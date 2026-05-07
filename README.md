@@ -1,7 +1,7 @@
 <!-- Logo and Title -->
 <img src="logo.png" height="64" alt="fastWorkflow Logo and Title">
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) [![PyPI](https://img.shields.io/pypi/v/fastworkflow)](https://pypi.org/project/fastworkflow/) [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/radiantlogicinc/fastworkflow/actions) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2)](https://discord.gg/k2g58dDjYR)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) [![PyPI](https://img.shields.io/pypi/v/fastworkflow)](https://pypi.org/project/fastworkflow/) [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/radiantlogicinc/fastworkflow/actions) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2)](https://discord.gg/k2g58dDjYR) [![Paper](https://img.shields.io/badge/Paper-alphaXiv-red)](https://www.alphaxiv.org/abs/2605.fastworkflow)
 
 **Build AI agents your application can actually trust in production — with small models cheaply, or frontier models more reliably.**
 
@@ -85,11 +85,11 @@ fastWorkflow was benchmarked on [Tau Bench](https://github.com/sierra-research/t
   <table>
     <tr>
       <td align="center" width="50%">
-        <img src="fastWorkflow - Tau Bench Retail.jpg" alt="fastWorkflow Tau Bench Retail results" style="max-width: 100%; height: auto;"/>
+        <img src="tau_bench_retail_performance.png" alt="fastWorkflow Tau Bench Retail results" style="max-width: 100%; height: auto;"/>
         <br/><em>Retail: orders, returns, account operations</em>
       </td>
       <td align="center" width="50%">
-        <img src="fastWorkflow - TauBench Airline.jpg" alt="fastWorkflow Tau Bench Airline results" style="max-width: 100%; height: auto;"/>
+        <img src="tau_bench_airline_performance.png" alt="fastWorkflow Tau Bench Airline results" style="max-width: 100%; height: auto;"/>
         <br/><em>Airline: rebooking, baggage, loyalty workflows</em>
       </td>
     </tr>
