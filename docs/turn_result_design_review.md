@@ -17,7 +17,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 
 | # | Finding | Severity | Design sections affected |
 |---|---------|----------|--------------------------|
-| R1 | ask_user exchanges lost; turn transcript not interleaved | **RESOLVED 2026-06-11** — ask_user modeled as a `CommandOutput` in the ordered list (Dhar's simplification) | 3.1, 5.4, 7.6, 9, decision 18 |
+| R1 | ask_user exchanges lost; turn transcript not interleaved | **RESOLVED 2026-06-11** — ask_user modeled as a `CommandOutput` in the ordered list (the developer'ssimplification) | 3.1, 5.4, 7.6, 9, decision 18 |
 | R2 | Content-addressing makes co-GC incoherent; cross-tenant handle sharing | **RESOLVED 2026-06-11** — turn-scoped payload keys; record-mediated access | 7.8, 8.2, decisions 13, 19 |
 | R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **RESOLVED 2026-06-10** — full absorption into unified `ConversationTurnStore` | 7.1, 7.2, 9.1, decisions 11, 18 |
 | R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **RESOLVED 2026-06-11** — fields verified unused; payload-only gallery kept; answer stays bare; provenance via text (xray scope) | 2.4, 5.4, 10.3, decision 2 |

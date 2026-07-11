@@ -215,3 +215,22 @@ audit-report.json
 *.db
 .beads-credential-key
 config.yaml
+.claude/skills/fastworkflow-proof-and-analysis-toolkit/SKILL.md
+.claude/skills/fastworkflow-proof-and-analysis-toolkit/references/worked-examples.md
+.claude/skills/fastworkflow-proof-and-analysis-toolkit/scripts/passk_math.py
+.claude/skills/fastworkflow-taubench-reference/SKILL.md
+.claude/skills/fastworkflow-taubench-reference/references/published-claims-provenance.md
+.claude/skills/fastworkflow-taubench-reference/references/rlm-experiment-dossier.md
+.claude/skills/tau2-reliability-campaign/SKILL.md
+.claude/skills/tau2-reliability-campaign/references/experiment-cards.md
+.claude/skills/tau2-reliability-campaign/references/failure-evidence.md
+.claude/skills/tau2-reliability-campaign/references/phase0-adapter.md
+.claude/skills/tau2-reliability-campaign/scripts/passk_stats.py
+.claude/skills/tau2-reliability-campaign/scripts/preregister_template.sh
+docs/Analysis and Recommendations for Improving fastWorkflow.docx
+docs/forge_meta_workflow_spec.md
+docs/rsi_harness_agent_report.md
+docs/tau2_retail_reliability_implementation_plan.md
+docs/turn_result_design_review.md
+.claude/skills/fastworkflow-research-frontier/SKILL.md
+.claude/skills/fastworkflow-research-frontier/references/plan-crosswalk.md

@@ -1,0 +1,322 @@
+---
+name: fastworkflow-config-and-flags
+description: >
+  Load this skill whenever you touch fastWorkflow configuration: any LLM_* / LITELLM_API_KEY_* /
+  SPEEDDICT_FOLDERNAME / INTENT_DETECTION_* / SESSION_STATE_* env var, the fastworkflow.env or
+  fastworkflow.passwords.env files, a fastworkflow CLI subcommand or flag, LiteLLM proxy routing,
+  or JWT server settings. Trigger symptoms: "env var not found" warnings, "SPEEDDICT_FOLDERNAME
+  env var not found!", "DSPy Language Model not provided", shell exports being mysteriously
+  ignored, refine failing with a missing-LM ValueError, or needing to add a new config knob.
+  Do NOT use it for how to run/operate workflows end to end (fastworkflow-run-and-operate),
+  recreating the dev environment and secrets (fastworkflow-build-and-env), or debugging
+  non-config runtime failures (fastworkflow-debugging-playbook).
+---
+
+# fastWorkflow Configuration and Flags Catalog
+
+Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Every file:line below was
+checked against the working tree on that date. If you are reading this later, run the
+re-verification commands in "Provenance and maintenance" before trusting line numbers.
+
+Jargon, defined once:
+- **dotenv file** — a `KEY=value` text file parsed by `python-dotenv`'s `dotenv_values()`. It is
+  NOT automatically exported to the process environment.
+- **LiteLLM** — the multi-provider LLM client library; model strings look like
+  `mistral/mistral-small-latest`. **LiteLLM Proxy** — a separate gateway server; model strings
+  get the `litellm_proxy/` prefix and calls go to `LITELLM_PROXY_API_BASE`.
+- **DSPy** — the LLM-programming library fastWorkflow uses for agent/planner/param-extraction
+  calls; `dspy.LM` wraps a LiteLLM model string.
+- **LLM role** — fastWorkflow assigns a separate model + API key pair per job (agent, planner,
+  parameter extraction, synthetic data generation, ...), so each role can use a different model.
+
+## When to use / when NOT to use
+
+Use this skill when you need to:
+- Look up any env var: its default, consumer, and sharp edges (Section 3).
+- Understand why a shell `export` is ignored (Section 2 — the precedence trap).
+- Look up a CLI subcommand/flag, including the ones the `--help` text lies about (Section 5).
+- Add a new env var or CLI flag correctly (Section 7 checklist).
+
+Use a sibling skill instead when you need:
+- **fastworkflow-run-and-operate** — actually running workflows/the server; artifact layout; endpoints.
+- **fastworkflow-build-and-env** — creating the dev environment from scratch; provisioning secrets.
+- **fastworkflow-nlu-pipeline-reference** — what the LLM roles and intent models *do*.
+- **fastworkflow-debugging-playbook** — symptom-first triage when you don't yet know it's config.
+- **fastworkflow-change-control** — whether you are *allowed* to change a default.
+
+## 1. The two-dotenv-file contract
+
+Every workflow is configured by exactly two dotenv files, conventionally placed inside the
+workflow folder:
+
+| File | Contains | Template |
+|---|---|---|
+| `fastworkflow.env` | Model strings, framework settings, tuning knobs | `fastworkflow/examples/fastworkflow.env` |
+| `fastworkflow.passwords.env` | `LITELLM_API_KEY_*` secrets only | `fastworkflow/examples/fastworkflow.passwords.env` |
+
+Loading (verified in `run/__main__.py:125-128`, `train/__main__.py:269-271`,
+`run_fastapi_mcp/__main__.py:259-264`):
+
+```python
+env_vars = {**dotenv_values(env_file_path), **dotenv_values(passwords_file_path)}
+fastworkflow.init(env_vars=env_vars)
+```
+
+Rules that follow from this code:
+- Passwords are merged AFTER the env file, so a key in the passwords file wins on conflict.
+- `dotenv_values` never touches `os.environ`; config lives in an in-process dict
+  (`fastworkflow._env_vars`, set at `fastworkflow/__init__.py:174-176`).
+- `fastworkflow.init()` must run before using framework classes (module globals like
+  `CommandContextModel` are `None` until then) and before importing modules that read env vars
+  at import time (see Section 4 traps).
+- `init()` also re-applies `LOG_LEVEL` from the dotenv dict (`__init__.py:180-182`).
+
+When the CLI's env-file arguments are omitted, defaults resolve to
+`<workflow_path>/fastworkflow.env` and `<workflow_path>/fastworkflow.passwords.env`
+(`cli.py:177-191`). The `--help` text saying ".env in current directory" is WRONG — see Section 5.
+
+For fetched examples, `fastworkflow examples fetch` copies the two templates to `./examples/`
+(not into each example folder), so you must pass them explicitly:
+`fastworkflow train ./examples/<name> ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env`.
+
+## 2. get_env_var precedence — the code default SHADOWS the OS environment
+
+`fastworkflow.get_env_var(var_name, var_type=str, default=None)` at
+`fastworkflow/__init__.py:211-227` resolves in this exact order:
+
+1. `_env_vars` dict (the two dotenv files passed to `init()`)
+2. the `default=` argument at the call site, **if one was provided**
+3. `os.getenv(var_name)` — consulted ONLY when no code default exists
+4. `None` + a logged warning
+
+**Consequence (the trap):** for any var whose call site passes a non-None `default=`, a shell
+`export VAR=...` is silently ignored — step 2 returns before `os.getenv` is ever consulted.
+You can only override such vars via the env FILES. The shell-unoverridable vars as of v2.22.2
+(call sites verified): `SESSION_STATE_STORE` (default `"disk"`, `session_state_store.py:123`),
+`INTENT_DETECTION_TINY_MODEL` and `INTENT_DETECTION_LARGE_MODEL`
+(`model_pipeline_training.py:892-895`). Put overrides for these in `fastworkflow.env`, never
+in the shell.
+
+Call sites that pass `default=None` (e.g. `SESSION_STATE_REDIS_URL`/`REDIS_URL` at
+`session_state_store.py:127-129`, `LITELLM_PROXY_API_KEY` at `utils/dspy_utils.py:58`) do NOT
+trigger the shadow — the guard is `if default is not None` — so those fall through to the OS
+environment normally.
+
+Type coercion: `var_type=bool` accepts only `true/1/false/0` (case-insensitive), else
+`ValueError` (`__init__.py:232-238`). A provided `default` is returned as-is, uncoerced.
+
+**Masking hazard:** importing `litellm` runs `load_dotenv()` over `./.env` in the CWD
+(verified: `site-packages/litellm/__init__.py:29`). The repo root has a generated `.env`
+(`make gen-env`), so import-time env bugs that would crash a customer deployment are invisible
+when developing in-repo. This masked the v2.21.0-2.21.3 regression fixed in 79e6986.
+
+## 3. Which subcommands load env files (and which ignore them)
+
+| Subcommand | Env files loaded? | Evidence | Consequence |
+|---|---|---|---|
+| `build` | **NO** — `fastworkflow.init(env_vars={})` | `build/__main__.py:326,349` | LLM vars must be OS-environment exports (step 3 fallback works because call sites pass no default) |
+| `refine` | **NO** — `init(env_vars={})` | `refine/__main__.py:32` | Same; no env-file CLI args exist at all |
+| `train` | YES (both files) | `train/__main__.py:269-271` | — |
+| `run` | YES (both files) | `run/__main__.py:125-128` | — |
+| `run_fastapi_mcp` | YES (both files, in lifespan) | `run_fastapi_mcp/__main__.py:259-264` | Plus a pre-lifespan read of `LOG_LEVEL` for uvicorn (`:1612-1617`) |
+
+So before `fastworkflow build` / `fastworkflow refine` you must:
+
+```bash
+export LLM_COMMAND_METADATA_GEN=mistral/mistral-small-latest
+export LITELLM_API_KEY_COMMANDMETADATA_GEN=<your key>   # note: no underscore in COMMANDMETADATA
+```
+
+Nothing in `--help` tells you this; the failure mode is
+`ValueError: DSPy Language Model not provided. Set LLM_COMMAND_METADATA_GEN environment variable.`
+(raised from `utils/dspy_utils.py:44-45` via `build/genai_postprocessor.py:239`).
+
+**File-presence probes at startup:**
+- `run` HARD-FAILS if `LITELLM_API_KEY_SYNDATA_GEN` is absent (`run/__main__.py:131-132`) even
+  though run never generates synthetic data — it is used purely as a "did the passwords file
+  load?" probe. This breaks Bedrock/proxy users who legitimately have no such key; workaround:
+  put a dummy value in the passwords file.
+- `train` only WARNS for the same missing key ("OK if this is Bedrock",
+  `train/__main__.py:276-277`) but hard-fails on missing `SPEEDDICT_FOLDERNAME` (`:273-275`),
+  as does `run` (`run/__main__.py:129-130`).
+
+## 4. Env var catalog
+
+Legend: **prod** = production, load-bearing. **dead** = zero consumers in code.
+"Default" = code default at the consumer (template value shown separately).
+
+### 4a. LLM role variables (all resolved via `dspy_utils.get_lm` unless noted)
+
+| Model var (template value: `mistral/mistral-small-latest`) | API key var | Consumer file:line | Role | Sharp edge |
+|---|---|---|---|---|
+| `LLM_AGENT` | `LITELLM_API_KEY_AGENT` | `workflow_agent.py:270,309`; `workflow_execution_context.py:691` | prod | — |
+| `LLM_PLANNER` | `LITELLM_API_KEY_PLANNER` | `workflow_agent.py:507`; `workflow_execution_context.py:1019` | prod | Key var missing from the `cli.py:136-139` fallback passwords stub |
+| `LLM_PARAM_EXTRACTION` | `LITELLM_API_KEY_PARAM_EXTRACTION` | `utils/signatures.py:252-255` | prod | Bypasses `get_lm`: direct `dspy.LM(model, api_key=...)` at `signatures.py:255`, values cached in module globals after first read. Because no `api_base` is passed, `litellm_proxy/` routing very likely does NOT work for this role (code-read inference, not runtime-verified) |
+| `LLM_SYNDATA_GEN` | `LITELLM_API_KEY_SYNDATA_GEN` | `train/generate_synthetic.py:35-36`; `utils/generate_param_examples.py:333-334` (both call `litellm.completion` directly) | prod (train-time) | Key doubles as run-time file-presence probe (Section 3) |
+| `LLM_CONVERSATION_STORE` | `LITELLM_API_KEY_CONVERSATION_STORE` | `run_fastapi_mcp/conversation_store.py:331` | prod (server) | Key var missing from the `cli.py` fallback stub |
+| `LLM_COMMAND_METADATA_GEN` | `LITELLM_API_KEY_COMMANDMETADATA_GEN` | `build/genai_postprocessor.py:239` (used by `build` and `refine`) | prod (build-time) | (1) NOT in the packaged templates — only in `docs/genai_postprocessor_readme.md` and repo-local `env/.env` + `passwords/.env`; (2) key spelling is `COMMANDMETADATA` (no underscore) unlike every other key; (3) must be an OS export (Section 3) |
+| `LLM_RESPONSE_GEN` | `LITELLM_API_KEY_RESPONSE_GEN` | **none** (rg over `fastworkflow/` + `tests/` `*.py`: zero hits) | **dead** | Templated at `examples/fastworkflow.env:8`, `examples/fastworkflow.passwords.env:9`, and written by the `cli.py:138` fallback stub — pure drift. Whether it is reserved for a future response-gen stage is an open question; do not delete without change control |
+
+LiteLLM Proxy routing (`utils/dspy_utils.py:42-69`): if a model string starts with
+`litellm_proxy/`, `get_lm` requires `LITELLM_PROXY_API_BASE` (raises `ValueError` if unset,
+`:50-55`), optionally uses `LITELLM_PROXY_API_KEY` (default `None`, no-auth proxies allowed,
+`:58`), and IGNORES the per-role `LITELLM_API_KEY_*`. The `[server]` extra is NOT needed for
+proxy routing. Full recipe: [references/litellm-proxy-and-local-dev.md](references/litellm-proxy-and-local-dev.md).
+
+### 4b. Framework and pipeline variables
+
+| Var | Code default | Template value | Consumer file:line | Role | Sharp edge |
+|---|---|---|---|---|---|
+| `SPEEDDICT_FOLDERNAME` | none | `___workflow_contexts` (`fastworkflow.env:36`) | `workflow.py:360` (function cache); `session_state_store.py:138`; `run_fastapi_mcp/utils.py:388,399` | prod | Roots ALL disk state; hard-required by `run` and `train` (Section 3) |
+| `SESSION_STATE_STORE` | `"disk"` | not templated | `session_state_store.py:123` | prod (server) | `redis` value can ONLY be set via env file (default shadows shell, Section 2) |
+| `SESSION_STATE_REDIS_URL` / `REDIS_URL` | `None` | not templated | `session_state_store.py:127-129` | prod (server, redis only) | `ValueError` if `SESSION_STATE_STORE=redis` and neither is set |
+| `INTENT_DETECTION_TINY_MODEL` | `google/bert_uncased_L-4_H-128_A-2` | commented (`fastworkflow.env:30`) | `model_pipeline_training.py:892-893` | prod (train-time) | Env-file-only override (Section 2). Defaults chosen for transformers 4.48+/5.x compat |
+| `INTENT_DETECTION_LARGE_MODEL` | `distilbert-base-uncased` | commented (`fastworkflow.env:31`) | `model_pipeline_training.py:894-895` | prod (train-time) | Same |
+| `SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS` | none (int) | `4` | `train/generate_synthetic.py:14` | prod (train-time) | **Import-time read trap**: all three are read as module globals when `generate_synthetic` is first imported. Import before `fastworkflow.init()` captures `None` (a warning is logged; downstream failure inferred, not runtime-verified). Never import train modules before `init()` |
+| `SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA` | none (int) | `5` | `train/generate_synthetic.py:15` | prod (train-time) | Same trap |
+| `SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH` | none (int) | `1` | `train/generate_synthetic.py:16` | prod (train-time) | Same trap |
+| `MISSING_INFORMATION_ERRMSG` | none | `"Missing parameter values: "` | `_workflows/command_metadata_extraction/parameter_extraction.py:19` (import-time); `utils/signatures.py:324` | prod | Parameter-error handling string-matches on these values — changing them mid-deployment changes behavior |
+| `INVALID_INFORMATION_ERRMSG` | none | `"Invalid parameter values: "` | `parameter_extraction.py:20`; `signatures.py:326` | prod | Same |
+| `NOT_FOUND` | none | `"NOT_FOUND"` | `parameter_extraction.py:22` (import-time); `signatures.py:74,185,328`; `mcp_server.py:57`; example command files | prod | Sentinel value meaning "parameter not extracted"; commands compare against it |
+| `INVALID` | none | `"INVALID"` | `parameter_extraction.py:23` (import-time) | prod | Sentinel |
+| `PARAMETER_EXTRACTION_ERROR_MSG` | none | `"Error in parameter extraction: {error}"` | `parameter_extraction.py:263`; `signatures.py:249` (lazy, cached) | prod | Must keep the `{error}` placeholder |
+| `LOG_LEVEL` | `INFO` | not templated | THREE paths: `utils/logging.py:53` (OS env at import, invalid value raises `ValueError`); `__init__.py:180-182` (dotenv, via `reconfigure_log_level`); `run_fastapi_mcp/__main__.py:1612-1617` (dotenv pre-read for uvicorn) | prod | Put it in `fastworkflow.env`; that covers paths 2 and 3. Shell export covers path 1 only |
+| `FW_EAGER_ARTIFACT_VALIDATION` | `"1"` (on) | not templated | `turn.py:155` (direct `os.environ.get` — shell export works) | prod, transitional | Set `0` to silence unserializable-artifact warnings; becomes a hard rejection in v3.0 per the docstring (`turn.py:147-154`) |
+| `PYTEST_RUNNING` | — | — | set by `tests/conftest.py:16`; **zero readers** in `fastworkflow/` | **dead** | Safe to ignore; do not build logic on it |
+
+Not fastWorkflow config, despite appearances: repo-root `config.yaml` is a Dolt SQL server
+config for the beads issue tracker; repo-root `.env`, `env/.env`, `passwords/.env` are the
+local dev convention (see [references/litellm-proxy-and-local-dev.md](references/litellm-proxy-and-local-dev.md)).
+
+### 4c. Known drift summary (candidates for cleanup, gated by change control)
+
+- `LLM_RESPONSE_GEN` + key: templated but unconsumed (dead).
+- `LLM_COMMAND_METADATA_GEN` + key: consumed but untemplated, inconsistent key spelling.
+- `cli.py:136-139` fallback passwords stub lists only 4 keys (SYNDATA_GEN, PARAM_EXTRACTION,
+  RESPONSE_GEN, AGENT) — omits PLANNER, CONVERSATION_STORE, COMMANDMETADATA_GEN; includes the
+  dead RESPONSE_GEN.
+- `run`'s hard requirement on `LITELLM_API_KEY_SYNDATA_GEN` (probe misuse, Section 3).
+
+## 5. CLI subcommands and flags
+
+Entry point: `fastworkflow = "fastworkflow.cli:main"` (`pyproject.toml:31`). Six subcommands
+(verified live with `fastworkflow --help` on 2026-07-09).
+
+| Subcommand | Positional args | Flags | Notes |
+|---|---|---|---|
+| `examples list` | — | — | Lists bundled examples |
+| `examples fetch` | `name` | `--force` | Copies example to `./examples/<name>`, copies/creates the two env templates in `./examples/` (`cli.py:104-139`) |
+| `build` | — | `--app-dir/-s` (required), `--workflow-folderpath/-w` (required), `--overwrite`, `--stub-commands <a,b>`, `--no-startup` | Ignores env files (Section 3) |
+| `refine` | — | `--workflow-folderpath/-w` (required) | Ignores env files; no env-file args exist |
+| `train` | `workflow_folderpath [env_file_path] [passwords_file_path]` | — | Env defaults: `<workflow>/fastworkflow.env|.passwords.env` |
+| `run` | `workflow_path [env_file_path] [passwords_file_path]` | `--context_file_path`, `--startup_command`, `--startup_action`, `--keep_alive` (default `True`), `--project_folderpath`, `--assistant` | Agent mode by default; `--assistant` = deterministic |
+| `run_fastapi_mcp` | `workflow_path [env_file_path] [passwords_file_path]` | `--context <JSON>`, `--startup_command`, `--startup_action <JSON>`, `--project_folderpath`, `--port 8000`, `--host 0.0.0.0` | Re-execs `python -m fastworkflow.run_fastapi_mcp` as a subprocess (`cli.py:453-472`); requires the `[server]` extra (`cli.py:384-413`) |
+
+**Help-text lie:** the env-file positionals for `train`/`run`/`run_fastapi_mcp` claim
+"(default: .env in current directory, or bundled env file for examples)"
+(`cli.py:239,245,259,265,288,294`). The actual default is
+`<workflow_path>/fastworkflow.env` + `<workflow_path>/fastworkflow.passwords.env`
+(`find_default_env_files`, `cli.py:177-191`). Trust the code.
+
+**`--keep_alive` sharp edge:** defined with `default=True` and no `type=` (`cli.py:270`), so
+any value you pass arrives as a string — `--keep_alive False` yields the truthy string
+`"False"`. Effectively this flag cannot be turned off from the CLI (empty-string workaround
+untested). Downstream signature is `keep_alive: bool` (`chat_session.py:150`).
+
+**`--expect_encrypted_jwt` is unreachable from the wrapper:** it exists only on the module
+server (`run_fastapi_mcp/__main__.py:358-359`, `action="store_true"`, default `False`), and the
+CLI wrapper never forwards it (`cli.py:454-469`). Therefore:
+
+```bash
+# JWT signature verification DISABLED (trusted-network mode) — the only mode the wrapper offers:
+fastworkflow run_fastapi_mcp ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+
+# JWT signature verification ENABLED — must bypass the wrapper:
+python -m fastworkflow.run_fastapi_mcp --workflow_path ./examples/hello_world \
+  --env_file_path ./examples/fastworkflow.env \
+  --passwords_file_path ./examples/fastworkflow.passwords.env \
+  --port 8000 --expect_encrypted_jwt
+```
+
+Note the argument style changes: the module form uses `--workflow_path`/`--env_file_path`
+flags (`load_args`, `run_fastapi_mcp/__main__.py:346-360`), not positionals.
+
+## 6. JWT constants and jwt_keys/ — hardcoded, not env vars
+
+`run_fastapi_mcp/jwt_manager.py:22-26` hardcodes (comment admits "can be made configurable via
+env vars" — acknowledged unfinished work):
+
+| Constant | Value |
+|---|---|
+| `JWT_ALGORITHM` | `RS256` |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `60` |
+| `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `30` |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | `fastworkflow-api` / `fastworkflow-client` |
+
+- Keys live at `./jwt_keys/private_key.pem` (mode 600) and `public_key.pem` (mode 644),
+  **relative to CWD** (`jwt_manager.py:29-31`, save at `:88-100`) — launch the server from a
+  stable directory or you'll silently generate a fresh keypair. `jwt_keys/.gitignore` excludes
+  the PEMs; never commit them.
+- Module default `EXPECT_ENCRYPTED_JWT = True` (`jwt_manager.py:38`) is ALWAYS overwritten at
+  startup by `set_jwt_verification_mode(ARGS.expect_encrypted_jwt)`
+  (`run_fastapi_mcp/__main__.py:267-268`), i.e. effective default is False/unverified.
+  Unsigned mode issues `alg="none"` tokens (`jwt_manager.py:203`).
+- Deployment security posture (unauthenticated /admin endpoints, open CORS) is covered in
+  **fastworkflow-run-and-operate**.
+
+## 7. How to add a config axis (checklist)
+
+Work through ALL of these; a var added to code but not the templates (or vice versa) becomes
+the next `LLM_RESPONSE_GEN` / `LLM_COMMAND_METADATA_GEN` drift entry.
+
+1. [ ] **Consumer**: read via `fastworkflow.get_env_var("MY_VAR", ...)` — never a scattered
+   `os.environ` read (sanctioned exceptions: `LOG_LEVEL` at logger import, and
+   `FW_EAGER_ARTIFACT_VALIDATION`). Never call it at module import time — read lazily inside
+   functions/properties (the 79e6986 lesson; litellm's cwd-`.env` load will hide the bug in-repo).
+2. [ ] **Decide the precedence tier consciously**: passing `default=` to `get_env_var` makes
+   the var shell-unoverridable (Section 2). If ops must be able to override via shell, pass no
+   default and enforce requiredness at the CLI entry instead.
+3. [ ] **LLM role?** Add BOTH `LLM_<ROLE>` and `LITELLM_API_KEY_<ROLE>` and resolve through
+   `dspy_utils.get_lm("LLM_<ROLE>", "LITELLM_API_KEY_<ROLE>")` so `litellm_proxy/` routing
+   works. Keep the `_` spelling consistent (do not imitate `COMMANDMETADATA`).
+4. [ ] **Templates**: add to `fastworkflow/examples/fastworkflow.env` (settings) or
+   `fastworkflow/examples/fastworkflow.passwords.env` (secrets), with a comment block.
+5. [ ] **CLI fallback stub**: if it's an API key, add it to the stub writer at `cli.py:134-139`.
+6. [ ] **build/refine reachability**: if the var is consumed on the build/refine path, document
+   that it must be an OS export (those subcommands init with `env_vars={}`).
+7. [ ] **This catalog**: add a row to Section 4 (or 4a) with consumer file:line and sharp edges,
+   plus a re-verification grep in the Provenance section.
+8. [ ] **Docs**: update `docs/genai_postprocessor_readme.md` / relevant doc of record if applicable
+   (see fastworkflow-docs-and-positioning).
+9. [ ] **Tests**: remember tests init from repo-local `./env/.env` + `./passwords/.env`
+   (`tests/test_command_executor.py:24-27`); add your var there if tests need it, and re-run
+   `make gen-env` mentally — it merges every `*.env` in the tree into root `.env`.
+10. [ ] **Change control**: renaming/removing an existing var is a breaking change
+    (deployed env files reference old names — e.g. the `COMMANDMETADATA` spelling is frozen by
+    existing installs until proven otherwise). Route through fastworkflow-change-control.
+    Do NOT commit or push any of this without the developer'sexplicit request in that turn.
+
+Run `scripts/audit_env_catalog.sh` (read-only) after any config change: it re-derives consumed
+vs templated vars and prints drift.
+
+## Provenance and maintenance
+
+Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verification one-liners (run from repo root):
+
+- Full consumer catalog: `grep -rn "get_env_var(" fastworkflow/ --include="*.py" | grep -v "def get_env_var"`
+- Direct OS reads (should stay ~3): `grep -rnE "os\.environ|os\.getenv" fastworkflow/ --include="*.py" | grep -v examples/`
+- LLM role call sites: `grep -rn "get_lm(" fastworkflow/ --include="*.py" | grep -v "def get_lm"`
+- Precedence logic: `sed -n '211,227p' fastworkflow/__init__.py`
+- build/refine empty init: `grep -n "init(env_vars={})" fastworkflow/build/__main__.py fastworkflow/refine/__main__.py`
+- run/train startup probes: `grep -n "SPEEDDICT_FOLDERNAME\|LITELLM_API_KEY_SYNDATA_GEN" fastworkflow/run/__main__.py fastworkflow/train/__main__.py`
+- LLM_RESPONSE_GEN still dead: `grep -rn "LLM_RESPONSE_GEN" fastworkflow/ tests/ --include="*.py"` (expect zero hits)
+- COMMANDMETADATA spelling: `grep -rn "COMMANDMETADATA" fastworkflow/ --include="*.py"`
+- Import-time reads: `sed -n '14,16p' fastworkflow/train/generate_synthetic.py; sed -n '19,23p' fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py`
+- Intent model defaults: `sed -n '890,896p' fastworkflow/model_pipeline_training.py`
+- CLI flags + help-text lie + env defaults: `sed -n '177,302p' fastworkflow/cli.py` and `fastworkflow <subcommand> --help`
+- `--expect_encrypted_jwt` reachability: `grep -n "expect_encrypted_jwt" fastworkflow/cli.py fastworkflow/run_fastapi_mcp/__main__.py` (expect: absent from cli.py)
+- JWT constants + CWD-relative keys: `sed -n '21,40p' fastworkflow/run_fastapi_mcp/jwt_manager.py`
+- litellm dotenv masking: `grep -n "load_dotenv" .venv/lib/python*/site-packages/litellm/__init__.py`
+- PYTEST_RUNNING still dead: `grep -rn "PYTEST_RUNNING" fastworkflow/ tests/ --include="*.py"` (expect conftest.py only)
+- Templates: `cat fastworkflow/examples/fastworkflow.env fastworkflow/examples/fastworkflow.passwords.env`
+- Or run everything at once: `bash .claude/skills/fastworkflow-config-and-flags/scripts/audit_env_catalog.sh`
