@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from fastworkflow.workflow_agent import _ask_user_tool
 from fastworkflow.workflow_execution_context import (
     CommandCancelledError,
     WorkflowExecutionContext,
@@ -381,8 +382,6 @@ def test_topology_a_cli_ask_user_blocks_with_queue(
     todo_workflow_path,
     monkeypatch,
 ):
-    from fastworkflow.workflow_agent import _ask_user_tool
-
     ctx = WorkflowExecutionContext(run_as_agent=True)
     wf = fastworkflow.Workflow.create(
         todo_workflow_path,
@@ -417,3 +416,58 @@ def test_topology_a_cli_ask_user_blocks_with_queue(
     assert observation == "replanned:user picks option A"
     assert wf.context["raw_user_message"] == "user picks option A"
     assert len(ctx.action_log) == 1
+
+
+def test_topology_a_cli_ask_user_pairs_output_with_trace_sentinel(
+    initialized_fastworkflow,
+    todo_workflow_path,
+    monkeypatch,
+):
+    """The CLI must receive the question and sentinel before ask_user blocks."""
+    ctx = WorkflowExecutionContext(run_as_agent=True)
+    wf = fastworkflow.Workflow.create(
+        todo_workflow_path,
+        workflow_id_str=f"cli-ask-sentinel-{uuid.uuid4().hex}",
+    )
+    ctx.bind_app_workflow(wf)
+    user_queue: Queue = Queue()
+    output_queue: Queue = Queue()
+    trace_queue: Queue = Queue()
+    ctx.set_transport_queues(
+        user_message_queue=user_queue,
+        command_output_queue=output_queue,
+        command_trace_queue=trace_queue,
+    )
+
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        lambda user_query, session, with_agent_inputs_and_trajectory=False: (
+            f"replanned:{user_query}"
+        ),
+    )
+
+    worker_result: dict[str, object] = {}
+
+    def run_ask_user():
+        ctx.push_active_workflow(wf)
+        try:
+            worker_result["observation"] = _ask_user_tool("Pick A or B?", ctx)
+        except BaseException as exc:
+            worker_result["error"] = exc
+        finally:
+            ctx.pop_active_workflow()
+
+    worker = threading.Thread(target=run_ask_user, daemon=True)
+    worker.start()
+
+    clarification = output_queue.get(timeout=1.0)
+    assert clarification.command_responses[0].response == "Pick A or B?"
+    assert trace_queue.get(timeout=1.0) is None
+    assert worker.is_alive()
+
+    user_queue.put("user picks option B")
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert "error" not in worker_result
+    assert worker_result["observation"] == "replanned:user picks option B"

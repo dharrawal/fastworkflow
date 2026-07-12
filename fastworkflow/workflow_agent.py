@@ -370,6 +370,12 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     )
     if output_queue is not None:
         output_queue.put(command_output)
+        # Preserve the transport contract: the output must be visible before the
+        # trace sentinel releases the CLI to read it. In v3.0 the queued payload
+        # becomes a partial TurnOutput, but the pairing and ordering stay the same.
+        trace_queue = chat_session_obj.command_trace_queue
+        if trace_queue is not None:
+            trace_queue.put(None)
 
     # Topology A: append the unanswered ask_user entry before blocking.
     # (Topology B appends it inside the WEC core at AskUserSuspend time.)
