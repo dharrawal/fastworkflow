@@ -73,7 +73,7 @@ def test_process_message_agent_mode_mocked_agent(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session: user_query,
+        lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -138,7 +138,7 @@ def test_process_message_converts_ask_user_cancel_to_output(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session: user_query,
+        lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -163,7 +163,7 @@ def _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session, with_agent_inputs_and_trajectory=False: user_query,
+        lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -176,6 +176,50 @@ def _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         lambda user_query, actions, final: ("summary", "{}"),
     )
     return ctx, wf
+
+
+def test_run_agent_threads_planning_context_to_planner(
+    initialized_fastworkflow,
+    todo_workflow_path,
+    monkeypatch,
+):
+    """_run_agent must forward the session's planning_insights and the stashed
+    planner LM (_current_planner_lm) to build_query_with_next_steps. This guards
+    the planner-LM/insights wiring that distillation depends on — a regression
+    here silently reverts replans to the default LLM_PLANNER.
+    """
+    ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
+
+    sentinel_insights = "PLANNING_INSIGHTS_SENTINEL"
+    sentinel_planner_lm = object()
+    ctx._planning_insights = sentinel_insights
+    ctx._current_planner_lm = sentinel_planner_lm
+
+    captured: dict = {}
+
+    def capturing_planner(user_query, session, **kwargs):
+        captured["planning_insights"] = kwargs.get("planning_insights")
+        captured["planner_lm"] = kwargs.get("planner_lm")
+        return user_query
+
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        capturing_planner,
+    )
+
+    # Mock the agent + retry wrapper so _run_agent returns after the planner call
+    mock_agent = MagicMock()
+    _set_agents(ctx, mock_agent)
+    monkeypatch.setattr(
+        ctx,
+        "_call_agent_with_retry",
+        lambda agent_call, lm=None: SimpleNamespace(final_answer="done"),
+    )
+
+    ctx.process_message("do the thing")
+
+    assert captured["planning_insights"] is sentinel_insights
+    assert captured["planner_lm"] is sentinel_planner_lm
 
 
 def test_topology_b_ask_user_suspend_resume_round_trip(
@@ -396,7 +440,7 @@ def test_topology_a_cli_ask_user_blocks_with_queue(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session, with_agent_inputs_and_trajectory=False: (
+        lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: (
             f"replanned:{user_query}"
         ),
     )
@@ -441,7 +485,7 @@ def test_topology_a_cli_ask_user_pairs_output_with_trace_sentinel(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session, with_agent_inputs_and_trajectory=False: (
+        lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: (
             f"replanned:{user_query}"
         ),
     )

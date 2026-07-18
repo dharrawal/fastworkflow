@@ -29,7 +29,8 @@ class AskUserSuspend(BaseException):
 
 
 class fastWorkflowReAct(Module):
-    def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10):
+    def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
+                 on_step_complete: Callable[[int, dict], bool] | None = None):
         """
         ReAct stands for "Reasoning and Acting," a popular paradigm for building tool-using agents.
         In this approach, the language model is iteratively provided with a list of tools and has
@@ -108,6 +109,7 @@ class fastWorkflowReAct(Module):
 
         self.inputs = {}
         self.current_trajectory = {}
+        self._on_step_complete = on_step_complete
         self._suspended: dict[str, Any] | None = None
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
@@ -150,6 +152,13 @@ class fastWorkflowReAct(Module):
         self.inputs = input_args
         self.clear_suspension()
 
+        # Reset the full-trajectory mirror at the start of each logical turn.
+        # resume() must NOT reset it, so a suspended->resumed turn accumulates one
+        # coherent trajectory. current_trajectory is a SEPARATE object from the
+        # working `trajectory` below (which is what gets stashed in _suspended),
+        # so mirroring into it never corrupts suspend/resume bookkeeping.
+        self.current_trajectory = {}
+
         trajectory: dict[str, Any] = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
         idx = 0
@@ -180,6 +189,11 @@ class fastWorkflowReAct(Module):
         max_iters = stash["max_iters"]
 
         trajectory[f"observation_{idx}"] = observation
+        # Mirror the resumed observation (the user's ask_user answer) into
+        # current_trajectory. Without this the highest-value context — what the
+        # user said in response to the clarification — would be missing from the
+        # trajectory the planner and distillation see.
+        self.current_trajectory[f"observation_{idx}"] = observation
         idx += 1
         self.iteration_counter += 1
         self._suspended = None
@@ -216,19 +230,25 @@ class fastWorkflowReAct(Module):
                 pred = self._call_with_potential_trajectory_truncation(
                     self.react, trajectory, **input_args
                 )
+                if pred is None:
+                    raise ValueError("Tool returned is None")
             except ValueError as err:
-                trajectory[f"observation_{idx}"] = (
+                invalid_tool_obs = (
                     f"Agent failed to select a valid tool: {_fmt_exc(err)}"
                 )
+                trajectory[f"observation_{idx}"] = invalid_tool_obs
+                self.current_trajectory[f"observation_{idx}"] = invalid_tool_obs
                 idx += 1
-                trajectory[f"thought_{idx}"] = (
-                    "To execute a command, I should use the execute_workflow_query tool"
+                recovery_thought = (
+                    "To execute a command, I should use one of the available tools"
                 )
-                trajectory[f"observation_{idx}"] = (
-                    "Use the execute_workflow_query tool with a single argument called "
-                    "'command' formatted as plain text using the command name and "
-                    "parameter values"
+                recovery_obs = (
+                    "Use the appropriate tool with proper arguments (correctly formatted)"
                 )
+                trajectory[f"thought_{idx}"] = recovery_thought
+                trajectory[f"observation_{idx}"] = recovery_obs
+                self.current_trajectory[f"thought_{idx}"] = recovery_thought
+                self.current_trajectory[f"observation_{idx}"] = recovery_obs
                 idx += 1
                 exception_count += 1
                 if exception_count > 2:
@@ -239,14 +259,20 @@ class fastWorkflowReAct(Module):
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name
             trajectory[f"tool_args_{idx}"] = pred.next_tool_args
 
+            # Mirror the full step into current_trajectory (consumed by the planner
+            # for replanning and by distillation as the agent trajectory). Keep the
+            # legacy action_{idx} entry too for any consumer that still reads it.
+            self.current_trajectory[f"thought_{idx}"] = pred.next_thought
+            self.current_trajectory[f"tool_name_{idx}"] = pred.next_tool_name
+            self.current_trajectory[f"tool_args_{idx}"] = pred.next_tool_args
             self.current_trajectory[f"action_{idx}"] = (
                 f"{pred.next_tool_name}: {pred.next_tool_args}"
             )
 
             try:
-                trajectory[f"observation_{idx}"] = self.tools[pred.next_tool_name](
-                    **pred.next_tool_args
-                )
+                observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                trajectory[f"observation_{idx}"] = observation
+                self.current_trajectory[f"observation_{idx}"] = observation
             except AskUserSuspend as err:
                 self._suspended = {
                     "trajectory": trajectory,
@@ -261,9 +287,21 @@ class fastWorkflowReAct(Module):
                     exhausted=False,
                 )
             except Exception as err:
-                trajectory[f"observation_{idx}"] = (
+                error_observation = (
                     f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
                 )
+                trajectory[f"observation_{idx}"] = error_observation
+                self.current_trajectory[f"observation_{idx}"] = error_observation
+
+            # Step-completion callback for distillation: lets external code inspect
+            # each completed step and stop execution early (e.g. on trajectory
+            # divergence). Placed AFTER the AskUserSuspend catch so it can never
+            # swallow a suspension, and it does not touch _suspended state.
+            # getattr guard: resume() may run on an instance built via __new__
+            # (test helpers) that never set this attribute.
+            on_step_complete = getattr(self, "_on_step_complete", None)
+            if on_step_complete and not on_step_complete(idx, trajectory):
+                break
 
             if pred.next_tool_name == "finish":
                 break
