@@ -51,6 +51,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from dotenv import dotenv_values
 
 import fastworkflow
+from fastworkflow import state_paths
 from fastworkflow.utils.logging import logger
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
@@ -67,9 +68,9 @@ from .utils import (
     MAX_CONVERSATION_TURNS_IN_MEMORY,
     ensure_topic_and_summary,
     reserve_conversation_id,
-    save_conversation_incremental,
     save_last_turn_feedback,
     try_ensure_topic_and_summary,
+    ConversationSummary,
     InitializationRequest,
     TokenResponse,
     InitializeResponse,
@@ -106,17 +107,18 @@ from .jwt_manager import (
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES
 )
 
-from .conversation_store import (
-    ConversationStore,
-    ConversationSummary,
+from fastworkflow.conversation_history_io import (
+    extract_turns_from_history,
+    restore_history_from_turns,
+)
+from fastworkflow.conversation_labeling import (
     generate_topic_and_summary,
     resolve_topic_generation_timeout,
     topic_generation_timeout_seconds,
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
-    extract_turns_from_history,
-    restore_history_from_turns
 )
+from fastworkflow.observability_store import ObservabilityStore
 
  
 # ============================================================================
@@ -336,9 +338,10 @@ def _conversation_turns_for_summary(runtime) -> list[dict[str, Any]]:
     also persists them (the no-active-conversation branch of /new_conversation)
     needs; that branch is reachable only when nothing is recorded yet.
     """
-    if runtime.active_conversation_id > 0:
-        if summaries := runtime.conversation_store.get_conversation_summaries(
-            runtime.active_conversation_id
+    store = runtime.observability_store
+    if store is not None and runtime.active_conversation_id > 0:
+        if summaries := store.conversation_summaries(
+            runtime.channel_id, runtime.active_conversation_id
         ):
             return summaries
     return extract_turns_from_history(runtime.execution_context.conversation_history)
@@ -435,48 +438,6 @@ async def lifespan(_app: FastAPI):
                 "queued work is left to process termination."
             )
         return remaining
-
-    async def finalize_conversations_on_shutdown(skip_channel_ids: list[str]) -> None:
-        """Make each quiescent channel's unsaved turns durable. Never label them.
-
-        Shutdown generates no topics or summaries. That was one synchronous
-        LLM_CONVERSATION_STORE call per live channel, untimed and unbudgeted, in
-        front of the checkpoints stop_all_chat_sessions writes — so under a 30 s
-        termination grace period the process was killed part-way through
-        generating titles and lost everything each channel had accumulated since
-        its last eviction. Conversations are left with the blank placeholder
-        topic and summary the store already writes for them.
-
-        What is worth doing here is the durable save. A turn persists from inside
-        _run_turn's own try, so a turn whose work raised leaves in-memory history
-        that was never appended — including on a channel that never got as far as
-        reserving a conversation id. save_conversation_incremental is the same
-        chokepoint the turn path uses: it reserves that id when there is none,
-        appends only turns above the high-water mark, and creates the record with
-        the blank placeholders rather than inventing a topic to store.
-        """
-        logger.info(
-            "Persisting unsaved conversation turns at shutdown; conversations are "
-            "left with placeholder topic and summary (no topic generation)"
-        )
-        skip = set(skip_channel_ids)
-        for channel_id in list(session_manager._sessions.keys()):
-            if channel_id in skip:
-                continue
-            runtime = await session_manager.get_session(channel_id)
-            if not runtime:
-                continue
-            try:
-                if appended := save_conversation_incremental(
-                    runtime, extract_turns_from_history, logger
-                ):
-                    logger.info(
-                        f"Persisted {appended} unsaved turn(s) to conversation "
-                        f"{runtime.active_conversation_id} for user {channel_id} "
-                        "during shutdown"
-                    )
-            except Exception as e:
-                logger.error(f"Failed to finalize conversation for user {channel_id} during shutdown: {e}")
 
     async def reap_checkpoints_periodically() -> None:
         """Drive checkpoint and pending-state retention. Neither store has a timer.
@@ -590,12 +551,12 @@ async def lifespan(_app: FastAPI):
         still_busy = await wait_for_active_turns_to_complete(
             max_wait_seconds=SHUTDOWN_DRAIN_SECONDS
         )
-        # Order between these two is no longer safety-critical: with topic
-        # generation gone both are bounded local SQLite writes, so neither can
-        # consume the termination grace period and leave the other unrun. It
-        # stays as it is because finalize reads the execution contexts that
-        # stop_all_chat_sessions closes.
-        await finalize_conversations_on_shutdown(still_busy)
+        # There is no conversation-finalize step any more. It existed to append
+        # turns the legacy store had not recorded yet; under sync-first turn
+        # records (Phase 7 §2.4) a turn is durable by the time process_turn
+        # returns, so at shutdown there is nothing left to persist and nothing
+        # for the termination grace period to lose. Labeling was already off
+        # this path. What remains is closing the sessions.
         await stop_all_chat_sessions(still_busy)
         logger.info("FastWorkflow FastAPI service shutdown complete")
 
@@ -628,9 +589,45 @@ def load_args():
                             "forwarders that re-expose a UI on a different local port. Used by "
                             "`fastworkflow run_chatbot`'s auto-spawned server [R19]. "
                             "Takes precedence over --cors_origin.")
+    parser.add_argument("--enable_admin_endpoints", action="store_true", default=False,
+                       help="Serve /admin/dump_all_conversations and "
+                            "/admin/generate_mcp_token. Off by default: the dump reads every "
+                            "channel's conversations and the token mint issues year-long "
+                            "credentials, and nothing in the product calls either one "
+                            "(`run_chatbot` spawns a server without this flag). While off "
+                            "both routes 404 and are absent from the OpenAPI schema; while "
+                            "on both additionally require a Bearer token.")
     return parser.parse_args()
 
 ARGS = load_args()
+
+# The two routes gated by --enable_admin_endpoints. Neither is reachable as an
+# MCP tool (mcp_specific excludes both) and neither is called by run_chatbot, so
+# the default-off posture costs the product nothing.
+ADMIN_ENDPOINT_PATHS = ("/admin/dump_all_conversations", "/admin/generate_mcp_token")
+
+
+def require_admin_enabled() -> None:
+    """Refuse an admin route unless the operator opted in on the command line.
+
+    The opt-in is the real control. A Bearer token is a weak second factor
+    here, because /initialize mints one for any channel_id without
+    credentials — on a reachable port, "authenticated" means little. What the
+    flag buys is that the dangerous surface is not there at all unless someone
+    asked for it, which is the posture the loopback binding was silently
+    relied upon to provide.
+
+    Disabled reads as 404, not 403, because a 403 confirms the route exists.
+    That is also why this is declared as a route-level dependency rather than
+    wrapping the JWT one: FastAPI solves route-level dependencies before the
+    signature's, so a disabled server answers 404 without the bearer scheme
+    ever getting a chance to answer 403 first.
+    """
+    if not ARGS.enable_admin_endpoints:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Not Found"
+        )
+
 
 app = FastAPI(
     title="FastWorkflow API",
@@ -669,12 +666,18 @@ def custom_openapi():
     # Apply security globally to all endpoints except public ones
     for path, path_item in openapi_schema["paths"].items():
         # Skip endpoints that don't require authentication (including probe endpoints)
-        if path in ["/initialize", "/refresh_token", "/", "/admin/dump_all_conversations", "/admin/generate_mcp_token", "/probes/healthz", "/probes/readyz"]:
+        if path in ["/initialize", "/refresh_token", "/", "/probes/healthz", "/probes/readyz"]:
             continue
         for method in path_item:
             if method in ["get", "post", "put", "delete", "patch"] and "security" not in path_item[method]:
                 path_item[method]["security"] = [{"BearerAuth": []}]
-    
+
+    # A disabled admin surface is not documented either: the schema is the one
+    # thing a scanner reads before it starts guessing paths.
+    if not ARGS.enable_admin_endpoints:
+        for path in ADMIN_ENDPOINT_PATHS:
+            openapi_schema["paths"].pop(path, None)
+
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
@@ -1881,21 +1884,12 @@ async def new_conversation(
             # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
             _reject_if_busy(channel_id)
             async with runtime.lock:
-                # Persist before labeling (fix-dzs.9). A rotate clears the
-                # in-memory history, so anything not yet durable at that moment is
-                # gone - and a turn persists from inside _run_turn's own try, so a
-                # store failure there leaves history holding turns with no record
-                # and, if a previous rotate had already reserved an id, no way to
-                # write one. Labeling that state raised ValueError out of
-                # update_conversation_topic_summary AFTER paying for the
-                # generation, so the rotate that would have cleaned the state up
-                # was the one thing the user could not do. This is the same
-                # chokepoint shutdown uses: it reserves the id when there is none,
-                # appends only what is missing, and creates the record - which is
-                # what makes the label write below well-defined.
-                save_conversation_incremental(
-                    runtime, extract_turns_from_history, logger
-                )
+                # No persist-before-labeling step any more (it was fix-dzs.9's
+                # answer to a rotate clearing history that the legacy store had
+                # not recorded yet). Turn records are written synchronously at
+                # finalize, so by the time a rotate runs, every turn it is about
+                # to clear from memory is already in the turns table and the
+                # label write below is well-defined without any preparation.
 
                 # Summarize the whole conversation, not just the in-memory window
                 if turns := _conversation_turns_for_summary(runtime):
@@ -1947,37 +1941,28 @@ async def new_conversation(
                             ),
                         ) from e
 
-                    # Topic/summary written by the helper above for the
-                    # conversation (turns already persisted)
+                    # Topic/summary were written by the helper above; the turns
+                    # themselves were recorded as they happened.
                     if runtime.active_conversation_id > 0:
                         conv_id = runtime.active_conversation_id
                         logger.info(f"Finalized conversation {conv_id} with topic and summary for session {channel_id}")
                     else:
-                        # Unreachable since the incremental save moved above this
-                        # (fix-dzs.9), and kept only as a belt-and-braces: reaching
-                        # `turns` non-empty requires either in-memory turns, in
-                        # which case that save reserved an id and wrote a record, or
-                        # a durable record, which needs an id already. Left in place
-                        # rather than deleted because it is the one branch that
-                        # would still persist turns if that reasoning is ever
-                        # invalidated, and the cost of keeping it is a log line.
+                        # Reachable only when the channel has never held a
+                        # conversation id — i.e. minting failed at create time
+                        # and again here. There is nothing to label and nothing
+                        # to archive, so the rotate just starts clean.
                         logger.warning(f"Conversation history exists but no active_conversation_id for session {channel_id}")
-                        conv_id = runtime.conversation_store.save_conversation(topic, summary, turns)
-                        logger.info(f"Created conversation {conv_id} for session {channel_id}")
 
                     # Reserve next conversation ID for the next conversation
                     # (one minting chokepoint [R1]; binds the id onto the WEC)
-                    next_id = reserve_conversation_id(runtime)
-                    runtime.active_conversation_id = next_id
+                    runtime.active_conversation_id = reserve_conversation_id(runtime)
                     runtime.execution_context.clear_conversation_history()
-                    runtime.durable_turn_count = 0
 
                     logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
                     return {"status": "ok"}
                 else:
                     # No turns to save, just clear history and start fresh
                     runtime.execution_context.clear_conversation_history()
-                    runtime.durable_turn_count = 0
                     logger.info(f"No turns to save for session {channel_id}, cleared history")
                     return {"status": "ok", "message": "No turns to save"}
 
@@ -2021,7 +2006,18 @@ async def list_conversations(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"User session not found: {channel_id}"
                 )
-            return runtime.conversation_store.list_conversations(limit)
+            store = runtime.observability_store
+            if store is None:
+                return []
+            # Conversations with zero usable turns are excluded by the store
+            # projection, so a reserved-but-unused id never shows up as a
+            # phantom empty thread in the history list (ruling C7).
+            return [
+                ConversationSummary(**row)
+                for row in store.list_conversation_summaries(
+                    runtime.channel_id, limit
+                )
+            ]
     except HTTPException:
         raise
     except Exception as e:
@@ -2084,7 +2080,7 @@ async def post_feedback(
                 }
 
                 # Persist the edit to the turn it belongs to
-                save_last_turn_feedback(runtime, extract_turns_from_history, logger)
+                save_last_turn_feedback(runtime, logger)
 
                 logger.info(f"Added feedback to latest turn for session {channel_id}")
                 return {"status": "ok"}
@@ -2139,12 +2135,22 @@ async def activate_conversation(
                     detail=f"User session not found: {channel_id}"
                 )
 
-            # Get conversation by ID, carrying only the window that is about to be
-            # restored: the rest of it would be deserialized and then dropped.
-            conv = runtime.conversation_store.get_conversation_window(
-                request.conversation_id, MAX_CONVERSATION_TURNS_IN_MEMORY
+            # Read only the window that is about to be restored: the rest of the
+            # conversation would be deserialized and then dropped.
+            store = runtime.observability_store
+            window = (
+                store.get_memory_window(
+                    runtime.channel_id,
+                    request.conversation_id,
+                    MAX_CONVERSATION_TURNS_IN_MEMORY,
+                )
+                if store is not None
+                else []
             )
-            if not conv:
+            if not window:
+                # Zero usable turns reads as "not found", which is also what
+                # /conversations shows: a conversation the history list does not
+                # offer must not be activatable through a guessed id.
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Conversation not found with ID: {request.conversation_id}"
@@ -2154,15 +2160,25 @@ async def activate_conversation(
             _reject_if_busy(channel_id)
             async with runtime.lock:
                 runtime.active_conversation_id = request.conversation_id
+                runtime.execution_context.bind_observability_identity(
+                    conversation_id=request.conversation_id
+                )
 
-                # Restore the newest window of the conversation; the rest stays in
-                # the durable record. Everything restored is already recorded, so
-                # the high-water mark moves with it and the next incremental save
-                # does not append the conversation a second time. The window came
-                # from the read above, so there is nothing left to slice here.
-                restored_history = restore_history_from_turns(conv["turns"])
-                runtime.execution_context._conversation_history = restored_history
-                runtime.durable_turn_count = len(restored_history.messages)
+                # Restore the newest window of the conversation; the rest stays
+                # in the durable record. The window came from the read above, so
+                # there is nothing left to slice here.
+                runtime.execution_context._conversation_history = (
+                    restore_history_from_turns(window)
+                )
+                # Feedback follows the conversation the user just opened, not
+                # the last turn this process happened to run — which after an
+                # activation belongs to a different conversation entirely
+                # (ruling I3).
+                runtime.execution_context.bind_last_completed_turn_key(
+                    store.get_last_completed_turn_key(
+                        runtime.channel_id, request.conversation_id
+                    )
+                )
                 logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
 
                 # After the activation, so the helper labels the conversation the
@@ -2193,46 +2209,61 @@ async def activate_conversation(
     "/admin/dump_all_conversations",
     operation_id="dump_all_conversations",
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin_enabled)],
     responses={
         200: {"description": "Conversations dumped successfully"},
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "Server started without --enable_admin_endpoints"},
         500: {"description": "Failed to dump conversations"}
     }
 )
-async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str, str]:
+async def dump_all_conversations(
+    request: DumpConversationsRequest,
+    session: SessionData = Depends(get_session_from_jwt),
+) -> dict[str, str]:
     """
     Admin endpoint: dump all conversations from all sessions to a JSONL file.
     Scans all .sqlite3 conversation stores in the base folder, not just active sessions.
+
+    Requires --enable_admin_endpoints and a Bearer token. The dump spans every
+    channel on the server, not just the caller's, so it is off by default.
+
+    Reads the observability DB, which is the whole conversation record since the
+    Phase-7 consolidation. The per-conversation shape is unchanged (ruling C7):
+    the same hydrated object with 3-key turns inlined, reconstructed from
+    conversations ⋈ turns ⋈ feedback. When pre-cutover
+    ``conversations/*.sqlite3`` files are still present beside the DB, the dump
+    says so in ``legacy_stores_present`` rather than silently omitting whatever
+    only they hold.
     """
     try:
         os.makedirs(request.output_folder, exist_ok=True)
         timestamp = int(time.time())
         output_file = os.path.join(request.output_folder, f"all_conversations_{timestamp}.jsonl")
-        
-        # Resolve the workflow-namespaced conversations folder
-        base_folder = get_channelconversations_dir(ARGS.workflow_path)
-        
+
         all_conversations = []
         session_count = 0
-        
-        # Scan the base folder for all .sqlite3 files (all users, active or not)
-        if os.path.isdir(base_folder):
-            for filename in os.listdir(base_folder):
-                if filename.endswith('.sqlite3'):
-                    # Extract channel_id from filename (format: <channel_id>.sqlite3)
-                    channel_id = filename[:-8]  # Remove .sqlite3 extension
-                    
-                    # Create temporary ConversationStore for this user
-                    store = ConversationStore(channel_id, base_folder)
-                    user_convs = store.get_all_conversations_for_dump()
-                    all_conversations.extend(user_convs)
-                    session_count += 1
-        
+        db_path = state_paths.observability_db(ARGS.workflow_path)
+        if os.path.exists(db_path):
+            store = ObservabilityStore(db_path)
+            for channel_id in store.list_channels():
+                all_conversations.extend(store.dump_all_conversations(channel_id))
+                session_count += 1
+
+        legacy_folder = get_channelconversations_dir(ARGS.workflow_path)
+        legacy_present = os.path.isdir(legacy_folder) and any(
+            name.endswith(".sqlite3") for name in os.listdir(legacy_folder)
+        )
+
         # Write to JSONL
         with open(output_file, 'w') as f:
             for conv in all_conversations:
-                f.write(json.dumps(conv) + '\n')
+                f.write(json.dumps({**conv, "legacy_stores_present": legacy_present}) + '\n')
         
-        logger.info(f"Dumped {len(all_conversations)} conversations from {session_count} users to {output_file}")
+        logger.info(
+            f"Channel {session.channel_id} dumped {len(all_conversations)} "
+            f"conversations from {session_count} users to {output_file}"
+        )
         return {"file_path": output_file}
 
     except Exception as e:
@@ -2249,13 +2280,19 @@ async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str,
     operation_id="generate_mcp_token",
     response_model=TokenResponse,
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_admin_enabled)],
     responses={
         200: {"description": "MCP token generated successfully"},
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "Server started without --enable_admin_endpoints"},
         422: {"description": "Empty channel_id"},
         500: {"description": "Failed to generate token"}
     }
 )
-async def generate_mcp_token(request: GenerateMCPTokenRequest) -> TokenResponse:
+async def generate_mcp_token(
+    request: GenerateMCPTokenRequest,
+    session: SessionData = Depends(get_session_from_jwt),
+) -> TokenResponse:
     """
     Admin endpoint: Generate a long-lived access token for MCP client configuration.
     
@@ -2269,13 +2306,21 @@ async def generate_mcp_token(request: GenerateMCPTokenRequest) -> TokenResponse:
     Returns:
         TokenResponse with long-lived access_token (no refresh_token needed for MCP)
         
-    Note: This endpoint should be restricted to administrators only in production.
+    Requires --enable_admin_endpoints and a Bearer token. The minted token is
+    valid for a year and names any channel_id the caller asks for, so an open
+    mint is a standing credential-issuing service; it is off by default.
     """
     try:
         # Generate long-lived access token with optional user_id
         access_token = create_access_token(request.channel_id, user_id=request.user_id, expires_days=request.expires_days)
         
-        logger.info(f"Generated MCP token for channel_id: {request.channel_id}, user_id: {request.user_id}, expires in {request.expires_days} days")
+        # Who asked is logged alongside who the token is for: the mint names any
+        # channel_id the caller supplies, so the two are not the same fact.
+        logger.info(
+            f"Channel {session.channel_id} generated an MCP token for channel_id: "
+            f"{request.channel_id}, user_id: {request.user_id}, expires in "
+            f"{request.expires_days} days"
+        )
         
         return TokenResponse(
             access_token=access_token,

@@ -177,6 +177,19 @@ class WorkflowExecutionContext:
         self._turn_entry_workflow_name: str = ""
         self._turn_entry_context: str = ""
         self._turn_agent_result: Any = None
+        self._turn_history_baseline: int = 0
+        # turn_key of the newest turn that both completed and contributed a
+        # conversation-history entry — the row feedback attaches to (ruling
+        # I3). Serialized with session state so a cross-process resume keys
+        # feedback off a real turn instead of inferring one from SQL.
+        self._last_completed_turn_key: Optional[str] = None
+        # Ack from the last turn-record emission: True stored, False queued and
+        # not yet durable, None no sink at all. Read by embedders that trim
+        # conversation history (ruling I1/I2).
+        self._last_turn_record_stored: Optional[bool] = None
+        # Whether the last finalize contributed a conversation-history entry —
+        # i.e. whether it grew the durable memory the label schedule counts.
+        self._last_turn_added_memory: bool = False
 
         cme_id = (
             f"cme_{session_key}"
@@ -330,6 +343,7 @@ class WorkflowExecutionContext:
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
         self._turn_agent_result = None
+        self._turn_history_baseline = len(self.conversation_history.messages)
 
         self._turn_entry_workflow_name = ""
         self._turn_entry_context = ""
@@ -575,6 +589,37 @@ class WorkflowExecutionContext:
         """True when the agent suspended on ask_user and awaits the next process_turn."""
         return self._awaiting_user
 
+    @property
+    def last_completed_turn_key(self) -> Optional[str]:
+        """turn_key of the newest completed turn that produced a memory entry.
+
+        Feedback keys off this rather than off "the newest row for the
+        conversation": a max-ordinal query attaches feedback to whatever
+        happened to be written last, which on a suspended or cancelled turn is
+        not the turn the user was looking at (ruling I3/C4).
+        """
+        return self._last_completed_turn_key
+
+    @property
+    def last_turn_added_memory(self) -> bool:
+        """Whether the last finalize grew the durable conversation memory.
+
+        The label-refresh schedule counts usable turns, so it needs to know
+        what THIS turn contributed; a cancelled turn or an abandoned suspension
+        wrote a row but added nothing to summarize (ruling I10).
+        """
+        return self._last_turn_added_memory
+
+    @property
+    def last_turn_record_stored(self) -> Optional[bool]:
+        """Whether the last turn record reached durable storage (ruling I1).
+
+        None when no sink is installed — there is no durable record to wait
+        for, so a caller gating a history trim on durability must treat it as
+        "nothing to defer for" rather than as a failure.
+        """
+        return self._last_turn_record_stored
+
     def _serialize_turn_accumulator(self) -> Optional[dict[str, Any]]:
         """Project the logical-turn accumulator, or None when no turn is open.
 
@@ -722,6 +767,7 @@ class WorkflowExecutionContext:
             "conversation_history_turns": extract_turns_from_history(
                 self.conversation_history
             ),
+            "last_completed_turn_key": self._last_completed_turn_key,
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -747,6 +793,9 @@ class WorkflowExecutionContext:
         )
 
         self._action_log = list(state.get("action_log") or [])
+        # Absent from blobs written before ruling I3 landed; a missing key just
+        # means feedback has no turn to attach to until the next turn completes.
+        self._last_completed_turn_key = state.get("last_completed_turn_key")
 
         if turns := state.get("conversation_history_turns") or []:
             from fastworkflow.conversation_history_io import restore_history_from_turns
@@ -789,6 +838,13 @@ class WorkflowExecutionContext:
         """Restore the logical turn so resume continues it instead of starting one."""
         if not turn:
             return
+
+        # Memory-stamp baseline (ruling I5). apply_serialized_state restores the
+        # conversation history BEFORE this, so the restored length is the right
+        # baseline: a resumed turn stamps only an entry it appends after resume.
+        # Reconstructing rather than serializing keeps a cross-process resume
+        # from stamping the PREVIOUS turn's summary onto this write-once row.
+        self._turn_history_baseline = len(self.conversation_history.messages)
 
         self._turn_key = turn.get("key")
         self._turn_outputs = [
@@ -882,6 +938,20 @@ class WorkflowExecutionContext:
 
     def clear_conversation_history(self) -> None:
         self._conversation_history = dspy.History(messages=[])
+        # No history means no turn for feedback to attach to. Leaving the key
+        # behind would let feedback given after a rotate land on a turn of the
+        # conversation that was just archived (ruling I3).
+        self._last_completed_turn_key = None
+
+    def bind_last_completed_turn_key(self, turn_key: Optional[str]) -> None:
+        """Point feedback at a turn this context did not run.
+
+        Activating a stored conversation replaces the in-memory history, so the
+        turn feedback belongs to is that conversation's newest usable turn, not
+        whatever this process happened to run last. The embedder reads the key
+        from the store (``get_last_completed_turn_key``) and installs it here.
+        """
+        self._last_completed_turn_key = turn_key
 
     def append_conversation_turn(
         self,
@@ -1064,6 +1134,15 @@ class WorkflowExecutionContext:
             command_outputs=list(self._turn_outputs),
         )
 
+        # An awaiting_user emission leaves the memory columns NULL and the
+        # terminal upsert fills them (§2.1). At suspension the newest history
+        # entry is not yet the turn's contribution — the resumed half of the
+        # exchange has not happened — so stamping here would record a partial
+        # exchange as this turn's memory.
+        conversation_summary, conversation_traces = (
+            (None, None) if self._awaiting_user else self._turn_memory_entry()
+        )
+
         turn_result = TurnResult(
             turn_output=turn_output,
             channel_id=self._channel_id,
@@ -1075,10 +1154,38 @@ class WorkflowExecutionContext:
             started_at=self._turn_started_at,
             completed_at=completed_at,
             suspended_ms=self._turn_suspended_ms,
+            conversation_summary=conversation_summary,
+            conversation_traces=conversation_traces,
         )
 
         self._finalize_turn_trace(turn_result)
         return turn_result
+
+    def _turn_memory_entry(self) -> tuple[Optional[str], Optional[str]]:
+        """The conversation-history entry THIS turn appended, or (None, None).
+
+        The turns table carries a row for every logical turn, but only some of
+        those turns correspond to a conversation-history entry: a cancelled
+        turn, an abandoned suspension, or an agent turn whose history never
+        grew has nothing to contribute to memory. Stamping the newest entry
+        unconditionally would attribute the previous turn's summary to this
+        row, and the row is write-once — so the growth guard is what keeps the
+        memory columns honest (§2.1, ruling I5).
+
+        The history is read through the property because distillation replaces
+        the object wholesale (and truncates it back to a pre-pass length, which
+        is why the comparison is `>` rather than `!=`).
+        """
+        messages = self.conversation_history.messages
+        if len(messages) <= self._turn_history_baseline:
+            return None, None
+        newest = messages[-1]
+        if not isinstance(newest, dict):
+            return None, None
+        return (
+            newest.get("conversation summary"),
+            newest.get("conversation_traces"),
+        )
 
     def _compute_context_mutations(self) -> Optional[dict]:
         """Shallow diff of the app workflow's context against the _begin_turn
@@ -1181,7 +1288,15 @@ class WorkflowExecutionContext:
             self._turn_root_span = None
             self._turn_context_snapshot = None
 
-        tracing.emit_turn_record(self, turn_result)
+        self._last_turn_record_stored = tracing.emit_turn_record(self, turn_result)
+        self._last_turn_added_memory = (
+            not awaiting and turn_result.conversation_summary is not None
+        )
+        if self._last_turn_added_memory:
+            # Only a turn that contributed a memory entry can carry feedback:
+            # the memory window filters on exactly that, so keying feedback to
+            # any other row would file it where no reader joins it (I3/I4).
+            self._last_completed_turn_key = turn_result.turn_output.turn_key
 
         if turn_result.completed_at is not None:
             metrics.safe_increment(

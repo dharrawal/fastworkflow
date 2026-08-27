@@ -403,6 +403,103 @@ class TestSerializationPolicies:
 
 
 # ----------------------------------------------------------------------
+# Conversation memory round trip (fix-24f.1)
+#
+# Every read below filters on a non-NULL conversation_summary. The serializer
+# used to hardcode both memory columns to None, which made all of them return
+# empty against real traffic while the seeded-row tests above stayed green —
+# so these go through emit_turn_record rather than writing rows directly.
+# ----------------------------------------------------------------------
+
+
+class TestConversationMemoryRoundTrip:
+    def _turn_result(self, summary, traces, conversation_id=1, channel="c"):
+        output = fastworkflow.CommandOutput(
+            command_name="x",
+            command_response=fastworkflow.CommandResponse(response="done"),
+        )
+        turn_output = fastworkflow.TurnOutput(
+            turn_key=fastworkflow.mint_turn_key(),
+            status=TurnStatus.COMPLETED,
+            answer="done",
+            command_outputs=[output],
+        )
+        return fastworkflow.TurnResult(
+            turn_output=turn_output,
+            channel_id=channel,
+            conversation_id=conversation_id,
+            user_message="msg",
+            conversation_summary=summary,
+            conversation_traces=traces,
+        )
+
+    def test_stamped_turn_is_readable_as_memory(self, db_path, sink):
+        sink.emit_turn_record(self._turn_result("first turn", '{"a": 1}'))
+        sink.emit_turn_record(self._turn_result("second turn", '{"b": 2}'))
+        assert sink.flush()
+
+        store = obs.ObservabilityStore(db_path)
+        assert store.count_usable_turns("c", 1) == 2
+        window = store.get_memory_window("c", 1, max_turns=10)
+        assert [entry["conversation summary"] for entry in window] == [
+            "first turn",
+            "second turn",
+        ]
+        assert window[0]["conversation_traces"] == '{"a": 1}'
+        assert store.conversation_summaries("c", 1) == [
+            {"conversation summary": "first turn"},
+            {"conversation summary": "second turn"},
+        ]
+        assert store.conversation_label_state("c", 1) == ("", 2)
+        assert store.get_last_completed_turn_key("c", 1) is not None
+        assert [c["conversation_id"] for c in store.list_conversation_summaries("c", 10)] == [1]
+        assert len(store.dump_all_conversations("c")[0]["turns"]) == 2
+
+    def test_unstamped_turn_is_a_trace_not_memory(self, db_path, sink):
+        """A turn that appended no history entry stays out of every memory read
+        even though its row exists (ruling I4's usable-rows invariant)."""
+        sink.emit_turn_record(self._turn_result(None, None))
+        assert sink.flush()
+
+        store = obs.ObservabilityStore(db_path)
+        assert _rows(db_path, "SELECT * FROM turns")  # the row is there
+        assert store.count_usable_turns("c", 1) == 0
+        assert store.get_memory_window("c", 1, max_turns=10) == []
+        assert store.list_conversation_summaries("c", 10) == []
+
+    def test_terminal_emission_fills_columns_an_awaiting_user_row_left_null(
+        self, db_path, sink
+    ):
+        suspended = self._turn_result(None, None)
+        suspended.turn_output.status = TurnStatus.AWAITING_USER
+        sink.emit_turn_record(suspended)
+        assert sink.flush()
+        store = obs.ObservabilityStore(db_path)
+        assert store.count_usable_turns("c", 1) == 0
+
+        resumed = self._turn_result("the resumed turn", "{}")
+        resumed.turn_output.turn_key = suspended.turn_output.turn_key
+        sink.emit_turn_record(resumed)
+        assert sink.flush()
+
+        assert store.count_usable_turns("c", 1) == 1
+        window = store.get_memory_window("c", 1, max_turns=10)
+        assert window[0]["conversation summary"] == "the resumed turn"
+
+    def test_feedback_joins_into_the_memory_window(self, db_path, sink):
+        turn_result = self._turn_result("a turn with feedback", "{}")
+        sink.emit_turn_record(turn_result)
+        assert sink.flush()
+
+        store = obs.ObservabilityStore(db_path)
+        store.upsert_feedback(
+            turn_result.turn_output.turn_key, json.dumps({"nl_feedback": "helpful"})
+        )
+        window = store.get_memory_window("c", 1, max_turns=10)
+        assert window[0]["feedback"] == {"nl_feedback": "helpful"}
+
+
+# ----------------------------------------------------------------------
 # Writer discipline [R13]: drops counted, failures never propagate
 # ----------------------------------------------------------------------
 
@@ -560,14 +657,19 @@ class TestFactory:
 
 
 # ----------------------------------------------------------------------
-# Ruling C2 (fix-kw7.8): conversation-id minting must respect the legacy
-# store's floor at the production chokepoint, and a failing mint must degrade
-# to the legacy reserve path instead of failing the caller.
+# Ruling C2: conversation ids come from a per-channel counter that never
+# decreases, so no erasure or prune can cause an id to be reused; and a mint
+# that cannot run degrades instead of failing the caller.
+#
+# The Phase-A `legacy_floor` half of C2 is gone with the legacy store: it
+# existed to stop a fresh observability DB re-issuing an id that already named
+# one of the channel's per-channel-DB conversations, which mattered only while
+# BOTH stores were written. Nothing reads those files now.
 # ----------------------------------------------------------------------
 
 
-class TestMintingLegacyFloor:
-    def _runtime(self, sink, legacy, channel_id):
+class TestMinting:
+    def _runtime(self, sink, channel_id):
         bound: dict = {}
 
         class _Ctx:
@@ -578,50 +680,174 @@ class TestMintingLegacyFloor:
 
         runtime = SimpleNamespace(
             execution_context=_Ctx(),
-            conversation_store=legacy,
             channel_id=channel_id,
         )
         return runtime, bound
 
-    def test_reserve_conversation_id_never_aliases_legacy_ids(self, db_path, tmp_path):
-        from fastworkflow.run_fastapi_mcp.conversation_store import ConversationStore
+    def test_reserve_conversation_id_binds_the_minted_id(self, db_path):
         from fastworkflow.run_fastapi_mcp.utils import reserve_conversation_id
-
-        legacy = ConversationStore("chanX", str(tmp_path / "convs"))
-        for _ in range(3):  # pre-cutover legacy conversations 1..3
-            legacy.reserve_next_conversation_id()
 
         sink = obs.SQLiteTraceSink(db_path)
         try:
-            runtime, bound = self._runtime(sink, legacy, "chanX")
-            conv_id = reserve_conversation_id(runtime)
+            runtime, bound = self._runtime(sink, "chanX")
+            assert reserve_conversation_id(runtime) == 1
+            assert bound == {"conversation_id": 1}
+            assert reserve_conversation_id(runtime) == 2
         finally:
             sink.close()
 
-        # A fresh observability DB must mint PAST the legacy history — id 1
-        # here would append new turns into the user's oldest legacy
-        # conversation (ruling C2).
-        assert conv_id == 4
-        assert bound == {"conversation_id": 4}
-        assert legacy.get_last_conversation_id() == 4  # floor-synced
+    def test_an_id_is_never_reused_after_the_channel_is_forgotten(self, db_path):
+        """Erasure must not roll the counter back (ruling C2).
 
-    def test_reserve_falls_back_to_legacy_when_the_mint_fails(
-        self, db_path, tmp_path, monkeypatch
-    ):
-        from fastworkflow.run_fastapi_mcp.conversation_store import ConversationStore
+        A MAX-derived mint would hand the next conversation an id that names a
+        deleted one, so anything still holding the old id — a checkpoint, a
+        client's history list — would silently point at the new conversation.
+        """
         from fastworkflow.run_fastapi_mcp.utils import reserve_conversation_id
 
-        legacy = ConversationStore("chanY", str(tmp_path / "convs"))
+        sink = obs.SQLiteTraceSink(db_path)
+        try:
+            runtime, _bound = self._runtime(sink, "chanZ")
+            first = reserve_conversation_id(runtime)
+            second = reserve_conversation_id(runtime)
+            sink.store.forget_channel("chanZ")
+            after_erasure = reserve_conversation_id(runtime)
+        finally:
+            sink.close()
+
+        assert (first, second) == (1, 2)
+        assert after_erasure > second, (
+            f"minting reused id {after_erasure} after the channel was forgotten"
+        )
+
+    def test_reserve_degrades_to_zero_when_the_mint_fails(self, db_path, monkeypatch):
+        """A wedged DB must not fail /initialize or a turn.
+
+        Zero is the same value a never-reserved channel carries, so every caller
+        already handles it as "no active conversation".
+        """
+        from fastworkflow.run_fastapi_mcp.utils import reserve_conversation_id
+
         sink = obs.SQLiteTraceSink(db_path)
         try:
             def _wedged(*args, **kwargs):
                 raise sqlite3.OperationalError("database is locked")
 
             monkeypatch.setattr(sink.store, "mint_conversation_id", _wedged)
-            runtime, bound = self._runtime(sink, legacy, "chanY")
+            runtime, bound = self._runtime(sink, "chanY")
             conv_id = reserve_conversation_id(runtime)  # must not raise
         finally:
             sink.close()
 
-        assert conv_id == 1  # legacy counter minted
-        assert bound == {"conversation_id": 1}
+        assert conv_id == 0
+        assert bound == {}, "a failed mint bound an id onto the context anyway"
+
+
+# ----------------------------------------------------------------------
+# Gate 2 (§2.4, rulings I1/I6/C8/C9): sync-first turn records
+# ----------------------------------------------------------------------
+
+
+class TestSyncFirstTurnRecords:
+    def _turn_result(self, summary="a turn", conversation_id=1, status=None):
+        turn_output = fastworkflow.TurnOutput(
+            turn_key=fastworkflow.mint_turn_key(),
+            status=status or TurnStatus.COMPLETED,
+            answer="ok",
+        )
+        return fastworkflow.TurnResult(
+            turn_output=turn_output,
+            channel_id="c",
+            conversation_id=conversation_id,
+            user_message="msg",
+            conversation_summary=summary,
+        )
+
+    def test_a_healthy_emit_is_durable_before_it_returns(self, db_path, sink):
+        turn_result = self._turn_result()
+        assert sink.emit_turn_record(turn_result) is True
+        # Deliberately NO flush: the ack promises the row is already there.
+        assert obs.ObservabilityStore(db_path).get_turn(
+            turn_result.turn_output.turn_key
+        ) is not None
+        assert sink.pending_retry_depth() == 0
+
+    def test_an_open_breaker_degrades_to_the_queue_and_reports_it(self, db_path, sink):
+        sink._sync_breaker_until = time.monotonic() + 300
+        turn_result = self._turn_result()
+        assert sink.emit_turn_record(turn_result) is False
+        assert sink.pending_retry_depth() == 1
+        # The row is not durable yet, which is exactly what the ack said.
+        assert obs.ObservabilityStore(db_path).get_turn(
+            turn_result.turn_output.turn_key
+        ) is None
+        assert sink.flush()
+        assert obs.ObservabilityStore(db_path).get_turn(
+            turn_result.turn_output.turn_key
+        ) is not None
+
+    def test_a_degraded_record_keeps_its_chronological_ordinal(self, db_path, sink):
+        """Ruling I6: the ordinal is reserved synchronously before the enqueue.
+
+        Without that, a turn written while the DB was briefly wedged would sort
+        after turns that happened later.
+        """
+        assert sink.emit_turn_record(self._turn_result("first")) is True
+        sink._sync_breaker_until = time.monotonic() + 300
+        assert sink.emit_turn_record(self._turn_result("second")) is False
+        sink._sync_breaker_until = 0.0
+        assert sink.emit_turn_record(self._turn_result("third")) is True
+        assert sink.flush()
+
+        window = obs.ObservabilityStore(db_path).get_memory_window("c", 1, 10)
+        assert [entry["conversation summary"] for entry in window] == [
+            "first",
+            "second",
+            "third",
+        ]
+
+    def test_the_pending_ring_is_bounded(self, db_path, sink):
+        sink._sync_breaker_until = time.monotonic() + 300
+        for i in range(obs._PENDING_RETRY_MAX + 10):
+            sink.emit_turn_record(self._turn_result(f"turn-{i}"))
+        assert sink.pending_retry_depth() == obs._PENDING_RETRY_MAX
+        health = sink._health
+        assert health["records_dropped"] >= 10
+        assert health["sync_fallbacks"] >= obs._PENDING_RETRY_MAX
+
+    def test_the_breaker_rearms_only_after_a_successful_probe(self, db_path, sink):
+        sink._trip_sync_breaker(RuntimeError("wedged"))
+        assert sink._sync_available() is False
+
+        # Cooldown elapsed, but the breaker stays shut until a probe succeeds.
+        sink._sync_breaker_until = time.monotonic() - 1
+        sink._maybe_rearm_sync_breaker()
+        assert sink._sync_available() is True
+        assert sink._health["sync_breaker_open"] is False
+        assert sink.emit_turn_record(self._turn_result()) is True
+
+    def test_writer_health_records_the_sync_path(self, db_path, sink):
+        sink.emit_turn_record(self._turn_result())
+        assert sink.flush()
+        health = obs.ObservabilityStore(db_path).writer_health()
+        assert health is not None
+        assert health["sync_writes"] >= 1
+        assert health["sync_write_ms_max"] >= 0
+        assert health["sync_breaker_open"] is False
+
+    def test_an_awaiting_user_emission_is_also_sync(self, db_path, sink):
+        """Ruling I6: awaiting_user and terminal take the SAME path.
+
+        Mixing them was what let one logical turn split across the sync and
+        queued paths and produce spurious refused-terminal-write noise.
+        """
+        suspended = self._turn_result(
+            summary=None, status=TurnStatus.AWAITING_USER
+        )
+        assert sink.emit_turn_record(suspended) is True
+        row = obs.ObservabilityStore(db_path).get_turn(
+            suspended.turn_output.turn_key
+        )
+        assert row is not None and row["status"] == "awaiting_user"
+        # A suspended row is not a pending-retry obligation: it is not terminal.
+        assert sink.pending_retry_depth() == 0

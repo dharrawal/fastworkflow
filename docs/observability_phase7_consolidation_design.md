@@ -1,5 +1,32 @@
 # Observability Phase 7 — Conversation-Store Consolidation (Design Slice)
 
+> **Status (2026-08-27): LANDED in v3.2.0** (bead `fix-24f.8`). The
+> observability DB is the single source of truth. `run_fastapi_mcp` no longer
+> imports `conversation_store.py`; the module and its tests remain on disk
+> pending the separate `[DHAR]`-approved deletion (ruling C5). Deviations from
+> the design as written, all deliberate:
+>
+> - **`legacy_floor` at mint is gone, not ported.** It existed to stop a fresh
+>   observability DB re-issuing an id that already named a per-channel-DB
+>   conversation, which is only a hazard while BOTH stores are written (an
+>   aliased id appended new turns into the user's oldest legacy conversation).
+>   Post-cutover nothing reads those files, so the per-channel counter alone is
+>   authoritative — §3's posture is "legacy-only conversations become
+>   invisible", not "misattributed". The one-shot per-channel topic dedupe from
+>   ruling I9 is likewise unlanded, for the same reason: it reconciled two live
+>   stores.
+> - **`finalize_conversations_on_shutdown` is deleted, not re-scoped.** Ruling
+>   C5 said its turn-append job was obsolete and its labeling job stayed, but
+>   labeling had already been removed from shutdown before this slice, so
+>   nothing was left.
+> - **A suspended-then-resumed exchange is now ONE conversation turn**, where
+>   the legacy store recorded each half separately. Falls out of one logical
+>   turn = one row.
+> - **With `FW_OBSERVABILITY=0` the server has no conversation persistence at
+>   all** (in-memory history only, nothing survives a restart), because the
+>   turn record IS the conversation record now. `run_fastapi_mcp` is an entry
+>   point, so the sink defaults on.
+
 > Errata (2026-08-26): CLI names herein predate the chatbot UI rework —
 > `fastworkflow studio` shipped as `fastworkflow run_chatbot`, and the
 > `--prune`/`--forget-channel`/`--include-conversations` flags became the

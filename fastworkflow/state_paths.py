@@ -109,7 +109,16 @@ def workflow_state_dir(workflow_path: str) -> str:
 
 
 def conversations_dir(workflow_path: str) -> str:
-    """Per-channel conversation SQLite DBs for this workflow (created)."""
+    """LEGACY per-channel conversation SQLite DBs for this workflow (created).
+
+    Nothing writes these since the Phase-7 consolidation made
+    ``observability_db`` the single source of truth for conversations
+    (docs/observability_phase7_consolidation_design.md §2.8). Pre-cutover files
+    are left in place — readable by older builds, deletable by the operator,
+    erased with the channel by ``run_forget_channel``. This function stays until
+    the next major so those paths remain addressable; the directory it creates
+    on a fresh install is simply empty.
+    """
     path = os.path.join(workflow_state_dir(workflow_path), _CONVERSATIONS_DIRNAME)
     os.makedirs(path, exist_ok=True)
     return path

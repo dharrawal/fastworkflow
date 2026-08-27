@@ -303,7 +303,8 @@ INTERNAL + `fw.human_wait=true`; TEXT timestamps parse RFC3339.
   one `[R15]`; the old conversation store keeps running (dual-write,
   explicitly temporary), consuming the same ids so the stores cannot diverge
   on identity.
-- **Phase B** (its own reviewed slice) — gates, all normative:
+- **Phase B** — LANDED in v3.2.0 (`fix-24f.8`); slice design and its deviations
+  in `docs/observability_phase7_consolidation_design.md`. Gates, all normative:
   1. Memory rebuild reads `conversation_summary`/`conversation_traces`/
      `feedback` from the new store `[R3]`.
   2. Turn-record/feedback writes go synchronous-or-acked `[R14]`.
@@ -312,8 +313,12 @@ INTERNAL + `fw.human_wait=true`; TEXT timestamps parse RFC3339.
   4. Insights distillation is ported off `action.jsonl` onto the in-process
      `ctx.action_log` (no file, no writer race) and the diagnostics skill's
      `trace_turn.py` is updated `[R25]`.
-  Then `run_fastapi_mcp/conversation_store.py`, the per-channel DBs, and the
-  `action.jsonl` mirror are retired.
+
+  `run_fastapi_mcp/conversation_store.py` and the `action.jsonl` mirror are
+  retired from every production path. The module and its tests remain on disk
+  pending a separate approved deletion; the per-channel DBs are left untouched
+  on disk (readable by older builds, erased with the channel by
+  `run_forget_channel`).
 
 ### 3.4 The viewer: fastWorkflow Studio
 

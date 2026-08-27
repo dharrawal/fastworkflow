@@ -52,13 +52,10 @@ from .checkpoint import (
     STARTUP_SUCCEEDED,
     STARTUP_SUSPENDED,
 )
-from .conversation_store import (
-    extract_turns_from_history,
-    generate_topic_and_summary,
-)
+from fastworkflow.conversation_labeling import generate_topic_and_summary
 from .utils import (
     collect_trace_events,
-    save_conversation_incremental,
+    trim_conversation_window,
     try_ensure_topic_and_summary,
 )
 
@@ -518,13 +515,16 @@ async def _label_conversation_after_turn(
     it instead - a session lease, or delaying the pointer clear - would put the
     channel straight back into the drain and undo the paragraph above. So the
     labeling path is built not to care: ``ensure_topic_and_summary`` reaches only
-    the durable conversation record, through ``runtime.conversation_store``, which
-    is a handle to a SQLite file that retirement neither owns nor closes, and the
-    conversation id it writes under is captured before it generates. A label
-    landing after its session was retired is correct - the conversation is
-    durable, the session was only a cache of it. Do NOT make this path read
-    ``runtime.execution_context``; that is the one thing retirement can pull out
-    from under it.
+    the durable conversation record, through ``runtime.observability_store``,
+    which is a handle to a SQLite file that retirement neither owns nor closes,
+    and the conversation id it writes under is captured before it generates. A
+    label landing after its session was retired is correct - the conversation is
+    durable, the session was only a cache of it.
+
+    That handle IS resolved off ``runtime.execution_context`` (the sink lives on
+    the WEC), so it must be taken while the runtime is still live rather than
+    re-read later. ``ensure_topic_and_summary`` reads it once, up front, for
+    exactly this reason; do not move that read after an await.
     """
     if execn.kind not in LABELABLE_TURN_KINDS:
         return
@@ -540,6 +540,20 @@ async def _label_conversation_after_turn(
     await try_ensure_topic_and_summary(
         runtime, generate_topic_and_summary, turns_appended=turns_appended
     )
+
+
+def _turns_appended(runtime: "ChannelRuntime") -> int:
+    """How many usable turns this attempt made durable — 0 or 1 (ruling I10).
+
+    Replaces the count the incremental legacy save used to return. It reads the
+    emit ack rather than the history length, so a turn whose record degraded to
+    the queue does not advance the label schedule past a milestone that nothing
+    can yet summarize.
+    """
+    ctx = runtime.execution_context
+    if not ctx.last_turn_added_memory:
+        return 0
+    return 1 if ctx.last_turn_record_stored else 0
 
 
 @contextlib.contextmanager
@@ -622,10 +636,13 @@ async def _run_turn(
                     f"Failed to collect traces for turn {execn.turn_key}: {trace_exc}"
                 )
 
-            # Persist BEFORE DONE so a poller never sees "done" with unsaved state.
-            turns_appended = save_conversation_incremental(
-                runtime, extract_turns_from_history, logger
-            )
+            # The turn record was written synchronously inside work_fn's
+            # finalize (Phase 7 §2.4), so by here it is already durable and a
+            # poller can never see "done" with unsaved state. What is left is
+            # windowing the in-memory history, which defers itself if that
+            # write degraded to the queue (ruling I2).
+            turns_appended = _turns_appended(runtime)
+            trim_conversation_window(runtime, logger)
             _persist_after_turn(session_manager, runtime, result)
     except NoSuspendedAgentStateError as exc:
         execn.error = str(exc)
@@ -703,9 +720,8 @@ async def run_owned_turn(
             if execn.result is not None:
                 execn.logical_turn_key = execn.result.turn_key
 
-            turns_appended = save_conversation_incremental(
-                runtime, extract_turns_from_history, logger
-            )
+            turns_appended = _turns_appended(runtime)
+            trim_conversation_window(runtime, logger)
     except NoSuspendedAgentStateError as exc:
         execn.error = str(exc)
         execn.http_status_on_error = 409

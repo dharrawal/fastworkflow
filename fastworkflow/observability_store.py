@@ -32,6 +32,7 @@ only (WAL constraint — the state root must not be NFS).
 from __future__ import annotations
 
 import atexit
+import contextlib
 import hashlib
 import json
 import os
@@ -63,6 +64,15 @@ _DEFAULT_QUEUE_MAX = 10_000
 _RECORD_QUEUE_MAX = 256
 _RECORD_PUT_TIMEOUT_S = 2.0
 _RECORD_BUSY_MAX_RETRIES = 5
+
+# Sync-first turn-record writes (Phase 7 §2.4, rulings I1/I6/C8/C9).
+_DEFAULT_SYNC_WRITE_TIMEOUT_S = 5
+_DEFAULT_SYNC_BREAKER_COOLDOWN_S = 60
+# Terminal records that fell back to the queue and have not been confirmed
+# durable ride this ring until a retry lands them. Bounded: it is a memory
+# holder on a path that only runs when the DB is already unhealthy, and the
+# window the history trim defers by is bounded with it (ruling I1/I2).
+_PENDING_RETRY_MAX = 64
 
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_MAX_BATCHES = 20
@@ -264,8 +274,11 @@ def serialize_turn_result(turn_result: Any) -> tuple[dict[str, Any], list[dict[s
         "success": 1 if turn_output.success else 0,
         "failure_reason": turn_output.failure_reason,
         "answer": turn_output.answer or "",
-        "conversation_summary": None,
-        "conversation_traces": None,
+        # Stamped by WEC._build_turn_result only when the turn appended a
+        # conversation-history entry, so these are exactly the rows the
+        # _USABLE_TURN_FILTER admits as conversation memory.
+        "conversation_summary": getattr(turn_result, "conversation_summary", None),
+        "conversation_traces": getattr(turn_result, "conversation_traces", None),
         "started_at": (
             turn_result.started_at.isoformat() if turn_result.started_at else None
         ),
@@ -469,7 +482,7 @@ class ObservabilityStore:
         conversation_id: int,
         topic: Optional[str],
         summary: Optional[str],
-    ) -> None:
+    ) -> str:
         """Upsert a conversation's topic/summary ([R15]; labels are mutable).
 
         A None topic or summary preserves the stored value, so the blank-topic
@@ -477,11 +490,20 @@ class ObservabilityStore:
         over from the legacy store. Topic uniquification runs inside the same
         transaction as the write (review ruling I9: no TOCTOU across the async
         label path; Python-side casefold, never SQLite's ASCII-only lower()).
+
+        Returns the topic actually STORED — collision-suffixed where one was
+        written, or the preserved existing title on a blank generation. A
+        caller that reports or logs the label must use this rather than its own
+        candidate, which is the contract the legacy store's
+        ``update_conversation_topic_summary`` established (ruling I9).
         """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self.apply_label_txn(conn, channel_id, conversation_id, topic, summary)
+            stored = self.apply_label_txn(
+                conn, channel_id, conversation_id, topic, summary
+            )
             conn.commit()
+        return stored
 
     def apply_label_txn(
         self,
@@ -490,8 +512,11 @@ class ObservabilityStore:
         conversation_id: int,
         topic: Optional[str],
         summary: Optional[str],
-    ) -> None:
-        """The single label-write enforcement point (caller owns the txn)."""
+    ) -> str:
+        """The single label-write enforcement point (caller owns the txn).
+
+        Returns the stored topic (see ``record_conversation_label``).
+        """
         if topic is not None:
             topic = self._unique_topic_in_txn(
                 conn, channel_id, topic, exclude_conversation_id=conversation_id
@@ -512,6 +537,13 @@ class ObservabilityStore:
                  updated_at=excluded.updated_at""",
             (channel_id, conversation_id, topic, summary, now, now),
         )
+        if topic is not None:
+            return topic
+        row = conn.execute(
+            "SELECT topic FROM conversations WHERE channel_id=? AND conversation_id=?",
+            (channel_id, conversation_id),
+        ).fetchone()
+        return (row["topic"] or "") if row is not None else ""
 
     @staticmethod
     def _topic_norm(value: str) -> str:
@@ -1268,10 +1300,20 @@ class SQLiteTraceSink:
             "write_errors": 0,
             "busy_retries": 0,
             "refused_terminal_writes": 0,
+            "sync_writes": 0,
+            "sync_fallbacks": 0,
+            "sync_write_ms_max": 0,
+            "pending_retry_depth": 0,
+            "sync_breaker_open": False,
             "last_error": None,
         }
         self._health_dirty = False
         self._health_lock = threading.Lock()
+        # Sync-first write state (§2.4). The breaker deadline is a monotonic
+        # timestamp; the ring holds terminal rows the sync path could not land.
+        self._sync_lock = threading.Lock()
+        self._sync_breaker_until = 0.0
+        self._pending: "dict[str, tuple]" = {}
         self._writer = threading.Thread(
             target=self._writer_loop, name="fw-obs-writer", daemon=True
         )
@@ -1308,14 +1350,114 @@ class SQLiteTraceSink:
         except Exception as exc:
             self._count("write_errors", error=repr(exc))
 
-    def emit_turn_record(self, record: Any) -> None:
+    def emit_turn_record(self, record: Any) -> bool:
+        """Write the turn record, synchronously by default. Returns "stored".
+
+        Sync-first (§2.4 as amended by rulings I6/C8): EVERY turn-record
+        emission — awaiting_user and terminal alike — takes the same path, so
+        one logical turn can never be split across the sync and queued paths
+        and arrive out of order. The queue is only the degraded fallback.
+
+        The return value is the ack ruling I1 requires. The observability DB is
+        the conversation record now, so a caller that drops turns out of its
+        in-memory history has to know whether they were actually persisted:
+        False means "queued, not yet durable" and the caller must defer its
+        trim. Never raises; a caller that cannot use the ack can ignore it.
+        """
         if self._closed:
-            return
+            return False
         try:
             turn_row, artifact_rows = serialize_turn_result(record)
         except Exception as exc:
             self._count("write_errors", error=f"serialize: {exc!r}")
-            return
+            return False
+
+        if self._sync_available() and self._sync_write(turn_row, artifact_rows):
+            self._forget_pending(turn_row["turn_key"])
+            return True
+
+        self._count("sync_fallbacks")
+        self._queue_turn_row(turn_row, artifact_rows)
+        return False
+
+    def _sync_available(self) -> bool:
+        with self._sync_lock:
+            return time.monotonic() >= self._sync_breaker_until
+
+    def _sync_write(
+        self, turn_row: dict[str, Any], artifact_rows: list[dict[str, Any]]
+    ) -> bool:
+        """One short BEGIN IMMEDIATE on the caller thread. Never raises.
+
+        Its own connection with a SHORT busy timeout (ruling C9): the default
+        30 s would put a wedged DB in front of a user's turn for half a minute.
+        On failure the breaker opens so a broken disk degrades to Phase-A
+        queued behaviour instead of taxing every subsequent turn.
+        """
+        started = time.monotonic()
+        conn = None
+        try:
+            conn = self.store._connect(
+                timeout=float(
+                    _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
+                )
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            accepted = self.store.upsert_turn_row(
+                conn, turn_row, artifact_rows, self._redactor
+            )
+            conn.commit()
+        except Exception as exc:
+            if conn is not None:
+                self._rollback(conn)
+            self._trip_sync_breaker(exc)
+            return False
+        finally:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+        if not accepted:
+            self._count("refused_terminal_writes")
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        with self._health_lock:
+            self._health["sync_writes"] = int(self._health["sync_writes"]) + 1
+            if elapsed_ms > int(self._health["sync_write_ms_max"] or 0):
+                self._health["sync_write_ms_max"] = elapsed_ms
+            self._health_dirty = True
+        # A refusal means a terminal row is already there: the turn IS durable,
+        # which is what the ack promises. Only a failed write is not.
+        return True
+
+    def _trip_sync_breaker(self, exc: Exception) -> None:
+        cooldown = _env_int(
+            "FW_OBS_SYNC_BREAKER_COOLDOWN_S", _DEFAULT_SYNC_BREAKER_COOLDOWN_S
+        )
+        with self._sync_lock:
+            self._sync_breaker_until = time.monotonic() + cooldown
+        with self._health_lock:
+            self._health["sync_breaker_open"] = True
+            self._health_dirty = True
+        self._count("write_errors", error=f"sync write: {exc!r}")
+
+    def _queue_turn_row(
+        self, turn_row: dict[str, Any], artifact_rows: list[dict[str, Any]]
+    ) -> None:
+        """Degraded path: reserve the ordinal, enqueue, and remember terminals.
+
+        The ordinal is reserved synchronously in its own tiny transaction
+        (ruling I6) so a record that rides the queue still sorts where it
+        happened — otherwise a turn written while the DB was briefly wedged
+        would land after turns that came later.
+        """
+        if (
+            turn_row.get("conversation_id") is not None
+            and turn_row.get("ordinal") is None
+        ):
+            turn_row["ordinal"] = self.store.reserve_turn_ordinal(
+                turn_row["channel_id"], turn_row["conversation_id"]
+            )
+        if turn_row["status"] in TERMINAL_TURN_STATUSES:
+            self._remember_pending(turn_row, artifact_rows)
         try:
             self._record_queue.put(
                 ("turn", turn_row, artifact_rows, 0), timeout=_RECORD_PUT_TIMEOUT_S
@@ -1328,6 +1470,41 @@ class SQLiteTraceSink:
             )
         except Exception as exc:
             self._count("write_errors", error=repr(exc))
+
+    def _remember_pending(
+        self, turn_row: dict[str, Any], artifact_rows: list[dict[str, Any]]
+    ) -> None:
+        """Hold a terminal row for retry until a write of it is confirmed."""
+        with self._sync_lock:
+            self._pending[turn_row["turn_key"]] = (turn_row, artifact_rows)
+            while len(self._pending) > _PENDING_RETRY_MAX:
+                # Oldest first: dict preserves insertion order, and the oldest
+                # entry is the one whose turn has been unrecorded longest.
+                oldest = next(iter(self._pending))
+                del self._pending[oldest]
+                self._count("records_dropped")
+                logger.warning(
+                    f"Observability pending-retry ring full; giving up on "
+                    f"turn record {oldest} [R13]"
+                )
+            depth = len(self._pending)
+        with self._health_lock:
+            self._health["pending_retry_depth"] = depth
+            self._health_dirty = True
+
+    def _forget_pending(self, turn_key: str) -> None:
+        with self._sync_lock:
+            if self._pending.pop(turn_key, None) is None:
+                return
+            depth = len(self._pending)
+        with self._health_lock:
+            self._health["pending_retry_depth"] = depth
+            self._health_dirty = True
+
+    def pending_retry_depth(self) -> int:
+        """Terminal records still awaiting a confirmed write (tests, health)."""
+        with self._sync_lock:
+            return len(self._pending)
 
     def record_conversation_label(
         self,
@@ -1390,12 +1567,16 @@ class SQLiteTraceSink:
             while not self._stop.is_set():
                 item = self._next_item()
                 if item is None:
-                    self._maybe_write_health(conn)
+                    self._heartbeat(conn)
                     continue
                 self._apply_batch(conn, [item] + self._drain_pending())
             # Final drain: everything enqueued before close() is written.
             while items := self._drain_pending():
                 self._apply_batch(conn, items)
+            # Then the retry ring, which holds terminal rows the queue may have
+            # dropped — the last thing standing between a wedged-then-recovered
+            # DB and a permanently missing turn.
+            self._retry_pending(conn)
         except Exception as exc:  # writer must never crash the process
             self._count("write_errors", error=repr(exc))
             logger.warning(f"Observability writer loop error: {exc!r}")
@@ -1407,6 +1588,87 @@ class SQLiteTraceSink:
                 except Exception:
                     pass
                 conn.close()
+
+    def _heartbeat(self, conn: sqlite3.Connection) -> None:
+        """Idle-tick work: flush health, retry the pending ring, re-arm the breaker.
+
+        All three are deliberately off the turn path — this runs on the writer
+        thread between drains, so a wedged DB costs a background retry rather
+        than a user's latency.
+        """
+        self._retry_pending(conn)
+        self._maybe_rearm_sync_breaker()
+        self._maybe_write_health(conn)
+
+    def _retry_pending(self, conn: sqlite3.Connection) -> None:
+        """Re-write terminal rows the sync path could not land (ruling I1).
+
+        The upsert is idempotent on turn_key, so a row the queue already
+        delivered is claimed as an idempotent retry rather than refused.
+        """
+        with self._sync_lock:
+            if not self._pending:
+                return
+            items = list(self._pending.items())
+        landed = []
+        for turn_key, (turn_row, artifact_rows) in items:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                self.store.upsert_turn_row(
+                    conn, turn_row, artifact_rows, self._redactor
+                )
+                conn.commit()
+            except Exception as exc:
+                self._rollback(conn)
+                self._count("write_errors", error=f"pending retry: {exc!r}")
+                break  # still unhealthy; leave the rest for the next tick
+            landed.append(turn_key)
+        for turn_key in landed:
+            self._forget_pending(turn_key)
+
+    def _maybe_rearm_sync_breaker(self) -> None:
+        """Close the breaker only after a write probe succeeds (ruling C9).
+
+        The cooldown elapsing proves nothing about the DB, and re-arming blind
+        would put the next user turn back in front of the same wedged file.
+        The probe is a diagnostics upsert on the sync path's own connection —
+        the same write shape, at the same busy timeout, off the turn path.
+        """
+        with self._sync_lock:
+            if self._sync_breaker_until == 0.0:
+                return
+            if time.monotonic() < self._sync_breaker_until:
+                return
+        conn = None
+        try:
+            conn = self.store._connect(
+                timeout=float(
+                    _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
+                )
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            self.store.set_diagnostic(
+                conn, "sync_breaker_probe", {"at": _utcnow_iso()}
+            )
+            conn.commit()
+        except Exception:
+            # Still wedged: hold the breaker open for another cooldown rather
+            # than probing on every idle tick.
+            with self._sync_lock:
+                self._sync_breaker_until = time.monotonic() + _env_int(
+                    "FW_OBS_SYNC_BREAKER_COOLDOWN_S", _DEFAULT_SYNC_BREAKER_COOLDOWN_S
+                )
+            return
+        finally:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+        with self._sync_lock:
+            self._sync_breaker_until = 0.0
+        with self._health_lock:
+            self._health["sync_breaker_open"] = False
+            self._health_dirty = True
+        logger.info("Observability sync-write breaker re-armed after a successful probe")
 
     def _next_item(self) -> Any:
         """One item, records first; None on idle timeout (health heartbeat)."""
@@ -1471,6 +1733,11 @@ class SQLiteTraceSink:
         )
         if not accepted:
             self._count("refused_terminal_writes")
+        # The row landed, so the retry ring no longer owes anyone this turn.
+        # Cleared inside the batch txn rather than after the commit: a commit
+        # failure rolls the batch back and requeues it, and the ring entry is
+        # re-added by that path if it is still needed.
+        self._forget_pending(turn_row["turn_key"])
 
     def _apply_label(self, conn: sqlite3.Connection, item: tuple) -> None:
         _, channel_id, conversation_id, topic, summary, _retries = item

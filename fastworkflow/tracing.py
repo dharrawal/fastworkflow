@@ -398,11 +398,20 @@ def end_span(
         logger.warning(f"end_span({span.name}) failed: {exc!r}")
 
 
-def emit_turn_record(host: Any, record: Any) -> None:
-    """Hand the finalized internal TurnResult to the sink. Never raises."""
+def emit_turn_record(host: Any, record: Any) -> Optional[bool]:
+    """Hand the finalized internal TurnResult to the sink. Never raises.
+
+    Returns the sink's "stored" ack (Phase 7 ruling I1), or None when there is
+    no sink at all. The three values are distinct on purpose: True and False
+    both mean a durable store exists and say whether the row reached it, while
+    None means nothing is recording turns, so a caller gating on durability has
+    nothing to wait for and must not defer forever.
+    """
     try:
         sink = get_sink(host)
-        if sink is not None:
-            sink.emit_turn_record(record)
+        if sink is None:
+            return None
+        return bool(sink.emit_turn_record(record))
     except Exception as exc:
         logger.warning(f"TraceSink.emit_turn_record failed: {exc!r}")
+        return False
