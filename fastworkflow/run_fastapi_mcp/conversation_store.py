@@ -142,6 +142,22 @@ class ConversationStore:
         """Reserve the next conversation ID by incrementing the counter without creating a conversation"""
         with self._get_db() as db:
             return self._increment_conversation_id(db)
+
+    def sync_conversation_id_floor(self, conversation_id: int) -> None:
+        """Raise this store's id counter to at least ``conversation_id``.
+
+        Phase-A dual-write ([R1]): the observability DB is the sole id-minting
+        authority; this store consumes the same ids so the two cannot diverge
+        on identity. Raising the counter keeps every id-range scan
+        (_ensure_unique_topic, list_conversations, ...) covering externally
+        minted conversations, and keeps a fallback reserve_next_conversation_id
+        from re-issuing an id already minted elsewhere.
+        """
+        with self._get_db() as db:
+            meta = db.get("meta", {"last_conversation_id": 0})
+            if int(meta.get("last_conversation_id") or 0) < conversation_id:
+                meta["last_conversation_id"] = conversation_id
+                db["meta"] = meta
     
     def _ensure_unique_topic(
         self,
@@ -348,10 +364,16 @@ class ConversationStore:
         conv_id: int,
         topic: str,
         summary: str
-    ) -> None:
+    ) -> str:
         """
         Update only the topic and summary of an existing conversation.
         Used when finalizing a conversation (turns already saved incrementally).
+
+        Returns the topic actually STORED — the collision-suffixed unique topic
+        when one was written, or the preserved existing topic on a blank
+        generation. Callers mirroring the label elsewhere (the Phase-A
+        observability mirror, ruling I9) must propagate this value, not the raw
+        candidate, or the stores diverge on the suffix.
 
         A blank topic - empty or whitespace-only - means generation failed: a
         partial JSON parse, a truncated completion, or a model that emitted
@@ -392,9 +414,10 @@ class ConversationStore:
                 )
             conv["summary"] = summary
             conv["updated_at"] = int(time.time() * 1000)
-            
+
             db[conv_key] = conv
-    
+            return conv.get("topic") or ""
+
     def save_conversation_turns(
         self,
         conversation_id: int,

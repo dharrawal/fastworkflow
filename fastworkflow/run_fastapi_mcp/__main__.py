@@ -66,6 +66,7 @@ from .utils import (
     ChannelSessionManager,
     MAX_CONVERSATION_TURNS_IN_MEMORY,
     ensure_topic_and_summary,
+    reserve_conversation_id,
     save_conversation_incremental,
     save_last_turn_feedback,
     try_ensure_topic_and_summary,
@@ -93,6 +94,7 @@ from .turns import (
     run_owned_turn,
     submit_turn,
     render_turn_response,
+    resolve_logical_turn_key,
     compute_idempotency_key,
 )
 from . import server_memory
@@ -297,8 +299,13 @@ def _log_memory_bounds() -> None:
     else:
         asserted = "asserted" if dspy_policy.asserted else "NOT ASSERTED"
         owner = "claimed" if dspy_policy.async_owner_claimed else "unclaimed"
+        history = (
+            f"bounded to {dspy_policy.history_entries} entries "
+            f"(1 per LM, for usage/cost capture)"
+            if dspy_policy.keep_history else "off"
+        )
         dspy_bounds = (
-            f"dspy_history=off ({asserted}), dspy_trace=off ({asserted}), "
+            f"dspy_history={history} ({asserted}), dspy_trace=off ({asserted}), "
             f"dspy_memory_cache={dspy_policy.memory_cache_entries} entries ({asserted}), "
             f"dspy_disk_cache={'off' if dspy_policy.disk_cache_off else 'ON'}, "
             f"dspy_policy_owner={owner}"
@@ -606,6 +613,21 @@ def load_args():
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
     parser.add_argument("--expect_encrypted_jwt", action="store_true", default=False,
                        help="Enable JWT signature verification (default: unsigned tokens accepted for trusted networks)")
+    parser.add_argument("--cors_origin", default=None,
+                       help="Pin CORS to exactly this origin (e.g. http://127.0.0.1:9000). "
+                            "Default: allow all origins (development posture).")
+    parser.add_argument("--keep_dspy_history", action="store_true", default=False,
+                        help="Retain a bounded DSPy call history so the observability "
+                             "trace can record token usage, cost and cache-hit status. "
+                             "For single-developer servers (the chatbot spawns one with "
+                             "this set); off by default because history holds "
+                             "request-sized payloads.")
+    parser.add_argument("--cors_loopback_only", action="store_true", default=False,
+                       help="Pin CORS to loopback origins only (127.0.0.1/localhost/[::1], any "
+                            "port) — tighter than the wide-open default, and resilient to port "
+                            "forwarders that re-expose a UI on a different local port. Used by "
+                            "`fastworkflow run_chatbot`'s auto-spawned server [R19]. "
+                            "Takes precedence over --cors_origin.")
     return parser.parse_args()
 
 ARGS = load_args()
@@ -658,14 +680,29 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS middleware. --cors_loopback_only pins the allowlist to loopback origins
+# on any port (the chatbot's auto-spawn posture — port forwarders re-expose the
+# UI on other local ports, so exact-origin pinning breaks legitimate access
+# while loopback-only still excludes every routable origin) [R19 as amended].
+# --cors_origin pins to exactly one origin — never a wildcard. Without either,
+# the historical wide-open development posture is kept unchanged.
+_LOOPBACK_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$"
+if ARGS.cors_loopback_only:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=_LOOPBACK_ORIGIN_RE,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[ARGS.cors_origin] if ARGS.cors_origin else ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Probe logging filter middleware - suppresses logs for successful probe requests
 app.add_middleware(ProbeLoggingFilterMiddleware)
@@ -833,6 +870,8 @@ def _initialize_response_from_execution(
         expires_in=JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         startup_turn_key=execn.turn_key,
         startup_exec_state=execn.exec_state.value,
+        # [R9] the logical key rides alongside the execution key once known.
+        startup_logical_turn_key=execn.logical_turn_key,
     )
     if not execn.is_terminal:
         return status.HTTP_202_ACCEPTED, resp
@@ -934,6 +973,243 @@ def _turn_json_response(execn, channel_id: str) -> JSONResponse:
     return JSONResponse(content=body, status_code=code)
 
 
+# ============================================================================
+# GET /turns — serve turn state from the registry, then the observability store
+# (fix-85g.9/.10; observability design §3.4/§4, rulings [R9]/[A39])
+# ============================================================================
+
+def _observability_store():
+    """This workflow's ObservabilityStore, or None when observability is off.
+
+    Reuses the process-wide sink (one writer per DB path) that the channel
+    runtimes already attach (``_create_channel_runtime``), so reads go against
+    exactly the DB the sink writes.
+    """
+    from fastworkflow.observability_store import get_observability_sink
+
+    sink = get_observability_sink(ARGS.workflow_path)
+    return sink.store if sink is not None else None
+
+
+def _turn_not_found(turn_key: str) -> HTTPException:
+    """404 for unknown keys AND for keys owned by another channel.
+
+    Deliberately indistinguishable ([A39]: the caller's JWT channel must match
+    the record's channel — no bare-handle reads, and a foreign key must not
+    even be confirmed to exist).
+    """
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Turn not found: {turn_key}",
+    )
+
+
+def _stored_turn_body(row: dict[str, Any]) -> dict[str, Any]:
+    """Project a stored ``turns`` row into the GET /turns response body.
+
+    The stored ``record_json`` (the full internal TurnResult, post-envelope and
+    post-redaction [R10][R20]) is parsed into ``record``; the projection fields
+    mirror ``render_turn_response`` so a poller reads one shape whichever side
+    of the registry/store boundary answers. The store is keyed by the LOGICAL
+    turn key, so here ``turn_key`` and ``logical_turn_key`` coincide.
+    """
+    try:
+        record = json.loads(row.get("record_json") or "{}")
+    except (TypeError, ValueError):
+        record = {}
+    turn_output = record.get("turn_output") or {}
+    return {
+        "turn_key": row["turn_key"],
+        "logical_turn_key": row["turn_key"],
+        "exec_state": ExecState.DONE.value,
+        "status": row.get("status"),
+        "failure_reason": row.get("failure_reason"),
+        "success": bool(row.get("success")),
+        "answer": row.get("answer") or "",
+        "command_outputs": turn_output.get("command_outputs") or [],
+        "record": record,
+    }
+
+
+def _span_bodies(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Span rows for the wire: attributes parsed from their stored JSON text."""
+    spans = []
+    for row in rows:
+        span = dict(row)
+        try:
+            span["attributes"] = json.loads(span.get("attributes") or "{}")
+        except (TypeError, ValueError):
+            pass  # serve the raw text rather than dropping the span
+        spans.append(span)
+    return spans
+
+
+@app.get(
+    "/turns/{turn_key}",
+    operation_id="get_turn",
+    response_model=None,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": (
+                "Execution state read successfully. In-flight: {turn_key, "
+                "exec_state:'running', logical_turn_key?}. Completed and still "
+                "in the registry: the TurnOutput projection (as the POST turn "
+                "endpoints render it). Completed and served from the "
+                "observability store: the projection plus the stored `record` "
+                "(the full turn record). The turn's outcome lives in "
+                "status/failure_reason/success — a failed turn is still a 200."
+            )
+        },
+        401: {"description": "Invalid or expired JWT token"},
+        404: {
+            "description": (
+                "Unknown turn key — or a turn belonging to another channel "
+                "(indistinguishable by design)"
+            )
+        },
+    },
+)
+async def get_turn(
+    turn_key: str,
+    session: SessionData = Depends(get_session_from_jwt),
+) -> JSONResponse:
+    """
+    Read a turn's execution state / result by key (fix-85g.9, ruling [R9]).
+
+    Consults the in-memory TurnRegistry FIRST (a still-running or retained
+    recently-completed execution), then falls back to the observability store.
+    Accepts either the EXECUTION key from a deferred 202 or the LOGICAL turn
+    key; the store fallback resolves logical keys only (the 202/200 bodies
+    carry `logical_turn_key` so a deferred caller learns it before the
+    registry record retires).
+
+    Authorization: the JWT channel must own the turn ([A39]); anything else is
+    a 404 identical to an unknown key.
+    """
+    channel_id = session.channel_id
+
+    if (execn := turn_registry.get_by_key_or_logical(turn_key)) is not None:
+        if execn.channel_id != channel_id:
+            raise _turn_not_found(turn_key)
+        runtime = await session_manager.get_session(channel_id)
+        resolve_logical_turn_key(execn, runtime, turn_registry)
+        _, body = render_turn_response(execn)
+        # GET transport semantics (85g §5.2): 200 means "execution state read
+        # successfully", even mid-run — deferral/completion is `exec_state`,
+        # the turn's outcome is `status`, and neither maps to an HTTP error.
+        return JSONResponse(content=body, status_code=status.HTTP_200_OK)
+
+    store = _observability_store()
+    row = await _store_read(store.get_turn, turn_key) if store is not None else None
+    if row is None or row.get("channel_id") != channel_id:
+        raise _turn_not_found(turn_key)
+    return JSONResponse(content=_stored_turn_body(row))
+
+
+async def _store_read(fn, *args):
+    """One observability-store read, off the event loop.
+
+    Store connections carry a 30s busy timeout; a pathologically locked DB
+    must stall only this request's worker thread, never every channel's event
+    loop. WAL readers normally return immediately, so the executor hop is the
+    only cost.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, fn, *args)
+
+
+@app.get(
+    "/turns/{turn_key}/trace",
+    operation_id="get_turn_trace",
+    response_model=None,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": (
+                "The turn's spans from the observability store, oldest first: "
+                "{turn_key, logical_turn_key, spans}. Non-destructive and "
+                "repeatable — the spans table is the replay buffer "
+                "(fix-85g.10); the live streaming drain is unrelated."
+            )
+        },
+        401: {"description": "Invalid or expired JWT token"},
+        404: {
+            "description": (
+                "Unknown turn key — or a turn belonging to another channel "
+                "(indistinguishable by design)"
+            )
+        },
+    },
+)
+async def get_turn_trace(
+    turn_key: str,
+    session: SessionData = Depends(get_session_from_jwt),
+) -> JSONResponse:
+    """
+    Non-destructive trace replay for one turn (fix-85g.10).
+
+    Returns the turn's spans from the observability store (`spans.trace_id` ==
+    the logical turn key), resolving an execution key through the registry
+    first. Reading is repeatable: the destructive live trace-queue drain used
+    for streaming is untouched by this endpoint. Same channel authorization as
+    GET /turns/{turn_key} ([A39]).
+    """
+    channel_id = session.channel_id
+    store = _observability_store()
+
+    if (execn := turn_registry.get_by_key_or_logical(turn_key)) is not None:
+        if execn.channel_id != channel_id:
+            raise _turn_not_found(turn_key)
+        runtime = await session_manager.get_session(channel_id)
+        trace_id = resolve_logical_turn_key(execn, runtime, turn_registry)
+        # Authorized via the registry record. No logical key yet means the
+        # work has not begun — nothing can be in the replay buffer for it.
+        spans = (
+            _span_bodies(await _store_read(store.get_spans, trace_id))
+            if store is not None and trace_id is not None
+            else []
+        )
+        return JSONResponse(
+            content={
+                "turn_key": turn_key,
+                "logical_turn_key": trace_id,
+                "spans": spans,
+            }
+        )
+
+    if store is None:
+        raise _turn_not_found(turn_key)
+    row = await _store_read(store.get_turn, turn_key)
+    if row is not None:
+        if row.get("channel_id") != channel_id:
+            raise _turn_not_found(turn_key)
+    else:
+        # No turn row (e.g. a turn suspended before its record landed, read
+        # after a restart): authorize from the spans themselves — every span
+        # must carry this caller's channel. NULL-channel spans are never
+        # served through this endpoint (no bare-handle reads [A39]).
+        spans_rows = await _store_read(store.get_spans, turn_key)
+        if not spans_rows or any(
+            span.get("channel_id") != channel_id for span in spans_rows
+        ):
+            raise _turn_not_found(turn_key)
+        return JSONResponse(
+            content={
+                "turn_key": turn_key,
+                "logical_turn_key": turn_key,
+                "spans": _span_bodies(spans_rows),
+            }
+        )
+    return JSONResponse(
+        content={
+            "turn_key": turn_key,
+            "logical_turn_key": turn_key,
+            "spans": _span_bodies(await _store_read(store.get_spans, turn_key)),
+        }
+    )
+
+
 @app.post(
     "/initialize",
     operation_id="rest_initialize",
@@ -988,6 +1264,11 @@ async def initialize(
                 ):
                     execn = turn_registry.get(startup_turn_key)
                     if execn is not None:
+                        # [R9] best-effort refresh of the logical key before
+                        # rendering (a running startup may have minted it).
+                        resolve_logical_turn_key(
+                            execn, existing_runtime, turn_registry
+                        )
                         code, resp = _initialize_response_from_execution(
                             channel_id, user_id, execn
                         )
@@ -1007,13 +1288,22 @@ async def initialize(
                 startup_action_dict = json.load(file)
             startup_action = fastworkflow.Action(**startup_action_dict)
 
+        # Per-session workflow context [R24]: the request field overrides the
+        # server-level --context CLI arg for this session; absent means the
+        # current (server-level) behavior. Applied at creation only.
+        launch_context = (
+            request.context
+            if request.context is not None
+            else (json.loads(ARGS.context) if ARGS.context else None)
+        )
+
         # Create the session (startup is NOT run during creation; it is the
         # first turn, submitted below under the registry).
         await ensure_user_runtime_exists(
             channel_id=channel_id,
             session_manager=session_manager,
             workflow_path=ARGS.workflow_path,
-            context=json.loads(ARGS.context) if ARGS.context else None,
+            context=launch_context,
             startup_command=None,
             startup_action=None,
             run_startup=False,
@@ -1676,7 +1966,8 @@ async def new_conversation(
                         logger.info(f"Created conversation {conv_id} for session {channel_id}")
 
                     # Reserve next conversation ID for the next conversation
-                    next_id = runtime.conversation_store.reserve_next_conversation_id()
+                    # (one minting chokepoint [R1]; binds the id onto the WEC)
+                    next_id = reserve_conversation_id(runtime)
                     runtime.active_conversation_id = next_id
                     runtime.execution_context.clear_conversation_history()
                     runtime.durable_turn_count = 0
@@ -2031,7 +2322,9 @@ def main():
     host = ARGS.host if hasattr(ARGS, 'host') else "0.0.0.0"
     port = ARGS.port if hasattr(ARGS, 'port') else 8000
 
-    server_memory.install_policy()
+    server_memory.install_policy(
+        keep_history=getattr(ARGS, "keep_dspy_history", False)
+    )
     
     # Read LOG_LEVEL from env file to configure uvicorn's logger
     # (env file isn't loaded until lifespan, but uvicorn needs log_level at startup)

@@ -244,6 +244,7 @@ class TurnResult(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     turn_output: "TurnOutput"
+    channel_id: Optional[str] = None
     conversation_id: Optional[int] = None
     ordinal: Optional[int] = None
     user_message: str

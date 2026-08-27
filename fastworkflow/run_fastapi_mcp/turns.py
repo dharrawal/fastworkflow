@@ -89,11 +89,13 @@ class ExecState(str, enum.Enum):
 _TERMINAL_STATES = (ExecState.DONE, ExecState.LOST)
 
 
-# Kinds worth keeping after they finish. Only ``/initialize`` looks an execution
-# up by turn_key afterwards, and only while the runtime is still live (a client
-# re-polling its own startup turn) — every other endpoint consults the registry
-# only while its execution is active. There is no GET /turns/{turn_key}, so a
-# retained record is NOT recoverable once its runtime is gone.
+# Kinds worth keeping after they finish. ``/initialize`` re-polls its startup
+# turn by key while the runtime is live, so startup records are retained.
+# Every other kind is dropped the moment it finishes: ``GET /turns/{turn_key}``
+# serves those completed turns from the observability store instead (by the
+# LOGICAL turn key — the 202 body carries it once known [R9]), so retaining the
+# request-sized payload in memory would duplicate the durable record for no
+# reader. The memory bound below is unchanged by the GET surface.
 COLLECTABLE_TERMINAL_KINDS = frozenset({"initialize_startup"})
 
 # Retained terminal executions are request-sized: 20 records is ~17 MB at a
@@ -174,6 +176,19 @@ class TurnExecution:
     # would otherwise interleave: B writes its token, B is rejected with 409,
     # and A — still running — reads B's credential.
     http_bearer_token: Optional[str] = None
+    # [R9] execution↔logical key identity. ``turn_key`` above is the EXECUTION
+    # key (the registry's polling handle). ``logical_turn_key`` is the
+    # workflow's own logical-turn key (``TurnOutput.turn_key`` — the
+    # observability store's ``turns``/``spans`` key), recorded here once known
+    # so deferred 202 bodies can carry it and GET /turns can resolve either.
+    logical_turn_key: Optional[str] = None
+    # ``ctx.current_turn_key`` snapshotted under ``runtime.lock`` before the
+    # work began. ONCE THE SNAPSHOT EXISTS (exec_state RUNNING), a *different*
+    # value observed later can only be the key ``_begin_turn`` minted for THIS
+    # execution (single-flight guarantees no other turn runs on the channel).
+    # While still QUEUED there is no snapshot and ``current_turn_key`` may hold
+    # the previous turn's key — resolve_logical_turn_key guards on that.
+    pre_turn_key: Optional[str] = None
     task: Optional[asyncio.Task] = None
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
     created_at: datetime = field(default_factory=_now)
@@ -269,6 +284,29 @@ class TurnRegistry:
 
     def get(self, turn_key: str) -> Optional[TurnExecution]:
         return self._by_key.get(turn_key)
+
+    def get_by_key_or_logical(self, key: str) -> Optional[TurnExecution]:
+        """Resolve *key* as an execution key OR a logical turn key [R9].
+
+        ``GET /turns/{turn_key}`` accepts both: the execution key a deferred
+        202 handed out, and the workflow's logical key (``TurnOutput.turn_key``)
+        that the observability store is keyed by. The registry is bounded (one
+        live execution per busy channel plus the retained startup records), so
+        the logical-key fallback is a plain scan — no second index to keep
+        consistent with eviction. No await, so reading is atomic in a single
+        event loop, like ``has_active``.
+        """
+        execn = self._by_key.get(key)
+        if execn is not None:
+            return execn
+        return next(
+            (
+                execn
+                for execn in self._by_key.values()
+                if execn.logical_turn_key == key
+            ),
+            None,
+        )
 
     async def start_or_get_active(
         self,
@@ -559,9 +597,21 @@ async def _run_turn(
             execn.exec_state = ExecState.RUNNING
             execn.started_at = _now()
 
+            # [R9] record the execution↔logical mapping as early as knowable,
+            # under the lock, before the worker thread exists (no race). A
+            # resume continues the SAME logical turn (A30.2), so its key is
+            # already current; a fresh turn's key is minted inside work_fn and
+            # is picked up by resolve_logical_turn_key / the result below.
+            ctx = runtime.execution_context
+            execn.pre_turn_key = ctx.current_turn_key
+            if ctx.awaiting_user:
+                execn.logical_turn_key = ctx.current_turn_key
+
             with installed_credential(runtime, execn.http_bearer_token):
                 result = await loop.run_in_executor(None, work_fn)
             execn.result = result
+            if result is not None:
+                execn.logical_turn_key = result.turn_key
 
             # Destructive trace drain (Step 1). Step 2 replaces this with a
             # non-destructive per-execution replay buffer.
@@ -642,8 +692,16 @@ async def run_owned_turn(
             execn.exec_state = ExecState.RUNNING
             execn.started_at = _now()
 
+            # [R9] same execution↔logical capture as _run_turn (see there).
+            ctx = runtime.execution_context
+            execn.pre_turn_key = ctx.current_turn_key
+            if ctx.awaiting_user:
+                execn.logical_turn_key = ctx.current_turn_key
+
             with installed_credential(runtime, execn.http_bearer_token):
                 execn.result = await work()
+            if execn.result is not None:
+                execn.logical_turn_key = execn.result.turn_key
 
             turns_appended = save_conversation_incremental(
                 runtime, extract_turns_from_history, logger
@@ -725,6 +783,49 @@ def _commit_startup_outcome(
         )
 
 
+def resolve_logical_turn_key(
+    execn: TurnExecution,
+    runtime: Optional["ChannelRuntime"],
+    registry: TurnRegistry,
+) -> Optional[str]:
+    """Best-effort capture of the execution's logical turn key [R9].
+
+    Order of authority:
+      1. already recorded on the execution (resume capture, or a finished run);
+      2. the result's ``TurnOutput.turn_key`` (a completed/suspended turn);
+      3. for an execution that is still THE active one for its channel, the
+         runtime's ``current_turn_key`` — but only when it differs from the
+         snapshot taken before the work began, i.e. only once ``_begin_turn``
+         has minted this turn's key. Reading the attribute cross-thread is a
+         GIL-atomic str read; the pre-work snapshot was taken under
+         ``runtime.lock``, so a differing value cannot be a stale key.
+
+    Never guesses: returns None while the logical key is genuinely unknowable
+    (queued work that has not begun, or an errored run with no result).
+    """
+    if execn.logical_turn_key:
+        return execn.logical_turn_key
+    result = execn.result
+    if result is not None:
+        execn.logical_turn_key = result.turn_key
+        return execn.logical_turn_key
+    if execn.is_terminal or runtime is None:
+        return None
+    if registry.active_turn_key(execn.channel_id) != execn.turn_key:
+        return None
+    if execn.exec_state is not ExecState.RUNNING:
+        # Queued: the pre-work snapshot has not been taken yet (it happens in
+        # the same no-await block that sets RUNNING), so pre_turn_key is still
+        # its unset default while current_turn_key may still hold the PREVIOUS
+        # turn's key — the WEC never clears it between turns. Comparing now
+        # would stamp that stale key onto this execution. Wait for the run.
+        return None
+    current = runtime.execution_context.current_turn_key
+    if current and current != execn.pre_turn_key:
+        execn.logical_turn_key = current
+    return execn.logical_turn_key
+
+
 async def submit_turn(
     runtime: "ChannelRuntime",
     registry: TurnRegistry,
@@ -766,6 +867,9 @@ async def submit_turn(
         await asyncio.wait_for(
             asyncio.shield(execn.done_event.wait()), wait_seconds
         )
+    # [R9] a deferred 202 should hand the caller the logical key alongside the
+    # execution key whenever it is already knowable (best-effort; see helper).
+    resolve_logical_turn_key(execn, runtime, registry)
     return execn
 
 
@@ -782,34 +886,48 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
                                         failure_reason, success, answer,
                                         command_outputs, traces?}.
 
-    Everything but ``turn_key``, ``exec_state``, and ``traces`` is the public
-    ``TurnOutput`` projection. ``exec_state`` is transport (where the *work*
-    is), ``status``/``failure_reason``/``success`` are the turn outcome; a
-    failed turn is still a 200. ``turn_key`` here is the EXECUTION's key — the
-    handle a deferred 202 is polled with — not ``TurnOutput.turn_key``, which
-    is the workflow's own logical-turn key.
+    Everything but ``turn_key``, ``exec_state``, ``logical_turn_key``, and
+    ``traces`` is the public ``TurnOutput`` projection. ``exec_state`` is
+    transport (where the *work* is), ``status``/``failure_reason``/``success``
+    are the turn outcome; a failed turn is still a 200. ``turn_key`` here is
+    the EXECUTION's key — the handle a deferred 202 is polled with — not
+    ``TurnOutput.turn_key``, which is the workflow's own logical-turn key.
+    [R9]: ``logical_turn_key`` carries that logical key alongside the
+    execution key once it is known (always, once a result exists; on a 202
+    only after the work has begun), so a deferred caller can later fetch the
+    completed turn — and its trace — from the observability store, which is
+    keyed by the logical key only.
 
     As of v3.0 the legacy top-level ``command_responses`` list is no longer
     emitted; clients should read ``answer`` and
     ``command_outputs[*].command_response``.
     """
     if not execn.is_terminal:
-        return 202, {
+        body = {
             "turn_key": execn.turn_key,
             "exec_state": ExecState.RUNNING.value,
         }
+        if execn.logical_turn_key:
+            body["logical_turn_key"] = execn.logical_turn_key
+        return 202, body
 
     if execn.error is not None:
-        return 200, {
+        body = {
             "turn_key": execn.turn_key,
             "exec_state": execn.exec_state.value,
             "error": execn.error,
         }
+        if execn.logical_turn_key:
+            body["logical_turn_key"] = execn.logical_turn_key
+        return 200, body
 
     result = execn.result
     body: dict[str, Any] = {
         "turn_key": execn.turn_key,
         "exec_state": execn.exec_state.value,
+        "logical_turn_key": (
+            result.turn_key if result else execn.logical_turn_key
+        ),
         "status": result.status.value if result else None,
         "failure_reason": result.failure_reason if result else None,
         "success": result.success if result else False,

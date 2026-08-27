@@ -377,3 +377,33 @@ def test_the_other_topic_writer_inherits_the_blank_exemption(tmp_path: Path):
     conv_id = store.save_conversation("", "s", turns)
 
     assert _topic(store, conv_id) == ""
+
+
+# ---------------------------------------------------------------------------
+# Ruling I9 (fix-kw7.8): the write reports the topic it actually stored, so
+# the Phase-A observability mirror can propagate the SUFFIXED topic instead of
+# the raw candidate (which made the two stores diverge on any collision).
+# ---------------------------------------------------------------------------
+
+def test_update_returns_the_stored_suffixed_topic(tmp_path: Path):
+    store = ConversationStore("mirror", str(tmp_path))
+    first = _conversation_with_a_turn(store, "order one")
+    second = _conversation_with_a_turn(store, "order two")
+
+    assert (
+        store.update_conversation_topic_summary(first, "Order Status", "s1")
+        == "Order Status"
+    )
+    stored = store.update_conversation_topic_summary(second, "Order Status", "s2")
+    assert stored == "Order Status 1"
+    assert _topic(store, second) == "Order Status 1"
+
+
+def test_update_returns_the_preserved_topic_on_a_blank_generation(tmp_path: Path):
+    store = ConversationStore("mirror-blank", str(tmp_path))
+    conv_id = _conversation_with_a_turn(store, "order one")
+    store.update_conversation_topic_summary(conv_id, "Good Title", "s1")
+
+    # A failed (blank) generation keeps the stored title — and reports it, so
+    # the mirror re-asserts the real title rather than clearing it.
+    assert store.update_conversation_topic_summary(conv_id, "   ", "s2") == "Good Title"

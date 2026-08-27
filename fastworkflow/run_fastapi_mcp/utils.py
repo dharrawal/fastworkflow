@@ -120,6 +120,11 @@ class InitializationRequest(BaseModel):
     stream_format: Optional[str] = None  # "ndjson" | "sse" (default ndjson)
     startup_command: Optional[str] = None  # Mutually exclusive with startup_action
     startup_action: Optional[dict[str, Any]] = None  # Mutually exclusive with startup_command
+    # Per-session workflow context [R24]: overrides the server-level --context
+    # CLI arg for THIS session only. Additive — absent means current behavior
+    # (the server-level context, or none). Applied at session creation, so it
+    # only takes effect on the /initialize call that creates the session.
+    context: Optional[dict[str, Any]] = None
     # How long the request blocks for the startup turn before deferring (202).
     # Same shape/default as InvokeRequest/PerformActionRequest.timeout_seconds.
     timeout_seconds: int = 60
@@ -155,6 +160,9 @@ class InitializeResponse(BaseModel):
     startup_turn_key: Optional[str] = None  # Handle to poll the startup turn
     startup_exec_state: Optional[str] = None  # queued | running | done | lost
     startup_error: Optional[str] = None  # Present if the startup turn failed
+    # [R9] the startup turn's LOGICAL key (TurnOutput.turn_key), once known —
+    # the key GET /turns and the observability store are ultimately keyed by.
+    startup_logical_turn_key: Optional[str] = None
 
 
 class SessionData(BaseModel):
@@ -505,6 +513,22 @@ async def _create_user_runtime(
     conversation_store = ConversationStore(channel_id, conv_base_folder)
 
     ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    # Identity plumbing [R1]: the embedder binds channel identity before any
+    # turn so spans/turn records are attributable (conversation ids are minted
+    # by the observability store from Phase 2).
+    ctx.bind_observability_identity(
+        channel_id=channel_id,
+        # FastAPI mints conversation ids through reserve_conversation_id
+        # (legacy floor + floor-sync, ruling C2); WEC self-minting must stay
+        # off so a degraded eager mint cannot floor-lessly double-mint.
+        embedder_owns_conversations=True,
+    )
+    # Observability sink [R4]: run_fastapi_mcp is a fastworkflow entry point,
+    # so the SQLite sink defaults ON (FW_OBSERVABILITY=0 disables). One sink
+    # (one writer thread) per workflow DB, shared across channels.
+    from fastworkflow.observability_store import get_observability_sink
+    if (trace_sink := get_observability_sink(workflow_path)) is not None:
+        ctx.set_trace_sink(trace_sink)
     trace_queue: Queue = Queue()
     ctx.set_transport_queues(command_trace_queue=trace_queue)
 
@@ -586,17 +610,32 @@ async def _create_user_runtime(
         len(ctx.conversation_history.messages) if conv_id_to_restore else 0
     )
 
+    active_conversation_id = (
+        restored.runtime_fields.get("active_conversation_id")
+        if restored.applied
+        else conv_id_to_restore
+    )
+    # [R1] conversation-id reservation moves ahead of the turn: a fresh session
+    # mints its first conversation id from the observability store NOW, so the
+    # very first turn's records are conversation-attributed. The legacy store
+    # consumes the same id (dual-write floor sync). Restored sessions keep
+    # their restored id.
+    if not active_conversation_id and trace_sink is not None:
+        active_conversation_id = _mint_conversation_id_via_observability(
+            trace_sink, conversation_store, channel_id
+        )
+    if active_conversation_id:
+        ctx.bind_observability_identity(
+            conversation_id=int(active_conversation_id)
+        )
+
     # A restored record is authoritative for the fields the framework knows how
     # to restore; the request's stream_format only applies to a fresh session.
     await session_manager.create_session(
         channel_id=channel_id,
         execution_context=ctx,
         conversation_store=conversation_store,
-        active_conversation_id=(
-            restored.runtime_fields.get("active_conversation_id")
-            if restored.applied
-            else conv_id_to_restore
-        ),
+        active_conversation_id=active_conversation_id,
         stream_format=(
             restored.runtime_fields.get("stream_format") or stream_format
             if restored.applied
@@ -1388,7 +1427,7 @@ def save_conversation_incremental(runtime: ChannelRuntime, extract_turns_func, l
         if runtime.active_conversation_id == 0:
             # This is the first conversation for this session
             # Reserve ID 1 and use it
-            runtime.active_conversation_id = runtime.conversation_store.reserve_next_conversation_id()
+            runtime.active_conversation_id = reserve_conversation_id(runtime)
             logger.debug(f"Initialized first conversation with ID {runtime.active_conversation_id} for user {runtime.channel_id}")
 
         runtime.conversation_store.append_conversation_turns(
@@ -1399,6 +1438,64 @@ def save_conversation_incremental(runtime: ChannelRuntime, extract_turns_func, l
 
     trim_conversation_window(runtime, logger)
     return len(new_turns)
+
+
+def _mint_conversation_id_via_observability(
+    sink, conversation_store: ConversationStore, channel_id: str
+) -> Optional[int]:
+    """Mint from the observability DB with the legacy floor, never raising.
+
+    The legacy store's last id is passed as ``legacy_floor`` so a fresh or
+    behind observability DB can never re-issue an id that already names one of
+    the channel's pre-existing legacy conversations (ruling C2 — without the
+    floor, a new mint of id 1 would append new turns into the user's OLDEST
+    legacy conversation). The legacy counter is then floor-synced to the mint.
+
+    Returns None on any failure: minting is an observability concern, and a
+    wedged/corrupt observability DB must degrade to the legacy lazy-reserve
+    path rather than fail /initialize or a turn (same posture as
+    ``get_observability_sink``). The eventual legacy-minted id is safe against
+    later aliasing because every observability mint carries the floor.
+    """
+    try:
+        conv_id = sink.store.mint_conversation_id(
+            channel_id,
+            legacy_floor=conversation_store.get_last_conversation_id() or 0,
+        )
+        conversation_store.sync_conversation_id_floor(conv_id)
+        return conv_id
+    except Exception as exc:
+        logger.warning(
+            f"Observability conversation-id mint failed for channel_id "
+            f"{channel_id} ({type(exc).__name__}: {exc}); falling back to the "
+            "legacy reserve path"
+        )
+        return None
+
+
+def reserve_conversation_id(runtime: "ChannelRuntime") -> int:
+    """Mint the next conversation id for a channel — one chokepoint [R1].
+
+    With the observability sink active, the observability DB is the sole
+    minting authority and the legacy per-channel store consumes the same id
+    (floor sync), so the two stores cannot diverge on identity during the
+    Phase-A dual-write. Without a sink — or when the observability mint
+    fails — the legacy counter still mints. The freshly minted id is bound
+    onto the WEC so subsequent turn records and spans carry it.
+    """
+    from fastworkflow.observability_store import SQLiteTraceSink
+
+    ctx = runtime.execution_context
+    sink = getattr(ctx, "trace_sink", None)
+    conv_id = None
+    if isinstance(sink, SQLiteTraceSink):
+        conv_id = _mint_conversation_id_via_observability(
+            sink, runtime.conversation_store, runtime.channel_id
+        )
+    if conv_id is None:
+        conv_id = runtime.conversation_store.reserve_next_conversation_id()
+    ctx.bind_observability_identity(conversation_id=conv_id)
+    return conv_id
 
 
 def trim_conversation_window(runtime: ChannelRuntime, logger) -> int:
@@ -1610,7 +1707,23 @@ async def ensure_topic_and_summary(
         topic, summary = await loop.run_in_executor(None, generate, turns)
 
         if conv_id:
-            store.update_conversation_topic_summary(conv_id, topic, summary)
+            stored_topic = store.update_conversation_topic_summary(conv_id, topic, summary)
+            # [R15]: mirror the label into the observability DB from Phase A.
+            # The mirror carries the topic actually STORED — collision-suffixed
+            # by the legacy store — never the raw candidate, so the two stores
+            # cannot diverge on the suffix (ruling I9). A blank stored topic
+            # passes as None so it never clobbers a stored title (same policy
+            # as update_conversation_topic_summary).
+            from fastworkflow.observability_store import SQLiteTraceSink
+
+            sink = getattr(runtime.execution_context, "trace_sink", None)
+            if isinstance(sink, SQLiteTraceSink):
+                sink.record_conversation_label(
+                    runtime.channel_id,
+                    conv_id,
+                    stored_topic if stored_topic and stored_topic.strip() else None,
+                    summary,
+                )
         return topic, summary
 
 

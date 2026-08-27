@@ -70,6 +70,7 @@ from fastworkflow.run_fastapi_mcp.utils import (
     ChannelRuntime,
     ChannelSessionManager,
     _label_milestones_reached,
+    reserve_conversation_id,
 )
 
 
@@ -1061,9 +1062,11 @@ def test_a_rotate_persists_unsaved_turns_before_it_labels_them(
 
             # Reproduce the state directly: an id reserved with no record written
             # (what a rotate leaves), plus a turn that never reached the store.
-            runtime.active_conversation_id = (
-                runtime.conversation_store.reserve_next_conversation_id()
-            )
+            # Reserve through the production chokepoint — since Phase 7 the
+            # observability store is the sole minting authority, so reserving off
+            # the legacy store instead would desynchronize the two counters and
+            # reproduce a state no production path can reach.
+            runtime.active_conversation_id = reserve_conversation_id(runtime)
             runtime.durable_turn_count = 0
             runtime.execution_context.append_conversation_turn(
                 "a turn whose persist never landed"

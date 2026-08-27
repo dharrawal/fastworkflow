@@ -32,13 +32,29 @@ import dspy
 
 import fastworkflow
 import fastworkflow.turn
-from fastworkflow import active_workflow
+from fastworkflow import active_workflow, metrics, tracing
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils import dspy_utils
-from fastworkflow.utils.react import NoSuspendedAgentStateError
+from fastworkflow.utils import dspy_logger, dspy_utils
+from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
+
+
+def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
+    """Close-out attributes for fw.agent.execute — what the executor returned.
+
+    Read defensively: a suspended run returns a Prediction with no
+    ``final_answer``, and distillation passes their own result shapes through
+    the same choke point.
+    """
+    return {
+        "attempts": attempts,
+        "final_answer": getattr(result, "final_answer", None),
+        "suspended": bool(getattr(result, "suspended", False)),
+        "clarification": getattr(result, "clarification", None),
+        "exhausted": bool(getattr(result, "exhausted", False)),
+    }
 
 
 class CommandCancelledError(BaseException):
@@ -92,19 +108,28 @@ class WorkflowExecutionContext:
         session_key: Optional[str] = None,
         mirror_action_log_to_file: bool = False,
         generate_insights: bool = False,
+        trace_sink: Optional[tracing.TraceSink] = None,
     ):
         """
         Args:
             session_key: Stable id (e.g. channel_id) for cme/app workflow persistence.
                          When omitted, cme uses an ephemeral uuid (CLI one-off sessions).
-            mirror_action_log_to_file: If True, also append to cwd action.jsonl (debug).
+            mirror_action_log_to_file: DEPRECATED no-op (Phase 7 [R25]). The cwd
+                         action.jsonl debug mirror was retired; use the in-process
+                         ``action_log`` property (live) or the observability DB
+                         (post-mortem) instead. Kept one release for external
+                         callers, then removed.
             generate_insights: If True, enable teacher/student distillation on each
                          agent turn (Topology A / CLI only).
+            trace_sink: Observability sink for boundary spans and turn records
+                         (observability design §3.1). Defaults to a no-op sink;
+                         reached via this context, never the transport queues [R28].
         """
         self._session_key = session_key
         self._run_as_agent = run_as_agent
         self._app_workflow: Optional[fastworkflow.Workflow] = None
         self._keep_alive = False
+        # Deprecated no-op, retained one release for ctor compatibility [R25].
         self._mirror_action_log_to_file = mirror_action_log_to_file
 
         self._user_message_queue: Optional[Queue] = None
@@ -130,6 +155,16 @@ class WorkflowExecutionContext:
         self._distillation_insights_count = 0
         self._planning_insights: Optional[str] = None
         self._execution_insights: Optional[str] = None
+
+        # Observability (design §3.1): sink + identity + span bookkeeping.
+        # The sink is a per-context attribute, not transport state [R28].
+        self._trace_sink: tracing.TraceSink = trace_sink or tracing.NoOpTraceSink()
+        self._metrics_sink: metrics.MetricsSink = metrics.NoOpMetricsSink()
+        self._channel_id: Optional[str] = None
+        self._conversation_id: Optional[int] = None
+        self._embedder_owns_conversations: bool = False
+        self._trace_span_stack: list[tracing.Span] = []
+        self._turn_root_span: Optional[tracing.Span] = None
 
         # Turn accumulator state (one logical turn = one key, across suspensions)
         self._turn_outputs: list = []
@@ -162,16 +197,115 @@ class WorkflowExecutionContext:
     def session_key(self) -> Optional[str]:
         return self._session_key
 
+    # ------------------------------------------------------------------
+    # Observability: sink wiring + identity plumbing (design §3.1 [R1][R28])
+    # ------------------------------------------------------------------
+
+    @property
+    def trace_sink(self) -> tracing.TraceSink:
+        return self._trace_sink
+
+    def set_trace_sink(self, sink: Optional[tracing.TraceSink]) -> None:
+        """Wire an observability sink (None restores the no-op default)."""
+        self._trace_sink = sink or tracing.NoOpTraceSink()
+
+    @property
+    def metrics_sink(self) -> metrics.MetricsSink:
+        return self._metrics_sink
+
+    def set_metrics_sink(self, sink: Optional[metrics.MetricsSink]) -> None:
+        """Wire a metrics sink (None restores the no-op default)."""
+        self._metrics_sink = sink or metrics.NoOpMetricsSink()
+
+    def bind_observability_identity(
+        self,
+        channel_id: Optional[str] = None,
+        conversation_id: Optional[int] = None,
+        embedder_owns_conversations: Optional[bool] = None,
+    ) -> None:
+        """Bind channel/conversation identity BEFORE the turn [R1].
+
+        The embedder owns identity: FastAPI binds its channel_id, the CLI a
+        synthetic ``cli:<session-start>`` channel [R17]. Stamped onto every
+        span and TurnResult this context produces. A None argument leaves
+        the corresponding binding unchanged (conversation ids rotate without
+        re-binding the channel).
+
+        ``embedder_owns_conversations=True`` (additive) disables the WEC's
+        own conversation self-minting for this context. FastAPI passes it:
+        its minting chokepoint carries the legacy-store floor and syncs it
+        back (ruling C2), so a WEC self-mint on its degraded path would mint
+        a floor-less id that can alias a legacy conversation and split the
+        session across two ids once the chokepoint's own mint succeeds.
+        """
+        if channel_id is not None:
+            self._channel_id = channel_id
+        if conversation_id is not None:
+            self._conversation_id = conversation_id
+        if embedder_owns_conversations is not None:
+            self._embedder_owns_conversations = embedder_owns_conversations
+
+    def _ensure_observability_conversation(self) -> None:
+        """Mint a conversation id when no embedder bound one.
+
+        FastAPI and the CLI both bind one before the first turn. Code that
+        embeds this context directly has no such layer, so its turns would be
+        filed outside any conversation and grouped nowhere. Minting here keeps
+        identity ownership with the embedder wherever one exists — a bound id
+        is never replaced — while giving bare embedders the same grouping.
+
+        Never fails a turn: an unmintable id (wedged or corrupt DB) leaves the
+        turn conversation-less, exactly as before.
+
+        Scope guard (ruling C2): an embedder that declared
+        ``embedder_owns_conversations`` (FastAPI) mints through its own
+        chokepoint, which carries the legacy-store floor and syncs it back;
+        self-minting on its degraded path would mint a floor-less id that can
+        alias a pre-existing legacy conversation and split the session across
+        two ids once the chokepoint's own mint succeeds. For such embedders a
+        failed mint leaves the turn conversation-less by design.
+        """
+        if self._conversation_id is not None or getattr(
+            self, "_embedder_owns_conversations", False
+        ):
+            return
+        store = getattr(tracing.get_sink(self), "store", None)
+        if store is None:
+            return
+        try:
+            # Mint against the channel the sink files this turn's row under.
+            self._conversation_id = store.mint_conversation_id(self._channel_id or "")
+        except Exception as exc:
+            logger.warning(
+                f"Could not mint a conversation id ({type(exc).__name__}: {exc}); "
+                "this turn is recorded without a conversation"
+            )
+
+    @property
+    def observability_channel_id(self) -> Optional[str]:
+        return self._channel_id
+
+    @property
+    def observability_conversation_id(self) -> Optional[int]:
+        return self._conversation_id
+
+    @property
+    def current_turn_key(self) -> Optional[str]:
+        """The open logical turn's key, or None between turns."""
+        return self._turn_key
+
+    @property
+    def trace_span_stack(self) -> list[tracing.Span]:
+        """Open-span stack for parenting nested spans (single-turn: I5)."""
+        return self._trace_span_stack
+
     def clear_action_log(self) -> None:
         """Clear in-memory action log for a new agent turn."""
         self._action_log.clear()
 
     def append_action_log(self, record: dict[str, Any]) -> None:
-        """Append one agent/workflow interaction record (replaces action.jsonl)."""
+        """Append one agent/workflow interaction record (in-memory only)."""
         self._action_log.append(record)
-        if self._mirror_action_log_to_file:
-            with open("action.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     @property
     def action_log(self) -> list[dict[str, Any]]:
@@ -187,6 +321,7 @@ class WorkflowExecutionContext:
         Never called while awaiting_user — a message during suspension is the
         resume answer and continues the same logical turn [A30.2].
         """
+        self._ensure_observability_conversation()
         self._turn_outputs = []
         self._turn_key = mint_turn_key()
         self._turn_started_at = datetime.now(timezone.utc)
@@ -207,6 +342,37 @@ class WorkflowExecutionContext:
                     self._app_workflow.current_command_context_name or ""
                 )
 
+        # Context-mutation baseline (D3 as amended): a shallow snapshot of the
+        # app workflow's context, diffed at finalize so the root span records
+        # what the turn's commands STORED into context — the "storing
+        # information in context" feature is otherwise invisible in logs.
+        # Sink-gated (zero cost with observability off); not serialized, so a
+        # cross-process resume finalizes without a mutation record.
+        self._turn_context_snapshot = None
+        with contextlib.suppress(Exception):
+            if self._app_workflow is not None and tracing.get_sink(self) is not None:
+                self._turn_context_snapshot = dict(self._app_workflow.context)
+
+        # Open the fw.turn root span (deterministic id [R6]; emitted at open so
+        # a suspended turn is visible before — and closable after — a process
+        # boundary). Off the stack: children parent to it via the deterministic
+        # root id, which survives suspension where the stack does not.
+        self._trace_span_stack.clear()
+        self._turn_root_span = tracing.start_span(
+            self,
+            tracing.SPAN_TURN,
+            span_id=tracing.root_span_id(self._turn_key),
+            attributes={
+                "turn_key": self._turn_key,
+                "channel_id": self._channel_id,
+                "conversation_id": self._conversation_id,
+                "user_message": user_message,
+            },
+            context=self._turn_entry_context or None,
+            use_stack=False,
+            emit_open=True,
+        )
+
     def append_turn_output(self, command_output: fastworkflow.CommandOutput) -> None:
         """Append one command execution to the current turn's accumulator."""
         self._turn_outputs.append(command_output)
@@ -217,7 +383,15 @@ class WorkflowExecutionContext:
 
         Role inversion: command_parameters holds the agent's question; the
         response holds the user's answer ("" + success=False while unanswered).
+
+        Also opens the fw.ask_user human-wait span (deterministic id per
+        attempt [R6]; emitted at open so the wait is visible while the turn
+        is suspended). Both topologies funnel through here: Topology A via
+        _ask_user_tool, Topology B via _note_agent_suspension.
         """
+        attempt = sum(
+            1 for output in self._turn_outputs if output.command_name == "ask_user"
+        )
         entry = fastworkflow.CommandOutput(
             command_name="ask_user",
             command_parameters=question,
@@ -226,6 +400,21 @@ class WorkflowExecutionContext:
             started_at=datetime.now(timezone.utc),
         )
         self.append_turn_output(entry)
+
+        if self._turn_key:
+            tracing.start_span(
+                self,
+                tracing.SPAN_ASK_USER,
+                kind=tracing.KIND_HUMAN_WAIT,
+                span_id=tracing.deterministic_span_id(
+                    self._turn_key, tracing.SPAN_ASK_USER, attempt
+                ),
+                parent_span_id=tracing.root_span_id(self._turn_key),
+                command_name="ask_user",
+                attributes={"agent_query": question, "attempt": attempt},
+                use_stack=False,
+                emit_open=True,
+            )
         return entry
 
     def complete_ask_user_entry(self, answer: str) -> None:
@@ -233,8 +422,14 @@ class WorkflowExecutionContext:
 
         duration_ms is the user's think time [A38]. No-op when there is no
         unanswered ask_user entry.
+
+        Closes the matching fw.ask_user span. The span is rebuilt from the
+        entry rather than held in memory, so the close is an idempotent upsert
+        that also works when the answer arrives in a different process than
+        the question ([R6]).
         """
-        for entry in reversed(self._turn_outputs):
+        for index in range(len(self._turn_outputs) - 1, -1, -1):
+            entry = self._turn_outputs[index]
             if (
                 entry.command_name == "ask_user"
                 and entry.command_response.success is False
@@ -246,7 +441,42 @@ class WorkflowExecutionContext:
                         (datetime.now(timezone.utc) - entry.started_at).total_seconds()
                         * 1000
                     )
+                self._close_ask_user_span(index, entry, answer)
                 return
+
+    def _close_ask_user_span(
+        self, entry_index: int, entry: fastworkflow.CommandOutput, answer: str
+    ) -> None:
+        """Emit the closed fw.ask_user span for a just-answered entry [R6]."""
+        if not self._turn_key or tracing.get_sink(self) is None:
+            return
+        attempt = sum(
+            1
+            for output in self._turn_outputs[:entry_index]
+            if output.command_name == "ask_user"
+        )
+        span = tracing.Span(
+            span_id=tracing.deterministic_span_id(
+                self._turn_key, tracing.SPAN_ASK_USER, attempt
+            ),
+            trace_id=self._turn_key,
+            name=tracing.SPAN_ASK_USER,
+            kind=tracing.KIND_HUMAN_WAIT,
+            parent_span_id=tracing.root_span_id(self._turn_key),
+            channel_id=self._channel_id,
+            command_name="ask_user",
+            start_ns=tracing.datetime_to_ns(entry.started_at) or 0,
+        )
+        tracing.end_span(
+            self,
+            span,
+            attributes={
+                "agent_query": entry.command_parameters,
+                "attempt": attempt,
+                "user_response": answer,
+                "human_wait_ms": entry.duration_ms,
+            },
+        )
 
     def _note_agent_suspension(self, clarification: str) -> None:
         """Bookkeeping when the agent suspends on ask_user (Topology B).
@@ -766,6 +996,7 @@ class WorkflowExecutionContext:
         turn_result = self._build_turn_result(command_output)
         return turn_result.turn_output
 
+    @dspy_logger.observe_dspy_calls
     def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
         """Shared message dispatch for _execute_message()/process_turn()."""
         if self._app_workflow is None:
@@ -833,8 +1064,10 @@ class WorkflowExecutionContext:
             command_outputs=list(self._turn_outputs),
         )
 
-        return TurnResult(
+        turn_result = TurnResult(
             turn_output=turn_output,
+            channel_id=self._channel_id,
+            conversation_id=self._conversation_id,
             user_message=self._turn_user_message,
             refined_user_message=self._turn_refined_message,
             entry_workflow_name=self._turn_entry_workflow_name,
@@ -843,6 +1076,150 @@ class WorkflowExecutionContext:
             completed_at=completed_at,
             suspended_ms=self._turn_suspended_ms,
         )
+
+        self._finalize_turn_trace(turn_result)
+        return turn_result
+
+    def _compute_context_mutations(self) -> Optional[dict]:
+        """Shallow diff of the app workflow's context against the _begin_turn
+        snapshot: {added, removed, changed} with repr-capped values, or None
+        when nothing changed / no snapshot exists. Never raises — this feeds a
+        span attribute and must not affect the turn."""
+        snapshot = getattr(self, "_turn_context_snapshot", None)
+        if snapshot is None or self._app_workflow is None:
+            return None
+        try:
+            return self._context_mutations_diff(snapshot)
+        except Exception:
+            # App-authored context can hold anything (uncomparable keys,
+            # exploding __eq__) — a diagnostic diff must never fail the turn.
+            return None
+
+    def _context_mutations_diff(self, snapshot: dict) -> Optional[dict]:
+        current = dict(self._app_workflow.context)
+
+        def brief(value: Any) -> str:
+            try:
+                return repr(value)[:200]
+            except Exception:
+                return f"<{type(value).__name__}>"
+
+        mutations: dict = {}
+        if added := {
+            key: brief(value) for key, value in current.items() if key not in snapshot
+        }:
+            mutations["added"] = added
+        # key=repr: context keys are app-authored and need not be mutually
+        # comparable (a str key beside an int key would make plain sorted()
+        # raise TypeError).
+        if removed := sorted(
+            (key for key in snapshot if key not in current), key=repr
+        ):
+            mutations["removed"] = removed
+        changed = {}
+        for key, old_value in snapshot.items():
+            if key not in current:
+                continue
+            new_value = current[key]
+            try:
+                differs = new_value is not old_value and new_value != old_value
+            except Exception:
+                differs = True  # incomparable values: report, don't hide
+            if differs:
+                changed[key] = {"from": brief(old_value), "to": brief(new_value)}
+        if changed:
+            mutations["changed"] = changed
+        return mutations or None
+
+    def _finalize_turn_trace(self, turn_result: TurnResult) -> None:
+        """Emit the fw.turn root span update/close, the turn record, and turn
+        metrics at the finalize chokepoint. Never raises (tracing helpers and
+        safe_* wrappers swallow sink failures).
+
+        On AWAITING_USER the root span is updated in place (still open) and
+        the record is emitted so the suspended turn is visible ([R2]); the
+        terminal finalize closes the same deterministic span id ([R6]) —
+        including after a cross-process resume, where the in-memory span
+        object is rebuilt from the restored accumulator.
+        """
+        turn_output = turn_result.turn_output
+        status = turn_output.status
+
+        root = self._turn_root_span
+        if root is None and self._turn_key and tracing.get_sink(self) is not None:
+            root = tracing.Span(
+                span_id=tracing.root_span_id(self._turn_key),
+                trace_id=self._turn_key,
+                name=tracing.SPAN_TURN,
+                channel_id=self._channel_id,
+                context=self._turn_entry_context or None,
+                start_ns=tracing.datetime_to_ns(self._turn_started_at) or 0,
+                attributes={
+                    "turn_key": self._turn_key,
+                    "channel_id": self._channel_id,
+                    "conversation_id": self._conversation_id,
+                    "user_message": tracing.cap_attr_value(self._turn_user_message),
+                },
+            )
+            self._turn_root_span = root
+
+        awaiting = status == TurnStatus.AWAITING_USER
+        tracing.end_span(
+            self,
+            root,
+            status=status.value,
+            close=not awaiting,
+            attributes={
+                "status": status.value,
+                "success": turn_output.success,
+                "failure_reason": turn_output.failure_reason,
+                "suspended_ms": turn_result.suspended_ms,
+                "context_mutations": self._compute_context_mutations(),
+            },
+        )
+        if not awaiting:
+            self._turn_root_span = None
+            self._turn_context_snapshot = None
+
+        tracing.emit_turn_record(self, turn_result)
+
+        if turn_result.completed_at is not None:
+            metrics.safe_increment(
+                self._metrics_sink, "fw_turns_total", status=status.value
+            )
+            if turn_result.started_at is not None:
+                metrics.safe_observe(
+                    self._metrics_sink,
+                    "fw_turn_duration_seconds",
+                    (
+                        turn_result.completed_at - turn_result.started_at
+                    ).total_seconds(),
+                    status=status.value,
+                )
+
+    def finalize_turn_for_observability(
+        self, command_output: Optional[fastworkflow.CommandOutput]
+    ) -> None:
+        """Run the finalize chokepoint for a turn driven outside process_turn.
+
+        The CLI chassis (ChatSession loop) dispatches via _execute_message /
+        process_action directly — its transport is the queues — so nothing
+        else builds the TurnResult for its turns. This emits the root-span
+        close, turn record, and metrics; the TurnResult itself is discarded.
+        No-op when no logical turn is open, or mid-suspension (Topology A
+        blocks through ask_user, so a completed _execute_message is a
+        completed turn).
+        """
+        if self._turn_key is None or self._awaiting_user:
+            return
+        if tracing.get_sink(self) is None and isinstance(
+            self._metrics_sink, metrics.NoOpMetricsSink
+        ):
+            # Observability fully off: nothing consumes the TurnResult, so
+            # skip building it — this path runs after EVERY CLI turn and must
+            # cost ~nothing when FW_OBSERVABILITY=0.
+            return
+        self._build_turn_result(command_output)
 
     def process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         if self._app_workflow is None:
@@ -984,11 +1361,18 @@ class WorkflowExecutionContext:
 
         return lm, CommandsSystemPreludeAdapter()
 
-    def _call_agent_with_retry(self, agent_call, lm=None):
+    def _call_agent_with_retry(self, agent_call, lm=None, *, trace_input=None,
+                               resumed=False):
         """Run agent_call under an agent dspy.context, retrying on AdapterParseError.
 
         lm: optional LM override (e.g. distillation's teacher/student model). When
         omitted, the default agent context (LLM_AGENT) is used.
+
+        This is the one choke point both the fresh forward and the resume pass
+        through, so it is where the executor phase is recorded: fw.agent.execute
+        wraps the whole loop (retries included), and ``host_scope`` binds this
+        context so ReAct's per-iteration fw.agent.step spans — several frames
+        down, with no reference to the WEC — reach the same sink ([R28]).
         """
         from dspy.utils.exceptions import AdapterParseError
 
@@ -996,19 +1380,54 @@ class WorkflowExecutionContext:
         if lm is None:
             lm = default_lm
         max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                with dspy.context(lm=lm, adapter=agent_adapter):
-                    return agent_call()
-            except AdapterParseError:
-                if attempt == max_retries - 1:
-                    raise
+        span = tracing.start_span(
+            self,
+            tracing.SPAN_AGENT_EXECUTE,
+            attributes={
+                "agent_input": trace_input,
+                "resumed": resumed,
+                "model": getattr(lm, "model", None),
+            },
+        )
+        attempts = 0
+        try:
+            with tracing.host_scope(self):
+                for attempt in range(max_retries):
+                    attempts = attempt + 1
+                    try:
+                        with dspy.context(lm=lm, adapter=agent_adapter):
+                            result = agent_call()
+                    except AdapterParseError:
+                        if attempt == max_retries - 1:
+                            raise
+                        continue
+                    tracing.end_span(
+                        self, span, attributes=_agent_result_attributes(result, attempts)
+                    )
+                    return result
+        except BaseException as exc:
+            # CommandCancelledError/AskUserSuspend are control signals, not
+            # failures; either way the span must close rather than leak onto
+            # the parenting stack for the rest of the turn.
+            tracing.end_span(
+                self,
+                span,
+                status=(
+                    tracing.STATUS_AWAITING_USER
+                    if isinstance(exc, (AskUserSuspend, CommandCancelledError))
+                    else tracing.STATUS_ERROR
+                ),
+                attributes={"attempts": attempts, "error_type": type(exc).__name__},
+            )
+            raise
+        # Every retry raised AdapterParseError but the last re-raise was
+        # swallowed by the loop shape: close the span rather than leak it.
+        tracing.end_span(self, span, status=tracing.STATUS_ERROR,
+                         attributes={"attempts": attempts})
 
     def _run_agent(self, message: str):
         """Fresh agent turn setup and ReAct forward call."""
         self.clear_action_log()
-        if self._mirror_action_log_to_file and os.path.exists("action.jsonl"):
-            os.remove("action.jsonl")
 
         if self._app_workflow:
             self._app_workflow.context["raw_user_message"] = message
@@ -1035,12 +1454,15 @@ class WorkflowExecutionContext:
             lambda: self._workflow_tool_agent(
                 user_query=command_info_and_refined_message_with_todolist,
                 available_commands=available_commands,
-            )
+            ),
+            trace_input=command_info_and_refined_message_with_todolist,
         )
 
     def _call_agent_resume(self, observation: str):
         return self._call_agent_with_retry(
-            lambda: self._workflow_tool_agent.resume(observation)
+            lambda: self._workflow_tool_agent.resume(observation),
+            trace_input=observation,
+            resumed=True,
         )
 
     def _awaiting_user_output(self, clarification: str) -> fastworkflow.CommandOutput:
@@ -1168,11 +1590,33 @@ class WorkflowExecutionContext:
                     response_text=None,
                     success=None,
                     timestamp_ms=int(time.time() * 1000),
+                    turn_key=self._turn_key,
                 )
             )
 
+        # Span emission sits OUTSIDE the trace-queue guard: the sink is reached
+        # via this context, not the transport-queue contract [R28].
+        span = tracing.start_span(
+            self,
+            tracing.SPAN_AGENT_TOOL_CALL,
+            kind=tracing.KIND_TOOL,
+            attributes={"raw_command": message},
+        )
+
         invoke_started_at = datetime.now(timezone.utc)
-        command_output = self._CommandExecutor.invoke_command(self, message)
+        try:
+            command_output = self._CommandExecutor.invoke_command(self, message)
+        except CommandCancelledError:
+            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
+            raise
+        except BaseException as exc:
+            tracing.end_span(
+                self,
+                span,
+                status=tracing.STATUS_ERROR,
+                attributes={"error_type": type(exc).__name__},
+            )
+            raise
         command_output.started_at = invoke_started_at
         command_output.duration_ms = int(
             (datetime.now(timezone.utc) - invoke_started_at).total_seconds() * 1000
@@ -1189,6 +1633,20 @@ class WorkflowExecutionContext:
         else:
             params_dict = params
 
+        tracing.end_span(
+            self,
+            span,
+            status=(
+                tracing.STATUS_OK if command_output.success else tracing.STATUS_ERROR
+            ),
+            command_name=command_output.command_name or None,
+            context=command_output.context or None,
+            attributes={
+                "response_text": response_text,
+                "success": bool(command_output.success),
+            },
+        )
+
         if self._command_trace_queue is not None:
             self._command_trace_queue.put(
                 fastworkflow.CommandTraceEvent(
@@ -1199,6 +1657,7 @@ class WorkflowExecutionContext:
                     response_text=response_text,
                     success=bool(command_output.success),
                     timestamp_ms=int(time.time() * 1000),
+                    turn_key=self._turn_key,
                 )
             )
 
@@ -1253,11 +1712,32 @@ class WorkflowExecutionContext:
                     response_text=None,
                     success=None,
                     timestamp_ms=int(time.time() * 1000),
+                    turn_key=self._turn_key,
                 )
             )
 
+        # Outside the trace-queue guard [R28]; see _process_message.
+        span = tracing.start_span(
+            self,
+            tracing.SPAN_AGENT_TOOL_CALL,
+            kind=tracing.KIND_TOOL,
+            attributes={"raw_command": raw_command},
+        )
+
         action_started_at = datetime.now(timezone.utc)
-        command_output = self._CommandExecutor.perform_action(workflow, action)
+        try:
+            command_output = self._CommandExecutor.perform_action(workflow, action)
+        except CommandCancelledError:
+            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
+            raise
+        except BaseException as exc:
+            tracing.end_span(
+                self,
+                span,
+                status=tracing.STATUS_ERROR,
+                attributes={"error_type": type(exc).__name__},
+            )
+            raise
         command_output.started_at = action_started_at
         command_output.duration_ms = int(
             (datetime.now(timezone.utc) - action_started_at).total_seconds() * 1000
@@ -1265,6 +1745,20 @@ class WorkflowExecutionContext:
         self.append_turn_output(command_output)
 
         response_text = command_output.command_response.response or ""
+
+        tracing.end_span(
+            self,
+            span,
+            status=(
+                tracing.STATUS_OK if command_output.success else tracing.STATUS_ERROR
+            ),
+            command_name=command_output.command_name or None,
+            context=command_output.context or None,
+            attributes={
+                "response_text": response_text,
+                "success": bool(command_output.success),
+            },
+        )
 
         if self._command_trace_queue is not None:
             self._command_trace_queue.put(
@@ -1276,6 +1770,7 @@ class WorkflowExecutionContext:
                     response_text=response_text,
                     success=bool(command_output.success),
                     timestamp_ms=int(time.time() * 1000),
+                    turn_key=self._turn_key,
                 )
             )
 

@@ -27,6 +27,7 @@ Layout::
         session_state/<channel_id>.pending.json
         checkpoints/channels/<deployment>/<fingerprint>/<channel_key>/...
         function_cache/<fingerprint>/<function_name>/cache.sqlite3
+        observability.sqlite3
 
 The fingerprint subdivisions are deliberate: checkpoints and function caches
 depend on the workflow's command source, so a code change must not read a stale
@@ -119,6 +120,17 @@ def session_state_dir(workflow_path: str) -> str:
     path = os.path.join(workflow_state_dir(workflow_path), _SESSION_STATE_DIRNAME)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def observability_db(workflow_path: str) -> str:
+    """Path of this workflow's observability DB (single source of truth for
+    turn records, spans, and artifacts — observability design §3.2).
+
+    One DB per workflow, directly under the workflow's state dir. The parent
+    dir is created here; file creation, 0700/0600 posture, and schema are the
+    observability store's job ([R4]).
+    """
+    return os.path.join(workflow_state_dir(workflow_path), "observability.sqlite3")
 
 
 def checkpoints_dir(workflow_path: str) -> str:

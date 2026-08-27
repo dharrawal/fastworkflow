@@ -550,7 +550,9 @@ def test_a_quiescent_runtime_is_still_finalized_and_closed_in_that_shutdown(
     assert all(quiet not in m for m in deadline_errors)
 
 
-def test_shutdown_persists_unsaved_turns_without_generating_a_topic(app_module):
+def test_shutdown_persists_unsaved_turns_without_generating_a_topic(
+    app_module, monkeypatch
+):
     """Hazard: up to `max_live_sessions` LLM calls in front of the checkpoint write.
 
     Shutdown used to label every live conversation — one synchronous
@@ -574,7 +576,17 @@ def test_shutdown_persists_unsaved_turns_without_generating_a_topic(app_module):
     other name never reaches the counter, but the stored topic then stops being
     blank and the last two assertions fail. Nothing else is substituted: the
     manager, the runtime, the store and the lifespan closures are all real.
+
+    On the observability switch: since Phase 7 a channel created with a trace
+    sink mints its conversation id up front ([R1], so the first turn's records
+    are conversation-attributed), which puts `active_conversation_id` past 0
+    before any turn runs. The reserve-at-save path this test covers is still
+    live — it is what runs when there is no sink, i.e. FW_OBSERVABILITY=0 and
+    the degraded case where the DB cannot be opened — so the switch is off here
+    to reach it. Turning it on does not make the hazard go away; it makes this
+    test silently stop exercising it.
     """
+    monkeypatch.setenv("FW_OBSERVABILITY", "0")
     channel_id = _channel("unsaved")
     seen: dict[str, Any] = {}
     generated: list[Any] = []
