@@ -35,6 +35,7 @@ import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, tracing
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
+from fastworkflow.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
@@ -366,6 +367,12 @@ class WorkflowExecutionContext:
         with contextlib.suppress(Exception):
             if self._app_workflow is not None and tracing.get_sink(self) is not None:
                 self._turn_context_snapshot = dict(self._app_workflow.context)
+
+        # Turn-scoped execution ledger (arch §12.1). Sink-gated like the other
+        # capture projections: with observability off this must cost nothing.
+        self._execution_recorder = (
+            ExecutionRecorder() if tracing.get_sink(self) is not None else None
+        )
 
         # Open the fw.turn root span (deterministic id [R6]; emitted at open so
         # a suspended turn is visible before — and closable after — a process
@@ -1143,6 +1150,10 @@ class WorkflowExecutionContext:
             (None, None) if self._awaiting_user else self._turn_memory_entry()
         )
 
+        turn_metadata: dict[str, Any] = {}
+        if self._app_workflow is not None:
+            turn_metadata["workflow_folderpath"] = self._app_workflow.folderpath
+
         turn_result = TurnResult(
             turn_output=turn_output,
             channel_id=self._channel_id,
@@ -1156,6 +1167,12 @@ class WorkflowExecutionContext:
             suspended_ms=self._turn_suspended_ms,
             conversation_summary=conversation_summary,
             conversation_traces=conversation_traces,
+            metadata=turn_metadata,
+            execution_records=(
+                self._execution_recorder.records()
+                if self._execution_recorder is not None
+                else ()
+            ),
         )
 
         self._finalize_turn_trace(turn_result)
@@ -1691,6 +1708,66 @@ class WorkflowExecutionContext:
         return self._finalize_agent_output(original_message, agent_result)
 
     # ------------------------------------------------------------------
+    # Shared capture for the fw.agent.tool_call emission sites
+    # ------------------------------------------------------------------
+    #
+    # _process_message and _process_action both open fw.agent.tool_call and both
+    # owe §12.1.1's shared capture, so the projection lives here once rather than
+    # being written twice and drifting. Everything below is additive recording:
+    # no fastWorkflow control flow reads a context handle or a consequence class,
+    # which is EXP-003's exit criterion and arch §17.3's stop condition.
+    #
+    # Amendment (fix-ajv.8): "here" is now `tracing`, because workflow_agent.py
+    # opens the same span from a third site and owes the same record. These two
+    # methods stay as the WEC-shaped entry points — they supply the app-workflow
+    # fallback that the free functions cannot know about — but the projection
+    # itself is written once, for all three sites.
+
+    def _context_before(
+        self, span, workflow: Optional[fastworkflow.Workflow] = None
+    ) -> Optional[dict]:
+        """The active context handle before a command runs, or None.
+
+        Gated on a span having actually opened, matching the existing
+        attribute-prep rule at this seam: with observability off this must cost
+        nothing.
+        """
+        return tracing.context_before(span, workflow or self._app_workflow)
+
+    def _capture_attributes(
+        self,
+        span,
+        command_output: fastworkflow.CommandOutput,
+        context_before: Optional[dict],
+        workflow: Optional[fastworkflow.Workflow] = None,
+        command_name: Optional[str] = None,
+    ) -> dict:
+        """Call-id, context-before/after and consequence for one command.
+
+        The call id is read off the CommandOutput rather than minted here: the
+        dispatcher that ran the command already stamped it, and minting a second
+        one would produce two ids for one execution and join neither.
+
+        ``command_name`` overrides what the CommandOutput reports, because on the
+        direct-action path it reports nothing: ``CommandExecutor.perform_action``
+        stamps ``workflow_name`` and ``context`` on its result but never
+        ``command_name``, so a direct action's outcome carries "" and the
+        consequence lookup would find no declaration for any command. The Action
+        names what was dispatched, and that is the authoritative identity for
+        that path. Passed in rather than fixed on the CommandOutput because
+        writing it there would change a public shape, which this slice may not
+        do — the empty ``command_name`` on direct-action outcomes is a separate
+        defect.
+        """
+        return tracing.capture_attributes(
+            span,
+            command_output,
+            context_before,
+            workflow or self._app_workflow,
+            command_name=command_name,
+        )
+
+    # ------------------------------------------------------------------
     # Deterministic / assistant mode
     # ------------------------------------------------------------------
 
@@ -1717,6 +1794,7 @@ class WorkflowExecutionContext:
             kind=tracing.KIND_TOOL,
             attributes={"raw_command": message},
         )
+        context_before = self._context_before(span)
 
         invoke_started_at = datetime.now(timezone.utc)
         try:
@@ -1759,6 +1837,7 @@ class WorkflowExecutionContext:
             attributes={
                 "response_text": response_text,
                 "success": bool(command_output.success),
+                **self._capture_attributes(span, command_output, context_before),
             },
         )
 
@@ -1838,6 +1917,10 @@ class WorkflowExecutionContext:
             kind=tracing.KIND_TOOL,
             attributes={"raw_command": raw_command},
         )
+        # The direct-action path's only span: CommandExecutor.perform_action
+        # opens none of its own, so this is where §12.1.1's shared capture has
+        # to land for this row of the matrix.
+        context_before = self._context_before(span, workflow)
 
         action_started_at = datetime.now(timezone.utc)
         try:
@@ -1872,7 +1955,20 @@ class WorkflowExecutionContext:
             attributes={
                 "response_text": response_text,
                 "success": bool(command_output.success),
+                **self._capture_attributes(
+                    span,
+                    command_output,
+                    context_before,
+                    workflow,
+                    command_name=action.command_name,
+                ),
             },
+        )
+        record_execution(
+            self._execution_recorder,
+            command_call_id=command_output.command_call_id,
+            parent_call_id=None,
+            span_id=span.span_id if span is not None else None,
         )
 
         if self._command_trace_queue is not None:

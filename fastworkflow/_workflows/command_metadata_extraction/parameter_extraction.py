@@ -11,6 +11,11 @@ from pydantic_core import PydanticUndefined
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow import ModuleType, tracing
+from fastworkflow.decision_signals import (
+    DecisionUncertainty,
+    UncertaintySignal,
+    slot_binding_source,
+)
 
 from fastworkflow.utils.signatures import InputForParamExtraction
 
@@ -24,6 +29,122 @@ INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMS
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
 PARAMETER_EXTRACTION_ERROR_MSG = None
+
+# Versions of the mechanisms that bind a parameter, one per member of
+# ``SLOT_BINDING_SOURCES``. ``signal_version`` identifies the producer of a value,
+# and for an enumerated provenance that means the extractor itself: a change to the
+# XML tag grammar or to the sentinel-driven merge changes what "xml_regex" or
+# "stored_merge" is evidence of, without changing the recorded enum.
+#
+# ``llm`` is resolved at call time instead, because the model string is the thing
+# that identifies that extractor and it comes from configuration.
+_STATIC_SLOT_BINDING_SIGNAL_VERSIONS = {
+    "stored_merge": "param-extraction/stored-merge/1",
+    "xml_regex": "param-extraction/xml-regex/1",
+    "db_lookup": "param-extraction/db-lookup/1",
+}
+
+# Resolved lazily and once, the same way PARAMETER_EXTRACTION_ERROR_MSG above is:
+# env access on every extraction logs a warning per turn when the var is unset.
+LLM_PARAM_EXTRACTION_MODEL = None
+
+
+def _slot_binding_signal_version(extraction_method: str) -> str:
+    """Which version of which mechanism produced a binding-source signal.
+
+    FW-REQ-021 clause 13 asks for thresholds to be re-validated when a model,
+    prompt, or artifact that produces a signal changes; naming the LLM here is what
+    makes an ``llm`` binding from one model distinguishable from another's.
+    """
+    global LLM_PARAM_EXTRACTION_MODEL
+    if static_version := _STATIC_SLOT_BINDING_SIGNAL_VERSIONS.get(extraction_method):
+        return static_version
+    if not LLM_PARAM_EXTRACTION_MODEL:
+        LLM_PARAM_EXTRACTION_MODEL = (
+            fastworkflow.get_env_var("LLM_PARAM_EXTRACTION") or "unknown"
+        )
+    return f"param-extraction/llm/{LLM_PARAM_EXTRACTION_MODEL}"
+
+
+def slot_binding_uncertainty(diagnostics: dict) -> Optional[DecisionUncertainty]:
+    """The §6.6.1 record for the slot-binding decision *diagnostics* describes.
+
+    A pure function of the facts ``_extract_impl`` recorded, and one-way: it reads
+    the capture bag and writes nothing back, so extraction cannot come to depend on
+    what is being measured about it (FW-REQ-021 P0 / arch §17.3 — capture only).
+
+    Returns None when no binding decision was reached: a command with no parameters
+    class binds no slots, and an extraction that raised before choosing a mechanism
+    made no decision to characterise. Neither is an uninstrumented decision, so
+    neither gets a record saying it was one.
+    """
+    extraction_method = diagnostics.get("extraction_method")
+    if extraction_method is None:
+        return None
+
+    signals: list[UncertaintySignal] = [
+        slot_binding_source(
+            extraction_method,
+            signal_version=_slot_binding_signal_version(extraction_method),
+        )
+    ]
+
+    db_lookup_events = diagnostics.get("db_lookup") or []
+    # `applied` alone means the catalogue agreed with the extracted value; only a
+    # rewrite makes db_lookup the thing that bound the slot, which is the sense in
+    # which SLOT_BINDING_SOURCES admits it as a source.
+    if any(event.get("corrected") for event in db_lookup_events):
+        signals.append(
+            slot_binding_source(
+                "db_lookup",
+                signal_version=_slot_binding_signal_version("db_lookup"),
+            )
+        )
+
+    # The extractor produces one binding per slot and enumerates no alternatives to
+    # it; a db_lookup that rejected a value did enumerate some, and each suggestion
+    # is a value the slot could have taken instead.
+    candidate_count = 1 + sum(
+        len(event.get("suggestions") or []) for event in db_lookup_events
+    )
+
+    # Requirements §4.14: uncertainty is reducible when evidence gathered inside the
+    # task can lower it. A missing or invalid field is re-prompted and the next
+    # round fills it, which is exactly that. Anything else is left as None — nobody
+    # assessed it, which is not the same as "no".
+    unresolved = diagnostics.get("missing_fields") or diagnostics.get("invalid_fields")
+    return DecisionUncertainty(
+        decision_kind="slot-binding",
+        signals=tuple(signals),
+        candidate_count=candidate_count,
+        reducible=True if unresolved else None,
+    )
+
+
+def _recorded_slot_binding_uncertainty(span, diagnostics: dict) -> Optional[dict]:
+    """``slot_binding_uncertainty`` in span-attribute form, never raising.
+
+    Skipped when *span* is None: ``start_span`` declines without a sink or an open
+    turn and ``end_span`` then discards its attributes, so assembling a record
+    nobody will store is pure overhead against this slice's declared budget.
+
+    ``tracing`` wraps every one of its own calls so a broken recorder degrades to
+    a log line rather than a failed turn; this assembly runs just outside that
+    guard, and capture that can lose a user's turn is the behavior change Phase 0
+    exists to avoid.
+
+    None also means no slot-binding decision occurred, which is a real outcome — so
+    a capture failure reports itself instead of collapsing into the same value. The
+    pure function above still raises, which is what the tests exercise.
+    """
+    if span is None:
+        return None
+    try:
+        uncertainty = slot_binding_uncertainty(diagnostics)
+    except Exception as exc:
+        logger.warning(f"slot-binding uncertainty capture failed: {exc!r}")
+        return {"capture_error": type(exc).__name__}
+    return None if uncertainty is None else uncertainty.model_dump(mode="json")
 
 
 def _unwrap_optional(field_type):
@@ -67,6 +188,11 @@ class ParameterExtraction:
         conversational state, not a span error: status stays ok and
         ``parameters_valid`` carries the signal; only an exception marks the
         span error. Emission never affects extraction (no-op without a host).
+
+        It also carries the §6.6.1 ``DecisionUncertainty`` for the slot-binding
+        decision, assembled by ``slot_binding_uncertainty`` from those same
+        diagnostics. That record is written to the span and read by nothing else
+        (FW-REQ-021 P0: representation only).
         """
         host = tracing.current_host()
         span = tracing.start_span(
@@ -79,6 +205,9 @@ class ParameterExtraction:
         try:
             output = self._extract_impl(diagnostics)
         except BaseException:
+            # No DecisionUncertainty here: the extraction did not complete, so
+            # there is no binding decision to characterise. The raw diagnostics
+            # gathered so far still go out.
             tracing.end_span(
                 host, span, status=tracing.STATUS_ERROR, attributes=diagnostics
             )
@@ -89,6 +218,9 @@ class ParameterExtraction:
             status=tracing.STATUS_OK,
             attributes={
                 **diagnostics,
+                "decision_uncertainty": _recorded_slot_binding_uncertainty(
+                    span, diagnostics
+                ),
                 "parameters_valid": output.parameters_are_valid,
             },
         )

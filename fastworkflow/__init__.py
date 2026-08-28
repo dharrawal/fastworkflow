@@ -93,6 +93,13 @@ class CommandOutput(BaseModel):
     command_parameters: Any = None  # typed model in memory; dict in records [A10]
     started_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
+    # Joins this outcome to the span that produced it (arch §12.0 delta 1).
+    # Optional with a default because §12.2 requires CommandOutput stay
+    # compatible: every existing constructor call and every already-serialized
+    # record must keep validating, and both do — an absent key reads as None.
+    # None means "not dispatched through a call-id-stamping path", which is the
+    # honest answer for a hand-built CommandOutput; it never means "no span".
+    command_call_id: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod

@@ -1,0 +1,774 @@
+"""What produced this run: engine, workflow, and model identity.
+
+The fastWorkflow-origin half of the evaluation provenance contract in
+architecture §6.3. An evaluation harness embeds this in its own
+`EvaluationProvenance` alongside the axes it owns — corpus, task contracts,
+evaluators, tenant/principal/dataset/timeslot fingerprints, and backend
+attestations. Those are deliberately absent here: fastWorkflow cannot attest to
+them, and a provenance writer that invents a value from local configuration is
+the failure §6.3 spends a paragraph forbidding.
+
+The point of the module is that these values are *hard to get right one at a
+time*, and a harness assembling them ad hoc gets them wrong in ways nothing
+detects. Four traps, each measured on this codebase rather than imagined:
+
+**The installed version is stale.** `importlib.metadata.version("fastworkflow")`
+answers 2.30.1 while `pyproject.toml` says 3.2.0, because an editable install's
+`dist-info` is written once and never tracks a version bump. Neither number is
+"the" version, so both are recorded and their disagreement is itself evidence.
+
+**A dirty tree makes the revision a lie.** A git revision identifies the code
+only if nothing is modified on top of it. Dirtiness is therefore recorded beside
+it, and `None` means "could not tell" — never `False`.
+
+**`None` from the artifact resolver does not mean untrained.** A workflow on the
+pre-versioning layout has no `current.json` and resolves to `None` while being
+fully trained; both bundled `hello_world` workflows are in exactly that state.
+`legacy_layout` carries the difference, and without it the record reports a
+trained workflow as untrained.
+
+**A cache hit means no model was called.** DSPy's cache is process-global, so a
+run with caching on is not evidence about the model that appears in
+`model_identifiers`. The cache state is a peer of the model string here, not a
+footnote.
+
+Naming, because two things in this repo are called a fingerprint and only one of
+them is identity: `workflow_source_hash` is the canonical content hash of §7.1 —
+reproducible from bytes, independent of path and mtime.
+`command_surface_fingerprint` is `compute_commands_source_fingerprint`, which
+hashes absolute paths plus `(size, mtime_ns)`. That one is correct for
+invalidating a cache and wrong for identifying a workflow; it is recorded
+because §6.3 asks for it, under a name that says which one it is.
+
+Leaf module (arch §22): standard library, Pydantic, and `runtime_manifest` only.
+Values that live behind a non-leaf module — the trained-artifact id and layout
+flag in `train.artifact_versioning`, the legacy fingerprint in
+`command_directory`, DSPy's process-global cache state — are caller-supplied
+arguments rather than something this module reaches for. That is about the
+dependency graph, not about speed: importing anything under `fastworkflow.`
+already executes the package root, so no arrangement of this module avoids that
+cost. What it avoids is this module depending on the training stack and command
+routing, which is what §22 is protecting.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.metadata
+import os
+import platform
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+from typing import Mapping, Optional
+from urllib.parse import urlsplit, urlunsplit
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from fastworkflow.runtime_manifest import (
+    MANIFEST_FILENAME,
+    WORKFLOW_SCOPE_RULE_VERSION,
+    FingerprintVerification,
+    RuntimeMetadata,
+    canonical_content_hash,
+    imported_package_entries,
+    workflow_content_hash,
+)
+
+# Lock files worth hashing, enumerated rather than globbed. Recording *which*
+# were found is itself provenance: a `uv.lock` appearing later should show up as
+# a new key, not silently change what a single hash covers. Only `poetry.lock`
+# exists in this repo today.
+LOCK_FILENAMES: tuple[str, ...] = (
+    "poetry.lock",
+    "uv.lock",
+    "requirements.txt",
+    "Pipfile.lock",
+)
+
+# Every per-role model env var read anywhere in the codebase, paired with the
+# key var that authenticates it. This is the first such registry here — until
+# now every name was a string literal at its call site — so two things are worth
+# stating rather than leaving to be rediscovered:
+#
+#   * `LLM_COMMAND_METADATA_GEN` pairs with `LITELLM_API_KEY_COMMANDMETADATA_GEN`.
+#     There is no underscore between COMMAND and METADATA on the key side, so
+#     code deriving the key name from the role name silently reads an unset
+#     variable for this one role. That is why the pairing is a table and not a
+#     format string.
+#   * `LLM_RESPONSE_GEN` is an orphan. It appears in every env file and in
+#     AGENTS.md, and no Python reads it. It is snapshotted below under
+#     `ORPHAN_ROLE_VARS` because a value an operator believes is in effect is
+#     worth having in the record, but it is not an active role.
+LLM_ROLE_VARS: tuple[tuple[str, str], ...] = (
+    ("LLM_SYNDATA_GEN", "LITELLM_API_KEY_SYNDATA_GEN"),
+    ("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION"),
+    ("LLM_PLANNER", "LITELLM_API_KEY_PLANNER"),
+    ("LLM_AGENT", "LITELLM_API_KEY_AGENT"),
+    ("LLM_CONVERSATION_STORE", "LITELLM_API_KEY_CONVERSATION_STORE"),
+    ("LLM_COMMAND_METADATA_GEN", "LITELLM_API_KEY_COMMANDMETADATA_GEN"),
+    ("LLM_DISTILLATION", "LITELLM_API_KEY_DISTILLATION"),
+    ("LLM_TEACHER_AGENT", "LITELLM_API_KEY_TEACHER_AGENT"),
+    ("LLM_TEACHER_PLANNER", "LITELLM_API_KEY_TEACHER_PLANNER"),
+    ("LLM_STUDENT_AGENT", "LITELLM_API_KEY_STUDENT_AGENT"),
+    ("LLM_STUDENT_PLANNER", "LITELLM_API_KEY_STUDENT_PLANNER"),
+)
+
+ORPHAN_ROLE_VARS: tuple[str, ...] = ("LLM_RESPONSE_GEN",)
+
+# Routing, not authentication: a model string prefixed `litellm_proxy/` is
+# served from somewhere else entirely, which changes what the model
+# identifier means.
+PROXY_BASE_VAR = "LITELLM_PROXY_API_BASE"
+
+
+def _digest(value: str, length: int = 12) -> str:
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:length]}"
+
+
+def secret_fingerprint(value: Optional[str]) -> Optional[str]:
+    """Enough to tell two credentials apart, and nothing more.
+
+    Never the value. A provenance artifact is written to disk and shipped
+    around; the only question it needs to answer about a key is "was this the
+    same key as last run", and a short digest answers it.
+    """
+    return None if not value else _digest(value)
+
+
+def strip_url_credentials(url: Optional[str]) -> Optional[str]:
+    """A URL with any ``user:password@`` removed.
+
+    ``LITELLM_PROXY_API_BASE`` is read from the same credential-bearing env as
+    the API keys, and embedding basic-auth in a proxy URL is common enough that
+    storing it verbatim would put a password in an artifact this module's own
+    docstring describes as written to disk and shipped around.
+    """
+    if not url:
+        return None
+    parsed = urlsplit(url)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit(parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]))
+
+
+# ----------------------------------------------------------------------
+# Engine identity
+# ----------------------------------------------------------------------
+
+
+def installed_version(distribution: str = "fastworkflow") -> Optional[str]:
+    """Version recorded in installed distribution metadata, or None.
+
+    For an editable install this is frozen at install time and drifts behind
+    `pyproject.toml` with every bump — 2.30.1 versus 3.2.0 as measured here — so
+    it is one of two answers rather than the answer.
+    """
+    try:
+        return importlib.metadata.version(distribution)
+    except Exception:
+        return None
+
+
+def source_version() -> Optional[str]:
+    """Version from a `pyproject.toml` beside the package, or None.
+
+    Present in a source or editable checkout, absent from an installed wheel.
+    This is the one that matches the code actually running when the two differ.
+    """
+    try:
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        if not pyproject.is_file():
+            return None
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        poetry = data.get("tool", {}).get("poetry", {}).get("version")
+        return poetry or data.get("project", {}).get("version")
+    except (OSError, ValueError, IndexError, AttributeError):
+        # AttributeError covers a pyproject whose `tool` or `tool.poetry` is not
+        # a table; the .get() chain assumes both are.
+        return None
+
+
+def _git_dir(start: Path) -> Optional[Path]:
+    """Nearest `.git` walking upward, resolving the worktree/submodule pointer.
+
+    A `.git` **file** ends the search whether or not its pointer resolves. It is
+    an explicit repository boundary, and climbing past a broken one lands in the
+    enclosing checkout and returns *that* repository's revision — a confident
+    wrong answer, which is worse in a provenance record than no answer.
+    """
+    for directory in (start, *start.parents):
+        entry = directory / ".git"
+        if entry.is_dir():
+            return entry
+        if entry.is_file():
+            text = entry.read_text(encoding="utf-8", errors="replace").strip()
+            if not text.startswith("gitdir:"):
+                return None
+            candidate = Path(text.partition(":")[2].strip())
+            if not candidate.is_absolute():
+                candidate = directory / candidate
+            return candidate.resolve() if candidate.is_dir() else None
+    return None
+
+
+def _read_ref(git_dir: Path, ref: str) -> Optional[str]:
+    """Resolve a ref, loose file first.
+
+    Loose refs shadow `packed-refs`, and in this very checkout the two disagree
+    — loose `main` is one commit, packed `main` is an older one. A resolver that
+    consulted `packed-refs` first would confidently report a revision the tree
+    has not been at for some time.
+    """
+    loose = git_dir / ref
+    if loose.is_file():
+        # An empty loose ref is corruption, not an answer: fall through to
+        # packed-refs rather than reporting "no revision".
+        if value := loose.read_text(encoding="utf-8", errors="replace").strip():
+            return value
+    packed = git_dir / "packed-refs"
+    if not packed.is_file():
+        return None
+    for line in packed.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "^")):
+            continue
+        sha, _, name = line.partition(" ")
+        if name.strip() == ref:
+            return sha or None
+    return None
+
+
+def _is_object_id(value: Optional[str]) -> bool:
+    """A 40-hex (SHA-1) or 64-hex (SHA-256) object id and nothing else."""
+    if not value or len(value) not in (40, 64):
+        return False
+    return all(character in "0123456789abcdef" for character in value.lower())
+
+
+def git_revision(start_path: str) -> Optional[str]:
+    """HEAD sha for the checkout containing `start_path`, or None.
+
+    Pure standard library: no git binary, no subprocess, and no exception. A
+    provenance capture that can fail is a provenance capture that gets wrapped
+    in a bare `except` by its caller.
+
+    The ref name is validated before it is joined onto the git directory, and
+    the result is validated to be an object id. Without the first check an
+    absolute `ref:` discards the git directory entirely (pathlib joins that
+    way) and a `../` traverses out of it, so a corrupt or hostile `.git/HEAD`
+    would turn provenance capture into an arbitrary file read whose contents get
+    published as `source_revision`. Real git rejects both.
+    """
+    try:
+        git_dir = _git_dir(Path(start_path).resolve())
+        if git_dir is None:
+            return None
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+        if not head.startswith("ref:"):
+            return head if _is_object_id(head) else None
+        ref = head.partition(":")[2].strip()
+        if not ref.startswith("refs/") or ".." in ref.split("/"):
+            return None
+        revision = _read_ref(git_dir, ref)
+        return revision if _is_object_id(revision) else None
+    except (OSError, ValueError):
+        return None
+
+
+def git_is_dirty(repo_path: str, timeout_seconds: float = 10.0) -> Optional[bool]:
+    """True, False, or None for "could not tell" — which is not False.
+
+    Unlike the revision, this cannot be computed from `.git` without
+    reimplementing git's index comparison, so it costs a subprocess. Worth it:
+    a modified tree means the revision alone does not identify the code, and an
+    evaluation harness recording a revision without that caveat is publishing a
+    number that does not reproduce.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
+
+
+def lock_hashes(repo_root: str) -> dict[str, str]:
+    """`sha256:<hex>` per lock file present. Absent files are simply omitted."""
+    hashes: dict[str, str] = {}
+    for name in LOCK_FILENAMES:
+        path = Path(repo_root) / name
+        try:
+            if path.is_file():
+                hashes[name] = f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+        except OSError:
+            continue
+    return hashes
+
+
+class EngineProvenance(BaseModel):
+    """Which fastWorkflow, built from what, running on which interpreter."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: str
+    version_installed: Optional[str] = None
+    version_source: Optional[str] = None
+    source_revision: Optional[str] = None
+    source_dirty: Optional[bool] = None
+    source_hash: str
+    imported_module_count: int
+    dependency_lock_hashes: dict[str, str] = Field(default_factory=dict)
+    python_version: str
+    python_build: str
+
+    @property
+    def version_metadata_disagrees(self) -> bool:
+        """Installed metadata and source disagree — the editable-install case."""
+        return (
+            self.version_installed is not None
+            and self.version_source is not None
+            and self.version_installed != self.version_source
+        )
+
+    @property
+    def reproducible(self) -> bool:
+        """Whether the recorded revision actually identifies the running code.
+
+        False for a dirty tree and for an unknown revision. A run that is not
+        reproducible may still be useful; it may not be reported as if it were.
+        """
+        return self.source_revision is not None and self.source_dirty is False
+
+
+def capture_engine_provenance() -> EngineProvenance:
+    """Identity of the fastWorkflow that is running right now.
+
+    `source_hash` covers the *actually imported* module tree per §6.3, so this
+    is meaningful only at a defined point in a run — capture it where the
+    harness records provenance, not at import time.
+
+    Everything here describes the running package, deliberately with no override
+    parameter: revision, dirtiness and lock hashes are read from the checkout
+    that `source_hash` was computed from, so they cannot come to describe
+    different codebases.
+    """
+    root = Path(__file__).resolve().parent
+    repo_root = root.parent
+    entries = imported_package_entries()
+    installed = installed_version()
+    source = source_version()
+    return EngineProvenance(
+        version=source or installed or "unknown",
+        version_installed=installed,
+        version_source=source,
+        source_revision=git_revision(str(root)),
+        source_dirty=git_is_dirty(str(repo_root)),
+        source_hash=canonical_content_hash(entries),
+        imported_module_count=len(entries),
+        dependency_lock_hashes=lock_hashes(str(repo_root)),
+        python_version=platform.python_version(),
+        python_build=sys.version,
+    )
+
+
+# ----------------------------------------------------------------------
+# Workflow identity
+# ----------------------------------------------------------------------
+
+
+class WorkflowProvenance(BaseModel):
+    """Which workflow, at which content, with which features on."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workflow_source_hash: str
+    # Which file-selection rule produced `workflow_source_hash`. Not a peer of
+    # `RuntimeProvenance.schema_version`, which describes the shape of this
+    # record: the two move independently, since a field can be added without
+    # changing what gets hashed and the selection can change without changing
+    # the shape. Two hashes are comparable only when this agrees; §6.3 makes
+    # bundles immutable, so an old bundle cannot be re-derived under a new rule
+    # and a reader that ignores this reports rule changes as workflow drift.
+    workflow_scope_rule_version: int = WORKFLOW_SCOPE_RULE_VERSION
+    declared_workflow_fingerprint: Optional[str] = None
+    # The rule the *generator* used, which is why it is recorded separately from
+    # the field above rather than assumed equal to it. Those two disagreeing is
+    # the whole reason `fingerprint_verified` can be None on a workflow that
+    # declared a fingerprint.
+    declared_scope_rule_version: Optional[int] = None
+    fingerprint_verified: Optional[bool] = None
+    runtime_manifest_fingerprint: Optional[str] = None
+    command_surface_fingerprint: Optional[str] = None
+    runtime_feature_snapshot: dict[str, str] = Field(default_factory=dict)
+    trained_artifact_id: Optional[str] = None
+    trained_artifact_legacy_layout: bool = False
+
+    @property
+    def trained(self) -> Optional[bool]:
+        """True when these fields establish training, None when they cannot.
+
+        Never False. Neither input can distinguish "never trained" from "trained
+        by some path that records nothing here", so claiming absence would be
+        claiming more than the inputs support: a legacy-layout workflow is fully
+        trained and still resolves to no version id, which is why the flag
+        exists at all. A caller needing a definite negative has to look at the
+        artifacts on disk.
+        """
+        if self.trained_artifact_id is not None:
+            return True
+        return True if self.trained_artifact_legacy_layout else None
+
+
+def runtime_manifest_fingerprint(workflow_folderpath: str) -> Optional[str]:
+    """Canonical hash of the manifest file itself, or None when absent.
+
+    Distinct from `workflow_fingerprint`, which the manifest *declares* about
+    the tree. This one identifies the declaration.
+    """
+    path = Path(workflow_folderpath) / MANIFEST_FILENAME
+    try:
+        if not path.is_file():
+            return None
+        return canonical_content_hash([(MANIFEST_FILENAME, path.read_bytes())])
+    except OSError:
+        return None
+
+
+def capture_workflow_provenance(
+    workflow_folderpath: str,
+    metadata: RuntimeMetadata,
+    *,
+    command_surface_fingerprint: Optional[str] = None,
+    trained_artifact_id: Optional[str] = None,
+    trained_artifact_legacy_layout: bool = False,
+) -> WorkflowProvenance:
+    """Identity of the workflow this run executed.
+
+    `metadata` is the result of `check_startup_conformance`, so the feature
+    snapshot recorded here is the *effective* post-gating one rather than what
+    the manifest asked for.
+
+    The three keyword arguments are caller-supplied because reaching for them
+    would make this module depend on command routing and the training stack,
+    which §22 forbids: `command_surface_fingerprint` lives in
+    `command_directory` and both artifact values in
+    `train.artifact_versioning`. Callers get them from::
+
+        from fastworkflow.command_directory import compute_commands_source_fingerprint
+        from fastworkflow.train.artifact_versioning import (
+            legacy_layout_in_use, resolve_current_version)
+
+    Omitting `trained_artifact_legacy_layout` when the workflow is on the old
+    layout records a trained workflow as untrained; see `WorkflowProvenance.trained`.
+    """
+    source_hash = workflow_content_hash(workflow_folderpath)
+    declared = metadata.workflow_fingerprint
+    verification = FingerprintVerification(
+        declared=declared,
+        computed=source_hash,
+        declared_scope_rule_version=metadata.workflow_scope_rule_version,
+    )
+    return WorkflowProvenance(
+        workflow_source_hash=source_hash,
+        declared_workflow_fingerprint=declared,
+        declared_scope_rule_version=metadata.workflow_scope_rule_version,
+        # None, not False, when the two sides selected different files: a
+        # generator on an older scope rule produces a digest that answers a
+        # different question, and recording that as a failed verification would
+        # be the record asserting drift it has no evidence for. `reproducible`
+        # reads this as `is not False`, so an incomparable pair does not silently
+        # demote a run that is otherwise fully pinned.
+        fingerprint_verified=None if verification.incomparable else (
+            None if declared is None else verification.matches
+        ),
+        runtime_manifest_fingerprint=runtime_manifest_fingerprint(workflow_folderpath),
+        command_surface_fingerprint=command_surface_fingerprint,
+        runtime_feature_snapshot=dict(metadata.feature_modes),
+        trained_artifact_id=trained_artifact_id,
+        trained_artifact_legacy_layout=trained_artifact_legacy_layout,
+    )
+
+
+# ----------------------------------------------------------------------
+# Model identity
+# ----------------------------------------------------------------------
+
+
+class RoleProvenance(BaseModel):
+    """One LLM role: which model, reached how, authenticated with which key."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    model: Optional[str] = None
+    via_proxy: bool = False
+    proxy_base: Optional[str] = None
+    proxy_credentials_fingerprint: Optional[str] = None
+    api_key_fingerprint: Optional[str] = None
+
+
+class ModelProvenance(BaseModel):
+    """Which models a run was configured to use, and whether it called them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    roles: dict[str, RoleProvenance] = Field(default_factory=dict)
+    orphan_role_vars: dict[str, str] = Field(default_factory=dict)
+    config_hash: str
+    cache_enabled: Optional[bool] = None
+
+    @property
+    def model_identifiers(self) -> dict[str, str]:
+        """`role -> model string` for the roles that have one, per §6.3."""
+        return {
+            role: value.model
+            for role, value in sorted(self.roles.items())
+            if value.model
+        }
+
+    @property
+    def evidence_about_the_model(self) -> Optional[bool]:
+        """Whether this run's outputs say anything about the models named here.
+
+        False when caching is on: a cache hit returns a stored completion and
+        calls nothing, so the run is evidence about the cache. None when the
+        caller did not say.
+        """
+        return None if self.cache_enabled is None else not self.cache_enabled
+
+
+def capture_model_provenance(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    cache_enabled: Optional[bool] = None,
+    extra_config: Optional[Mapping[str, str]] = None,
+) -> ModelProvenance:
+    """Snapshot the per-role model configuration.
+
+    `env` takes a mapping rather than reading `os.environ`, because none of
+    these variables are in the OS environment in a normal deployment — they are
+    loaded from the workflow's env files into `fastworkflow._env_vars`. A leaf
+    may not reach for that, so callers pass
+    `runtime_manifest.deployment_env(fastworkflow._env_vars)`; reading
+    `os.environ` alone would capture nothing and record it as "no models
+    configured".
+
+    `cache_enabled` is caller-supplied because DSPy's cache is process-global
+    state (`dspy.settings`), not configuration this module can see. Pass it: a
+    run with the cache on is not evidence about the models named here.
+
+    `extra_config` folds any additional behavioral settings the caller knows
+    about — per-call `max_tokens`, `timeout`, `num_retries` literals — into
+    `config_hash`, which otherwise covers only what is visible from the
+    environment.
+    """
+    source = os.environ if env is None else env
+
+    roles: dict[str, RoleProvenance] = {}
+    proxy_base = strip_url_credentials(source.get(PROXY_BASE_VAR))
+    proxy_credentials = _proxy_credentials(source.get(PROXY_BASE_VAR))
+    for model_var, key_var in LLM_ROLE_VARS:
+        model = source.get(model_var) or None
+        via_proxy = bool(model and model.startswith("litellm_proxy/"))
+        roles[model_var] = RoleProvenance(
+            model=model,
+            via_proxy=via_proxy,
+            proxy_base=proxy_base if via_proxy else None,
+            proxy_credentials_fingerprint=proxy_credentials if via_proxy else None,
+            api_key_fingerprint=secret_fingerprint(source.get(key_var)),
+        )
+
+    orphans = {
+        name: source[name] for name in ORPHAN_ROLE_VARS if source.get(name)
+    }
+
+    # Hash the behavior-determining settings, not the credentials: two runs
+    # differing only in which key was used are the same configuration, and the
+    # key fingerprints above already record that separately.
+    #
+    # Routed through canonical_content_hash rather than a joined string because
+    # that function is self-delimiting: with a plain "k=v\n" join, a value
+    # containing a newline is indistinguishable from an extra key, so two
+    # genuinely different configurations can share a hash. That is the one thing
+    # this value exists not to do, and the fix was already imported.
+    material: list[tuple[str, bytes]] = []
+    for role, value in sorted(roles.items()):
+        material.append((f"role/{role}/model", (value.model or "").encode("utf-8")))
+        material.append((f"role/{role}/proxy", (value.proxy_base or "").encode("utf-8")))
+    for key, value in sorted((extra_config or {}).items()):
+        material.append((f"extra/{key}", str(value).encode("utf-8")))
+    material.append(("cache_enabled", str(cache_enabled).encode("utf-8")))
+
+    return ModelProvenance(
+        roles=roles,
+        orphan_role_vars=orphans,
+        config_hash=canonical_content_hash(material),
+        cache_enabled=cache_enabled,
+    )
+
+
+def _proxy_credentials(url: Optional[str]) -> Optional[str]:
+    """Fingerprint of any ``user:password`` in a proxy URL, or None."""
+    if not url:
+        return None
+    userinfo = urlsplit(url).netloc.rpartition("@")[0]
+    return secret_fingerprint(userinfo) if userinfo else None
+
+
+# ----------------------------------------------------------------------
+# Observability configuration (arch §12.0 delta 6, requirements §12.4)
+# ----------------------------------------------------------------------
+
+
+class ObservabilityProvenance(BaseModel):
+    """Under what capture regime a run's trace evidence was recorded.
+
+    §12.4 requires an evidence run to record "observability configuration
+    (`FW_OBS_*` values in effect) and the span-contract version", because trace
+    evidence read without them is uninterpretable: the same workflow under
+    `FW_OBS_CAPTURE_PROFILE=evidence` and under `debug` produces records that
+    differ in what they contain rather than in what happened, and two runs whose
+    span-contract versions differ cannot be compared attribute by attribute at all.
+
+    Values arrive as arguments rather than being read here, per the §22 leaf
+    constraint — `observability_store` and `tracing` are not leaves, and this
+    module deliberately cannot reach them.
+
+    `dspy_history_enabled` is included because §12.4 makes it a precondition of
+    evidence-grade capture: with DSPy history off there is no token or cost
+    evidence at all, and its absence is indistinguishable from a run that cost
+    nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = 1
+    enabled: bool
+    capture_profile: str
+    capture_policy_version: str
+    span_contract_version: int
+    # Per-emitter attribute-contract versions (arch §12.0 delta 5). Additive and
+    # defaulted: this model is frozen with `extra="forbid"`, so a required field
+    # would reject every already-written record and every caller that predates it.
+    #
+    # It does not replace `span_contract_version` above, which stays the answer to
+    # "did anything change between these two runs". This is the answer to "which
+    # emitter", which the aggregate cannot give — and an empty map means the run
+    # predates per-emitter versioning, not that no emitter declared one.
+    span_contract_versions: dict[str, int] = Field(default_factory=dict)
+    db_schema_version: int
+    config: dict[str, str] = Field(default_factory=dict)
+    dspy_history_enabled: Optional[bool] = None
+    # Set only by an evidence-grade run; None means normal best-effort operation,
+    # where drops are acceptable and nobody asserted otherwise.
+    evidence_grade: Optional[bool] = None
+
+    @property
+    def default_deny(self) -> bool:
+        """Whether unclassified fields were withheld rather than captured."""
+        return self.capture_profile == "evidence"
+
+    @property
+    def evidence_interpretable(self) -> bool:
+        """Whether this record is sufficient to read the run's traces.
+
+        Every condition demands a positive answer. `dspy_history_enabled` defaults
+        to None, and accepting "not False" here would report a run with no token
+        or cost evidence as fully interpretable — the one direction this must not
+        fail in, exactly as with `cache_enabled` on `ModelProvenance`.
+        """
+        return self.enabled and self.dspy_history_enabled is True
+
+
+# ----------------------------------------------------------------------
+# The whole record
+# ----------------------------------------------------------------------
+
+
+class RuntimeProvenance(BaseModel):
+    """Everything about a run that originates in fastWorkflow.
+
+    A harness embeds this in the §6.3 `EvaluationProvenance` next to the axes it
+    owns. It is deliberately not that model: corpus, contract and evaluator
+    bundles, tenant/principal/dataset/timeslot fingerprints, backend
+    attestations and seed records are the harness's to attest, and §6.3 is
+    explicit that a writer must record `unknown` rather than invent one from
+    local configuration.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = 1
+    engine: EngineProvenance
+    workflow: WorkflowProvenance
+    models: ModelProvenance
+    # Additive and optional: a harness that consumes no trace evidence owes no
+    # capture regime, and requiring one would break every existing caller to
+    # record a fact that does not apply to it.
+    observability: Optional[ObservabilityProvenance] = None
+
+    @property
+    def reproducible(self) -> bool:
+        """Whether the *code and models* this run used are pinned by this record.
+
+        Requires a known-clean revision, a declared fingerprint that verified
+        (or none declared — `workflow_source_hash` pins the tree either way),
+        and a cache known to be off.
+
+        Every condition demands a positive answer, never merely the absence of a
+        negative. `cache_enabled` defaults to None, so accepting "not False"
+        here would report an ordinary clean-tree run as reproducible while
+        nothing at all is known about whether a cached completion answered
+        instead of the model — the one direction this property must not fail in.
+
+        It says nothing about the dependency closure: `dependency_lock_hashes`
+        records what was resolvable, and an empty one is not consulted here.
+        """
+        return (
+            self.engine.reproducible
+            and self.workflow.fingerprint_verified is not False
+            and self.models.evidence_about_the_model is True
+        )
+
+
+def capture_runtime_provenance(
+    workflow_folderpath: str,
+    metadata: RuntimeMetadata,
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    command_surface_fingerprint: Optional[str] = None,
+    trained_artifact_id: Optional[str] = None,
+    trained_artifact_legacy_layout: bool = False,
+    cache_enabled: Optional[bool] = None,
+    extra_config: Optional[Mapping[str, str]] = None,
+    observability: Optional[ObservabilityProvenance] = None,
+) -> RuntimeProvenance:
+    """Capture the whole fastWorkflow-origin provenance record in one call.
+
+    Intended to run once, at the point a harness begins a measured run, because
+    `engine.source_hash` describes the module tree imported at that moment.
+
+    `observability` is caller-supplied for the §22 reason given on that model: it
+    is built by `evidence_run.capture_observability_provenance()`, which imports
+    the store and therefore cannot be reached from here.
+    """
+    return RuntimeProvenance(
+        engine=capture_engine_provenance(),
+        workflow=capture_workflow_provenance(
+            workflow_folderpath,
+            metadata,
+            command_surface_fingerprint=command_surface_fingerprint,
+            trained_artifact_id=trained_artifact_id,
+            trained_artifact_legacy_layout=trained_artifact_legacy_layout,
+        ),
+        models=capture_model_provenance(
+            env, cache_enabled=cache_enabled, extra_config=extra_config
+        ),
+        observability=observability,
+    )

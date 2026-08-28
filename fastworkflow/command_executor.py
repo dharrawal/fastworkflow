@@ -3,6 +3,7 @@ from fastworkflow import tracing
 from fastworkflow.command_interfaces import CommandExecutorInterface
 
 from fastworkflow import Action, CommandOutput, ChatSession
+from fastworkflow.execution_recorder import record_execution, recorder_for
 from fastworkflow import ModuleType
 from fastworkflow.utils.signatures import InputForParamExtraction
 from pathlib import Path
@@ -38,6 +39,13 @@ class CommandExecutor(CommandExecutorInterface):
                     )
             )
 
+        # One id per command execution, minted before the span so both sides
+        # carry it (arch §12.0 delta 1). This is the join key between the
+        # CommandOutput that lands in the turn's record_json and the span that
+        # produced it; before it there was none.
+        call_id = tracing.new_command_call_id()
+        parent_call_id = tracing.current_call_id()
+
         # fw.command.execute boundary span (observability design §3.1, D3).
         # chat_session is duck-typed (WEC, or ChatSession delegating to its
         # core); with no sink or open turn the helpers no-op.
@@ -45,14 +53,31 @@ class CommandExecutor(CommandExecutorInterface):
             chat_session,
             tracing.SPAN_COMMAND_EXECUTE,
             kind=tracing.KIND_TOOL,
-            attributes={"raw_command": command},
+            attributes={
+                "raw_command": command,
+                tracing.ATTR_COMMAND_CALL_ID: call_id,
+                tracing.ATTR_PARENT_CALL_ID: parent_call_id,
+            },
         )
+
+        # Context BEFORE execution (arch §12.0 delta 2, FW-REQ-002). Gated on a
+        # span having actually opened, for the same reason the attribute prep
+        # below is: with tracing off this work must not run at all.
+        context_before = (
+            tracing.context_handle(cls._active_workflow(chat_session))
+            if span is not None
+            else None
+        )
+
         try:
             # Bind the trace host for the deep NLU emission sites
             # (fw.nlu.intent / fw.nlu.param_extraction) — they run several
             # frames down with no reference to the session ([R28]; D3 as
-            # amended).
-            with tracing.host_scope(chat_session):
+            # amended). call_scope additionally makes this dispatch the parent
+            # of every perform_action hop underneath it.
+            with tracing.host_scope(chat_session), tracing.call_scope(
+                call_id
+            ) as child_calls:
                 command_output = cls._invoke_command_impl(chat_session, command)
         except BaseException as exc:
             # CommandCancelledError/AskUserSuspend are BaseException control
@@ -84,6 +109,22 @@ class CommandExecutor(CommandExecutorInterface):
                     params_dict = params
             except Exception:
                 params_dict = None
+
+        # Stamped unconditionally, not only when a span opened: the id is what
+        # makes the outcome joinable, and a turn recorded with tracing off can
+        # still be read back through a public API.
+        command_output.command_call_id = call_id
+
+        context_after = None
+        consequence = None
+        if span is not None:
+            workflow = cls._active_workflow(chat_session)
+            context_after = tracing.context_handle(workflow)
+            consequence = tracing.consequence_assessment(
+                getattr(workflow, "folderpath", None),
+                command_output.command_name or None,
+            )
+
         tracing.end_span(
             chat_session,
             span,
@@ -96,9 +137,39 @@ class CommandExecutor(CommandExecutorInterface):
                 "parameters": params_dict,
                 "response_text": command_output.command_response.response or "",
                 "success": bool(command_output.success),
+                tracing.ATTR_CONTEXT_BEFORE: context_before,
+                tracing.ATTR_CONTEXT_AFTER: context_after,
+                tracing.ATTR_CONSEQUENCE: consequence,
+                # The internal CME/core hops this dispatch made, each naming its
+                # parent (arch §12.1 item 5). They have no spans of their own, so
+                # this ledger is where their correlation lives. An empty list is
+                # recorded rather than omitted: "this dispatch made no inner
+                # calls" and "nothing captured them" are different facts, and an
+                # absent key cannot tell them apart.
+                tracing.ATTR_CHILD_CALLS: list(child_calls),
             },
         )
+        record_execution(
+            recorder_for(chat_session),
+            command_call_id=call_id,
+            parent_call_id=parent_call_id,
+            span_id=span.span_id if span is not None else None,
+            child_calls=child_calls,
+        )
         return command_output
+
+    @staticmethod
+    def _active_workflow(chat_session: 'fastworkflow.ChatSession'):
+        """The workflow whose command context this dispatch acts on, or None.
+
+        Duck-typed and never raising, like the rest of the tracing seam: this is
+        called only to build capture attributes, and a host that cannot answer
+        must degrade to an absent handle rather than fail the command.
+        """
+        try:
+            return chat_session.get_active_workflow()
+        except Exception:
+            return None
 
     @classmethod
     def _invoke_command_impl(
@@ -176,6 +247,12 @@ class CommandExecutor(CommandExecutorInterface):
         workflow.command_context_for_response_generation = \
             workflow.current_command_context
 
+        # One id per dispatch through this method (arch §12.0 delta 1). It is
+        # the outermost id on the direct-action, startup-action and MCP paths,
+        # and a child id on the internal CME hop that invoke_command makes — in
+        # which case call_scope files it under the enclosing command call.
+        call_id = tracing.new_command_call_id()
+
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
         
@@ -200,7 +277,8 @@ class CommandExecutor(CommandExecutorInterface):
             )
         )
         if not command_parameters_class:
-            command_output = response_generation_object(workflow, action.command)
+            with tracing.call_scope(call_id, command_name=action.command_name):
+                command_output = response_generation_object(workflow, action.command)
             
             # Validate that response_generation_object returns a CommandOutput, not a string
             if not isinstance(command_output, CommandOutput):
@@ -209,6 +287,7 @@ class CommandExecutor(CommandExecutorInterface):
             # Set the additional attributes
             command_output.workflow_name = workflow_name
             command_output.context = context
+            command_output.command_call_id = call_id
             return command_output
 
         # Always resolve the command's Signature class via create() so
@@ -231,7 +310,8 @@ class CommandExecutor(CommandExecutorInterface):
                 f"Invalid action parameters for command '{action.command_name}'\n{error_msg}"
             )
 
-        command_output = response_generation_object(workflow, action.command, input_obj)
+        with tracing.call_scope(call_id, command_name=action.command_name):
+            command_output = response_generation_object(workflow, action.command, input_obj)
         
         # Validate that response_generation_object returns a CommandOutput, not a string
         if not isinstance(command_output, CommandOutput):
@@ -240,6 +320,7 @@ class CommandExecutor(CommandExecutorInterface):
         # Set the additional attributes
         command_output.workflow_name = workflow_name
         command_output.context = context
+        command_output.command_call_id = call_id
         
         return command_output
 

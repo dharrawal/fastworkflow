@@ -396,6 +396,12 @@ class CommandRouter:
         The details dict is JSON-safe: {model_tier, confidence,
         ambiguous_threshold, confident, top_label, topk_labels}. The behavior
         of ``predict`` is unchanged — it delegates here.
+
+        Amendment (fix-ajv.12): ``topk_scores`` joins the list, positionally
+        aligned with ``topk_labels``. It is the probability behind each ranked
+        label, which is what a top-k margin is the difference of; the winning
+        label's own probability is ``confidence``, so the first score is that same
+        number rather than a second measurement of it.
         """
         results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
         used_distil = bool(results['used_distil'])
@@ -413,6 +419,7 @@ class CommandRouter:
             "confident": confident,
             "top_label": str(results['label']),
             "topk_labels": [str(label) for label in results['topk_labels']],
+            "topk_scores": [float(score) for score in results['topk_scores']],
         }
         return list(labels), details
             
@@ -673,12 +680,19 @@ def predict_single_sentence(
     # Convert numeric prediction back to original label name
     label_name = label_encoder.inverse_transform([numeric_prediction])[0]
 
+    # `topk_scores` rides along with the labels it belongs to. `predict_batch`
+    # already computed it in the same forward pass, and dropping it here was what
+    # made `classifier-topk-margin` uncomputable downstream (FW-REQ-021 clause 1):
+    # with only the labels, there is no second-best probability to subtract, and a
+    # second forward pass to recover one would be a real performance change.
+    # Ordering matches `topk_labels` — both come from the same `torch.topk`.
     return {
         "prediction": numeric_prediction,
         "label": label_name,
         "confidence": results["confidences"][0],
         "used_distil": results["used_distil"][0],
-        "topk_labels":label_names
+        "topk_labels":label_names,
+        "topk_scores": results["top_k_scores"][0],
     }
 
 # ---------------------------------------------------------------------

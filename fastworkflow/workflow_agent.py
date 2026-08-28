@@ -192,6 +192,22 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         attributes={"raw_command": command},
     )
 
+    # §12.1.1's shared capture for the agent-tool path (arch §12.0 deltas 1-2/4).
+    # This was the one fw.agent.tool_call emitter it had not reached, which is why
+    # the agent-tool, resumed-turn and distillation rows of the conformance matrix
+    # could not claim P0 — and why a single contract version for this span name
+    # would have described three different attribute sets.
+    #
+    # The projection is `tracing`'s, not a copy of the WorkflowExecutionContext
+    # methods: the same record written three ways is three things to drift.
+    # Resolving the workflow is gated on a span having opened, so with
+    # observability off this seam costs a `start_span` that already declined. One
+    # workflow reference serves both handles, matching the sibling sites — the
+    # handle is re-projected after execution, so a context the command MOVED is
+    # still recorded as a transition.
+    workflow = tracing.active_workflow(chat_session_obj) if span is not None else None
+    context_before = tracing.context_before(span, workflow)
+
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
     from fastworkflow.command_executor import CommandExecutor
@@ -278,6 +294,9 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         attributes={
             "response_text": response_text,
             "success": bool(command_output.success),
+            **tracing.capture_attributes(
+                span, command_output, context_before, workflow
+            ),
         },
     )
 

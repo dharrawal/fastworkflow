@@ -52,6 +52,11 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import state_paths
+from fastworkflow.runtime_manifest import (
+    check_startup_conformance,
+    deployment_env,
+    register_runtime_metadata,
+)
 from fastworkflow.utils.logging import logger
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
@@ -362,6 +367,23 @@ async def lifespan(_app: FastAPI):
         if ARGS.passwords_file_path:
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
+
+        # Startup conformance for the optional workflow runtime manifest
+        # (arch §7.1). Raising here aborts the lifespan, so a nonconformant
+        # manifest or an over-permissive deployment declaration never reaches
+        # readiness — the same reasoning as the session-cap and topic-deadline
+        # checks below: a configuration that would reject traffic should reject
+        # startup instead.
+        # Retained rather than discarded (arch §12.0 delta 4): the effect
+        # contracts validated here are what the per-command ConsequenceAssessment
+        # reads at execution time. Without this the runtime cannot tell a
+        # workflow that declared `read_only` from one that declared nothing.
+        register_runtime_metadata(
+            ARGS.workflow_path,
+            check_startup_conformance(
+                ARGS.workflow_path, env=deployment_env(fastworkflow._env_vars)
+            ),
+        )
 
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
