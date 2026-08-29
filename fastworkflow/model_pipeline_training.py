@@ -17,6 +17,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from typing import List, Dict, NamedTuple, Optional, Tuple,Union
 import pickle
+import threading
 from pathlib import Path
 from collections import Counter
 
@@ -48,7 +49,19 @@ except Exception:  # noqa: BLE001 - older transformers may not expose this
     pass
 
 dataset=None
+# Trainer-only state: `train` fits this one and `save_label_encoder` pickles it.
+# The inference path must never read it - see `get_label_encoder`.
 label_encoder=LabelEncoder()
+
+# path -> (artefact identity, encoder). Inference decodes with the encoder of the
+# context it is predicting in, so that encoder cannot live in module state: a
+# prediction for another context would rebind it during the forward pass - which
+# releases the GIL for tens of ms - and the decode would then run against the wrong
+# label space, either raising "y contains previously unseen labels" or silently
+# returning another context's command. The identity is the artefact's (mtime, size)
+# so a retrain in the same process is not served a stale encoder.
+_label_encoder_cache: dict[str, tuple[tuple[int, int], LabelEncoder]] = {}
+_label_encoder_cache_lock = threading.Lock()
 
 
 class TrainingDataError(ValueError):
@@ -107,9 +120,38 @@ def save_label_encoder(filepath):
         pickle.dump(label_encoder, f)
 
 def load_label_encoder(filepath):
+    """Rebind the trainer's module-level encoder. Not for inference - use
+    ``get_label_encoder``, which hands back the encoder instead of sharing it."""
     global label_encoder
     with open(filepath, 'rb') as f:
         label_encoder = pickle.load(f)
+
+
+def get_label_encoder(filepath) -> LabelEncoder:
+    """Return the encoder pickled at *filepath*, unpickling it at most once per version.
+
+    Callers must bind the result to a local. Assigning it to the module-level
+    ``label_encoder`` would reintroduce the cross-context decode this exists to
+    prevent. Also spares every prediction an unpickle from disk, which the previous
+    ``load_label_encoder`` call per prediction paid.
+    """
+    stat = os.stat(filepath)
+    identity = (stat.st_mtime_ns, stat.st_size)
+
+    with _label_encoder_cache_lock:
+        cached = _label_encoder_cache.get(filepath)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+
+    # Unpickled outside the lock so a cold cache does not serialise every context's
+    # first prediction behind one disk read. Two threads racing here both produce a
+    # correct encoder for this artefact, so whichever result is stored is right.
+    with open(filepath, 'rb') as f:
+        encoder = pickle.load(f)
+
+    with _label_encoder_cache_lock:
+        _label_encoder_cache[filepath] = (identity, encoder)
+    return encoder
 
 
 def find_optimal_confidence_threshold(model, test_loader, device, min_threshold=0.5129, max_top3_usage=0.3, step_size=0.01, k_val=3):
@@ -666,19 +708,18 @@ def predict_single_sentence(
 
 
     # `path` is expected to be the absolute path to the label_encoder artefact
-    global label_encoder
-    load_label_encoder(path)
-    k_val=len(label_encoder.classes_)
+    encoder = get_label_encoder(path)
+    k_val=len(encoder.classes_)
     k_val = 3 if k_val>2 else 2
     # Make prediction using the pipeline's batch prediction method
     results = pipeline.predict_batch([text],k_val=k_val)
     # Get the numeric prediction
     numeric_prediction = results["predictions"][0]
 
-    label_names = label_encoder.inverse_transform(results['top_k_predictions'][0])
+    label_names = encoder.inverse_transform(results['top_k_predictions'][0])
 
     # Convert numeric prediction back to original label name
-    label_name = label_encoder.inverse_transform([numeric_prediction])[0]
+    label_name = encoder.inverse_transform([numeric_prediction])[0]
 
     # `topk_scores` rides along with the labels it belongs to. `predict_batch`
     # already computed it in the same forward pass, and dropping it here was what

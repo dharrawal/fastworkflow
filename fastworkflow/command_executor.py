@@ -24,6 +24,42 @@ class CommandNotFoundError(Exception):
     """Raised when a command cannot be resolved in any accessible context."""
 
 
+def _annotate_exception(exc: BaseException, **fields) -> None:
+    """Stamp routed identity onto an in-flight exception, first writer wins.
+
+    An exception unwinds outward, so the innermost frame that knew the identity
+    is the one that owns it; an enclosing dispatch must not overwrite what a
+    nested one already stamped. Attribute setting is best-effort — an exception
+    with __slots__ refuses it — because losing the annotation is survivable and
+    masking the original exception is not.
+    """
+    for name, value in fields.items():
+        # The READ is inside the guard too, not just the write. An exception
+        # whose type defines a __getattr__ that raises something other than
+        # AttributeError would otherwise propagate out of here and destroy the
+        # command's real exception — the precise failure this function's
+        # docstring says must never happen, reintroduced by the probe meant to
+        # avoid it.
+        try:
+            if getattr(exc, name, None) is None:
+                setattr(exc, name, value)
+        except Exception:
+            pass
+
+
+def _annotation(exc: BaseException, name: str):
+    """Read an annotation without letting a hostile __getattr__ escape.
+
+    Same reason the write is guarded: this runs while an exception is already
+    unwinding, and anything raised here replaces the failure the caller is
+    trying to report with one about the reporting.
+    """
+    try:
+        return getattr(exc, name, None)
+    except Exception:
+        return None
+
+
 class CommandExecutor(CommandExecutorInterface):
     @classmethod
     def invoke_command(
@@ -69,6 +105,9 @@ class CommandExecutor(CommandExecutorInterface):
             else None
         )
 
+        # Bound before the try so the error path can still file this dispatch's
+        # inner hops when call_scope itself is what raised.
+        child_calls: list = []
         try:
             # Bind the trace host for the deep NLU emission sites
             # (fw.nlu.intent / fw.nlu.param_extraction) — they run several
@@ -81,18 +120,47 @@ class CommandExecutor(CommandExecutorInterface):
                 command_output = cls._invoke_command_impl(chat_session, command)
         except BaseException as exc:
             # CommandCancelledError/AskUserSuspend are BaseException control
-            # signals — close the span and always re-raise untouched.
-            from fastworkflow.workflow_execution_context import CommandCancelledError
+            # signals — close the span and always re-raise untouched. Which
+            # exceptions those are lives in `tracing`, not here, so this site
+            # and the four others cannot drift apart (fix-ajv.19); the local
+            # imports that used to name them are gone with the isinstance.
+            is_control_signal = tracing.is_control_signal(exc)
             tracing.end_span(
                 chat_session,
                 span,
-                status=(
-                    tracing.STATUS_CANCELLED
-                    if isinstance(exc, CommandCancelledError)
-                    else tracing.STATUS_ERROR
-                ),
+                # One mapping, shared with every other dispatch site so they
+                # cannot drift apart again. fix-ajv.19.
+                status=tracing.status_for_dispatch_exception(exc),
+                # Routing usually got far enough to bind these before the
+                # generator raised; _invoke_command_impl stamps what it had.
+                # Without them the error span was the only one in the taxonomy
+                # that could not say which command it covered.
+                command_name=_annotation(exc, "_fw_command_name"),
+                context=_annotation(exc, "_fw_context"),
                 attributes={"error_type": type(exc).__name__},
             )
+            if not is_control_signal:
+                # A failure is still a dispatch that happened. Without the id,
+                # the outcome the caller builds from `exc` cannot be joined to
+                # this span or to the record below.
+                _annotate_exception(exc, _fw_call_id=call_id)
+                # Paired with the stamp rather than with the span: an outcome
+                # carrying a command_call_id must have an ExecutionRecordRef to
+                # join to (tests/test_dispatch_path_conformance.py). Control
+                # signals yield no outcome, so they stay unrecorded as before.
+                try:
+                    record_execution(
+                        recorder_for(chat_session),
+                        command_call_id=call_id,
+                        parent_call_id=parent_call_id,
+                        span_id=span.span_id if span is not None else None,
+                        child_calls=child_calls,
+                    )
+                except Exception:
+                    # Every other observation site on this path is wrapped so
+                    # it cannot mask the command's exception; this one was
+                    # bare. Recording is best-effort, unwinding is not.
+                    pass
             raise
 
         # Attribute prep stays inside the never-raise boundary and runs only
@@ -217,14 +285,28 @@ class CommandExecutor(CommandExecutorInterface):
         if "raw_user_message" in workflow.context:
             raw_user_message = workflow.context['raw_user_message']
 
-        if command_parameters_class := (
-            command_routing_definition.get_command_class(
-                command_name, ModuleType.COMMAND_PARAMETERS_CLASS
+        try:
+            if command_parameters_class := (
+                command_routing_definition.get_command_class(
+                    command_name, ModuleType.COMMAND_PARAMETERS_CLASS
+                )
+            ):
+                command_output = response_generation_object(workflow, raw_user_message, input_obj)
+            else:
+                command_output = response_generation_object(workflow, raw_user_message)
+        except BaseException as exc:
+            # Routing resolved this identity above; the assignments that would
+            # publish it onto the CommandOutput sit below the raise, so on
+            # failure it died with the frame and every caller had to report the
+            # command as unnamed. Carry it out on the exception instead, and
+            # re-raise unconditionally — this seam observes, it never handles.
+            _annotate_exception(
+                exc,
+                _fw_command_name=command_name,
+                _fw_workflow_name=workflow_name,
+                _fw_context=context,
             )
-        ):
-            command_output = response_generation_object(workflow, raw_user_message, input_obj)
-        else:
-            command_output = response_generation_object(workflow, raw_user_message)
+            raise
 
         # Set the additional attributes
         command_output.workflow_name = workflow_name

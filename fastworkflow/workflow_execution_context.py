@@ -169,6 +169,14 @@ class WorkflowExecutionContext:
 
         # Turn accumulator state (one logical turn = one key, across suspensions)
         self._turn_outputs: list = []
+        # Bound here and not only in _begin_turn, because _build_turn_result is
+        # reachable on a context that never began a turn in THIS process: resume
+        # continues the same logical turn and deliberately skips _begin_turn
+        # (see _serialize_turn_accumulator). The read at finalize guards on
+        # `is not None`, so an attribute that does not exist made the guard
+        # itself raise AttributeError — a missing binding wearing the costume of
+        # a null check. fix-ajv.20.
+        self._execution_recorder: Optional[ExecutionRecorder] = None
         self._turn_key: Optional[str] = None
         self._turn_started_at: Optional[datetime] = None
         self._turn_user_message: str = ""
@@ -410,11 +418,13 @@ class WorkflowExecutionContext:
         is suspended). Both topologies funnel through here: Topology A via
         _ask_user_tool, Topology B via _note_agent_suspension.
         """
-        attempt = sum(
-            1 for output in self._turn_outputs if output.command_name == "ask_user"
-        )
+        # `is_ask_user`, not the name: this count feeds a DETERMINISTIC span id,
+        # so a failed command called `ask_user` would not just miscount, it
+        # would make two real ask_user spans collide on one id. fix-ajv.17.
+        attempt = sum(1 for output in self._turn_outputs if output.is_ask_user)
         entry = fastworkflow.CommandOutput(
             command_name="ask_user",
+            ask_user_entry=True,
             command_parameters=question,
             command_response=
                 fastworkflow.CommandResponse(response="", success=False),
@@ -451,10 +461,11 @@ class WorkflowExecutionContext:
         """
         for index in range(len(self._turn_outputs) - 1, -1, -1):
             entry = self._turn_outputs[index]
-            if (
-                entry.command_name == "ask_user"
-                and entry.command_response.success is False
-            ):
+            # `is_ask_user`, not the bare name: a failed command that happens
+            # to be called `ask_user` also matches name+unsuccessful, and this
+            # loop would overwrite its error with the user's answer and mark it
+            # successful. fix-ajv.17.
+            if entry.is_ask_user and entry.command_response.success is False:
                 entry.command_response.response = answer
                 entry.command_response.success = True
                 if entry.started_at is not None:
@@ -474,7 +485,7 @@ class WorkflowExecutionContext:
         attempt = sum(
             1
             for output in self._turn_outputs[:entry_index]
-            if output.command_name == "ask_user"
+            if output.is_ask_user
         )
         span = tracing.Span(
             span_id=tracing.deterministic_span_id(
@@ -509,7 +520,7 @@ class WorkflowExecutionContext:
         last = self._turn_outputs[-1] if self._turn_outputs else None
         already_appended = (
             last is not None
-            and last.command_name == "ask_user"
+            and last.is_ask_user
             and last.command_response.success is False
             and last.command_parameters == clarification
         )
@@ -854,6 +865,15 @@ class WorkflowExecutionContext:
         self._turn_history_baseline = len(self.conversation_history.messages)
 
         self._turn_key = turn.get("key")
+        # The ledger is per-process and not serialized: the pre-suspension
+        # process kept its own, and those records went durable with its spans.
+        # What this rebuilds is the accumulator for the commands the RESUMED
+        # turn is about to run, so their outcomes can still be joined to their
+        # execution records. Sink-gated exactly as _begin_turn gates it, so
+        # observability-off costs nothing here either. fix-ajv.20.
+        self._execution_recorder = (
+            ExecutionRecorder() if tracing.get_sink(self) is not None else None
+        )
         self._turn_outputs = [
             fastworkflow.CommandOutput.model_validate(o)
             for o in (turn.get("outputs") or [])
@@ -1544,11 +1564,7 @@ class WorkflowExecutionContext:
             tracing.end_span(
                 self,
                 span,
-                status=(
-                    tracing.STATUS_AWAITING_USER
-                    if isinstance(exc, (AskUserSuspend, CommandCancelledError))
-                    else tracing.STATUS_ERROR
-                ),
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"attempts": attempts, "error_type": type(exc).__name__},
             )
             raise
@@ -1799,14 +1815,14 @@ class WorkflowExecutionContext:
         invoke_started_at = datetime.now(timezone.utc)
         try:
             command_output = self._CommandExecutor.invoke_command(self, message)
-        except CommandCancelledError:
-            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
-            raise
         except BaseException as exc:
+            # One arm, not two: a separate `except CommandCancelledError` left
+            # AskUserSuspend — the other control signal — falling through to the
+            # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
             tracing.end_span(
                 self,
                 span,
-                status=tracing.STATUS_ERROR,
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"error_type": type(exc).__name__},
             )
             raise
@@ -1925,14 +1941,14 @@ class WorkflowExecutionContext:
         action_started_at = datetime.now(timezone.utc)
         try:
             command_output = self._CommandExecutor.perform_action(workflow, action)
-        except CommandCancelledError:
-            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
-            raise
         except BaseException as exc:
+            # One arm, not two: a separate `except CommandCancelledError` left
+            # AskUserSuspend — the other control signal — falling through to the
+            # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
             tracing.end_span(
                 self,
                 span,
-                status=tracing.STATUS_ERROR,
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"error_type": type(exc).__name__},
             )
             raise

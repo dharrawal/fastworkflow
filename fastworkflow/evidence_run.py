@@ -42,6 +42,7 @@ un-migrated dispatch paths of §12.1.1 are both examples. Zero-drop is a floor.
 from __future__ import annotations
 
 import contextlib
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -51,6 +52,9 @@ from typing import Any, Optional
 from fastworkflow import capture_policy, observability_store, state_paths, tracing
 from fastworkflow.provenance import ObservabilityProvenance
 from fastworkflow.utils.logging import logger
+
+# How often to re-read the persisted health row while waiting for it to advance.
+_HEALTH_POLL_INTERVAL_S = 0.1
 
 
 class EvidenceRunInvalid(RuntimeError):
@@ -106,6 +110,14 @@ class EvidenceRun:
     delta: Optional[observability_store.WriterHealthDelta] = None
     archive: Optional[dict[str, Any]] = None
     extra_problems: list[str] = field(default_factory=list)
+    # Which process's counters this verdict rests on. True = this process holds
+    # the sink and the numbers are its live counters; False = the writer is
+    # somewhere else and the numbers come from the persisted diagnostics row,
+    # which this run had to wait for rather than flush. Recorded because a
+    # reader cannot otherwise tell a measured interval from an assumed one, and
+    # the cross-process case is where the old code silently reported zeros
+    # (fix-ajv.13).
+    in_process: bool = True
 
     @property
     def valid(self) -> bool:
@@ -131,6 +143,7 @@ class EvidenceRun:
         return {
             "run_id": self.run_id,
             "db_path": self.db_path,
+            "in_process": self.in_process,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "valid": self.valid,
@@ -154,14 +167,51 @@ def _health_snapshot(
     run that read only the row could snapshot a drop that had already happened as
     though it had not. The row is the cross-process fallback, and `None` from both
     is reported as `incomparable` rather than as zero.
+
+    The sink handed in here is now only ever one this process ALREADY had (see
+    `existing_observability_sink`). It is never minted to satisfy this call, so
+    "no sink" reliably means "this process is not the writer" instead of meaning
+    "nobody has asked yet". fix-ajv.13.
     """
     if sink is not None and not sink._closed:
         return sink.health_snapshot()
+    return _persisted_health(db_path)
+
+
+def _persisted_health(db_path: str) -> Optional[dict[str, Any]]:
+    """The `diagnostics` writer-health row, or None if it cannot be read."""
     try:
         return observability_store.ObservabilityStore(db_path).writer_health()
     except Exception as exc:
         logger.warning(f"Could not read writer health from {db_path}: {exc!r}")
         return None
+
+
+def _await_health_refresh(
+    db_path: str, since: Optional[str], settle_s: float
+) -> Optional[dict[str, Any]]:
+    """Poll the persisted health row until it advances past `since`.
+
+    The cross-process half of fix-ajv.13. The writing process persists its
+    counters on a heartbeat, so reading the row the instant the body returns can
+    snapshot a moment BEFORE the run's last writes — and a drop during those
+    writes would land outside the measured interval and be reported as clean.
+
+    Returns the freshest row read. The caller decides what an unrefreshed row
+    means; this function does not judge, so that "we waited and it never moved"
+    stays distinguishable from "we never looked".
+    """
+    deadline = time.monotonic() + max(settle_s, 0.0)
+    health = _persisted_health(db_path)
+    while time.monotonic() < deadline:
+        if health is not None and since is not None:
+            if str(health.get("updated_at") or "") > since:
+                return health
+        elif health is not None and since is None:
+            return health
+        time.sleep(_HEALTH_POLL_INTERVAL_S)
+        health = _persisted_health(db_path)
+    return health
 
 
 @contextlib.contextmanager
@@ -173,6 +223,7 @@ def evidence_run(
     dspy_history_enabled: Optional[bool] = None,
     require_evidence_profile: bool = False,
     raise_on_invalid: bool = False,
+    health_settle_s: float = 5.0,
 ):
     """Record a measured run, then verify nothing was silently lost.
 
@@ -188,6 +239,23 @@ def evidence_run(
     partially-valid run itself; raising by default would discard the run's data to
     signal that the run's data is suspect.
 
+    TOPOLOGY. This never constructs an observability sink. If this process is
+    the writer it already has one and its live counters are used; otherwise the
+    verdict is read from the persisted `diagnostics` row and `health_settle_s`
+    bounds how long to wait for the writing process to publish a row covering
+    the end of the run. A run that cannot read health from either source, or
+    whose cross-process row never advances, is reported with a problem rather
+    than as a clean interval — an unread counter is not a measurement of zero.
+    See `EvidenceRun.in_process`. fix-ajv.13.
+
+    CROSS-PROCESS PRUNING is a separate contract this cannot enforce from here:
+    `suppress_pruning()` below is an in-process counter, so it withholds pruning
+    in THIS process and not in the server that is actually writing. The only
+    switch that crosses a process boundary is the `FW_OBS_SUPPRESS_PRUNE`
+    environment variable, and it must be in the writer's environment BEFORE it
+    starts, because `SQLiteTraceSink.__init__` prunes opportunistically. See
+    fix-ajv.14 and `run_fastapi_mcp`'s startup report of the value in effect.
+
     `require_evidence_profile` additionally demands
     `FW_OBS_CAPTURE_PROFILE=evidence`. Off by default because the profile governs
     exposure, not completeness — a `debug`-profile run loses no evidence, it just
@@ -198,7 +266,15 @@ def evidence_run(
     """
     run_id = run_id or f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     db_path = state_paths.observability_db(workflow_folderpath)
-    sink = observability_store.get_observability_sink(workflow_folderpath)
+    # PEEK, never construct. Constructing here is what made a cross-process run
+    # certify itself: the harness got a sink of its own, both snapshots then read
+    # THAT sink's counters, which are zero and stay zero because the server is
+    # the process doing the dropping — so the delta was all zeros,
+    # incomparable=False, evidence_valid=True, for a run that measured nothing.
+    # It also started a second writer thread against the server's database and
+    # ran an opportunistic prune on the way in. fix-ajv.13.
+    sink = observability_store.existing_observability_sink(workflow_folderpath)
+    in_process = sink is not None
 
     provenance = capture_observability_provenance(
         dspy_history_enabled=dspy_history_enabled, evidence_grade=True
@@ -209,7 +285,17 @@ def evidence_run(
         provenance=provenance,
         started_at=datetime.now(timezone.utc),
         health_before=_health_snapshot(db_path, sink),
+        in_process=in_process,
     )
+    if not in_process and run.health_before is None:
+        # No sink here and no persisted row there: nothing to compare against,
+        # and the run must say so rather than report a clean interval. Zero
+        # drops out of an unread counter is not a measurement.
+        run.extra_problems.append(
+            "no writer health is available: this process holds no observability "
+            "sink and the database has no persisted writer-health row, so no "
+            "drop could have been detected by this run"
+        )
     if not provenance.enabled:
         run.extra_problems.append(
             "observability is disabled (FW_OBSERVABILITY), so this run recorded no "
@@ -238,13 +324,63 @@ def evidence_run(
         raise
     finally:
         run.completed_at = datetime.now(timezone.utc)
+        if sink is None:
+            # Re-peek. A sink that did not exist when the block opened but does
+            # now means THIS process became the writer during the run — the
+            # ordinary in-process shape, where the harness opens the gate and
+            # then starts the workflow that installs the sink. Its counters
+            # began at zero when it was constructed, which was inside the
+            # block, so every drop it counted belongs to this run and an empty
+            # dict is the correct baseline: `health_delta` reads a missing key
+            # as zero.
+            #
+            # Deliberately NOT the persisted row here. That row belongs to a
+            # different writer instance, so subtracting it would either credit
+            # this run with a predecessor's drops or, through max(0, ...), hide
+            # this run's own. fix-ajv.13.
+            appeared = observability_store.existing_observability_sink(
+                workflow_folderpath
+            )
+            if appeared is not None:
+                sink = appeared
+                run.in_process = True
+                run.health_before = {}
+                # The problem recorded at open assumed nobody would write here.
+                run.extra_problems = [
+                    problem
+                    for problem in run.extra_problems
+                    if not problem.startswith("no writer health is available")
+                ]
         if sink is not None and not sink._closed:
             # Flush first: an unflushed queue makes the "after" snapshot describe
             # a moment before the last turns were written, so a drop during that
             # final write would land outside the measured interval.
             sink.flush()
             sink.persist_health()
-        run.health_after = _health_snapshot(db_path, sink)
+            run.health_after = _health_snapshot(db_path, sink)
+        else:
+            # Cross-process: we cannot flush the writer, only wait for it to
+            # publish. An unrefreshed row means the writing process never
+            # persisted health inside this run's interval, so the "after"
+            # numbers describe a moment before the run's last writes — the
+            # window in which a drop is most likely and would go unseen.
+            before_stamp = str((run.health_before or {}).get("updated_at") or "") or None
+            run.health_after = _await_health_refresh(
+                db_path, before_stamp, health_settle_s
+            )
+            after_stamp = str((run.health_after or {}).get("updated_at") or "") or None
+            if run.health_after is None:
+                run.extra_problems.append(
+                    "the writing process published no writer-health row, so this "
+                    "run's drop count could not be read at all"
+                )
+            elif before_stamp is not None and after_stamp == before_stamp:
+                run.extra_problems.append(
+                    f"the writing process did not publish writer health during this "
+                    f"run (row still stamped {before_stamp} after waiting "
+                    f"{health_settle_s}s), so the delta describes an interval that "
+                    f"ended before the run did"
+                )
         run.delta = observability_store.health_delta(run.health_before, run.health_after)
 
         if archive_dir is not None:

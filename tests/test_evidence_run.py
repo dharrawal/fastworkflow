@@ -315,7 +315,14 @@ def test_pruning_is_suppressed_inside_the_block_and_restored_after(workflow_path
         assert store.prune() == {"suppressed": 1}
     assert obs.pruning_suppressed() is False
     assert "suppressed" not in store.prune()
-    assert run.valid
+
+    # This run installs no sink and writes nothing, so no writer health exists
+    # on either side and the run cannot certify anything. It used to report
+    # `valid` here — which is the false certification fix-ajv.13 is about: the
+    # zeros came from counters nobody had written, not from a measured interval.
+    # Suppression, this test's actual subject, is asserted above.
+    assert run.valid is False
+    assert any("no writer health is available" in p for p in run.problems())
 
 
 def test_suppression_is_distinguishable_from_having_nothing_to_prune(workflow_path):
@@ -500,3 +507,69 @@ def test_a_crashed_run_is_still_verified_and_archived(workflow_path, tmp_path):
     assert run.delta is not None
     assert run.archive is not None
     assert Path(run.archive["path"]).exists()
+
+
+# ----------------------------------------------------------------------
+# Cross-process runs must not certify themselves (fix-ajv.13)
+# ----------------------------------------------------------------------
+#
+# The gate used to call get_observability_sink(), which CONSTRUCTS one. A
+# harness driving a separate server process therefore got a sink of its own,
+# and both snapshots read that sink's counters — which are zero and stay zero,
+# because the server is the process doing the dropping. Delta all zeros,
+# incomparable=False, evidence_valid=True, for a run that measured nothing.
+# Constructing it also started a second writer thread against the server's
+# database and ran SQLiteTraceSink.__init__'s opportunistic prune, so the
+# evidence gate pruned evidence on its way in.
+
+
+def test_the_gate_does_not_construct_a_sink(workflow_path):
+    """The load-bearing regression: opening the gate must not make this process
+    a writer, because that is what silently replaced the server's counters with
+    the harness's own — and what ran a prune before suppression was entered."""
+    assert obs.existing_observability_sink(workflow_path) is None
+
+    with evidence_run(workflow_path, run_id="run-nosink"):
+        assert obs.existing_observability_sink(workflow_path) is None
+
+    assert obs.existing_observability_sink(workflow_path) is None
+
+
+def test_a_run_with_no_readable_writer_health_is_not_valid(workflow_path):
+    """Unknown is not a pass. Zeros out of a counter nobody wrote are not a
+    measurement of zero, and this is exactly the shape a cross-process harness
+    had: no sink here, nothing published there."""
+    with evidence_run(workflow_path, run_id="run-unknown") as run:
+        pass
+
+    assert run.valid is False
+    assert run.in_process is False
+    assert any("no writer health is available" in p for p in run.problems())
+
+
+def test_a_sink_installed_during_the_run_is_measured_from_zero(workflow_path):
+    """The ordinary in-process shape: the gate opens, then the workflow starts
+    and installs the sink. Its counters began at zero INSIDE the block, so every
+    drop it counted belongs to this run and the baseline is empty — not the
+    persisted row, which would belong to a different writer instance."""
+    with evidence_run(workflow_path, run_id="run-appears") as run:
+        sink = obs.get_observability_sink(workflow_path)
+        sink.emit_turn_record(_turn(0))
+
+    assert run.in_process is True
+    assert run.health_before == {}
+    assert run.delta.incomparable is False
+    assert run.valid
+
+
+def test_the_record_says_which_process_the_verdict_came_from(workflow_path, tmp_path):
+    """A reader cannot otherwise tell a measured interval from an assumed one."""
+    with evidence_run(
+        workflow_path, run_id="run-topology", archive_dir=str(tmp_path / "b")
+    ) as run:
+        sink = obs.get_observability_sink(workflow_path)
+        sink.emit_turn_record(_turn(0))
+
+    record = run.as_record()
+    assert record["in_process"] is True
+    assert json.dumps(record)

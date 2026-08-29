@@ -502,6 +502,45 @@ STATUS_AWAITING_USER = "awaiting_user"
 _DEFAULT_MAX_ATTR_BYTES = 16384
 
 
+def is_control_signal(exc: BaseException) -> bool:
+    """True for the BaseExceptions that mean "pause", not "fail".
+
+    `CommandCancelledError` and `AskUserSuspend` both unwind a dispatch without
+    anything having gone wrong: the first suspends a trajectory for ask_user
+    resume, the second is raised by ask_user when no user_message_queue is
+    configured. Both subclass BaseException precisely so ordinary
+    `except Exception` handlers do not swallow them.
+
+    Imports are deferred: both defining modules import this one.
+    """
+    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.workflow_execution_context import CommandCancelledError
+
+    return isinstance(exc, (AskUserSuspend, CommandCancelledError))
+
+
+def status_for_dispatch_exception(exc: BaseException) -> str:
+    """The span status for an exception that ended a command dispatch.
+
+    ONE mapping in ONE place, because five sites used to each carry their own
+    isinstance check and they did not agree (fix-ajv.19). The same
+    AskUserSuspend closed as `error` in three of them, `awaiting_user` in a
+    fourth, and escaped a fifth without closing its span at all — so an
+    ordinary pause for input drew as a red ERROR node in the chatbot waterfall
+    (index.html:1671), and what a reader saw depended on which layer happened
+    to catch it.
+
+    Control signals map to CANCELLED rather than AWAITING_USER deliberately.
+    `awaiting_user` is a TURN-level state in this codebase: the store's
+    non-terminal turn status, and the only thing the SPA tests it for
+    (index.html:803/840/2342 all read `turn.status`). Nothing anywhere reads a
+    SPAN status of awaiting_user. A span status describes that span's own
+    outcome — this dispatch was cut short — while "we are waiting on a human"
+    is recorded once, on the turn, where readers already look for it.
+    """
+    return STATUS_CANCELLED if is_control_signal(exc) else STATUS_ERROR
+
+
 @dataclass
 class Span:
     """One OTel-shaped span record (spans table shape, design §3.2)."""

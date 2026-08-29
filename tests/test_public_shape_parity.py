@@ -92,6 +92,14 @@ COMMAND_OUTPUT_FIELDS = (
     "duration_ms",
     # Appended by fix-ajv.3 (arch §12.0 delta 1), optional with a default.
     "command_call_id",
+    # Appended by fix-ajv.17, optional with a default, and APPENDED rather than
+    # inserted for the same §12.2 reason the TurnResult pin spells out: the
+    # claim is that everything before it is untouched. `is_ask_user` used to be
+    # `command_name == "ask_user"`, which fix-ajv.16 made forgeable — a failure
+    # output carries the real routed name with success=False, and root-context
+    # names are unqualified, so a workflow defining a root command called
+    # `ask_user` would have its failures collected as unanswered questions.
+    "ask_user_entry",
 )
 
 # `success` is a computed field: absent from `model_fields`, present in every

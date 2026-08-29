@@ -249,3 +249,87 @@ def test_record_execution_with_no_recorder_is_cheap():
         )
     elapsed = time.perf_counter() - start
     assert elapsed < 1.0, f"record_execution(None) took {elapsed:.2f}s for 100k calls"
+
+
+# ----------------------------------------------------------------------
+# The recorder must exist on every construction path (fix-ajv.20)
+# ----------------------------------------------------------------------
+#
+# _build_turn_result reads `self._execution_recorder.records() if
+# self._execution_recorder is not None else ()`. That guard is only a guard if
+# the attribute exists: _begin_turn was the sole binder, and resume deliberately
+# skips _begin_turn (it continues the same logical turn), so a cross-process
+# resume reached the read on a context that had never bound it — and the null
+# check raised AttributeError instead of returning (). A missing binding wearing
+# the costume of a null check.
+
+
+def test_a_fresh_context_has_the_attribute_before_any_turn_begins(
+    initialized_fastworkflow, todo_workflow_path, tmp_path, sink
+):
+    """Construction, not _begin_turn, is what guarantees the attribute."""
+    context = _make_ctx(todo_workflow_path, tmp_path, sink)
+    try:
+        # Not getattr(..., default): the point is that the attribute is bound.
+        assert context.__dict__["_execution_recorder"] is None
+    finally:
+        with suppress(Exception):
+            context.close()
+
+
+def test_a_resumed_turn_finalizes_instead_of_raising(
+    initialized_fastworkflow, todo_workflow_path, tmp_path, sink
+):
+    """The production shape of the bug: resume, then finalize, in a new process.
+
+    `apply_serialized_state` rebuilds the turn accumulator without _begin_turn,
+    which is exactly the path that used to reach the read unbound.
+    """
+    origin = _make_ctx(todo_workflow_path, tmp_path, sink)
+    origin._begin_turn("original message")
+    state = origin.serialize_state(channel_id="chan")
+    with suppress(Exception):
+        origin.close()
+
+    resumed = _make_ctx(todo_workflow_path, tmp_path, sink)
+    try:
+        resumed.apply_serialized_state(state)
+        turn_result = resumed._build_turn_result(
+            fastworkflow.CommandOutput(
+                command_name="x",
+                command_response=fastworkflow.CommandResponse(response="ok"),
+            )
+        )
+        assert turn_result is not None
+    finally:
+        with suppress(Exception):
+            resumed.close()
+
+
+def test_a_resumed_turn_can_still_record_its_post_resume_commands(
+    initialized_fastworkflow, todo_workflow_path, tmp_path, sink
+):
+    """Not merely 'does not crash': the resumed half of the turn stays joinable.
+
+    The pre-suspension process kept its own ledger and those records went durable
+    with its spans; what the restore rebuilds is the accumulator for the commands
+    the resumed turn is about to run. Without it every post-resume outcome would
+    carry a command_call_id with no ExecutionRecordRef to join to — the same gap
+    fix-ajv.16 closed for failures, reopened for resumptions.
+    """
+    origin = _make_ctx(todo_workflow_path, tmp_path, sink)
+    origin._begin_turn("original message")
+    state = origin.serialize_state(channel_id="chan")
+    with suppress(Exception):
+        origin.close()
+
+    resumed = _make_ctx(todo_workflow_path, tmp_path, sink)
+    try:
+        resumed.apply_serialized_state(state)
+        assert resumed._execution_recorder is not None, "sink installed → recorder"
+
+        resumed.process_action_turn(_action())
+        assert resumed._turn_outputs[-1].command_call_id
+    finally:
+        with suppress(Exception):
+            resumed.close()

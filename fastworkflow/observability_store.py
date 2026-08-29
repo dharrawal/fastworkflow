@@ -491,6 +491,42 @@ def _apply_capture_policy(
     """
     for command_output in record.get("turn_output", {}).get("command_outputs", []):
         command_name = command_output.get("command_name") or "unknown"
+        # A FAILED command's response and artifacts are diagnostic content —
+        # an exception repr, a message, a traceback — not the command's normal
+        # output, so they must not inherit the policy written for its happy
+        # path. `CapturePolicy.apply` returns a value WHOLE when a declared
+        # policy is not gated for this sink, so a perfectly reasonable
+        # `command.X.response` rule (X's normal response is benign, keep it)
+        # would also release X's failure text once fix-ajv.16 started naming
+        # failed commands. A separate segment makes releasing error text
+        # something a deployment has to say, rather than something it inherits.
+        # fix-ajv.18.
+        #
+        # ask_user is excluded deliberately [A7]: `success=False` on an
+        # ask_user entry means the question is still unanswered, not that
+        # anything failed, and its response is the user's ANSWER — ordinary
+        # user text that belongs on the ordinary path.
+        #
+        # Read via the structural marker with the name as fallback, mirroring
+        # `CommandOutput.is_ask_user` — this walks the model_dump()ed dict, so
+        # it cannot call the property. `ask_user_entry` absent means a record
+        # written before that field existed (fix-ajv.17); True/False are
+        # authoritative, and False is what a failed command NAMED `ask_user`
+        # carries, which is the whole point of not testing the name here.
+        response_dict = command_output.get("command_response") or {}
+        marker = command_output.get("ask_user_entry")
+        is_ask_user = marker if marker is not None else command_name == "ask_user"
+        is_failure = response_dict.get("success") is False and not is_ask_user
+        # PARAMETERS DELIBERATELY STAY ON THE ORDINARY PATH, and this asymmetry
+        # is the point rather than an oversight. A failure's parameters are the
+        # SAME values the success path carries, so a rule written to gate them
+        # must keep applying; moving them under `.error.` would stop that rule
+        # matching and fall through to the profile default — which under
+        # `debug` returns the value whole. Separating them would un-gate the
+        # one field group the success policy is right about.
+        outcome_prefix = (
+            f"command.{command_name}.error" if is_failure else f"command.{command_name}"
+        )
         parameters = command_output.get("command_parameters")
         if isinstance(parameters, dict):
             for field_name in list(parameters):
@@ -514,7 +550,7 @@ def _apply_capture_policy(
         response = command_output.get("command_response") or {}
         if response.get("response"):
             response["response"] = policy.apply(
-                f"command.{command_name}.response",
+                f"{outcome_prefix}.response",
                 response["response"],
                 classification="user-text",
             )
@@ -529,7 +565,7 @@ def _apply_capture_policy(
             if isinstance(value, dict) and "__fw_artifact_ref__" in value:
                 continue
             artifacts[key] = policy.apply(
-                f"command.{command_name}.artifacts.{key}",
+                f"{outcome_prefix}.artifacts.{key}",
                 value,
                 classification=_policy_classification(classify, command_name, key),
             )
@@ -2605,6 +2641,29 @@ def observability_enabled(default_on: bool) -> bool:
     default_on=True; library embedders get the sink only with FW_OBSERVABILITY=1."""
     value = _env("FW_OBSERVABILITY", "1" if default_on else "0")
     return value not in ("0", "false", "False", "no", "off")
+
+
+def existing_observability_sink(workflow_path: str) -> Optional[SQLiteTraceSink]:
+    """The live sink for this workflow's DB **if this process already has one**.
+
+    Deliberately does NOT construct. `get_observability_sink` creating a sink on
+    demand is right for a writer and wrong for an observer: a harness driving a
+    separate server process has no sink of its own, and asking for one starts a
+    second writer thread against a database another process is writing AND runs
+    `SQLiteTraceSink.__init__`'s opportunistic prune — so an evidence gate could
+    prune the very evidence it was opening to protect. fix-ajv.13.
+
+    Never raises; a path that cannot be resolved reads as "no sink".
+    """
+    try:
+        db_path = state_paths.observability_db(workflow_path)
+    except Exception:
+        return None
+    with _sinks_lock:
+        sink = _sinks.get(db_path)
+    if sink is None or sink._closed:
+        return None
+    return sink
 
 
 def get_observability_sink(
