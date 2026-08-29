@@ -369,11 +369,29 @@ There is deliberately no box for a startup command or a per-session context: the
 
 A spawned server always binds `127.0.0.1`, has CORS pinned to loopback origins, and is stopped when the chatbot exits (SIGTERM included). It runs with unsigned dev JWTs — fine for a loopback-only dev server whose tokens the chatbot mints itself; pass `--expect-encrypted-jwt` to require signed tokens instead (then paste one in the chat's Advanced panel). Already have a server running? Launch with `--server-port <port>` and connect via the Advanced panel.
 
-Insights distillation (`fastworkflow run --generate_insights`) stays CLI-only by design, as do bind address and env-file choices for externally managed servers. The full capability comparison is in [`docs/run_chatbot_cli_parity.md`](docs/run_chatbot_cli_parity.md).
+*Running* insights distillation (`fastworkflow run --generate_insights`) stays CLI-only by design, as do bind address and env-file choices for externally managed servers — but *reviewing* what it produced is now a chatbot surface (see below). The full capability comparison is in [`docs/run_chatbot_cli_parity.md`](docs/run_chatbot_cli_parity.md).
+
+### Reviewing distillation: where a rule came from, and whether it holds
+
+`fastworkflow run --generate_insights` runs every message twice — a **teacher** pass on a large model and a **student** pass on a small one — diffs them, and appends the rules it draws to `Insights/<workflow>/planning_agent_insights.md` and `execution_agent_anti_patterns.md`. Those two files are the product; everything that justified them used to be thrown away when the call returned. It is now recorded, and reviewable.
+
+A distilled turn is marked in the turn list, with the two facts that decide whether it is worth opening: whether the passes **diverged**, and whether they were **comparable** at all. Opening one gives you:
+
+- **Passes.** Both passes share the turn's trace, so the raw waterfall interleaves them. The pass selector renders one clean trajectory at a time — teacher, student, or the spans belonging to neither.
+- **The run header.** Per-role models, both entry state fingerprints and whether they matched, per-pass duration, tokens and cost, and whether a DSPy cache hit in one pass but not the other made the *cost* columns incomparable. A run whose passes did **not** start from the same state is flagged loudly and excluded from every aggregate: a divergence is evidence of a student mistake only if both passes started identical, and without that check every diff is deniable.
+- **The aligned diff.** A real sequence alignment, stored — not a prose summary and not recomputed in the browser. Each row carries a kind (`missing-in-student`, `same-command-different-params`, …) and a **materiality** flag, so "the student reached the same end state by a different path" is visibly not an error. Parameter-level highlighting means *step 3 used the wrong `customer_id`* is legible without opening both spans.
+- **The insights.** Each rule shown beside the divergences it cites, with a click through to either side's span, its support and contradiction counts across the whole corpus, and a **verdict** you can record (`supported`, `overfit-to-single-turn`, …). Verdicts are append-only with supersede: an insight accepted and later contradicted keeps both rows, because the history of judgements is itself evidence.
+- **Negative outcomes**, which are evidence too: a run that diverged but whose extractor returned nothing, and a run whose passes simply agreed — the contradiction set for every future rule.
+
+**Distillation corpus** in the debug rail aggregates it: divergence rate by week (is the student improving as insights accumulate?), frequency by command and by divergence kind, teacher-vs-student cost, and per-insight support and contradiction counts.
+
+None of this requires the browser. The same records are documented SQL — the tables, their joins and eight verified recipes ship in the [`debug-workflow-conversations`](fastworkflow/skills_for_coding_fastworkflows/debug-workflow-conversations/SKILL.md) skill — and a whole run exports as one self-contained JSON document, so an agent extracting skills and verifiers works from the evidence rather than from the markdown file.
+
+Retention knows about all this: the evidence behind an insight is **pinned** and cannot be pruned while that insight is unadjudicated or supported, and every run tells you which pin class it is in and when it is released.
 
 ### Retention and erasure
 
-Trace data grows. Spans and artifacts are pruned beyond a retention horizon; **turn records and conversations are never deleted by a default prune**, so history survives.
+Trace data grows. Spans and artifacts are pruned beyond a retention horizon; **turn records and conversations are never deleted by a default prune**, so history survives. Distillation evidence is pinned against that horizon while it still justifies a live rule — a shipped insight whose trace expired would be an unverifiable rule in a file, which is the failure this recording exists to prevent.
 
 Use **Clear conversations** in Debug mode for an explicit, confirmed reset. It removes conversation labels, turns, spans, artifacts, feedback, and legacy per-channel conversation files. Training runs, writer diagnostics, and monotonic conversation counters survive, so identities are never reused after a clear.
 

@@ -14,6 +14,11 @@ Where the data lives:
    `~/.local/state/fastworkflow`). Written by SQLiteTraceSink: turn records
    sync-first on the turn path, spans/artifacts on a background writer.
    `spans.trace_id` IS the `turns.turn_key`, so one join covers a whole turn.
+   (A CLI counterfactual replay is the one exception: it writes into
+   `<turn_key>~replay.<n>` and has no `turns` row.) On a `--generate_insights`
+   turn the trace holds BOTH passes, told apart by `spans.distillation_pass`,
+   which this script prints beside each span — duplicate-looking tool calls
+   there are the two passes, not a loop.
    Persists across turns and processes — unlike action.jsonl, which only ever
    held the last turn.
 
@@ -202,7 +207,20 @@ def _span_line(span: sqlite3.Row) -> str:
         parts.append(f"command={span['command_name']}")
     if span["context"]:
         parts.append(f"context={span['context']}")
+    # On a --generate_insights turn one trace holds two trajectories. Without
+    # the label the tree reads as a loop that ran everything twice.
+    pass_label = _column(span, "distillation_pass")
+    if pass_label:
+        parts.append(f"pass={pass_label}")
     return "  ".join(parts)
+
+
+def _column(row: sqlite3.Row, name: str):
+    """One column, or None on a DB written before it existed."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
 
 
 def _print_span_tree(spans: list[sqlite3.Row]) -> None:

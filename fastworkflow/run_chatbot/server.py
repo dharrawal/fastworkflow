@@ -35,6 +35,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import tempfile
 import threading
 import time
@@ -44,6 +45,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from fastworkflow import state_paths
 from fastworkflow.observability_store import (
+    FEATURE_DISTILLATION_V1,
     IncompatibleObservabilityDB,
     ObservabilityStore,
     ReadOnlyObservabilityStore,
@@ -870,6 +872,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 "/api/configure_env",
                 "/api/clear_conversations",
                 "/api/train",
+                # `[DR30]`: the fifth route, argued in design §12. It is not a
+                # relaxation of `[R12]` — the invariant `[R12]` protects is
+                # "recorded observability data stays read-only over HTTP", and
+                # a verdict is an append to an annotation table that cannot
+                # alter, delete or rewrite any span, turn, artifact, run,
+                # divergence or insight row. The `feedback` table is the
+                # existing precedent for exactly that shape.
+                "/api/distillation/verdict",
             }:
                 self._refuse_write()
                 return
@@ -911,6 +921,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     self._error(400, str(exc))
                     return
                 self._send_json({"session": session})
+                return
+            if split.path == "/api/distillation/verdict":
+                self._handle_verdict(body)
                 return
             if split.path == "/api/train":
                 path = str(body.get("path") or "").strip()
@@ -1023,28 +1036,34 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/turns":
             success = q("success")
-            self._send_json(
-                {
-                    "turns": store.list_turns(
-                        channel_id=q("channel"),
-                        conversation_id=(
-                            self._int(q("conversation"), None)
-                            if q("conversation") is not None
-                            else None
-                        ),
-                        status=q("status"),
-                        success=(
-                            None
-                            if success is None
-                            else success in ("1", "true", "True")
-                        ),
-                        command_name=q("command"),
-                        context=q("context"),
-                        limit=self._int(q("limit"), 100),
-                        offset=self._int(q("offset"), 0),
-                    )
-                }
+            turns = store.list_turns(
+                channel_id=q("channel"),
+                conversation_id=(
+                    self._int(q("conversation"), None)
+                    if q("conversation") is not None
+                    else None
+                ),
+                status=q("status"),
+                success=(
+                    None if success is None else success in ("1", "true", "True")
+                ),
+                command_name=q("command"),
+                context=q("context"),
+                limit=self._int(q("limit"), 100),
+                offset=self._int(q("offset"), 0),
             )
+            # The list-level distillation marker (`fix-sb8.7`): one statement
+            # for the page, so a turn list of 100 rows does not become 100
+            # round trips. Absent on a pre-distillation DB, which the SPA
+            # renders as an ordinary turn.
+            markers = store.distillation_turn_markers(
+                [t["turn_key"] for t in turns]
+            )
+            for turn in turns:
+                marker = markers.get(turn["turn_key"])
+                if marker is not None:
+                    turn["distillation"] = marker
+            self._send_json({"turns": turns})
         elif path.startswith("/api/turn/"):
             turn_key = path[len("/api/turn/"):]
             turn = store.get_turn(turn_key)
@@ -1058,13 +1077,20 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"turn": turn})
         elif path.startswith("/api/spans/"):
             trace_id = path[len("/api/spans/"):]
-            spans = store.get_spans(trace_id)
+            # `?pass=teacher|student|extract|none` is what makes each
+            # distillation pass independently viewable: the passes share a
+            # trace_id by [DR1] and are separated by spans.distillation_pass,
+            # so the filter is the whole of "neither waterfall interleaves the
+            # other" (§12.1 row 5).
+            spans = store.get_spans(trace_id, distillation_pass=q("pass"))
             for span in spans:
                 try:
                     span["attributes"] = json.loads(span["attributes"])
                 except (ValueError, TypeError, KeyError):
                     pass
             self._send_json({"spans": spans})
+        elif path.startswith("/api/distillation/"):
+            self._handle_distillation(store, path, q)
         elif path.startswith("/api/artifact/"):
             self._serve_artifact(store, path[len("/api/artifact/"):])
         elif path == "/api/health":
@@ -1075,6 +1101,127 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     "db_available": True,
                 }
             )
+        else:
+            self._error(404, "not found")
+
+    def _handle_verdict(self, body: dict[str, Any]) -> None:
+        """`POST /api/distillation/verdict` — §12 `[DR30]` + `[DR53]`.
+
+        No confirmation phrase: that guard exists for destruction, and
+        applying it to a non-destructive annotation trains users to type past
+        confirmations. The Host/Origin and bearer-token gates every other
+        route carries still apply — `do_POST` has already run both.
+
+        `[DR53]`: the feature check runs through the PER-REQUEST READ-ONLY
+        handle and returns 404 before any writable handle exists, so a POST
+        against a pre-distillation snapshot cannot be what creates the six
+        distillation tables in it.
+        """
+        store = self.chatbot.open_store()
+        if store is None or not store.has_feature(FEATURE_DISTILLATION_V1):
+            self._error(404, "this database predates distillation recording")
+            return
+        try:
+            written = ObservabilityStore.open_for_annotation(
+                self.chatbot.db_path
+            ).insert_verdict(
+                insight_id=str(body.get("insight_id") or "").strip(),
+                verdict=str(body.get("verdict") or "").strip(),
+                actor=str(body.get("actor") or "").strip(),
+                note=body.get("note"),
+            )
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+        except (OSError, sqlite3.Error) as exc:
+            self._error(500, f"could not record verdict: {type(exc).__name__}")
+            return
+        self._send_json({"verdict": written})
+
+    def _handle_distillation(
+        self,
+        store: ReadOnlyObservabilityStore,
+        path: str,
+        q: Any,
+    ) -> None:
+        """The `/api/distillation/*` GET inventory (§12.1, [DR55]).
+
+        `[DR29]`: a DB written by a pre-distillation build has no marker and no
+        tables, so every route 404s with a reason a human can act on instead of
+        raising `no such table` behind a 500.
+        """
+        if not store.has_feature(FEATURE_DISTILLATION_V1):
+            self._error(404, "this database predates distillation recording")
+            return
+        rest = path[len("/api/distillation/"):]
+        flag = lambda name: (  # noqa: E731
+            None if q(name) is None else q(name) in ("1", "true", "True")
+        )
+        if rest == "runs":
+            self._send_json(
+                {
+                    "runs": store.list_distillation_runs(
+                        channel_id=q("channel"),
+                        conversation_id=(
+                            self._int(q("conversation"), None)
+                            if q("conversation") is not None
+                            else None
+                        ),
+                        comparable=flag("comparable"),
+                        diverged=flag("diverged"),
+                        include_replays=bool(flag("include_replays")),
+                        limit=self._int(q("limit"), 100),
+                        offset=self._int(q("offset"), 0),
+                    )
+                }
+            )
+        elif rest.startswith("run/"):
+            detail = store.get_distillation_run(rest[len("run/"):])
+            if detail is None:
+                self._error(404, "distillation run not found")
+                return
+            # The pin explanation rides the run detail (`fix-sb8.13`): "why is
+            # this trace still here" is a question about THIS run, and a
+            # separate route would be one the UI never calls.
+            detail["retention"] = store.distillation_retention_status(
+                detail["run"]["run_id"]
+            )
+            self._send_json(detail)
+        elif rest.startswith("divergences/"):
+            self._send_json(
+                {
+                    "divergences": store.list_distillation_divergences(
+                        rest[len("divergences/"):],
+                        kind=q("kind"),
+                        material=q("material"),
+                        level=q("level"),
+                    )
+                }
+            )
+        elif rest == "insights":
+            selectors = [q("run"), q("insight"), q("text_hash")]
+            if sum(1 for value in selectors if value is not None) != 1:
+                self._error(
+                    400, "exactly one of run, insight, text_hash is required"
+                )
+                return
+            self._send_json(
+                store.distillation_insights(
+                    run_id=q("run"),
+                    insight_id=q("insight"),
+                    text_hash=q("text_hash"),
+                )
+            )
+        elif rest == "corpus":
+            self._send_json(
+                store.distillation_corpus(channel_id=q("channel"))
+            )
+        elif rest.startswith("export/"):
+            payload = store.export_distillation_run(rest[len("export/"):])
+            if payload is None:
+                self._error(404, "distillation run not found")
+                return
+            self._send_json(payload)
         else:
             self._error(404, "not found")
 

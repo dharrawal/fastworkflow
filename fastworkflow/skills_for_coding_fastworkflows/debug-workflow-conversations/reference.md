@@ -50,12 +50,15 @@ CREATE TABLE feedback (
   turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 
 CREATE TABLE spans (
-  span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL,   -- trace_id = turn_key
+  span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL,   -- trace_id = turn_key,
+                                              --   or <turn_key>~replay.<n>
+                                              --   for a stored-trace replay
   parent_span_id TEXT, name TEXT NOT NULL,
   kind TEXT NOT NULL,                         -- internal|llm|human_wait|tool
   channel_id TEXT, command_name TEXT, context TEXT,
   start_ns INTEGER NOT NULL, end_ns INTEGER,  -- epoch ns; end_ns NULL = still open
   status TEXT NOT NULL,                       -- open|ok|error|cancelled|awaiting_user
+  distillation_pass TEXT,                     -- teacher|student|extract, else NULL
   attributes TEXT NOT NULL);                  -- JSON object
 
 CREATE TABLE artifacts (
@@ -74,9 +77,18 @@ CREATE TABLE diagnostics (                    -- writer health, schema markers
 Indexes exist on `spans(trace_id)`, `spans(command_name)` (partial — only
 rows with a command_name),
 `turns(channel_id, conversation_id, ordinal)`, `turns(status)`,
-`artifacts(turn_key)`. `turn_key` is
+`artifacts(turn_key)`, and — where the distillation tables are present —
+`spans(trace_id, distillation_pass)` (partial). `turn_key` is
 `YYYYMMDDTHHMMSS.ffffffZ-<12hex>` — lexicographic order is chronological
 order, so `ORDER BY turn_key` sorts by time.
+
+**`trace_id` is the turn key with exactly one exception.** A counterfactual
+replay (see "Distillation" below) writes into `<turn_key>~replay.<n>`, which
+is a real addressable trace with **no `turns` row**. Nothing else ever mints a
+`~` id. So `spans.trace_id = turns.turn_key` is the right join for everything a
+user did, and `instr(trace_id, '~') > 0` is how you find — or exclude — the
+replays. Generalize a turn-key filter to `trace_id = :turn_key OR trace_id LIKE
+:turn_key || '~%'` only when you actually want the replays too.
 
 ## Span catalog
 
@@ -261,6 +273,313 @@ SELECT json_extract(attributes,'$.context_mutations') FROM spans
 WHERE name='fw.turn' AND trace_id=:turn_key AND end_ns IS NOT NULL;
 ```
 
+## Distillation (`fastworkflow run --generate_insights`)
+
+Present only when `diagnostics.schema_features` names `distillation_v1` (older
+DBs have neither the tables nor `spans.distillation_pass`; check before
+projecting either, or you get `no such column`). A distilled turn runs the
+SAME user message twice — a teacher pass and a student pass — diffs them, and
+appends rules to `Insights/<workflow>/planning_agent_insights.md` and
+`execution_agent_anti_patterns.md`. These tables are what makes those rules
+checkable against the evidence that produced them.
+
+```sql
+CREATE TABLE distillation_runs (              -- one per compared message
+  run_id TEXT PRIMARY KEY,
+  turn_key TEXT NOT NULL,                     -- == spans.trace_id == turns.turn_key
+  channel_id TEXT, conversation_id INTEGER,
+  user_message TEXT NOT NULL,
+  workflow_name TEXT, entry_context TEXT,
+  comparable INTEGER NOT NULL,                -- 0 => divergences UNUSABLE as evidence
+  comparable_reason TEXT,                     -- fingerprint-differs | evidence-incomplete
+                                              --   | teacher-raised | student-raised
+  isolation_verified INTEGER,                 -- NULL until EXP-013; promotion needs 1
+  fingerprint_teacher TEXT, fingerprint_student TEXT,
+  restore_ok_pre_student INTEGER, restore_ok_post_compare INTEGER,
+  cache_asymmetric INTEGER NOT NULL DEFAULT 0,-- a hit in one pass, a miss in the other:
+                                              --   a COST confound, not a comparability one
+  left_steps INTEGER, right_steps INTEGER,
+  planning_diverged INTEGER NOT NULL DEFAULT 0,
+  exec_diverged INTEGER NOT NULL DEFAULT 0,
+  material_divergences INTEGER NOT NULL DEFAULT 0,
+  planning_insights INTEGER NOT NULL DEFAULT 0,
+  execution_insights INTEGER NOT NULL DEFAULT 0,
+  extractor_empty INTEGER NOT NULL DEFAULT 0, -- diverged but extracted nothing
+  extractor_model TEXT, insight_set_json TEXT,
+  replay_of TEXT, replay_trace_id TEXT,       -- set only on a counterfactual replay
+  pinned INTEGER NOT NULL DEFAULT 0,          -- evidence held against retention
+  pinned_at TEXT, pinned_span_count INTEGER,
+  turn_fields_from TEXT,
+  evidence_pruned INTEGER NOT NULL DEFAULT 0, -- the trace behind this run is gone
+  started_at TEXT, completed_at TEXT, run_json TEXT NOT NULL);
+
+CREATE TABLE distillation_passes (            -- one row per pass; N-pass ready
+  run_id TEXT NOT NULL, pass_label TEXT NOT NULL,  -- joins spans.distillation_pass
+  role TEXT NOT NULL,                         -- teacher|student|extractor|student-replay
+  seq INTEGER NOT NULL, trace_id TEXT NOT NULL,
+  agent_model TEXT, planner_model TEXT, model_params_json TEXT,
+  entry_fingerprint TEXT, exit_fingerprint TEXT,
+  first_span_id TEXT, last_span_id TEXT,
+  wall_ms INTEGER, tokens INTEGER, cost_usd REAL,
+  cache_hits INTEGER, cache_misses INTEGER,
+  entry_prompt_fingerprint TEXT, exit_prompt_fingerprint TEXT,
+  history_bound INTEGER, summary_hash TEXT, spans_dropped_delta INTEGER,
+  entry_inputs_json TEXT,                     -- PROMPT INPUTS, not restorable state
+  PRIMARY KEY (run_id, pass_label));
+
+CREATE TABLE distillation_divergences (       -- the aligned diff, structured
+  divergence_id TEXT PRIMARY KEY, run_id TEXT NOT NULL,
+  level TEXT NOT NULL,                        -- plan|action|run
+  left_pass TEXT NOT NULL, right_pass TEXT NOT NULL,
+  align_index INTEGER NOT NULL,
+  kind TEXT NOT NULL,                         -- identical | same-command-different-params
+                                              -- | param-value-only | extra-in-student
+                                              -- | missing-in-student | reordered
+                                              -- | different-answer-same-actions
+  material INTEGER,                           -- 1|0|NULL(run was not comparable)
+  replayable INTEGER NOT NULL DEFAULT 1,
+  command_key TEXT, command_name TEXT, context TEXT,
+  left_step_key TEXT, right_step_key TEXT,
+  left_span_id TEXT, right_span_id TEXT,      -- -> spans.span_id
+  param_diff_json TEXT, detail_json TEXT NOT NULL);
+
+CREATE TABLE distillation_insights (
+  insight_id TEXT PRIMARY KEY,                -- stable; survives renumbering the .md
+  run_id TEXT NOT NULL, kind TEXT NOT NULL,   -- planning|execution
+  text TEXT NOT NULL, text_hash TEXT NOT NULL,-- reverse index from a markdown line
+  extractor_span_id TEXT, insight_file TEXT,
+  file_entry_number INTEGER,                  -- DISPLAY ONLY — never an identifier
+  created_at TEXT NOT NULL);
+
+CREATE TABLE distillation_insight_citations ( -- insight <-> divergence, both ways
+  insight_id TEXT NOT NULL, divergence_id TEXT NOT NULL,
+  PRIMARY KEY (insight_id, divergence_id));
+
+CREATE TABLE distillation_verdicts (          -- append-only, with supersede
+  verdict_id TEXT PRIMARY KEY, insight_id TEXT NOT NULL,
+  verdict TEXT NOT NULL,                      -- supported | not-supported-by-cited-evidence
+                                              -- | overfit-to-single-turn
+                                              -- | duplicate-of-existing
+                                              -- | contradicted-by-other-turns
+  note TEXT, actor TEXT NOT NULL,             -- 'human' | 'agent:<name>' | 'replay'
+  replay_run_id TEXT, superseded INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL);
+```
+
+**The joins, in one line each.** `distillation_runs.turn_key = turns.turn_key`
+(the user-visible turn) and `= spans.trace_id` (its evidence);
+`distillation_passes.run_id` + `.pass_label = spans.distillation_pass` (one
+pass's spans); `distillation_divergences.left_span_id` / `.right_span_id` →
+`spans.span_id` (the two sides of one aligned step);
+`distillation_insight_citations` binds an insight to the divergences it was
+drawn from, in both directions; `distillation_verdicts.insight_id` carries the
+adjudication history, newest non-superseded row first.
+
+**Three things to filter on, every time.** `r.comparable = 1` — a run whose two
+passes did not start from the same state proves nothing, and the rows are kept
+only so the quarantine is visible. `r.replay_of IS NULL` — a replay is a TEST
+of an insight, so counting it as support for that insight double-counts a
+result in its own favour. And for the promotion decision only,
+`r.isolation_verified = 1` — promotion is a causal claim, and until EXP-013
+lands nothing sets that column, so the promotion query legitimately returns
+nothing. Read that as "not yet checkable", never as "no support".
+
+### Distillation recipes
+
+Executed against a fixture holding one comparable run, one non-comparable run,
+one replay, one no-divergence run, a run-level (NULL-`command_name`) divergence
+and a NULL-`command_name` failed span — the shapes that silently break these
+queries. "It parses" is not verification here; three-valued logic on nullable
+`command_name` turns a wrong query into zero rows and no error.
+
+```sql
+-- Which turns SUPPORT insight X (the run it came from included)
+WITH cited AS (
+  SELECT DISTINCT d.command_key, d.kind
+  FROM distillation_insights i
+  JOIN distillation_insight_citations c ON c.insight_id = i.insight_id
+  JOIN distillation_divergences d ON d.divergence_id = c.divergence_id
+  WHERE i.insight_id = :insight_id
+)
+SELECT r.run_id, r.turn_key, r.started_at,
+       d.divergence_id, d.kind, d.command_name, d.material
+FROM distillation_runs r
+JOIN distillation_divergences d ON d.run_id = r.run_id
+JOIN cited ON cited.command_key = d.command_key AND cited.kind = d.kind
+WHERE r.comparable = 1 AND r.replay_of IS NULL
+ORDER BY r.started_at DESC;
+
+-- Which turns CONTRADICT insight X: the cited command ran in the STUDENT pass
+-- and produced no divergence of the cited kind — i.e. the rule would have
+-- fired wrongly. The `cited.command_name IS NOT NULL` guard is load-bearing:
+-- run-level divergences carry no command, and without it the whole query
+-- returns zero rows with no error.
+WITH cited AS (
+  SELECT DISTINCT d.command_key, d.command_name, d.kind
+  FROM distillation_insights i
+  JOIN distillation_insight_citations c ON c.insight_id = i.insight_id
+  JOIN distillation_divergences d ON d.divergence_id = c.divergence_id
+  WHERE i.insight_id = :insight_id
+)
+SELECT r.run_id, r.turn_key, r.started_at, cited.command_name
+FROM distillation_runs r
+CROSS JOIN cited
+WHERE cited.command_name IS NOT NULL
+  AND r.comparable = 1 AND r.replay_of IS NULL
+  AND EXISTS (SELECT 1 FROM spans s
+               WHERE s.trace_id = r.turn_key
+                 AND s.distillation_pass = 'student'
+                 AND s.name = 'fw.command.execute'
+                 AND s.command_name = cited.command_name)
+  AND NOT EXISTS (SELECT 1 FROM distillation_divergences d2
+                   WHERE d2.run_id = r.run_id
+                     AND d2.command_key = cited.command_key
+                     AND d2.kind = cited.kind)
+ORDER BY r.started_at DESC;
+
+-- Which turns CONTRADICT a RUN-LEVEL insight. A run-level divergence has no
+-- command to key on, so the contradiction is defined over outcomes: comparable
+-- runs in the same context whose two passes agreed on the final answer. Note
+-- `IS` and not `=` on the join — both columns are nullable.
+WITH cited AS (
+  SELECT DISTINCT r0.entry_context, r0.workflow_name
+  FROM distillation_insights i
+  JOIN distillation_insight_citations c ON c.insight_id = i.insight_id
+  JOIN distillation_divergences d ON d.divergence_id = c.divergence_id
+  JOIN distillation_runs r0 ON r0.run_id = d.run_id
+  WHERE i.insight_id = :insight_id AND d.level = 'run'
+)
+SELECT r.run_id, r.turn_key, r.started_at, r.user_message
+FROM distillation_runs r
+JOIN cited ON cited.entry_context IS r.entry_context
+          AND cited.workflow_name IS r.workflow_name
+WHERE r.comparable = 1 AND r.replay_of IS NULL
+  AND NOT EXISTS (SELECT 1 FROM distillation_divergences d2
+                   WHERE d2.run_id = r.run_id AND d2.level = 'run')
+ORDER BY r.started_at DESC;
+
+-- The promotion view: support and contradiction counts per insight, plus the
+-- live verdict. Correlated subqueries rather than a join chain ON PURPOSE — a
+-- join loses the insight row whenever the filter matches nothing, so a
+-- freshly extracted rule with no corroboration would VANISH from the list a
+-- human uses to decide, instead of appearing with a zero.
+SELECT i.insight_id, i.kind, i.text,
+       (SELECT v.verdict FROM distillation_verdicts v
+         WHERE v.insight_id = i.insight_id AND v.superseded = 0
+         ORDER BY v.created_at DESC LIMIT 1)                     AS verdict,
+       (SELECT COUNT(DISTINCT sup.run_id)
+          FROM distillation_insight_citations c
+          JOIN distillation_divergences cit ON cit.divergence_id = c.divergence_id
+          JOIN distillation_divergences sup  ON sup.command_key = cit.command_key
+                                            AND sup.kind        = cit.kind
+          JOIN distillation_runs r           ON r.run_id = sup.run_id
+         WHERE c.insight_id = i.insight_id
+           AND cit.command_key IS NOT NULL
+           AND r.comparable = 1 AND r.replay_of IS NULL
+           AND r.isolation_verified = 1 AND r.evidence_pruned = 0) AS support_runs
+FROM distillation_insights i
+ORDER BY support_runs DESC;
+
+-- Divergence rate by week: is the student improving as insights accumulate?
+SELECT strftime('%Y-W%W', r.started_at) AS week, COUNT(*) AS runs,
+       SUM(CASE WHEN r.exec_diverged = 1 THEN 1 ELSE 0 END) AS diverged,
+       SUM(r.material_divergences) AS material,
+       ROUND(1.0 * SUM(CASE WHEN r.exec_diverged = 1 THEN 1 ELSE 0 END)
+                 / COUNT(*), 3) AS rate
+FROM distillation_runs r
+WHERE r.comparable = 1 AND r.replay_of IS NULL
+GROUP BY week ORDER BY week;
+
+-- All material missing-in-student divergences by command, with the run ids
+SELECT d.command_name, COUNT(*) AS n, GROUP_CONCAT(DISTINCT r.run_id) AS run_ids
+FROM distillation_divergences d
+JOIN distillation_runs r ON r.run_id = d.run_id
+WHERE d.kind = 'missing-in-student' AND d.material = 1
+  AND r.comparable = 1 AND r.replay_of IS NULL
+GROUP BY d.command_name ORDER BY n DESC;
+
+-- Divergences by taxonomy kind: which WAY does the student go wrong, rather
+-- than on which command. `identical` rows are stored on purpose, so this is a
+-- denominator as well as a set of counts.
+SELECT d.level, d.kind, COUNT(*) AS n,
+       SUM(CASE WHEN d.material = 1 THEN 1 ELSE 0 END) AS material,
+       COUNT(DISTINCT d.run_id) AS runs
+FROM distillation_divergences d
+JOIN distillation_runs r ON r.run_id = d.run_id
+WHERE r.comparable = 1 AND r.replay_of IS NULL
+GROUP BY d.level, d.kind ORDER BY n DESC;
+
+-- Teacher vs student cost and latency (cache-asymmetric runs excluded: that
+-- is exactly the confound that makes the cost columns incomparable)
+SELECT p.role, COUNT(*) AS passes, SUM(p.tokens) AS tokens,
+       ROUND(SUM(p.cost_usd), 4) AS cost_usd, ROUND(AVG(p.wall_ms)) AS avg_ms,
+       SUM(p.cache_hits) AS cache_hits, SUM(p.cache_misses) AS cache_misses
+FROM distillation_passes p
+JOIN distillation_runs r ON r.run_id = p.run_id
+WHERE r.comparable = 1 AND r.cache_asymmetric = 0
+  AND p.role IN ('teacher','student')
+GROUP BY p.role;
+
+-- From a SPAN back to the rules drawn from it. The other direction of the
+-- provenance chain, and the one that answers "this tool call looks wrong —
+-- did we already write a rule about it?"
+SELECT i.insight_id, i.kind, i.text, d.divergence_id, d.kind AS divergence_kind,
+       d.material,
+       (SELECT v.verdict FROM distillation_verdicts v
+         WHERE v.insight_id = i.insight_id AND v.superseded = 0
+         ORDER BY v.created_at DESC LIMIT 1) AS verdict
+FROM distillation_divergences d
+JOIN distillation_insight_citations c ON c.divergence_id = d.divergence_id
+JOIN distillation_insights i ON i.insight_id = c.insight_id
+WHERE d.left_span_id = :span_id OR d.right_span_id = :span_id;
+
+-- From a line in the markdown file back to the turns behind it
+SELECT i.insight_id, r.run_id, r.turn_key, r.started_at
+FROM distillation_insights i JOIN distillation_runs r ON r.run_id = i.run_id
+WHERE i.text_hash = :text_hash ORDER BY r.started_at;
+
+-- One pass's trajectory, unmerged
+SELECT s.start_ns, s.name, s.command_name,
+       json_extract(s.attributes,'$.parameters') AS params
+FROM spans s
+WHERE s.trace_id = :turn_key AND s.distillation_pass = 'student'
+ORDER BY s.start_ns;
+
+-- Negative outcomes, which are evidence too: diverged-but-extracted-nothing,
+-- and the runs where the two passes simply agreed
+SELECT run_id, turn_key, user_message,
+       CASE WHEN extractor_empty = 1 THEN 'diverged, extractor returned EMPTY'
+            WHEN planning_diverged = 0 AND exec_diverged = 0 THEN 'no divergence'
+            ELSE 'diverged' END AS outcome
+FROM distillation_runs
+WHERE comparable = 1 AND replay_of IS NULL
+ORDER BY started_at DESC;
+```
+
+### Distillation read API and HTTP surface
+
+`ReadOnlyObservabilityStore` adds `list_distillation_runs(...)`,
+`get_distillation_run(run_id)`, `list_distillation_divergences(run_id, ...)`,
+`distillation_insights(run_id=|insight_id=|text_hash=)`,
+`distillation_turn_markers(turn_keys)`, `distillation_corpus(channel_id=)`,
+`distillation_retention_status(run_id)`, `distillation_evidence_shortfall(run_id)`
+and `export_distillation_run(run_id)`; `get_spans` takes an optional
+`distillation_pass=` (`'none'` selects the spans belonging to no pass).
+
+The chatbot serves the same shapes over HTTP — `GET /api/distillation/runs`,
+`/run/<run_id>`, `/divergences/<run_id>`, `/insights?run=|insight=|text_hash=`,
+`/corpus`, `/export/<run_id>`, and `GET /api/spans/<turn_key>?pass=<label>`.
+`POST /api/distillation/verdict` (`{insight_id, verdict, note?, actor}`) is the
+one write, an append to `distillation_verdicts` and nothing else.
+
+**Prefer `export_distillation_run` / `/api/distillation/export/<run_id>` over
+assembling a run yourself.** It returns the run, its passes, the alignment, the
+insights, their citations and verdicts, the retention explanation and both
+passes' spans as one JSON document — built entirely out of stored rows, so it
+inherits the redaction that ran at the sink boundary. Assembling the same
+thing from live objects would route around that and put credentials in a file
+whose whole point is being handed to another agent.
+
 ## Trust notes
 
 - All persisted text passed the redaction pass (credential shapes + loaded
@@ -269,4 +588,8 @@ WHERE name='fw.turn' AND trace_id=:turn_key AND end_ns IS NOT NULL;
   `writer_health()` (`spans_dropped`, `records_dropped`, `write_errors`)
   before reading absence as evidence.
 - `--generate_insights` CLI turns contain teacher AND student passes in one
-  trace (duplicate-looking tool calls are expected there).
+  trace, told apart by `spans.distillation_pass` — so duplicate-looking tool
+  calls are expected there, and `AND distillation_pass = 'student'` is what
+  turns the merged trace back into one trajectory. A run whose
+  `distillation_runs.comparable = 0` is **quarantined evidence**: the rows are
+  there, and every recipe below filters them out on purpose.

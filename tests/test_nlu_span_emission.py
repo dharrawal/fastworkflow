@@ -27,12 +27,34 @@ from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
-HELLO_WORLD = str(
-    Path(__file__).parent.parent / "fastworkflow" / "examples" / "hello_world"
-)
-MESSAGING_APP = str(
-    Path(__file__).parent.parent / "fastworkflow" / "examples" / "messaging_app_4"
-)
+_REPO = Path(__file__).parent.parent
+
+# The PACKAGED example, deliberately. `fastworkflow examples fetch hello_world`
+# copies this tree to ./examples/hello_world for a user to train, but that copy
+# is an independent vintage of the example — the fetched one on this machine
+# takes `a`/`b` where the packaged one (and every assertion below) takes
+# `first_num`/`second_num`. Redirecting these tests at the trained copy trades
+# four failures for a different two, so the path stays and the SKIP GUARD is
+# what has to be honest.
+HELLO_WORLD = str(_REPO / "fastworkflow" / "examples" / "hello_world")
+MESSAGING_APP = str(_REPO / "fastworkflow" / "examples" / "messaging_app_4")
+
+
+def _trained_threshold(workflow_path: str) -> Path | None:
+    """The trained global threshold.json for a workflow, or None if untrained.
+
+    Publication is versioned: `___command_info/current` is a symlink to
+    `versions/<stamp>/`. The unversioned layout is checked too, so a workflow
+    trained by an older build still counts.
+    """
+    info = Path(workflow_path) / "___command_info"
+    for threshold in (
+        info / "current" / "global" / "threshold.json",
+        info / "global" / "threshold.json",
+    ):
+        if threshold.is_file():
+            return threshold
+    return None
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -65,8 +87,18 @@ class RecordingTraceSink:
 
 @pytest.fixture
 def hello_ctx():
-    if not Path(HELLO_WORLD, "___command_info").is_dir():
-        pytest.skip("hello_world is not trained on this machine")
+    if _trained_threshold(HELLO_WORLD) is None:
+        # The guard used to test for a ___command_info DIRECTORY, which the
+        # UNTRAINED packaged tree also has (command_directory.json and
+        # routing_definition.json are build-time, not train-time). So it waved
+        # a model-less workflow through and the tests died on a missing
+        # threshold.json instead of skipping. Ask for the artifact the
+        # classifier actually loads.
+        pytest.skip(
+            f"hello_world is not trained: no global/threshold.json under "
+            f"{HELLO_WORLD}/___command_info. Train it with: fastworkflow train "
+            f"{HELLO_WORLD} ./env/.env ./passwords/.env"
+        )
     sink = RecordingTraceSink()
     wf = fastworkflow.Workflow.create(
         HELLO_WORLD,

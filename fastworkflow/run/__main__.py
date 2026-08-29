@@ -282,6 +282,18 @@ def run_main(args):
                 console.print(
                     f"\n[bold cyan]Insights generation complete. New insights extracted: {count}[/bold cyan]"
                 )
+                # Point at the records rather than only the tally: every
+                # compared message has a distillation_runs row (fix-sb8.2),
+                # and the run id is what every other distillation table and
+                # every fw.distill.* span joins on.
+                core = getattr(fastworkflow.chat_session, "_core", fastworkflow.chat_session)
+                run_ids = getattr(core, "_distillation_run_ids", [])
+                if run_ids:
+                    console.print(
+                        f"[cyan]{len(run_ids)} distillation run(s) recorded; latest "
+                        f"{run_ids[-1]}. Read one with: SELECT * FROM distillation_runs "
+                        f"WHERE run_id = '{run_ids[-1]}';[/cyan]"
+                    )
             break
         if user_command.startswith("//new"):
             fastworkflow.chat_session.clear_conversation_history()

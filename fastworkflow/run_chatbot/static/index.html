@@ -264,6 +264,57 @@ main { flex: 1; display: flex; min-height: 0; }
   margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msgBlock .lbl { color: var(--muted); font-size: 10px; text-transform: uppercase;
   letter-spacing: .05em; display: block; margin-bottom: 2px; }
+/* distillation review (fix-sb8.7 / .8 / .9 / .10) --------------------------
+   Additive to the existing span palette rather than a replacement: the diff
+   panes reuse --bar-* for span category and add their own state colours for
+   the alignment kinds, so a reader who has learned the waterfall's colours
+   does not have to learn a second scheme. */
+.badge.distill { color: var(--bar-planner); border-color: var(--bar-planner);
+  background: #f3ecfd; }
+.badge.warn { color: #8a5a00; border-color: var(--warn-border);
+  background: var(--warn-bg); }
+.passTabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 4px; }
+.passTabs button.on { background: var(--accent); color: var(--on-accent);
+  border-color: var(--accent); }
+.nonComparable { border-left: 4px solid var(--warn-border);
+  background: var(--warn-bg); padding: 8px 10px; border-radius: 6px;
+  margin-top: 8px; }
+.diffToolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin: 8px 0; }
+.diffGrid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+  gap: 0 10px; margin-top: 6px; }
+.diffHead { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); padding: 2px 6px; position: sticky; top: 0;
+  background: var(--panel); }
+.diffPair { display: contents; }
+.diffCell { border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 8px; margin-bottom: 5px; overflow-wrap: anywhere;
+  cursor: pointer; background: var(--panel); }
+.diffCell.gap { border-style: dashed; background: var(--code-bg); opacity: .55;
+  cursor: default; }
+.diffCell .cmd { font-weight: 600; }
+.diffCell .params { font-size: 11px; color: var(--muted); }
+.diffCell .pdiff { color: var(--fail); font-weight: 600; }
+.diffCell.k-identical { border-color: var(--border); }
+.diffCell.k-changed { border-color: var(--fail); background: var(--fail-soft); }
+.diffCell.k-missing { border-color: var(--warn-border); background: var(--warn-bg); }
+.diffCell.k-extra { border-color: var(--bar-tool); background: #e6f4fc; }
+.diffCell.immaterial { opacity: .6; border-style: dotted; }
+.diffKind { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); grid-column: 1 / -1; margin: 2px 0 1px; }
+.insightCard { border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; margin-top: 8px; }
+.insightCard .text { font-weight: 600; overflow-wrap: anywhere; }
+.verdictRow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  margin-top: 6px; }
+.verdictRow input[type=text] { flex: 1; min-width: 140px; }
+.corpusTable { width: 100%; border-collapse: collapse; margin-top: 8px;
+  font-size: 12px; }
+.corpusTable th, .corpusTable td { border-bottom: 1px solid var(--border);
+  padding: 4px 6px; text-align: left; vertical-align: top; }
+.corpusTable th { color: var(--muted); font-weight: 600; font-size: 10px;
+  text-transform: uppercase; letter-spacing: .05em; }
+.scrollX { overflow-x: auto; }
 /* waterfall */
 /* Every column has a floor: the cost cell is wide enough for "1.60 s | tok -
    1,589 in, 113 out" on a roomy pane, but fixed widths starved the bar track
@@ -478,6 +529,7 @@ button.newConv:hover { filter: brightness(1.1); }
       </select>
       <input type="text" id="fCommand" placeholder="command filter">
       <input type="text" id="fContext" placeholder="context filter">
+      <button id="corpusBtn">Distillation corpus</button>
     </div>
     <div id="convList"></div>
   </div>
@@ -563,7 +615,17 @@ var state = {
   channel: "",              // "" = all channels
   turnKey: null,
   turn: null,               // the loaded turn record for the open drill-down
-  path: []                  // node path from the turn down to the open level
+  path: [],                 // node path from the turn down to the open level
+  /* Distillation review (fix-sb8.7). `distillPass` selects which pass's
+     waterfall is rendered — the passes share one trace_id by [DR1] and are
+     separated by spans.distillation_pass, so this is the whole of "neither
+     waterfall interleaves the other". */
+  distill: null,            // the run detail for the open turn, or null
+  distillPass: "",          // "" = every span, else teacher|student|none
+  distillView: "passes",    // passes | diff | insights
+  divergences: null,
+  provenance: null,
+  divergencesOnly: false
 };
 var session = null;          // /api/session payload: workflow + server + identity
 
@@ -804,7 +866,35 @@ function renderNestedTurns(turns) {
     /* Channel and conversation are the enclosing groups; repeating them on
        every row would just crowd out the message. */
     item.appendChild(el("div", "sub", statusTxt + " · " + fmtTs(t.started_at)));
-    item.addEventListener("click", function () { selectTurn(t.turn_key); });
+    /* The list-level distillation marker (fix-sb8.7): findable at a glance,
+       with the two facts that decide whether the run is worth opening — did
+       the passes disagree, and is the evidence usable at all. */
+    if (t.distillation) {
+      var marks = el("div", "sub");
+      marks.appendChild(el("span", "badge distill", "distilled"));
+      var d = t.distillation;
+      if (!d.comparable) {
+        marks.appendChild(document.createTextNode(" "));
+        marks.appendChild(el("span", "badge warn",
+          "not comparable" + (d.comparable_reason ? " · " + d.comparable_reason : "")));
+      } else if (d.planning_diverged || d.exec_diverged) {
+        marks.appendChild(document.createTextNode(" "));
+        marks.appendChild(el("span", "badge fail",
+          "diverged" + (d.material_divergences ? " · " + d.material_divergences + " material" : "")));
+      } else {
+        marks.appendChild(document.createTextNode(" "));
+        marks.appendChild(el("span", "badge ok", "agreed"));
+      }
+      var insights = (d.planning_insights || 0) + (d.execution_insights || 0);
+      if (insights) {
+        marks.appendChild(document.createTextNode(" "));
+        marks.appendChild(el("span", "badge", insights + " insight" + (insights > 1 ? "s" : "")));
+      }
+      item.appendChild(marks);
+    }
+    item.addEventListener("click", function () {
+      selectTurn(t.turn_key, t.distillation ? t.distillation.run_id : null);
+    });
     list.appendChild(item);
   });
   return list;
@@ -818,22 +908,580 @@ function renderNestedTurns(turns) {
   });
 });
 
+/* ======================================================================
+   Distillation review  (fix-sb8.7, fix-sb8.8, fix-sb8.9, fix-sb8.10)
+   ======================================================================
+   Three things the markdown files cannot show: which pass did what, where
+   exactly the two disagreed, and whether the rule that came out of it is
+   supported by the evidence it cites.
+
+   The diff is DRIVEN BY THE STORED ALIGNMENT, never recomputed here — the
+   extractor prompt and this view read the same rows, so a reader can check a
+   rule against exactly what the model was shown. And nothing below builds
+   markup from a string: every record-derived value goes through el() /
+   textContent [R22]. */
+
+var DIFF_KIND_CLASS = {
+  "identical": "k-identical",
+  "same-command-different-params": "k-changed",
+  "param-value-only": "k-changed",
+  "missing-in-student": "k-missing",
+  "extra-in-student": "k-extra",
+  "reordered": "k-changed",
+  "different-answer-same-actions": "k-changed"
+};
+
+var VERDICTS = [
+  "supported",
+  "not-supported-by-cited-evidence",
+  "overfit-to-single-turn",
+  "duplicate-of-existing",
+  "contradicted-by-other-turns"
+];
+
+function distillRun() { return state.distill ? state.distill.run : null; }
+
+function renderDistillationCard() {
+  var card = el("div", "card");
+  var run = distillRun();
+  var head = el("div", "levelHead");
+  head.appendChild(el("h2", null, "Distillation run"));
+  head.appendChild(el("span", "levelDur", run.run_id));
+  card.appendChild(head);
+
+  /* The non-comparability banner comes FIRST and is loud, because it
+     invalidates every claim below it: a divergence is evidence of a student
+     mistake only if the passes started from the same state (§6.2). */
+  if (!run.comparable) {
+    var warn = el("div", "nonComparable");
+    warn.appendChild(el("strong", null, "The passes did not start comparable."));
+    warn.appendChild(el("div", null,
+      "Reason: " + (run.comparable_reason || "unknown") +
+      ". The divergences below are not usable as evidence and are excluded " +
+      "from every aggregate."));
+    card.appendChild(warn);
+  }
+  card.appendChild(renderRunHeader(run));
+
+  var tabs = el("div", "passTabs");
+  [["passes", "Passes"], ["diff", "Aligned diff"], ["insights", "Insights"]]
+    .forEach(function (pair) {
+      var b = el("button", state.distillView === pair[0] ? "on" : null, pair[1]);
+      b.addEventListener("click", function () {
+        state.distillView = pair[0];
+        renderLevel();
+      });
+      tabs.appendChild(b);
+    });
+  card.appendChild(tabs);
+
+  var body = el("div");
+  card.appendChild(body);
+  if (state.distillView === "diff") {
+    renderDiffView(body, run);
+  } else if (state.distillView === "insights") {
+    renderInsightsView(body, run);
+  } else {
+    renderPassesView(body, run);
+  }
+  return card;
+}
+
+function renderRunHeader(run) {
+  var wrap = el("div");
+  var dl = el("dl", "kv");
+  function row(k, v) {
+    dl.appendChild(el("dt", null, k));
+    dl.appendChild(el("dd", null, v === null || v === undefined || v === "" ? "—" : String(v)));
+  }
+  row("comparable", run.comparable ? "yes" : "no — " + (run.comparable_reason || ""));
+  /* Entry fingerprints side by side and explicitly compared: "they matched" is
+     the claim the whole run rests on, so it is stated rather than left to a
+     reader to diff two hashes by eye. */
+  var same = run.fingerprint_teacher && run.fingerprint_teacher === run.fingerprint_student;
+  row("entry fingerprints",
+    (run.fingerprint_teacher || "—") + " / " + (run.fingerprint_student || "—") +
+    (run.fingerprint_teacher ? (same ? "  — matched" : "  — DIFFER") : ""));
+  row("diverged",
+    (run.planning_diverged ? "planning " : "") + (run.exec_diverged ? "execution" : "") ||
+    "no");
+  row("material divergences", run.material_divergences);
+  row("insights",
+    (run.planning_insights || 0) + " planning, " + (run.execution_insights || 0) + " execution" +
+    (run.extractor_empty ? " (extractor returned EMPTY)" : ""));
+  /* A cache hit in one pass and a miss in the other is a silent COST confound,
+     never a comparability one ([DR16]) — said in those words so nobody reads
+     it as invalidating the trajectory. */
+  if (run.cache_asymmetric) {
+    row("cache", "asymmetric — the cost columns are not comparable across the passes");
+  }
+  if (run.isolation_verified !== 1) {
+    row("isolation", "not verified — promotion and replay both decline ([DR48])");
+  }
+  wrap.appendChild(dl);
+
+  var passes = state.distill.passes || [];
+  if (passes.length) {
+    var table = el("table", "corpusTable");
+    var head = el("tr");
+    ["pass", "role", "agent model", "wall", "tokens", "cost", "cache h/m", "exit fingerprint"]
+      .forEach(function (h) { head.appendChild(el("th", null, h)); });
+    table.appendChild(head);
+    passes.forEach(function (p) {
+      var tr = el("tr");
+      [p.pass_label, p.role, p.agent_model, fmtMs(p.wall_ms),
+       fmtCount(p.tokens), p.cost_usd === null ? "—" : "$" + Number(p.cost_usd).toFixed(4),
+       (p.cache_hits || 0) + "/" + (p.cache_misses || 0), p.exit_fingerprint]
+        .forEach(function (v) {
+          tr.appendChild(el("td", null, v === null || v === undefined || v === "" ? "—" : String(v)));
+        });
+      table.appendChild(tr);
+    });
+    var scroll = el("div", "scrollX");
+    scroll.appendChild(table);
+    wrap.appendChild(scroll);
+  }
+
+  /* fix-sb8.13: "why is this trace still here", in words, next to the thing
+     it is about. A pin nobody can explain is a pin nobody trusts. */
+  var ret = state.distill.retention;
+  if (ret && ret.known) {
+    var line = el("div", "sub");
+    line.appendChild(el("span", "badge " + (ret.pinned ? "ok" : ""),
+      ret.pinned ? "evidence pinned" : "not pinned"));
+    line.appendChild(document.createTextNode(" " + ret.pin_class + " — " + ret.release));
+    wrap.appendChild(line);
+    if (ret.evidence && ret.evidence.incomplete) {
+      var lost = el("div", "nonComparable");
+      lost.appendChild(el("strong", null, "Evidence incomplete."));
+      lost.appendChild(el("div", null,
+        ret.evidence.missing_span_count + " of " + ret.evidence.pinned_span_count +
+        " spans are gone; a build without the retention pin may have pruned them."));
+      wrap.appendChild(lost);
+    }
+  }
+  return wrap;
+}
+
+function renderPassesView(container, run) {
+  /* One clean waterfall at a time. The selector re-fetches with ?pass=,
+     because filtering server-side is what the partial index on
+     (trace_id, distillation_pass) exists for. */
+  var tabs = el("div", "passTabs");
+  var options = [["", "both passes"], ["teacher", "teacher"], ["student", "student"],
+                 ["none", "outside the passes"]];
+  options.forEach(function (pair) {
+    var b = el("button", state.distillPass === pair[0] ? "on" : null, pair[1]);
+    b.addEventListener("click", function () {
+      state.distillPass = pair[0];
+      var q = "/api/spans/" + encodeURIComponent(state.turnKey) +
+        (pair[0] ? "?pass=" + encodeURIComponent(pair[0]) : "");
+      api(q).then(function (data) {
+        state.path = [buildTurnTree(state.turn, data.spans || [])];
+        renderLevel();
+      });
+    });
+    tabs.appendChild(b);
+  });
+  container.appendChild(tabs);
+  container.appendChild(el("div", "sub",
+    state.distillPass
+      ? "Showing only the " + state.distillPass + " pass. The waterfall above " +
+        "is rebuilt from that pass alone, so neither pass interleaves the other."
+      : "Showing every span of the turn — the two passes interleave. Pick a " +
+        "pass to see one clean trajectory."));
+}
+
+function renderDiffView(container, run) {
+  if (state.divergences === null) {
+    container.appendChild(el("div", "empty", "loading the aligned diff…"));
+    api("/api/distillation/divergences/" + encodeURIComponent(run.run_id))
+      .then(function (data) {
+        state.divergences = data.divergences || [];
+        renderLevel();
+      })
+      .catch(function () { state.divergences = []; renderLevel(); });
+    return;
+  }
+  var rows = state.divergences;
+  if (!rows.length) {
+    container.appendChild(el("div", "empty",
+      "No alignment rows recorded for this run."));
+    return;
+  }
+  var diverging = rows.filter(function (r) { return r.kind !== "identical"; });
+
+  var bar = el("div", "diffToolbar");
+  var jump = el("button", null, "Jump to first divergence");
+  jump.addEventListener("click", function () {
+    var target = document.getElementById("firstDivergence");
+    if (target) { target.scrollIntoView({ block: "center" }); }
+  });
+  bar.appendChild(jump);
+  var only = el("button", state.divergencesOnly ? "on" : null, "Divergences only");
+  only.addEventListener("click", function () {
+    state.divergencesOnly = !state.divergencesOnly;
+    renderLevel();
+  });
+  bar.appendChild(only);
+  bar.appendChild(el("span", "sub",
+    diverging.length + " of " + rows.length + " aligned steps differ"));
+  container.appendChild(bar);
+
+  var grid = el("div", "diffGrid");
+  grid.appendChild(el("div", "diffHead", "teacher"));
+  grid.appendChild(el("div", "diffHead", "student"));
+  var firstMarked = false;
+  var shown = state.divergencesOnly ? diverging : rows;
+  shown.forEach(function (row) {
+    var label = el("div", "diffKind",
+      "#" + row.align_index + " · " + row.level + " · " + row.kind +
+      (row.material === null ? " · materiality unknown (non-comparable run)"
+        : (row.material ? " · material" : " · same end state, different path")));
+    if (!firstMarked && row.kind !== "identical") {
+      label.id = "firstDivergence";
+      firstMarked = true;
+    }
+    grid.appendChild(label);
+    grid.appendChild(diffCell(row, "left"));
+    grid.appendChild(diffCell(row, "right"));
+  });
+  container.appendChild(grid);
+}
+
+function diffCell(row, side) {
+  var detail = row.detail || {};
+  var payload = detail[side] || null;
+  var spanId = side === "left" ? row.left_span_id : row.right_span_id;
+  var missing = (side === "left" && row.kind === "extra-in-student") ||
+                (side === "right" && row.kind === "missing-in-student");
+  if (missing || (!payload && !spanId)) {
+    var gap = el("div", "diffCell gap", "— nothing here —");
+    return gap;
+  }
+  var cls = "diffCell " + (DIFF_KIND_CLASS[row.kind] || "k-identical");
+  /* A non-material divergence reached the same end state by another path. It
+     is not an error and must not be coloured like one (§7.4). */
+  if (row.material === 0) { cls += " immaterial"; }
+  var cell = el("div", cls);
+  cell.appendChild(el("div", "cmd",
+    (payload && payload.command_name) || row.command_name || "(unnamed)"));
+  var params = payload ? payload.parameters : null;
+  if (params && typeof params === "object") {
+    /* Parameter-level highlighting: "step 3 used the wrong customer_id" has to
+       be visible without opening both spans. */
+    var pd = row.param_diff || {};
+    Object.keys(params).forEach(function (key) {
+      var line = el("div", "params");
+      line.appendChild(el("span", pd[key] ? "pdiff" : null, key + ": "));
+      line.appendChild(document.createTextNode(String(params[key])));
+      cell.appendChild(line);
+    });
+  }
+  if (spanId) {
+    cell.title = "open this span";
+    cell.addEventListener("click", function () { openSpan(spanId); });
+  } else {
+    cell.classList.add("gap");
+  }
+  return cell;
+}
+
+function openSpan(spanId) {
+  /* Click-through from a diff row into the waterfall: descend the already
+     built tree to the node whose span carries this id. */
+  var root = state.path[0];
+  if (!root) { return; }
+  var trail = findNodeTrail(root, spanId);
+  if (trail) { state.path = trail; renderLevel(); }
+}
+
+function findNodeTrail(node, spanId) {
+  if (node.span && node.span.span_id === spanId) { return [node]; }
+  for (var i = 0; i < node.children.length; i++) {
+    var found = findNodeTrail(node.children[i], spanId);
+    if (found) { return [node].concat(found); }
+  }
+  return null;
+}
+
+function renderInsightsView(container, run) {
+  if (state.provenance === null) {
+    container.appendChild(el("div", "empty", "loading the insight ledger…"));
+    api("/api/distillation/insights?run=" + encodeURIComponent(run.run_id))
+      .then(function (data) { state.provenance = data; renderLevel(); })
+      .catch(function () {
+        state.provenance = { insights: [], citations: [], verdicts: [] };
+        renderLevel();
+      });
+    return;
+  }
+  var prov = state.provenance;
+  if (!prov.insights.length) {
+    /* A negative outcome is a row, not an absence (§13.3): saying which
+       negative it was is the difference between evidence and silence. */
+    container.appendChild(el("div", "empty",
+      run.extractor_empty
+        ? "The passes diverged and the extractor returned EMPTY — the " +
+          "divergence was context-justified or already covered."
+        : ((run.planning_diverged || run.exec_diverged)
+            ? "This run diverged but produced no insight."
+            : "The passes agreed. This run is part of the contradiction set " +
+              "for future rules.")));
+    return;
+  }
+  prov.insights.forEach(function (insight) {
+    container.appendChild(insightCard(insight, prov));
+  });
+}
+
+function insightCard(insight, prov) {
+  var card = el("div", "insightCard");
+  card.appendChild(el("div", "text", insight.text));
+  card.appendChild(el("div", "sub",
+    insight.kind + " · " + insight.insight_id +
+    (insight.insight_file ? " · " + insight.insight_file : "") +
+    (insight.file_entry_number ? " (entry #" + insight.file_entry_number + ")" : "")));
+
+  var cited = prov.citations.filter(function (c) {
+    return c.insight_id === insight.insight_id;
+  });
+  if (cited.length) {
+    var list = el("div", "sub", "cites: ");
+    cited.forEach(function (c, index) {
+      if (index) { list.appendChild(document.createTextNode(", ")); }
+      var link = el("button", null,
+        "#" + c.align_index + " " + (c.kind || "?") +
+        (c.command_name ? " · " + c.command_name : ""));
+      link.addEventListener("click", function () {
+        state.distillView = "diff";
+        renderLevel();
+      });
+      list.appendChild(link);
+    });
+    card.appendChild(list);
+  } else {
+    card.appendChild(el("div", "sub", "cites nothing — provenance is broken for this rule"));
+  }
+
+  var live = prov.verdicts.filter(function (v) {
+    return v.insight_id === insight.insight_id && !v.superseded;
+  })[0];
+  var history = prov.verdicts.filter(function (v) {
+    return v.insight_id === insight.insight_id;
+  });
+  var verdictLine = el("div", "sub");
+  verdictLine.appendChild(el("span", "badge " + (live && live.verdict === "supported" ? "ok" : ""),
+    live ? live.verdict : "unadjudicated"));
+  if (live) {
+    verdictLine.appendChild(document.createTextNode(
+      " by " + live.actor + (live.note ? " — " + live.note : "")));
+  }
+  card.appendChild(verdictLine);
+  if (history.length > 1) {
+    /* The history of judgements IS evidence: an insight accepted and then
+       contradicted by a replay is exactly the signal replay exists to make. */
+    var prior = el("div", "sub", "earlier: " + history.slice(1).map(function (v) {
+      return v.verdict + " (" + v.actor + ")";
+    }).join(", "));
+    card.appendChild(prior);
+  }
+
+  var row = el("div", "verdictRow");
+  var select = el("select");
+  VERDICTS.forEach(function (v) {
+    var opt = el("option", null, v);
+    opt.value = v;
+    select.appendChild(opt);
+  });
+  var note = el("input");
+  note.type = "text";
+  note.placeholder = "note (optional)";
+  var save = el("button", "primary", "Record verdict");
+  var status = el("span", "sub");
+  save.addEventListener("click", function () {
+    save.disabled = true;
+    clear(status);
+    status.appendChild(document.createTextNode("saving…"));
+    apiPost("/api/distillation/verdict", {
+      insight_id: insight.insight_id,
+      verdict: select.value,
+      note: note.value || null,
+      actor: "human"
+    }).then(function () {
+      state.provenance = null;
+      renderLevel();
+    }).catch(function (e) {
+      save.disabled = false;
+      clear(status);
+      status.appendChild(document.createTextNode("failed: " + e.message));
+    });
+  });
+  row.appendChild(select);
+  row.appendChild(note);
+  row.appendChild(save);
+  row.appendChild(status);
+  card.appendChild(row);
+
+  /* Support and contradiction, fetched lazily: one turn is an anecdote, and a
+     promotion decision is made from the counts, not from this row. */
+  var counts = el("div", "sub");
+  var ask = el("button", null, "Support / contradiction");
+  ask.addEventListener("click", function () {
+    ask.disabled = true;
+    api("/api/distillation/insights?insight=" + encodeURIComponent(insight.insight_id))
+      .then(function (data) {
+        var runs = data.runs || {};
+        clear(counts);
+        counts.appendChild(document.createTextNode(
+          (runs.support || []).length + " supporting run(s), " +
+          ((runs.contradict || []).length + (runs.contradict_run_level || []).length) +
+          " contradicting run(s)"));
+        (runs.support || []).slice(0, 20).forEach(function (r) {
+          var b = el("button", null, r.run_id);
+          b.addEventListener("click", function () { selectTurn(r.turn_key, r.run_id); });
+          counts.appendChild(document.createTextNode(" "));
+          counts.appendChild(b);
+        });
+      })
+      .catch(function () {
+        clear(counts);
+        counts.appendChild(document.createTextNode("could not load counts"));
+      });
+  });
+  counts.appendChild(ask);
+  card.appendChild(counts);
+  return card;
+}
+
+/* -- the corpus view (fix-sb8.10) -------------------------------------- */
+function showCorpus() {
+  var d = document.getElementById("detail");
+  clear(d);
+  d.appendChild(el("div", "empty", "loading the distillation corpus…"));
+  api("/api/distillation/corpus").then(function (corpus) {
+    clear(d);
+    var card = el("div", "card");
+    card.appendChild(el("h2", null, "Distillation corpus"));
+    card.appendChild(el("div", "sub",
+      "One turn is an anecdote. These are the rates and counts a rule has to " +
+      "survive before it becomes a planner skill."));
+
+    corpusTable(card, "Divergence rate by week",
+      ["week", "runs", "diverged", "material", "rate"], corpus.weekly,
+      ["week", "runs", "diverged", "material", "rate"]);
+    corpusTable(card, "Material missing-in-student by command",
+      ["command", "n", "runs"], corpus.by_command,
+      ["command_name", "n", "run_ids"]);
+    corpusTable(card, "Divergences by kind",
+      ["level", "kind", "n", "material", "runs"], corpus.by_kind,
+      ["level", "kind", "n", "material", "runs"]);
+    corpusTable(card, "Teacher vs student cost",
+      ["role", "passes", "tokens", "cost", "avg ms", "cache hits", "cache misses"],
+      corpus.cost,
+      ["role", "passes", "tokens", "cost_usd", "avg_ms", "cache_hits", "cache_misses"]);
+
+    var promo = el("div");
+    promo.appendChild(el("h2", null, "Promotion view"));
+    if (corpus.promotion_blocked) {
+      /* Not "no support" — "the causal claim promotion rests on is not yet
+         checkable". Rendering an empty table here would be a lie by omission. */
+      var blocked = el("div", "nonComparable");
+      blocked.appendChild(el("strong", null, "Promotion is blocked."));
+      blocked.appendChild(el("div", null,
+        "Application-object isolation is not yet verified for any run, so no " +
+        "insight can carry the causal claim promotion requires. The counts " +
+        "below are therefore all zero by construction, not by evidence."));
+      promo.appendChild(blocked);
+    }
+    card.appendChild(promo);
+    corpusTable(card, null,
+      ["insight", "kind", "verdict", "support", "material support", "text"],
+      corpus.promotion,
+      ["insight_id", "kind", "verdict", "support_runs", "material_support_runs", "text"]);
+    d.appendChild(card);
+  }).catch(function (e) {
+    clear(d);
+    d.appendChild(el("div", "empty",
+      "No distillation corpus available: " + e.message));
+  });
+}
+
+function corpusTable(container, heading, headers, rows, keys) {
+  if (heading) { container.appendChild(el("h2", null, heading)); }
+  if (!rows || !rows.length) {
+    container.appendChild(el("div", "empty", "no rows"));
+    return;
+  }
+  var table = el("table", "corpusTable");
+  var head = el("tr");
+  headers.forEach(function (h) { head.appendChild(el("th", null, h)); });
+  table.appendChild(head);
+  rows.forEach(function (row) {
+    var tr = el("tr");
+    keys.forEach(function (key) {
+      var value = row[key];
+      tr.appendChild(el("td", null,
+        value === null || value === undefined ? "—" : String(value)));
+    });
+    table.appendChild(tr);
+  });
+  var scroll = el("div", "scrollX");
+  scroll.appendChild(table);
+  container.appendChild(scroll);
+}
+
+document.getElementById("corpusBtn").addEventListener("click", showCorpus);
+
 /* -- turn detail ------------------------------------------------------- */
-function selectTurn(turnKey) {
+function selectTurn(turnKey, runId) {
   state.turnKey = turnKey;
   state.turn = null;
   state.path = [];
+  state.distill = null;
+  state.distillPass = "";
+  state.distillView = "passes";
+  state.divergences = null;
+  state.provenance = null;
   refreshConvs();
   Promise.all([
     api("/api/turn/" + encodeURIComponent(turnKey)),
-    api("/api/spans/" + encodeURIComponent(turnKey))
+    api("/api/spans/" + encodeURIComponent(turnKey)),
+    /* The distillation run for this turn, when there is one. A failure here
+       must never cost the turn its detail view: a pre-distillation DB 404s by
+       [DR29] and an ordinary turn simply has no run. */
+    distillationFor(runId, turnKey)
   ]).then(function (results) {
+    state.distill = results[2];
     renderDetail(results[0].turn, results[1].spans || []);
   }).catch(function (e) {
     var d = document.getElementById("detail");
     clear(d);
     d.appendChild(el("div", "empty", "Failed to load turn: " + e.message));
   });
+}
+
+function distillationFor(runId, turnKey) {
+  /* Three cases, deliberately distinguished by runId's TYPE.
+
+     A string is a known run: fetch it. `null` means the caller KNOWS there is
+     none — the turn list gets a marker for its whole page in one statement, so
+     an unmarked row is not an unknown, and looking it up anyway would add a
+     500-run fetch to every ordinary turn click. `undefined` is genuine
+     ignorance (a page opened straight onto a turn), and only that pays for the
+     search. */
+  if (runId === null) { return Promise.resolve(null); }
+  if (runId) {
+    return api("/api/distillation/run/" + encodeURIComponent(runId))
+      .catch(function () { return null; });
+  }
+  return api("/api/distillation/runs?limit=500")
+    .then(function (data) {
+      var match = (data.runs || []).filter(function (r) { return r.turn_key === turnKey; })[0];
+      if (!match) { return null; }
+      return api("/api/distillation/run/" + encodeURIComponent(match.run_id));
+    })
+    .catch(function () { return null; });
 }
 
 function statusBadge(turn) {
@@ -1527,6 +2175,13 @@ function renderLevel() {
     wf.appendChild(el("h2", null, "Inside this " + levelNoun(node)));
     renderWaterfall(wf, node);
     d.appendChild(wf);
+  }
+
+  if (node.kind === "turn" && state.distill) {
+    /* Turn level only: the run this turn was distilled into, its two passes,
+       the aligned diff and the insights drawn from it (fix-sb8.7 / .8 / .9).
+       Placed above artifacts because on a distilled turn it IS the subject. */
+    d.appendChild(renderDistillationCard());
   }
 
   if (node.kind === "turn") {

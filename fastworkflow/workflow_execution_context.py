@@ -156,6 +156,10 @@ class WorkflowExecutionContext:
         self._distillation_insights_count = 0
         self._planning_insights: Optional[str] = None
         self._execution_insights: Optional[str] = None
+        # The pass currently executing, stamped onto every span emitted inside
+        # it ([DR3]); None between passes and on every non-distilled turn.
+        self._distillation_pass: Optional[str] = None
+        self._distillation_run_ids: list[str] = []
 
         # Observability (design §3.1): sink + identity + span bookkeeping.
         # The sink is a per-context attribute, not transport state [R28].
@@ -178,6 +182,11 @@ class WorkflowExecutionContext:
         # a null check. fix-ajv.20.
         self._execution_recorder: Optional[ExecutionRecorder] = None
         self._turn_key: Optional[str] = None
+        # [DR41]: a SECOND, independent trace id for the counterfactual-replay
+        # path. `_turn_key` is never overridden — overriding it is exactly the
+        # corruption §3.3 rejects option (c) for — so a replay writes into
+        # `<turn_key>~replay.<n>` while the turn machinery keeps seeing None.
+        self._replay_trace_id: Optional[str] = None
         self._turn_started_at: Optional[datetime] = None
         self._turn_user_message: str = ""
         self._turn_refined_message: Optional[str] = None
@@ -317,9 +326,69 @@ class WorkflowExecutionContext:
         return self._turn_key
 
     @property
+    def current_replay_trace_id(self) -> Optional[str]:
+        """The replay trace spans are being written into, or None ([DR41]).
+
+        Set only by `replay_trace_scope`, only by the counterfactual-replay
+        driver, and only to `<original_turn_key>~replay.<n>` ([DR5]).
+        """
+        return self._replay_trace_id
+
+    @contextlib.contextmanager
+    def replay_trace_scope(self, trace_id: str):
+        """Write spans into a derived replay trace for the enclosed block.
+
+        The `finally` clears it on the failure path too, and that is not the
+        only guard: a leaked id still cannot write a `turns` row, because
+        `finalize_turn_for_observability` short-circuits on
+        `self._turn_key is None` and the replay driver never calls
+        `_begin_turn`. Belt and braces, because the thing being protected is
+        the evidence a shipped rule cites.
+        """
+        previous = self._replay_trace_id
+        self._replay_trace_id = trace_id
+        try:
+            yield
+        finally:
+            self._replay_trace_id = previous
+
+    @property
     def trace_span_stack(self) -> list[tracing.Span]:
         """Open-span stack for parenting nested spans (single-turn: I5)."""
         return self._trace_span_stack
+
+    @property
+    def current_refined_message(self) -> Optional[str]:
+        """The refined user query this turn's prompts saw, or None.
+
+        Read by `distillation.prompt_fingerprint` ([DR47]), which hashes the
+        inputs a pass's prompts actually see rather than the world it runs
+        against. It is None until `_process_agent_message` refines the message,
+        and it stays None through a distillation pass: the distillation branch
+        refines per pass without stamping the turn, and *which* pass supplies a
+        turn's fields is [DR42]'s question, not this property's.
+        """
+        return self._turn_refined_message
+
+    @property
+    def current_distillation_pass(self) -> Optional[str]:
+        """The distillation pass whose work is running, or None ([DR3])."""
+        return self._distillation_pass
+
+    @contextlib.contextmanager
+    def distillation_pass_scope(self, pass_label: Optional[str]):
+        """Label every span emitted inside the block with *pass_label*.
+
+        Restored on **every** exit path, the student-failure raise included: a
+        leaked label files each following turn's spans under a stale pass,
+        which is worse than the interleaving this exists to fix.
+        """
+        previous = self._distillation_pass
+        self._distillation_pass = pass_label
+        try:
+            yield
+        finally:
+            self._distillation_pass = previous
 
     def clear_action_log(self) -> None:
         """Clear in-memory action log for a new agent turn."""
@@ -387,6 +456,10 @@ class WorkflowExecutionContext:
         # boundary). Off the stack: children parent to it via the deterministic
         # root id, which survives suspension where the stack does not.
         self._trace_span_stack.clear()
+        # Belt-and-braces beside the stack clear: the pass scope restores on
+        # every exit path, but a label that somehow survived a turn would
+        # silently file this turn's spans under a pass that never ran.
+        self._distillation_pass = None
         self._turn_root_span = tracing.start_span(
             self,
             tracing.SPAN_TURN,
@@ -433,14 +506,25 @@ class WorkflowExecutionContext:
         self.append_turn_output(entry)
 
         if self._turn_key:
+            # [DR51] / §9 producer items 6 and 12. Inside a distillation pass
+            # the question belongs to THAT pass: it takes the pass label into
+            # its deterministic id ([DR11], so the two passes' questions are
+            # two spans rather than one upsert over the other) and parents onto
+            # the pass wrapper instead of the turn root, which is what makes
+            # §7.1's own sentence and [DR8]'s parenting assertion true. Outside
+            # a pass the label is None and both are byte-identical to before.
+            pass_label = tracing.get_distillation_pass(self)
             tracing.start_span(
                 self,
                 tracing.SPAN_ASK_USER,
                 kind=tracing.KIND_HUMAN_WAIT,
                 span_id=tracing.deterministic_span_id(
-                    self._turn_key, tracing.SPAN_ASK_USER, attempt
+                    self._turn_key,
+                    tracing.SPAN_ASK_USER,
+                    attempt,
+                    pass_label=pass_label,
                 ),
-                parent_span_id=tracing.root_span_id(self._turn_key),
+                parent_span_id=self._ask_user_parent_span_id(pass_label),
                 command_name="ask_user",
                 attributes={"agent_query": question, "attempt": attempt},
                 use_stack=False,
@@ -476,6 +560,17 @@ class WorkflowExecutionContext:
                 self._close_ask_user_span(index, entry, answer)
                 return
 
+    def _ask_user_parent_span_id(self, pass_label: Optional[str]) -> str:
+        """The `fw.ask_user` parent: its own pass wrapper, or the turn root.
+
+        §9 producer item 12 / `[DR51]`. `distill_pass_span_id` is deterministic
+        precisely so the close site — which holds only the turn key and the
+        label — can recompute what the open wrote.
+        """
+        if pass_label:
+            return tracing.distill_pass_span_id(self._turn_key, pass_label)
+        return tracing.root_span_id(self._turn_key)
+
     def _close_ask_user_span(
         self, entry_index: int, entry: fastworkflow.CommandOutput, answer: str
     ) -> None:
@@ -487,16 +582,26 @@ class WorkflowExecutionContext:
             for output in self._turn_outputs[:entry_index]
             if output.is_ask_user
         )
+        # The close rebuilds the Span from pure functions of the turn key, so
+        # it must agree with the open on BOTH the id and the parent: a
+        # disagreeing id writes a second row, and `parent_span_id` is
+        # deliberately absent from the span upsert's DO UPDATE set (§9 item 8),
+        # so a wrong parent at open can never be repaired here.
+        pass_label = tracing.get_distillation_pass(self)
         span = tracing.Span(
             span_id=tracing.deterministic_span_id(
-                self._turn_key, tracing.SPAN_ASK_USER, attempt
+                self._turn_key,
+                tracing.SPAN_ASK_USER,
+                attempt,
+                pass_label=pass_label,
             ),
             trace_id=self._turn_key,
             name=tracing.SPAN_ASK_USER,
             kind=tracing.KIND_HUMAN_WAIT,
-            parent_span_id=tracing.root_span_id(self._turn_key),
+            parent_span_id=self._ask_user_parent_span_id(pass_label),
             channel_id=self._channel_id,
             command_name="ask_user",
+            distillation_pass=pass_label,
             start_ns=tracing.datetime_to_ns(entry.started_at) or 0,
         )
         tracing.end_span(
@@ -1677,6 +1782,8 @@ class WorkflowExecutionContext:
             from fastworkflow.distillation import distill_message
             result = distill_message(self, message)
             self._distillation_insights_count += result.insights_extracted
+            if result.run_id:
+                self._distillation_run_ids.append(result.run_id)
             self._maybe_enqueue_output(result.command_output)
             self._maybe_enqueue_trace_sentinel()
             return result.command_output

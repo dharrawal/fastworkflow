@@ -203,6 +203,9 @@ CREATE TABLE spans (
   command_name TEXT, context TEXT,                    -- queryable [R27]
   start_ns INTEGER NOT NULL, end_ns INTEGER,
   status TEXT NOT NULL, attributes TEXT NOT NULL);
+-- + distillation_pass TEXT (additive, no user_version bump) [DR1][DR28];
+--   distillation_runs / _passes / _divergences / _insights /
+--   _insight_citations / _verdicts per docs/distillation_observability_design.md §9
 
 CREATE TABLE artifacts (
   artifact_id TEXT PRIMARY KEY, turn_key TEXT NOT NULL,
@@ -410,6 +413,22 @@ variation is testable; insights distillation is explicitly out of Studio
 scope. A CLI-parity table ships in the Studio docs listing anything still
 CLI-only.
 
+> *Amendment (owner ruling, 2026-08-28, `fix-sb8.1`) — `[R24]`'s
+> distillation exclusion is REVERSED.* Distillation review is now in scope and
+> is a debug-mode surface, designed in
+> `docs/distillation_observability_design.md` (rulings `[DR1]`–`[DR56]`). The
+> reason `[R24]` was right in August and is wrong now is that distillation's
+> purpose changed: its insights are the raw material for extracting planner
+> skills and verifiers, and promotion requires seeing an insight beside the
+> divergence records it cites, the trace excerpts behind them, and its support
+> and contradiction counts. That is review over recorded evidence — Studio's
+> definition — and the alternative is a second viewer beside the one that
+> exists. Distillation remains CLI-only to *produce* (`--generate_insights` is
+> guarded on `user_message_queue is not None`, so Topology B can never run it);
+> only the *review* surface is in Studio. The rest of `[R24]` — the additive
+> `/initialize` `startup_command`/`startup_action`/`context` fields and the
+> CLI-parity table — is unchanged.
+
 **Packaging `[R23]`:** the SPA bundle is built in CI and included in the
 wheel via explicit `pyproject.toml` `include` entries, with a wheel-content
 assertion test so a missing bundle fails the build; debug mode's HTTP layer
@@ -440,6 +459,8 @@ Not absorbed: fix-85g.11 (backpressure/TTL), fix-85g.13 (distributed store).
 | `FW_OBS_QUEUE_MAX` | `10000` | span/artifact queue bound (turn-record queue is separate and small) `[R13]` |
 | `FW_OBS_SYNC_WRITE_TIMEOUT_S` | `5` | busy timeout for in-request synchronous store writes (conversation-id minting; Phase-7 ruling C9's fail-fast principle) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | `0` | persist traceback artifacts `[R20]` |
+| `FW_OBS_DISTILL_NEGATIVE_PIN_DAYS` | `90` | how long a no-divergence distillation run stays pinned as contradiction evidence `[DR24]` |
+| `FW_OBS_DISTILL_PIN_MAX_FRACTION` | `0.5` | fraction of `FW_OBS_DB_MAX_BYTES` the pinned set may occupy before size-cap eviction starts evicting pinned traces, loudly `[DR52]` |
 
 ## 6. Test strategy
 
@@ -512,7 +533,7 @@ spawned server always passes it.
 | R21 | channel_id on spans/artifacts + forget-channel op with checkpoint+vacuum |
 | R22 | Text-as-text, sandboxed iframes, restrictive CSP, parameterized SQL |
 | R23 | CI-built bundle + wheel assertion; stdlib debug mode; [server] gates test mode |
-| R24 | Additive /initialize startup fields; distillation out of scope; parity table |
+| R24 | Additive /initialize startup fields; parity table. Distillation-out-of-scope REVERSED 2026-08-28 by [DR37] — see docs/distillation_observability_design.md §16 |
 | R25 | Distillation ported to ctx.action_log as a Phase B gate; trace_turn.py updated |
 | R26 | OTel-aligned claim + documented translation table (derived ids, kind mapping) |
 | R27 | Secondary indexes added; command_name/context promoted to span columns |
