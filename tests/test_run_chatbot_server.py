@@ -1007,3 +1007,741 @@ class TestControlPlane:
         assert status == 405
         status, _ = _post(server, "/api/channels", {})
         assert status == 405
+
+
+# ----------------------------------------------------------------------
+# Distillation review surface (`fix-sb8.6`, `fix-sb8.9`, `fix-sb8.10`,
+# `fix-sb8.12`, `fix-sb8.13`) — §12.1's route inventory [DR55].
+# ----------------------------------------------------------------------
+
+DISTILL_TURN = "20260826T090000-d1"
+
+
+@pytest.fixture
+def distilled_db(seeded_db):
+    """A `[DR54]`-shaped corpus on top of the seeded DB.
+
+    Four runs — one comparable and citing an action divergence, one
+    non-comparable with the same command and kind, one replay of the first,
+    and one comparable run that agreed — plus a run-level divergence with a
+    NULL `command_name`. That is the minimum fixture `[DR54]` will accept as
+    evidence that a provenance query is right rather than merely parseable.
+    """
+    store = obs.ObservabilityStore(seeded_db)
+    redactor = obs.Redactor()
+
+    def run(conn, run_id, **overrides):
+        payload = {
+            "run_id": run_id,
+            "turn_key": DISTILL_TURN if run_id == "runA" else f"t-{run_id}",
+            "channel_id": "chan1",
+            "conversation_id": 1,
+            "user_message": "finish my laundry task",
+            "workflow_name": "todo_list",
+            "entry_context": "TodoList",
+            "comparable": 1,
+            "isolation_verified": 1,
+            "started_at": "2026-08-26T09:00:00+00:00",
+            "completed_at": "2026-08-26T09:00:20+00:00",
+            "exec_diverged": 1,
+            "material_divergences": 1,
+            "execution_insights": 1,
+            "run_json": json.dumps({"run_id": run_id, "status": "ok"}),
+        }
+        payload.update(overrides)
+        store.upsert_distillation_row(conn, "run", payload, redactor)
+
+    def divergence(conn, divergence_id, run_id, **overrides):
+        payload = {
+            "divergence_id": divergence_id,
+            "run_id": run_id,
+            "level": "action",
+            "left_pass": "teacher",
+            "right_pass": "student",
+            "align_index": 0,
+            "kind": "missing-in-student",
+            "material": 1,
+            "command_key": "TodoList/complete_task",
+            "command_name": "complete_task",
+            "left_span_id": "sd-teacher",
+            "right_span_id": "sd-student",
+            "param_diff_json": json.dumps({"task_id": {"left": 1, "right": 2}}),
+            "detail_json": json.dumps({"left": {}, "right": {}}),
+        }
+        payload.update(overrides)
+        store.upsert_distillation_row(conn, "divergence", payload, redactor)
+
+    conn = store._connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # The user-visible turn the run belongs to: the marker is what the SPA
+        # renders on the turn list, so it has to be a real turn row.
+        assert store.upsert_turn_row(
+            conn,
+            _turn_row(
+                DISTILL_TURN, "chan1", 1, 3, "completed", 1,
+                {"turn_output": {"turn_key": DISTILL_TURN, "success": True}},
+            ),
+            [],
+            redactor,
+        )
+        run(conn, "runA")
+        run(conn, "runB", comparable=0, comparable_reason="fingerprint-differs")
+        run(conn, "runC", replay_of="runA", replay_trace_id=f"{DISTILL_TURN}~replay.1")
+        run(conn, "runD", exec_diverged=0, material_divergences=0, execution_insights=0)
+        divergence(conn, "dA", "runA")
+        divergence(conn, "dB", "runB")
+        divergence(conn, "dC", "runC")
+        # A run-level divergence keys on nothing: no command, and no step pair
+        # to point at either — it is about the two passes' final ANSWERS.
+        divergence(
+            conn, "dRun", "runA",
+            level="run", kind="different-answer-same-actions",
+            command_key=None, command_name=None, align_index=1,
+            left_span_id=None, right_span_id=None,
+        )
+        for run_id in ("runA", "runD"):
+            for label, seq in (("teacher", 0), ("student", 1)):
+                store.upsert_distillation_row(
+                    conn,
+                    "pass",
+                    {
+                        "run_id": run_id,
+                        "pass_label": label,
+                        "role": label,
+                        "seq": seq,
+                        "trace_id": (
+                            DISTILL_TURN if run_id == "runA" else f"t-{run_id}"
+                        ),
+                        "agent_model": f"model-{label}",
+                        "entry_fingerprint": "fp-entry",
+                        "exit_fingerprint": f"fp-exit-{label}",
+                        "wall_ms": 500,
+                        "tokens": 100,
+                        "cost_usd": 0.01,
+                        "cache_hits": 0,
+                        "cache_misses": 2,
+                        "model_params_json": json.dumps({"temperature": 0}),
+                        "entry_inputs_json": json.dumps({"user_message": "x"}),
+                    },
+                    redactor,
+                )
+        for insight_id, divergence_id in (("ins-1", "dA"), ("ins-2", "dRun")):
+            store.upsert_distillation_row(
+                conn,
+                "insight",
+                {
+                    "insight_id": insight_id,
+                    "run_id": "runA",
+                    "kind": "execution",
+                    "text": f"text for {insight_id}",
+                    "text_hash": f"hash-{insight_id}",
+                    "created_at": "2026-08-26T09:00:30+00:00",
+                },
+                redactor,
+            )
+            store.upsert_distillation_row(
+                conn,
+                "citation",
+                {"insight_id": insight_id, "divergence_id": divergence_id},
+                redactor,
+            )
+        store.upsert_span_rows(
+            conn,
+            [
+                tracing.Span(
+                    span_id="sd-teacher", trace_id=DISTILL_TURN,
+                    name="fw.command.execute", command_name="complete_task",
+                    start_ns=1, end_ns=2, status="ok",
+                    distillation_pass="teacher",
+                ),
+                tracing.Span(
+                    span_id="sd-student", trace_id=DISTILL_TURN,
+                    name="fw.command.execute", command_name="add_todo",
+                    start_ns=3, end_ns=4, status="ok",
+                    distillation_pass="student",
+                ),
+                tracing.Span(
+                    span_id="sd-turn", trace_id=DISTILL_TURN,
+                    name="fw.turn", start_ns=0, end_ns=9, status="ok",
+                ),
+                # runD's student DID run the cited command and did not diverge:
+                # the contradiction case.
+                tracing.Span(
+                    span_id="sd-agree", trace_id="t-runD",
+                    name="fw.command.execute", command_name="complete_task",
+                    start_ns=1, end_ns=2, status="ok",
+                    distillation_pass="student",
+                ),
+                # A NULL-command failed span, the [DR54] three-valued-logic trap.
+                tracing.Span(
+                    span_id="sd-null", trace_id="t-runD",
+                    name="fw.command.execute", start_ns=3, end_ns=4,
+                    status="error", distillation_pass="student",
+                ),
+            ],
+            redactor,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return seeded_db
+
+
+@pytest.fixture
+def distill_server(distilled_db, workflow_path):
+    srv = run_chatbot_server.ChatbotServer(
+        distilled_db, workflow_path=workflow_path, port=0
+    )
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield srv
+    srv.shutdown()
+    thread.join(timeout=5)
+
+
+class TestDistillationReadApi:
+    def test_run_list_excludes_replays_by_default(self, distill_server):
+        runs = _get_json(distill_server, "/api/distillation/runs")["runs"]
+        assert [r["run_id"] for r in runs] == ["runA", "runB", "runD"]
+        with_replays = _get_json(
+            distill_server, "/api/distillation/runs?include_replays=1"
+        )["runs"]
+        assert "runC" in {r["run_id"] for r in with_replays}
+
+    def test_run_list_filters(self, distill_server):
+        assert [
+            r["run_id"]
+            for r in _get_json(
+                distill_server, "/api/distillation/runs?comparable=0"
+            )["runs"]
+        ] == ["runB"]
+        assert [
+            r["run_id"]
+            for r in _get_json(
+                distill_server, "/api/distillation/runs?diverged=0"
+            )["runs"]
+        ] == ["runD"]
+        assert [
+            r["run_id"]
+            for r in _get_json(
+                distill_server, "/api/distillation/runs?channel=nobody"
+            )["runs"]
+        ] == []
+
+    def test_run_detail_carries_passes_and_retention(self, distill_server):
+        payload = _get_json(distill_server, "/api/distillation/run/runA")
+        assert payload["run"]["run_id"] == "runA"
+        # run_json is parsed server-side, the /api/turn/<k> precedent.
+        assert payload["run"]["record"]["status"] == "ok"
+        assert [(p["pass_label"], p["seq"]) for p in payload["passes"]] == [
+            ("teacher", 0),
+            ("student", 1),
+        ]
+        assert payload["passes"][0]["model_params"] == {"temperature": 0}
+        # `fix-sb8.13`: "why is this trace still here", answered.
+        assert payload["retention"]["pin_class"] == "produced-an-insight"
+        assert payload["retention"]["pin_expected"] is True
+
+    def test_run_detail_404s_for_an_unknown_run(self, distill_server):
+        status, _, _ = _get(distill_server, "/api/distillation/run/nope")
+        assert status == 404
+
+    def test_divergences_are_ordered_and_parsed(self, distill_server):
+        rows = _get_json(
+            distill_server, "/api/distillation/divergences/runA"
+        )["divergences"]
+        assert [r["divergence_id"] for r in rows] == ["dA", "dRun"]
+        assert rows[0]["param_diff"] == {"task_id": {"left": 1, "right": 2}}
+        only_run = _get_json(
+            distill_server, "/api/distillation/divergences/runA?level=run"
+        )["divergences"]
+        assert [r["divergence_id"] for r in only_run] == ["dRun"]
+
+    def test_insights_resolve_provenance_in_both_directions(self, distill_server):
+        forward = _get_json(distill_server, "/api/distillation/insights?run=runA")
+        assert {i["insight_id"] for i in forward["insights"]} == {"ins-1", "ins-2"}
+        assert {c["divergence_id"] for c in forward["citations"]} == {"dA", "dRun"}
+
+        reverse = _get_json(
+            distill_server, "/api/distillation/insights?insight=ins-1"
+        )
+        # [DR54]: the non-comparable run and the replay are BOTH excluded.
+        assert {r["run_id"] for r in reverse["runs"]["support"]} == {"runA"}
+        assert {r["run_id"] for r in reverse["runs"]["contradict"]} == {"runD"}
+
+        # A run-level insight has no command to key on: its contradiction set
+        # is defined over outcomes, and it must not silently return nothing.
+        run_level = _get_json(
+            distill_server, "/api/distillation/insights?insight=ins-2"
+        )
+        assert {
+            r["run_id"] for r in run_level["runs"]["contradict_run_level"]
+        } == {"runD"}
+
+        by_hash = _get_json(
+            distill_server, "/api/distillation/insights?text_hash=hash-ins-1"
+        )
+        assert [i["insight_id"] for i in by_hash["insights"]] == ["ins-1"]
+
+    def test_insights_requires_exactly_one_selector(self, distill_server):
+        status, _, _ = _get(distill_server, "/api/distillation/insights")
+        assert status == 400
+        status, _, _ = _get(
+            distill_server, "/api/distillation/insights?run=runA&insight=ins-1"
+        )
+        assert status == 400
+
+    def test_spans_can_be_filtered_to_one_pass(self, distill_server):
+        """The whole of "neither waterfall interleaves the other": the passes
+        share a trace_id by [DR1] and are separated by the column."""
+        every = _get_json(distill_server, f"/api/spans/{DISTILL_TURN}")["spans"]
+        assert len(every) == 3
+        teacher = _get_json(
+            distill_server, f"/api/spans/{DISTILL_TURN}?pass=teacher"
+        )["spans"]
+        assert [s["span_id"] for s in teacher] == ["sd-teacher"]
+        student = _get_json(
+            distill_server, f"/api/spans/{DISTILL_TURN}?pass=student"
+        )["spans"]
+        assert [s["span_id"] for s in student] == ["sd-student"]
+        outside = _get_json(
+            distill_server, f"/api/spans/{DISTILL_TURN}?pass=none"
+        )["spans"]
+        assert [s["span_id"] for s in outside] == ["sd-turn"]
+
+    def test_the_turn_list_marks_distillation_turns(self, distill_server):
+        turns = _get_json(distill_server, "/api/turns")["turns"]
+        marked = {
+            t["turn_key"]: t.get("distillation")
+            for t in turns
+            if t.get("distillation")
+        }
+        assert list(marked) == [DISTILL_TURN]
+        assert marked[DISTILL_TURN]["run_id"] == "runA"
+        assert marked[DISTILL_TURN]["exec_diverged"] == 1
+
+    def test_corpus_aggregates(self, distill_server):
+        corpus = _get_json(distill_server, "/api/distillation/corpus")
+        promotion = {row["insight_id"]: row for row in corpus["promotion"]}
+        # An insight with no corroboration is LISTED with a zero, not dropped.
+        assert promotion["ins-1"]["support_runs"] == 1
+        assert promotion["ins-2"]["support_runs"] == 0
+        assert corpus["promotion_blocked"] is False
+        by_command = {row["command_name"]: row for row in corpus["by_command"]}
+        assert by_command["complete_task"]["n"] == 1
+        assert {row["kind"] for row in corpus["by_kind"]} == {
+            "missing-in-student",
+            "different-answer-same-actions",
+        }
+        assert {row["role"] for row in corpus["cost"]} == {"teacher", "student"}
+        assert corpus["weekly"], "no weekly rate rows"
+
+    def test_export_is_self_contained(self, distill_server):
+        payload = _get_json(distill_server, "/api/distillation/export/runA")
+        assert payload["export_version"] == 1
+        assert payload["run"]["run_id"] == "runA"
+        assert [d["divergence_id"] for d in payload["divergences"]] == ["dA", "dRun"]
+        assert {i["insight_id"] for i in payload["insights"]} == {"ins-1", "ins-2"}
+        # The evidence itself, so an extraction agent can work from the file.
+        assert {s["span_id"] for s in payload["spans"][DISTILL_TURN]} == {
+            "sd-teacher", "sd-student", "sd-turn",
+        }
+
+    def test_a_pre_distillation_db_404s_rather_than_500s(self, server):
+        """[DR29]: the seeded DB has the tables (this build wrote it), so the
+        marker is what is interrogated — the viewer must answer with a reason,
+        never with `no such table` behind a 500."""
+        for path in (
+            "/api/distillation/runs",
+            "/api/distillation/run/nope",
+            "/api/distillation/corpus",
+        ):
+            status, _, _ = _get(server, path)
+            assert status in (200, 404), path
+        status, _, _ = _get(server, "/api/distillation/nope")
+        assert status == 404
+
+
+class TestDistillationUi:
+    """`fix-sb8.7` / `.8` / `.9` / `.10` in the SPA.
+
+    Byte-level assertions rather than a browser, following the existing
+    `test_page_never_uses_innerhtml` precedent: the page is 3k lines of
+    framework-free vanilla JS with no build step, so what a test can hold onto
+    is that the seams exist and the [R22] ban still holds over the new code.
+    """
+
+    def test_the_distillation_surface_is_present(self, distill_server):
+        page = distill_server.index_html
+        for marker in (
+            b"renderDistillationCard",   # the run header
+            b"renderPassesView",         # one clean waterfall at a time
+            b"renderDiffView",           # the aligned two-pane diff
+            b"renderInsightsView",       # the ledger beside its evidence
+            b"showCorpus",               # the aggregates
+            b"/api/distillation/verdict",
+            b"firstDivergence",          # jump-to-first-divergence
+            b"nonComparable",            # the loud banner
+        ):
+            assert marker in page, marker
+
+    def test_the_new_code_keeps_the_innerhtml_ban(self, distill_server):
+        assert b"innerHTML" not in distill_server.index_html
+        # And the banned rail ids from the parent design are still absent.
+        assert b'id="channelSel"' not in distill_server.index_html
+        assert b"/api/channels" not in distill_server.index_html
+
+    def test_the_page_still_loads_under_its_own_csp(self, distill_server):
+        """The CSP hashes are computed from the page, so an edit to the inline
+        script flows through that path — but only if the page is still served
+        as one hash-sourced inline block."""
+        status, headers, body = _get(distill_server, "/")
+        assert status == 200
+        assert b"renderDistillationCard" in body
+        csp = headers["Content-Security-Policy"]
+        assert "'sha256-" in csp
+        # Only STYLE may be inline; the script block stays hash-sourced.
+        assert "script-src 'self' 'unsafe-inline'" not in csp
+
+
+class TestDistillationVerdicts:
+    def test_a_verdict_is_appended_and_supersedes_the_previous(
+        self, distill_server, distilled_db
+    ):
+        status, first = _post(
+            distill_server,
+            "/api/distillation/verdict",
+            {"insight_id": "ins-1", "verdict": "supported", "actor": "human"},
+        )
+        assert status == 200, first
+        status, second = _post(
+            distill_server,
+            "/api/distillation/verdict",
+            {
+                "insight_id": "ins-1",
+                "verdict": "overfit-to-single-turn",
+                "actor": "agent:reviewer",
+                "note": "one turn is an anecdote",
+            },
+        )
+        assert status == 200, second
+
+        rows = _rows_of(
+            distilled_db,
+            "SELECT verdict, actor, superseded FROM distillation_verdicts "
+            "WHERE insight_id='ins-1' ORDER BY created_at, verdict_id",
+        )
+        # Append-only WITH supersede: the history of judgements is evidence.
+        assert len(rows) == 2
+        assert {r["superseded"] for r in rows} == {0, 1}
+        live = [r for r in rows if r["superseded"] == 0]
+        assert live[0]["verdict"] == "overfit-to-single-turn"
+        assert live[0]["actor"] == "agent:reviewer"
+
+    def test_the_verdict_shows_up_in_the_provenance_view(self, distill_server):
+        _post(
+            distill_server,
+            "/api/distillation/verdict",
+            {"insight_id": "ins-1", "verdict": "supported", "actor": "human"},
+        )
+        payload = _get_json(
+            distill_server, "/api/distillation/insights?insight=ins-1"
+        )
+        assert [v["verdict"] for v in payload["verdicts"]] == ["supported"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"insight_id": "ins-1", "verdict": "looks-fine", "actor": "human"},
+            {"insight_id": "ins-1", "verdict": "supported", "actor": "root"},
+            {"insight_id": "ins-1", "verdict": "supported", "actor": "agent:"},
+            {"insight_id": "nope", "verdict": "supported", "actor": "human"},
+            {
+                "insight_id": "ins-1",
+                "verdict": "supported",
+                "actor": "human",
+                "note": "x" * 4097,
+            },
+        ],
+    )
+    def test_rejected_bodies_are_400(self, distill_server, distilled_db, body):
+        status, _ = _post(distill_server, "/api/distillation/verdict", body)
+        assert status == 400
+        assert _rows_of(distilled_db, "SELECT * FROM distillation_verdicts") == []
+
+    def test_the_verdict_route_still_needs_the_token(self, distill_server):
+        status, _ = _post(
+            distill_server,
+            "/api/distillation/verdict",
+            {"insight_id": "ins-1", "verdict": "supported", "actor": "human"},
+            token=None,
+        )
+        assert status == 401
+
+    def test_the_verdict_route_cannot_reach_recorded_evidence(
+        self, distill_server, distilled_db
+    ):
+        """§12 rule 5: the read-only property is RE-ASSERTED, not relaxed.
+
+        The route touches `distillation_verdicts` and nothing else — not
+        spans, turns or artifacts, and not the `pinned` column either, whose
+        consequential change `prune()` derives ([DR52]).
+        """
+        before = _row_counts(distilled_db)
+        before_runs = _rows_of(
+            distilled_db, "SELECT run_id, pinned FROM distillation_runs"
+        )
+        before_divergences = _rows_of(
+            distilled_db, "SELECT * FROM distillation_divergences"
+        )
+        status, _ = _post(
+            distill_server,
+            "/api/distillation/verdict",
+            {"insight_id": "ins-1", "verdict": "supported", "actor": "human"},
+        )
+        assert status == 200
+        assert _row_counts(distilled_db) == before
+        assert (
+            _rows_of(distilled_db, "SELECT run_id, pinned FROM distillation_runs")
+            == before_runs
+        )
+        assert (
+            _rows_of(distilled_db, "SELECT * FROM distillation_divergences")
+            == before_divergences
+        )
+
+    def test_other_posts_are_still_405(self, distill_server):
+        for path in ("/api/turns", "/api/distillation/runs", "/api/spans/x"):
+            status, _ = _post(distill_server, path, {})
+            assert status == 405
+
+
+class TestShippedSqlRecipes:
+    """`[DR54]`: a recipe is not verified until it has been EXECUTED against a
+    fixture containing the shapes that silently break it.
+
+    Parse-checking is retired as a standard of evidence here — it is what let a
+    promotion query ship returning three supporters where the answer was one,
+    and a contradiction query ship returning zero rows with no error. Every SQL
+    block in the skill's Distillation section is extracted from the shipped
+    markdown and run against `distilled_db`, which holds a comparable run, a
+    non-comparable one, a replay, a no-divergence run, a run-level
+    NULL-command divergence and a NULL-command failed span.
+    """
+
+    def _recipes(self) -> list[str]:
+        from fastworkflow import state_paths as _sp  # noqa: F401
+
+        reference = (
+            Path(run_chatbot_server.__file__).resolve().parents[1]
+            / "skills_for_coding_fastworkflows"
+            / "debug-workflow-conversations"
+            / "reference.md"
+        )
+        text = reference.read_text()
+        section = text.split("### Distillation recipes", 1)[1]
+        block = section.split("```sql", 1)[1].split("```", 1)[0]
+        statements = []
+        for chunk in block.split(";"):
+            # A recipe's `--` title lines belong to the statement that FOLLOWS
+            # them, so they land at the head of the next chunk and are dropped
+            # here. Trailing same-line comments stay: SQLite reads them fine
+            # and they carry the reason each filter is there.
+            sql = "\n".join(
+                line
+                for line in chunk.strip().splitlines()
+                if line.strip() and not line.strip().startswith("--")
+            ).strip()
+            if sql:
+                statements.append(sql)
+        assert len(statements) >= 8, f"only {len(statements)} recipes extracted"
+        return statements
+
+    def test_every_documented_recipe_executes(self, distilled_db):
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        params = {"insight_id": "ins-1", "text_hash": "hash-ins-1",
+                  "turn_key": DISTILL_TURN, "span_id": "sd-teacher"}
+        try:
+            for statement in self._recipes():
+                needed = {
+                    name: value
+                    for name, value in params.items()
+                    if ":" + name in statement
+                }
+                conn.execute(statement, needed).fetchall()
+        finally:
+            conn.close()
+
+    def test_a_span_resolves_back_to_the_rules_drawn_from_it(self, distilled_db):
+        """Acceptance criterion 2's reverse direction: given a tool call that
+        looks wrong, has a rule already been written about it?"""
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            recipe = next(
+                st for st in self._recipes() if "d.left_span_id = :span_id" in st
+            )
+            rows = conn.execute(recipe, {"span_id": "sd-teacher"}).fetchall()
+        finally:
+            conn.close()
+        assert {r["insight_id"] for r in rows} == {"ins-1"}
+
+    def test_the_support_recipe_excludes_replays_and_non_comparable_runs(
+        self, distilled_db
+    ):
+        """The specific defect `[DR54]` caught: runB (non-comparable) and runC
+        (a replay of runA) carry the same command and kind as the cited
+        divergence, so a recipe missing either filter reports three supporters
+        for an insight that has one."""
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            support = next(
+                st for st in self._recipes() if "cited.command_key = d.command_key" in st
+            )
+            rows = conn.execute(support, {"insight_id": "ins-1"}).fetchall()
+        finally:
+            conn.close()
+        assert {r["run_id"] for r in rows} == {"runA"}
+
+    def test_the_contradiction_recipe_survives_a_null_command_name(
+        self, distilled_db
+    ):
+        """Without the `cited.command_name IS NOT NULL` guard, three-valued
+        logic makes EXISTS false for every run and the query returns nothing
+        at all — which reads as "no contradictions found"."""
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            recipe = next(
+                st for st in self._recipes() if "CROSS JOIN cited" in st
+            )
+            rows = conn.execute(recipe, {"insight_id": "ins-1"}).fetchall()
+        finally:
+            conn.close()
+        assert {r["run_id"] for r in rows} == {"runD"}
+
+    def test_the_promotion_recipe_keeps_an_uncorroborated_insight(
+        self, distilled_db
+    ):
+        """A run-level insight keys on nothing, so a join-chain form drops it
+        entirely. It has to appear with a zero — an insight that silently
+        disappears from the promotion list is the failure this epic exists to
+        remove."""
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            recipe = next(st for st in self._recipes() if "AS support_runs" in st)
+            rows = {r["insight_id"]: r for r in conn.execute(recipe).fetchall()}
+        finally:
+            conn.close()
+        assert set(rows) == {"ins-1", "ins-2"}
+        assert rows["ins-1"]["support_runs"] == 1
+        assert rows["ins-2"]["support_runs"] == 0
+
+
+class TestDocumentedSqlMatchesExecutedSql:
+    """The UI and the agent surface must not drift apart.
+
+    `fix-sb8.10`'s design note is explicit about the risk: the corpus view is
+    worth having only if it "runs exactly the §15 recipes, so the UI and the
+    agent surface cannot drift". They are two copies of the same query — one
+    in `observability_store`, one in the shipped skill — and nothing stops
+    someone fixing a bug in one of them.
+
+    Equality of TEXT would be the wrong assertion: the executed constants
+    carry a `{scope}` placeholder for channel filtering that has no place in
+    documentation. Equality of ANSWERS is the property that matters, so both
+    are run against the same fixture and their result sets compared.
+    """
+
+    def _doc_recipe(self, needle: str) -> str:
+        return next(
+            st for st in TestShippedSqlRecipes()._recipes() if needle in st
+        )
+
+    @pytest.mark.parametrize(
+        "needle, constant, params",
+        [
+            ("cited.command_key = d.command_key", "_SUPPORT_RUNS_SQL",
+             {"insight_id": "ins-1"}),
+            ("CROSS JOIN cited", "_CONTRADICT_RUNS_SQL", {"insight_id": "ins-1"}),
+            ("d.level = 'run'", "_CONTRADICT_RUN_LEVEL_SQL",
+             {"insight_id": "ins-2"}),
+        ],
+    )
+    def test_provenance_recipes_agree(
+        self, distilled_db, needle, constant, params
+    ):
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            documented = [
+                tuple(r) for r in conn.execute(self._doc_recipe(needle), params)
+            ]
+            executed = [
+                tuple(r)
+                for r in conn.execute(getattr(obs, constant), params)
+            ]
+        finally:
+            conn.close()
+        assert documented == executed, (
+            f"{constant} and its shipped documentation no longer answer the "
+            "same question"
+        )
+
+    @pytest.mark.parametrize(
+        "needle, constant",
+        [
+            ("strftime('%Y-W%W'", "_WEEKLY_RATE_SQL"),
+            ("missing-in-student", "_BY_COMMAND_SQL"),
+            ("GROUP BY d.level, d.kind", "_BY_KIND_SQL"),
+            ("p.role IN ('teacher','student')", "_COST_SQL"),
+        ],
+    )
+    def test_aggregate_recipes_agree(self, distilled_db, needle, constant):
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            documented = [tuple(r) for r in conn.execute(self._doc_recipe(needle))]
+            # The unscoped form: `{scope}` is the channel filter the route adds.
+            executed = [
+                tuple(r)
+                for r in conn.execute(getattr(obs, constant).replace("{scope}", ""))
+            ]
+        finally:
+            conn.close()
+        assert documented == executed, (
+            f"{constant} and its shipped documentation no longer agree"
+        )
+
+    def test_the_promotion_recipe_agrees_on_support_counts(self, distilled_db):
+        """The store's constant additionally computes `material_support_runs`,
+        which the documented version omits for readability — so the comparison
+        is over the columns they share."""
+        conn = sqlite3.connect(distilled_db)
+        conn.row_factory = sqlite3.Row
+        keys = ("insight_id", "kind", "verdict", "support_runs")
+        try:
+            documented = [
+                tuple(r[k] for k in keys)
+                for r in conn.execute(self._doc_recipe("AS support_runs"))
+            ]
+            executed = [
+                tuple(r[k] for k in keys)
+                for r in conn.execute(obs._PROMOTION_SQL)
+            ]
+        finally:
+            conn.close()
+        assert documented == executed
+
+
+def _rows_of(db_path: str, sql: str) -> list[dict]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(sql).fetchall()]
+    finally:
+        conn.close()

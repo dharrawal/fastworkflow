@@ -129,7 +129,10 @@ Trace vocabulary, defined once:
 - **observability.sqlite3** — the per-workflow single source of truth since
   Phase 7, at `$FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/`. Holds
   `turns` (one row per logical turn, keyed by `turn_key`), `spans`
-  (`trace_id` == `turn_key`), and `artifacts`. Written by `SQLiteTraceSink`
+  (`trace_id` == `turn_key`, except a CLI counterfactual replay which writes
+  `<turn_key>~replay.<n>` and has no `turns` row), and `artifacts`. A distilled
+  turn's spans carry `distillation_pass` (`teacher`/`student`), so one trace
+  holds two trajectories. Written by `SQLiteTraceSink`
   for every topology, CLI included, and it **keeps every turn** — read it with
   `trace_turn.py turns` / `trace_turn.py turn <turn_key>`.
 - **`ctx.action_log`** — the in-process, per-turn list of tool-call

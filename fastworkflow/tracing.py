@@ -116,6 +116,28 @@ RESERVED_V2_SPAN_NAMES = frozenset(
     {SPAN_NLU_INTENT, SPAN_NLU_PARAM_EXTRACTION, SPAN_LLM_CALL, SPAN_TRAIN_PREFIX}
 )
 
+# Distillation structure spans (distillation design §8, [DR21]). Deliberately
+# NOT under fw.train.*: that prefix means the training pipeline, distillation
+# is a run-time surface, and SPAN_TRAIN_PREFIX is stored above as a *prefix*
+# rather than a name, so set membership against it is already ambiguous.
+# All five are KIND_INTERNAL — they are structure; the model invocations
+# inside them stay fw.llm.call spans, now parented by the enclosing pass.
+SPAN_DISTILL_RUN = "fw.distill.run"
+SPAN_DISTILL_PASS = "fw.distill.pass"
+SPAN_DISTILL_COMPARE = "fw.distill.compare"
+SPAN_DISTILL_EXTRACT = "fw.distill.extract"
+SPAN_DISTILL_REPLAY = "fw.distill.replay"
+
+DISTILL_SPAN_NAMES = frozenset(
+    {
+        SPAN_DISTILL_RUN,
+        SPAN_DISTILL_PASS,
+        SPAN_DISTILL_COMPARE,
+        SPAN_DISTILL_EXTRACT,
+        SPAN_DISTILL_REPLAY,
+    }
+)
+
 # Span kinds (spans.kind column): internal | llm | human_wait | tool.
 KIND_INTERNAL = "internal"
 KIND_LLM = "llm"
@@ -138,7 +160,7 @@ class Span:
     """One OTel-shaped span record (spans table shape, design §3.2)."""
 
     span_id: str
-    trace_id: str  # = turn_key
+    trace_id: str  # = turn_key, or <turn_key>~replay.<n> for a replay [DR1]
     name: str
     kind: str = KIND_INTERNAL
     parent_span_id: Optional[str] = None
@@ -149,6 +171,10 @@ class Span:
     end_ns: Optional[int] = None
     status: str = STATUS_OPEN
     attributes: dict[str, Any] = field(default_factory=dict)
+    # The distillation pass this span was emitted inside, or None ([DR23]): a
+    # real column rather than an attribute, so it is indexable, outside the
+    # 16 KiB attribute cap, and outside the Redactor's blind substring pass.
+    distillation_pass: Optional[str] = None
 
 
 # ----------------------------------------------------------------------
@@ -176,6 +202,20 @@ class TraceSink(Protocol):
         summary: Optional[str],
     ) -> None: ...  # [R15]
 
+    def emit_distillation_record(self, kind: str, payload: dict[str, Any]) -> None:
+        """Persist one distillation row ([DR46]).
+
+        ``kind`` is one of ``run`` | ``pass`` | ``divergence`` | ``insight`` |
+        ``citation`` and selects the table; ``payload`` is a flat column->value
+        mapping whose keys are validated against that table's columns by the
+        implementation. Upsert semantics on the table's primary key, so a run
+        row may be written at start and completed later.
+
+        Verdicts are NOT written through here: they are a viewer-side HTTP
+        route, one of the two deliberate off-turn-thread exemptions [DR46].
+        """
+        ...
+
 
 class NoOpTraceSink:
     """Default sink: tracing structurally present, nothing recorded."""
@@ -195,22 +235,56 @@ class NoOpTraceSink:
     ) -> None:
         pass
 
+    def emit_distillation_record(self, kind: str, payload: dict[str, Any]) -> None:
+        pass
+
 
 # ----------------------------------------------------------------------
 # Span identity
 # ----------------------------------------------------------------------
 
 
-def deterministic_span_id(turn_key: str, span_name: str, attempt: int = 0) -> str:
+def deterministic_span_id(
+    turn_key: str,
+    span_name: str,
+    attempt: int = 0,
+    pass_label: Optional[str] = None,
+) -> str:
     """Deterministic span id for spans that must close in a different process
-    than the one that opened them (fw.turn, fw.ask_user) — [R6]."""
-    digest = hashlib.sha256(f"{turn_key}|{span_name}|{attempt}".encode()).hexdigest()
+    than the one that opened them (fw.turn, fw.ask_user) — [R6].
+
+    ``pass_label`` is folded into the digest **only when non-None** ([DR11]):
+    the two-pass shapes mint the same (turn_key, span_name, attempt) triple
+    twice, so without it the student's span would upsert over the teacher's.
+    Leaving it None keeps the digest byte-identical for every pre-distillation
+    caller, root_span_id included.
+    """
+    seed = f"{turn_key}|{span_name}|{attempt}"
+    if pass_label is not None:
+        seed = f"{seed}|{pass_label}"
+    digest = hashlib.sha256(seed.encode()).hexdigest()
     return digest[:32]
 
 
 def root_span_id(turn_key: str) -> str:
     """The fw.turn root span id for a logical turn."""
     return deterministic_span_id(turn_key, SPAN_TURN, 0)
+
+
+def distill_pass_span_id(turn_key: str, pass_label: str) -> str:
+    """The fw.distill.pass span id for one pass of a distilled turn ([DR51]).
+
+    Deterministic rather than a uuid4 because _close_ask_user_span rebuilds its
+    Span from pure functions of the turn key and can therefore only parent onto
+    something it can *compute*, and parent_span_id is not in the span upsert's
+    DO UPDATE set — the open has to be right the first time. The label alone
+    carries the uniqueness, so the attempt ordinal stays 0: a caller holding
+    only the label (which is all the ask_user close has) must be able to
+    reproduce this id.
+    """
+    return deterministic_span_id(
+        turn_key, SPAN_DISTILL_PASS, 0, pass_label=pass_label
+    )
 
 
 def _max_attr_bytes() -> int:
@@ -275,6 +349,24 @@ def get_channel_id(host: Any) -> Optional[str]:
     return _resolve(host, "observability_channel_id")
 
 
+def get_replay_trace_id(host: Any) -> Optional[str]:
+    """The derived replay trace id bound on *host*, or None ([DR41]).
+
+    A SECOND attribute beside `current_turn_key`, never a substitute for it:
+    the deterministic span ids `root_span_id(turn_key)` and
+    `deterministic_span_id(turn_key, 'fw.ask_user', attempt)` are pure
+    functions of the turn key, so re-running under the original key would
+    regenerate the SAME span ids and the upsert's `DO UPDATE` would rewrite
+    the very evidence a pin exists to protect ([DR4]).
+    """
+    return _resolve(host, "current_replay_trace_id")
+
+
+def get_distillation_pass(host: Any) -> Optional[str]:
+    """The distillation pass currently executing on *host*, or None ([DR3])."""
+    return _resolve(host, "current_distillation_pass")
+
+
 def _get_stack(host: Any) -> Optional[list]:
     return _resolve(host, "trace_span_stack")
 
@@ -326,8 +418,10 @@ def start_span(
         sink = get_sink(host)
         if sink is None:
             return None
-        turn_key = get_turn_key(host)
-        if not turn_key:
+        # [DR41]: a replay's derived id wins where one is bound; otherwise the
+        # turn key, which is every ordinary span. Declining requires NEITHER.
+        trace_id = get_replay_trace_id(host) or get_turn_key(host)
+        if not trace_id:
             return None
 
         stack = _get_stack(host)
@@ -335,11 +429,11 @@ def start_span(
             if stack:
                 parent_span_id = stack[-1].span_id
             elif name != SPAN_TURN:
-                parent_span_id = root_span_id(turn_key)
+                parent_span_id = root_span_id(trace_id)
 
         span = Span(
             span_id=span_id or uuid.uuid4().hex,
-            trace_id=turn_key,
+            trace_id=trace_id,
             name=name,
             kind=kind,
             parent_span_id=parent_span_id,
@@ -349,6 +443,7 @@ def start_span(
             start_ns=time.time_ns(),
             status=STATUS_OPEN,
             attributes=_capped(attributes),
+            distillation_pass=get_distillation_pass(host),
         )
 
         if use_stack and stack is not None:
@@ -396,6 +491,36 @@ def end_span(
             _emit(sink, span)
     except Exception as exc:
         logger.warning(f"end_span({span.name}) failed: {exc!r}")
+
+
+DISTILLATION_RECORD_KINDS = frozenset(
+    {"run", "pass", "divergence", "insight", "citation"}
+)
+
+
+def emit_distillation_record(host: Any, kind: str, payload: dict[str, Any]) -> bool:
+    """Hand one distillation row to the host's sink ([DR46]). Never raises.
+
+    Returns True when a sink accepted it. The sink queues the write on its own
+    writer thread, so this is the only path a live turn may use — a direct
+    ``ObservabilityStore._connect()`` on the turn thread would put lock
+    contention in front of ``_execute_message``, which [R14] forbids.
+    """
+    try:
+        if kind not in DISTILLATION_RECORD_KINDS:
+            logger.warning(f"emit_distillation_record: unknown kind {kind!r}")
+            return False
+        sink = get_sink(host)
+        if sink is None:
+            return False
+        emit = getattr(sink, "emit_distillation_record", None)
+        if emit is None:  # a foreign sink predating [DR46]
+            return False
+        emit(kind, payload)
+        return True
+    except Exception as exc:
+        logger.warning(f"TraceSink.emit_distillation_record({kind}) failed: {exc!r}")
+        return False
 
 
 def emit_turn_record(host: Any, record: Any) -> Optional[bool]:

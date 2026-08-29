@@ -1157,6 +1157,11 @@ async def get_turn_trace(
     first. Reading is repeatable: the destructive live trace-queue drain used
     for streaming is untouched by this endpoint. Same channel authorization as
     GET /turns/{turn_key} ([A39]).
+
+    The one exception to `trace_id == turn_key` is a CLI-only counterfactual
+    replay, which writes into `<turn_key>~replay.<n>` and has no `turns` row
+    ([DR1]/[DR41]). It cannot arise here: distillation is unreachable from
+    Topology B, so this endpoint always sees the plain invariant.
     """
     channel_id = session.channel_id
     store = _observability_store()

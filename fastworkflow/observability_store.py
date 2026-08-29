@@ -43,7 +43,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import fastworkflow
 from fastworkflow import state_paths, tracing
@@ -77,6 +77,26 @@ _PENDING_RETRY_MAX = 64
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_MAX_BATCHES = 20
 
+# Distillation retention (distillation design §10, [DR24][DR43][DR52]).
+_DEFAULT_DISTILL_NEGATIVE_PIN_DAYS = 90
+# §12 rule 4: a verdict note is an annotation, not a document.
+_VERDICT_NOTE_MAX_BYTES = 4096
+# How many per-trace barrier marks to hold before sweeping the applied ones.
+_TRACE_MARK_CEILING = 1024
+# Whole traces per size-cap eviction batch [DR27]. Small, because a batch is
+# one transaction and a trace can be large; the loop runs up to
+# _PRUNE_MAX_BATCHES times.
+_EVICT_TRACES_PER_BATCH = 32
+_DEFAULT_DISTILL_PIN_MAX_FRACTION = 0.5
+# Per-span bytes the attribute length does not account for (row header, the
+# id/name columns, and the index entries the span carries). Used only to size
+# the pinned set against the cap; it is an estimate and is labelled one.
+_PINNED_ROW_OVERHEAD_BYTES = 256
+# Feature marker written into diagnostics instead of a SCHEMA_VERSION bump
+# ([DR28]): the version gate is fail-closed and coarse, so a bump would make
+# every v3.2.0 build refuse whole DBs over tables it never queries.
+FEATURE_DISTILLATION_V1 = "distillation_v1"
+
 
 class IncompatibleObservabilityDB(RuntimeError):
     """The DB was written by a newer fastWorkflow; readers refuse it [R11]."""
@@ -97,6 +117,225 @@ def _env_int(name: str, default: int) -> int:
         return int(_env(name, str(default)))
     except ValueError:
         return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(_env(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _chunked(values: list[Any], size: int = 500) -> Any:
+    """Slice an id list into SQLite-parameter-sized IN() chunks."""
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
+def _in_placeholders(count: int) -> str:
+    return ", ".join("?" for _ in range(count))
+
+
+def _merge_nonzero(counts: dict[str, int], added: dict[str, int]) -> None:
+    """Merge sweep counters into a prune result, dropping the zeroes.
+
+    The historical result is exactly ``{"spans", "artifacts"}``; a workflow
+    that never distills must keep seeing that, so a distillation counter shows
+    up only when it actually did something.
+    """
+    for key, value in added.items():
+        if value:
+            counts[key] = counts.get(key, 0) + value
+
+
+# `fix-sb8.18`: a `pinned_span_count` the WRITER resolves. `[DR43]` wants the
+# trace's live span count as the pin is taken, and the producer used to read it
+# with its own sqlite3 connection — a synchronous DB read on the turn thread at
+# the completion of every pinned run, stacked on top of the barrier waits. The
+# writer thread already holds a connection inside the batch transaction that
+# writes the row, so the count is a free join there and costs the user nothing.
+COUNT_LIVE_SPANS = "@fw.count-live-spans"
+
+
+class OrphanedCitation(Exception):
+    """A citation whose divergence row never landed (`fix-sb8.16`).
+
+    Raised by `upsert_distillation_row` so the writer counts the suppression
+    instead of writing a citation that points at nothing — §15's provenance
+    recipes join through `distillation_insight_citations` and would read an
+    orphan as evidence an insight was drawn from a divergence that no longer
+    exists.
+    """
+
+_LIVE_SPAN_COUNT_SQL = """
+SELECT COUNT(*) FROM spans WHERE trace_id IN (
+    SELECT trace_id FROM distillation_passes WHERE run_id = ?
+    UNION SELECT ?
+)
+"""
+
+
+def _loads_or_none(value: Any) -> Any:
+    """Parse a stored JSON column for a JSON response, or None.
+
+    The `/api/spans` `attributes` precedent: the server parses stored blobs
+    server-side so the SPA never has to `JSON.parse` a field that may be
+    NULL or malformed.
+    """
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return None
+
+
+# §15's provenance recipes, verbatim and `[DR54]`-corrected. They live here as
+# constants rather than inline strings because `fix-sb8.12` ships them as
+# documentation and the documented text has to be the executed text.
+
+_SUPPORT_RUNS_SQL = """
+WITH cited AS (
+  SELECT DISTINCT d.command_key, d.kind
+  FROM distillation_insights i
+  JOIN distillation_insight_citations c ON c.insight_id = i.insight_id
+  JOIN distillation_divergences d ON d.divergence_id = c.divergence_id
+  WHERE i.insight_id = :insight_id
+)
+SELECT r.run_id, r.turn_key, r.started_at,
+       d.divergence_id, d.kind, d.command_name, d.material
+FROM distillation_runs r
+JOIN distillation_divergences d ON d.run_id = r.run_id
+JOIN cited ON cited.command_key = d.command_key AND cited.kind = d.kind
+WHERE r.comparable = 1
+  AND r.replay_of IS NULL      -- a replay tests an insight; it is not support for it
+ORDER BY r.started_at DESC
+"""
+
+_CONTRADICT_RUNS_SQL = """
+WITH cited AS (
+  SELECT DISTINCT d.command_key, d.command_name, d.kind
+  FROM distillation_insights i
+  JOIN distillation_insight_citations c ON c.insight_id = i.insight_id
+  JOIN distillation_divergences d ON d.divergence_id = c.divergence_id
+  WHERE i.insight_id = :insight_id
+)
+SELECT r.run_id, r.turn_key, r.started_at, cited.command_name
+FROM distillation_runs r
+CROSS JOIN cited            -- deliberate: every cited (command, kind) against every run
+WHERE cited.command_name IS NOT NULL   -- run-level divergences have no command [DR54]
+  AND r.comparable = 1
+  AND r.replay_of IS NULL
+  AND EXISTS (SELECT 1 FROM spans s
+               WHERE s.trace_id = r.turn_key            -- [DR1]: the invariant holds
+                 AND s.distillation_pass = 'student'
+                 AND s.name = 'fw.command.execute'
+                 AND s.command_name = cited.command_name)
+  AND NOT EXISTS (SELECT 1 FROM distillation_divergences d2
+                   WHERE d2.run_id = r.run_id
+                     AND d2.command_key = cited.command_key
+                     AND d2.kind = cited.kind)
+ORDER BY r.started_at DESC
+"""
+
+_CONTRADICT_RUN_LEVEL_SQL = """
+WITH cited AS (
+  SELECT DISTINCT r0.entry_context, r0.workflow_name
+  FROM distillation_insights i
+  JOIN distillation_insight_citations c ON c.insight_id = i.insight_id
+  JOIN distillation_divergences d ON d.divergence_id = c.divergence_id
+  JOIN distillation_runs r0 ON r0.run_id = d.run_id
+  WHERE i.insight_id = :insight_id AND d.level = 'run'
+)
+SELECT r.run_id, r.turn_key, r.started_at, r.user_message
+FROM distillation_runs r
+JOIN cited ON cited.entry_context IS r.entry_context
+          AND cited.workflow_name IS r.workflow_name
+WHERE r.comparable = 1 AND r.replay_of IS NULL
+  AND NOT EXISTS (SELECT 1 FROM distillation_divergences d2
+                   WHERE d2.run_id = r.run_id AND d2.level = 'run')
+ORDER BY r.started_at DESC
+"""
+
+
+_WEEKLY_RATE_SQL = """
+SELECT strftime('%Y-W%W', r.started_at) AS week,
+       COUNT(*)                                                       AS runs,
+       SUM(CASE WHEN r.exec_diverged = 1 THEN 1 ELSE 0 END)           AS diverged,
+       SUM(r.material_divergences)                                    AS material,
+       ROUND(1.0 * SUM(CASE WHEN r.exec_diverged = 1 THEN 1 ELSE 0 END)
+                 / COUNT(*), 3)                                       AS rate
+FROM distillation_runs r
+WHERE r.comparable = 1 AND r.replay_of IS NULL{scope}
+GROUP BY week ORDER BY week
+"""
+
+_BY_COMMAND_SQL = """
+SELECT d.command_name, COUNT(*) AS n,
+       GROUP_CONCAT(DISTINCT r.run_id) AS run_ids
+FROM distillation_divergences d
+JOIN distillation_runs r ON r.run_id = d.run_id
+WHERE d.kind = 'missing-in-student' AND d.material = 1
+  AND r.comparable = 1 AND r.replay_of IS NULL{scope}
+GROUP BY d.command_name ORDER BY n DESC
+"""
+
+_BY_KIND_SQL = """
+SELECT d.level, d.kind, COUNT(*) AS n,
+       SUM(CASE WHEN d.material = 1 THEN 1 ELSE 0 END) AS material,
+       COUNT(DISTINCT d.run_id) AS runs
+FROM distillation_divergences d
+JOIN distillation_runs r ON r.run_id = d.run_id
+WHERE r.comparable = 1 AND r.replay_of IS NULL{scope}
+GROUP BY d.level, d.kind ORDER BY n DESC
+"""
+
+# The promotion view. Correlated subqueries rather than a join chain so an
+# insight with no corroboration appears with a zero instead of vanishing, and
+# `material_support_runs` counts RUNS rather than divergence rows — both
+# corrections forced by `[DR54]`'s fixture.
+_PROMOTION_SQL = """
+SELECT i.insight_id, i.kind, i.text, i.run_id, i.created_at,
+       (SELECT v.verdict FROM distillation_verdicts v
+         WHERE v.insight_id = i.insight_id AND v.superseded = 0
+         ORDER BY v.created_at DESC LIMIT 1)                     AS verdict,
+       (SELECT COUNT(DISTINCT sup.run_id)
+          FROM distillation_insight_citations c
+          JOIN distillation_divergences cit ON cit.divergence_id = c.divergence_id
+          JOIN distillation_divergences sup  ON sup.command_key = cit.command_key
+                                            AND sup.kind        = cit.kind
+          JOIN distillation_runs r           ON r.run_id = sup.run_id
+         WHERE c.insight_id = i.insight_id
+           AND cit.command_key IS NOT NULL   -- run-level citations key on nothing
+           AND r.comparable = 1
+           AND r.replay_of IS NULL           -- a replay is a test, not support [DR54]
+           AND r.isolation_verified = 1      -- promotion is a causal claim [DR48]
+           AND r.evidence_pruned = 0)                            AS support_runs,
+       (SELECT COUNT(DISTINCT sup.run_id)
+          FROM distillation_insight_citations c
+          JOIN distillation_divergences cit ON cit.divergence_id = c.divergence_id
+          JOIN distillation_divergences sup  ON sup.command_key = cit.command_key
+                                            AND sup.kind        = cit.kind
+          JOIN distillation_runs r           ON r.run_id = sup.run_id
+         WHERE c.insight_id = i.insight_id
+           AND cit.command_key IS NOT NULL AND sup.material = 1
+           AND r.comparable = 1 AND r.replay_of IS NULL
+           AND r.isolation_verified = 1 AND r.evidence_pruned = 0) AS material_support_runs
+FROM distillation_insights i
+ORDER BY support_runs DESC
+"""
+
+_COST_SQL = """
+SELECT p.role,
+       COUNT(*) AS passes, SUM(p.tokens) AS tokens,
+       ROUND(SUM(p.cost_usd), 4) AS cost_usd,
+       ROUND(AVG(p.wall_ms)) AS avg_ms,
+       SUM(p.cache_hits) AS cache_hits, SUM(p.cache_misses) AS cache_misses
+FROM distillation_passes p
+JOIN distillation_runs r ON r.run_id = p.run_id
+WHERE r.comparable = 1 AND r.cache_asymmetric = 0 AND p.role IN ('teacher','student')
+GROUP BY p.role
+"""
 
 
 def _utcnow_iso() -> str:
@@ -326,7 +565,8 @@ _SCHEMA_STATEMENTS = [
         channel_id TEXT,
         command_name TEXT, context TEXT,
         start_ns INTEGER NOT NULL, end_ns INTEGER,
-        status TEXT NOT NULL, attributes TEXT NOT NULL)""",
+        status TEXT NOT NULL, attributes TEXT NOT NULL,
+        distillation_pass TEXT)""",
     """CREATE TABLE IF NOT EXISTS artifacts (
         artifact_id TEXT PRIMARY KEY, turn_key TEXT NOT NULL,
         channel_id TEXT,
@@ -338,12 +578,193 @@ _SCHEMA_STATEMENTS = [
         completed_at TEXT, metrics_json TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS diagnostics (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    # Distillation records (distillation design §9). No inline REFERENCES:
+    # this file declares none and does not enable PRAGMA foreign_keys, so the
+    # joins are by convention and the delete order in forget_channel is what
+    # keeps them consistent [DR22][DR44].
+    """CREATE TABLE IF NOT EXISTS distillation_runs (
+        run_id TEXT PRIMARY KEY,
+        turn_key TEXT NOT NULL,
+        channel_id TEXT, conversation_id INTEGER,
+        user_message TEXT NOT NULL,
+        workflow_name TEXT, entry_context TEXT,
+        comparable INTEGER NOT NULL,
+        comparable_reason TEXT,
+        isolation_verified INTEGER,
+        fingerprint_teacher TEXT, fingerprint_student TEXT,
+        restore_ok_pre_student INTEGER,
+        restore_ok_post_compare INTEGER,
+        cache_asymmetric INTEGER NOT NULL DEFAULT 0,
+        left_steps INTEGER, right_steps INTEGER,
+        planning_diverged INTEGER NOT NULL DEFAULT 0,
+        exec_diverged INTEGER NOT NULL DEFAULT 0,
+        material_divergences INTEGER NOT NULL DEFAULT 0,
+        planning_insights INTEGER NOT NULL DEFAULT 0,
+        execution_insights INTEGER NOT NULL DEFAULT 0,
+        extractor_empty INTEGER NOT NULL DEFAULT 0,
+        extractor_model TEXT,
+        insight_set_json TEXT,
+        replay_of TEXT,
+        replay_trace_id TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        pinned_at TEXT,
+        pinned_span_count INTEGER,
+        turn_fields_from TEXT,
+        evidence_pruned INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT, completed_at TEXT,
+        run_json TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS distillation_passes (
+        run_id TEXT NOT NULL,
+        pass_label TEXT NOT NULL,
+        role TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        trace_id TEXT NOT NULL,
+        agent_model TEXT, planner_model TEXT, model_params_json TEXT,
+        entry_fingerprint TEXT, exit_fingerprint TEXT,
+        first_span_id TEXT, last_span_id TEXT,
+        wall_ms INTEGER, tokens INTEGER, cost_usd REAL,
+        cache_hits INTEGER, cache_misses INTEGER,
+        entry_prompt_fingerprint TEXT, exit_prompt_fingerprint TEXT,
+        history_bound INTEGER,
+        summary_hash TEXT,
+        spans_dropped_delta INTEGER,
+        entry_inputs_json TEXT,
+        PRIMARY KEY (run_id, pass_label))""",
+    """CREATE TABLE IF NOT EXISTS distillation_divergences (
+        divergence_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        level TEXT NOT NULL,
+        left_pass TEXT NOT NULL,
+        right_pass TEXT NOT NULL,
+        align_index INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        material INTEGER,
+        replayable INTEGER NOT NULL DEFAULT 1,
+        command_key TEXT, command_name TEXT, context TEXT,
+        left_step_key TEXT, right_step_key TEXT,
+        left_span_id TEXT, right_span_id TEXT,
+        param_diff_json TEXT,
+        detail_json TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS distillation_insights (
+        insight_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        text_hash TEXT NOT NULL,
+        extractor_span_id TEXT,
+        insight_file TEXT,
+        file_entry_number INTEGER,
+        created_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS distillation_insight_citations (
+        insight_id TEXT NOT NULL,
+        divergence_id TEXT NOT NULL,
+        PRIMARY KEY (insight_id, divergence_id))""",
+    """CREATE TABLE IF NOT EXISTS distillation_verdicts (
+        verdict_id TEXT PRIMARY KEY,
+        insight_id TEXT NOT NULL,
+        verdict TEXT NOT NULL,
+        note TEXT,
+        actor TEXT NOT NULL,
+        replay_run_id TEXT,
+        superseded INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_spans_command ON spans(command_name) WHERE command_name IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(channel_id, conversation_id, ordinal)",
     "CREATE INDEX IF NOT EXISTS idx_turns_status ON turns(status)",
     "CREATE INDEX IF NOT EXISTS idx_artifacts_turn ON artifacts(turn_key)",
+    # Partial, following the idx_spans_command precedent: distillation costs
+    # nothing on the spans that are not distillation.
+    "CREATE INDEX IF NOT EXISTS idx_spans_trace_pass ON spans(trace_id, distillation_pass) WHERE distillation_pass IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_distill_runs_turn ON distillation_runs(turn_key)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_runs_channel ON distillation_runs(channel_id, started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_runs_replay ON distillation_runs(replay_of) WHERE replay_of IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_distill_runs_pinned ON distillation_runs(run_id) WHERE pinned = 1",
+    "CREATE INDEX IF NOT EXISTS idx_distill_passes_run ON distillation_passes(run_id, seq)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_passes_trace ON distillation_passes(trace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_div_run ON distillation_divergences(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_div_kind ON distillation_divergences(kind, command_name)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_insights_run ON distillation_insights(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_insights_hash ON distillation_insights(text_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_citations_div ON distillation_insight_citations(divergence_id)",
+    "CREATE INDEX IF NOT EXISTS idx_distill_verdicts_insight ON distillation_verdicts(insight_id, created_at)",
 ]
+
+
+# Distillation record kinds -> (table, primary key columns, writable columns)
+# [DR46]. The column tuples mirror the §9 DDL above; a payload key outside
+# them is dropped by upsert_distillation_row rather than raising.
+_DISTILL_RECORD_TABLES: dict[str, tuple[str, tuple[str, ...], frozenset[str]]] = {
+    "run": (
+        "distillation_runs",
+        ("run_id",),
+        frozenset(
+            """run_id turn_key channel_id conversation_id user_message
+            workflow_name entry_context comparable comparable_reason
+            isolation_verified fingerprint_teacher fingerprint_student
+            restore_ok_pre_student restore_ok_post_compare cache_asymmetric
+            left_steps right_steps planning_diverged exec_diverged
+            material_divergences planning_insights execution_insights
+            extractor_empty extractor_model insight_set_json replay_of
+            replay_trace_id pinned pinned_at pinned_span_count turn_fields_from
+            evidence_pruned started_at completed_at run_json""".split()
+        ),
+    ),
+    "pass": (
+        "distillation_passes",
+        ("run_id", "pass_label"),
+        frozenset(
+            """run_id pass_label role seq trace_id agent_model planner_model
+            model_params_json entry_fingerprint exit_fingerprint first_span_id
+            last_span_id wall_ms tokens cost_usd cache_hits cache_misses
+            entry_prompt_fingerprint exit_prompt_fingerprint history_bound
+            summary_hash spans_dropped_delta entry_inputs_json""".split()
+        ),
+    ),
+    "divergence": (
+        "distillation_divergences",
+        ("divergence_id",),
+        frozenset(
+            """divergence_id run_id level left_pass right_pass align_index kind
+            material replayable command_key command_name context left_step_key
+            right_step_key left_span_id right_span_id param_diff_json
+            detail_json""".split()
+        ),
+    ),
+    "insight": (
+        "distillation_insights",
+        ("insight_id",),
+        frozenset(
+            """insight_id run_id kind text text_hash extractor_span_id
+            insight_file file_entry_number created_at""".split()
+        ),
+    ),
+    "citation": (
+        "distillation_insight_citations",
+        ("insight_id", "divergence_id"),
+        frozenset({"insight_id", "divergence_id"}),
+    ),
+}
+
+# The pinned trace set [DR25]. `pinned` lives on distillation_runs, never on
+# distillation_passes: a per-pass pin can retain the student trace of an
+# accepted insight while deleting the teacher trace it cites, which looks like
+# data rather than a bug. At run granularity a pin is atomic by construction.
+_PINNED_TRACES_SQL = (
+    "SELECT p.trace_id FROM distillation_passes p "
+    "JOIN distillation_runs r ON r.run_id = p.run_id WHERE r.pinned = 1"
+)
+
+# The tables the distillation records live in, newest-dependency first — the
+# order forget_channel/clear_conversations delete in [DR44].
+_DISTILL_TABLES = (
+    "distillation_verdicts",
+    "distillation_insight_citations",
+    "distillation_insights",
+    "distillation_divergences",
+    "distillation_passes",
+    "distillation_runs",
+)
 
 
 class ObservabilityStore:
@@ -353,9 +774,36 @@ class ObservabilityStore:
     short-lived WAL connection (timeout=30, ``BEGIN IMMEDIATE`` for writes).
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, migrate: bool = True) -> None:
         self.db_path = db_path
-        self._ensure_schema()
+        self._features: frozenset[str] = frozenset()
+        if migrate:
+            self._ensure_schema()
+        self._features = self._load_features()
+
+    @staticmethod
+    def open_for_annotation(db_path: str) -> "ObservabilityStore":
+        """A writable handle that will NOT migrate the file `[DR53]`.
+
+        `_ensure_schema` is not a no-op on an existing DB: it runs every
+        `_SCHEMA_STATEMENTS` entry and the `ALTER TABLE` block, stamps
+        `PRAGMA user_version`, writes a `diagnostics` probe row and chmods the
+        file and its parent. So constructing an ordinary store to append one
+        verdict would mutate the post-mortem snapshot the viewer's read-only
+        contract exists to protect — and would silently create the six
+        distillation tables in a pre-distillation DB, which is the exact state
+        `[DR29]` promises to degrade on rather than migrate.
+
+        This handle opens read-write, detects features from what is already
+        there, and touches nothing else. The caller is responsible for
+        refusing when the feature marker is absent.
+
+        Deliberately not a `classmethod`: `ReadOnlyObservabilityStore` inherits
+        it, and "give me a writable handle" resolved through the read-only
+        subclass is a contradiction — its `__init__` does not even take the
+        flag. Naming the base class here makes that unreachable.
+        """
+        return ObservabilityStore(db_path, migrate=False)
 
     # -- connections ----------------------------------------------------
 
@@ -389,6 +837,24 @@ class ObservabilityStore:
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
+            # BEFORE the statements, not after them like the conversations
+            # migration below: idx_spans_trace_pass names distillation_pass,
+            # so on an existing DB the CREATE INDEX fails with "no such
+            # column" unless the ALTER has already run. On a fresh DB the
+            # table does not exist yet, PRAGMA table_info returns nothing, and
+            # the column arrives with the CREATE TABLE.
+            #
+            # Additive, and deliberately WITHOUT a version bump ([DR28]): the
+            # premise of the migration comment below ("schema v1 was never
+            # shipped") expired at v3.2.0, so two released builds now disagree
+            # about the spans shape at the same user_version. The replacement
+            # guarantee is the schema_features marker written further down,
+            # which readers feature-detect instead of version-gating.
+            span_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(spans)").fetchall()
+            }
+            if span_cols and "distillation_pass" not in span_cols:
+                conn.execute("ALTER TABLE spans ADD COLUMN distillation_pass TEXT")
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
             # Pre-release column migration (schema v1 was never shipped, but
@@ -412,6 +878,7 @@ class ObservabilityStore:
                      value=excluded.value, updated_at=excluded.updated_at""",
                 ("schema_opened", json.dumps({"schema_version": SCHEMA_VERSION}), _utcnow_iso()),
             )
+            self._merge_schema_features(conn, [FEATURE_DISTILLATION_V1])
             conn.commit()
         finally:
             conn.close()
@@ -422,6 +889,74 @@ class ObservabilityStore:
                 os.chmod(wal, 0o600)
         except OSError:
             pass
+
+    @staticmethod
+    def _merge_schema_features(conn: sqlite3.Connection, features: list[str]) -> None:
+        """Add *features* to diagnostics['schema_features'], merged not
+        overwritten — another build's markers are not ours to drop [DR28]."""
+        row = conn.execute(
+            "SELECT value FROM diagnostics WHERE key='schema_features'"
+        ).fetchone()
+        known: list[str] = []
+        if row is not None:
+            try:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, list):
+                    known = [str(name) for name in loaded]
+            except (ValueError, TypeError):
+                known = []
+        merged = sorted(set(known) | set(features))
+        if merged == sorted(set(known)):
+            return
+        conn.execute(
+            """INSERT INTO diagnostics (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                 value=excluded.value, updated_at=excluded.updated_at""",
+            ("schema_features", json.dumps(merged, ensure_ascii=False), _utcnow_iso()),
+        )
+
+    def _load_features(self) -> frozenset[str]:
+        """The DB's feature set, read once at construction.
+
+        The diagnostics marker is authoritative; the PRAGMA fallback covers a
+        DB migrated by a build that added the column before the marker existed,
+        and a read-only handle on a DB it may not migrate ([DR28]/[DR29]).
+        """
+        conn = None
+        try:
+            conn = self._connect(timeout=5.0)
+            row = conn.execute(
+                "SELECT value FROM diagnostics WHERE key='schema_features'"
+            ).fetchone()
+            if row is not None:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, list):
+                    return frozenset(str(name) for name in loaded)
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(spans)").fetchall()
+            }
+            if "distillation_pass" in cols:
+                return frozenset({FEATURE_DISTILLATION_V1})
+            return frozenset()
+        except Exception:
+            # An unreadable/absent marker means "assume nothing"; every caller
+            # of has_feature degrades rather than raising [DR29].
+            return frozenset()
+        finally:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+
+    def has_feature(self, name: str) -> bool:
+        """Runtime feature detection, in place of a SCHEMA_VERSION bump [DR28].
+
+        ``has_feature("distillation_v1")`` is False on a DB written by a
+        pre-distillation build and never migrated (the read-only viewer's
+        post-mortem-snapshot case), so a projection naming
+        ``spans.distillation_pass`` or a distillation table can be skipped
+        instead of raising ``no such column`` [DR29].
+        """
+        return name in self._features
 
     # -- identity [R1] ---------------------------------------------------
 
@@ -589,8 +1124,9 @@ class ObservabilityStore:
             conn.execute(
                 """INSERT INTO spans
                    (span_id, trace_id, parent_span_id, name, kind, channel_id,
-                    command_name, context, start_ns, end_ns, status, attributes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    command_name, context, start_ns, end_ns, status, attributes,
+                    distillation_pass)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(span_id) DO UPDATE SET
                      end_ns=COALESCE(excluded.end_ns, spans.end_ns),
                      status=CASE WHEN excluded.end_ns IS NOT NULL OR spans.end_ns IS NULL
@@ -599,6 +1135,10 @@ class ObservabilityStore:
                                      THEN excluded.attributes ELSE spans.attributes END,
                      command_name=COALESCE(excluded.command_name, spans.command_name),
                      context=COALESCE(excluded.context, spans.context)""",
+                # distillation_pass is deliberately NOT in the DO UPDATE set:
+                # the label is a fact about where the span was opened, so
+                # write-once at open is the correct semantics and a close
+                # emitted outside the pass cannot relabel it.
                 (
                     span.span_id,
                     span.trace_id,
@@ -612,8 +1152,110 @@ class ObservabilityStore:
                     span.end_ns,
                     span.status,
                     attributes,
+                    span.distillation_pass,
                 ),
             )
+
+    def upsert_distillation_row(
+        self,
+        conn: sqlite3.Connection,
+        kind: str,
+        payload: dict[str, Any],
+        redactor: Redactor,
+    ) -> None:
+        """Write one distillation row ([DR46]); upsert on the table's PK.
+
+        ``kind`` selects the table (``run`` | ``pass`` | ``divergence`` |
+        ``insight`` | ``citation``); ``payload`` is a flat column->value map.
+        Unknown columns are dropped rather than raising, so a producer built
+        against a later column set degrades to a partial row on an older
+        build instead of failing a turn. A run row is upsertable so it can be
+        written at start (``comparable``, ``user_message``) and completed
+        later; verdicts are not written here — that route is one of [DR46]'s
+        two off-turn-thread exemptions.
+
+        ``pinned_span_count = COUNT_LIVE_SPANS`` asks the writer to resolve the
+        column from the table rather than carrying a value the producer read
+        itself (`fix-sb8.18`).
+
+        A ``citation`` whose divergence row is not in the table raises
+        `OrphanedCitation` rather than writing an orphan (`fix-sb8.16`).
+        """
+        spec = _DISTILL_RECORD_TABLES.get(kind)
+        if spec is None:
+            raise ValueError(f"unknown distillation record kind {kind!r}")
+        table, key_cols, columns = spec
+        if payload.get("pinned_span_count") == COUNT_LIVE_SPANS:
+            # Resolved here, on the writer's connection, rather than by the
+            # producer on the turn thread (`fix-sb8.18`). The pass rows are
+            # enqueued ahead of this row and the record queue is FIFO, so they
+            # are already applied; `turn_key` is unioned in so a run whose pass
+            # rows were lost still counts its own trace. Spans in THIS batch
+            # are applied after the records, which keeps the count a slight
+            # under-count — the same conservative direction as before, so
+            # `distillation_evidence_shortfall` can never invent a loss.
+            payload = dict(payload)
+            payload["pinned_span_count"] = conn.execute(
+                _LIVE_SPAN_COUNT_SQL,
+                (payload.get("run_id"), payload.get("turn_key")),
+            ).fetchone()[0]
+        row = {
+            name: (redactor.redact(value) if isinstance(value, str) else value)
+            for name, value in payload.items()
+            if name in columns
+        }
+        missing = [name for name in key_cols if row.get(name) in (None, "")]
+        if missing:
+            raise ValueError(f"{table} record is missing key column(s) {missing}")
+        names = list(row)
+        placeholders = ", ".join("?" for _ in names)
+        updatable = [name for name in names if name not in key_cols]
+        if updatable:
+            assignment = ", ".join(f"{name}=excluded.{name}" for name in updatable)
+        else:
+            # A pure key row (citations): the second write is a no-op, not a
+            # constraint violation.
+            assignment = None
+        conflict = ", ".join(key_cols)
+        if kind == "citation":
+            # `fix-sb8.16`: a citation is only written once the divergence row
+            # it names is IN THE TABLE. Divergence records are enqueued ahead
+            # of the citations drawn from them and the record queue is FIFO, so
+            # by the time this runs the row is either present or it was lost —
+            # and a citation written anyway is an orphan that §15's provenance
+            # recipes read as real evidence. The guard lives here, on the
+            # writer's connection inside the batch transaction, so the ordering
+            # costs the turn thread neither a barrier nor a read.
+            written = conn.execute(
+                f"INSERT INTO {table} ({', '.join(names)}) "
+                f"SELECT {placeholders} WHERE EXISTS (SELECT 1 FROM "
+                "distillation_divergences WHERE divergence_id=?) "
+                f"ON CONFLICT({conflict}) DO NOTHING",
+                tuple(row[name] for name in names) + (row["divergence_id"],),
+            ).rowcount
+            if not written:
+                # Distinguishable from the ON CONFLICT no-op by asking the
+                # table, so a re-emitted citation is not reported as a loss.
+                orphan = conn.execute(
+                    f"SELECT 1 FROM {table} WHERE insight_id=? AND divergence_id=?",
+                    (row["insight_id"], row["divergence_id"]),
+                ).fetchone()
+                if orphan is None:
+                    raise OrphanedCitation(
+                        f"divergence {row['divergence_id']!r} is not in the "
+                        f"table; citation from insight {row['insight_id']!r} "
+                        "suppressed"
+                    )
+            return
+        sql = (
+            f"INSERT INTO {table} ({', '.join(names)}) VALUES ({placeholders}) "
+            + (
+                f"ON CONFLICT({conflict}) DO UPDATE SET {assignment}"
+                if assignment
+                else f"ON CONFLICT({conflict}) DO NOTHING"
+            )
+        )
+        conn.execute(sql, tuple(row[name] for name in names))
 
     def upsert_turn_row(
         self,
@@ -975,11 +1617,30 @@ class ObservabilityStore:
             ).fetchone()
             return dict(row) if row is not None else None
 
-    def get_spans(self, trace_id: str) -> list[dict[str, Any]]:
+    def get_spans(
+        self, trace_id: str, distillation_pass: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Every span of a trace, or only one pass's ([DR1], [DR6], [DR7]).
+
+        `distillation_pass` is what turns the shared `trace_id == turn_key`
+        into two independently viewable waterfalls: the passes share one trace
+        and are told apart by the column, so filtering here is the whole of
+        "neither pass interleaves the other". `'none'` selects the spans
+        belonging to no pass (the turn wrapper and anything outside both), which
+        is what the UI's third tab needs. On a pre-distillation DB the column
+        does not exist, so the filter is dropped rather than raising [DR29].
+        """
+        query = "SELECT * FROM spans WHERE trace_id=?"
+        params: list[Any] = [trace_id]
+        if distillation_pass is not None and self.has_feature(FEATURE_DISTILLATION_V1):
+            if distillation_pass == "none":
+                query += " AND distillation_pass IS NULL"
+            else:
+                query += " AND distillation_pass=?"
+                params.append(distillation_pass)
+        query += " ORDER BY start_ns"
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM spans WHERE trace_id=? ORDER BY start_ns", (trace_id,)
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
     def list_conversations(
@@ -1068,6 +1729,591 @@ class ObservabilityStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    # -- distillation read layer (`fix-sb8.6`, §12.1 [DR55]) -------------
+    #
+    # Every method degrades to an empty result on a DB written by a
+    # pre-distillation build [DR29], so the viewer opening a post-mortem
+    # snapshot gets an empty view rather than "no such table".
+
+    _RUN_LIST_COLUMNS = (
+        "run_id, turn_key, channel_id, conversation_id, user_message, "
+        "workflow_name, entry_context, started_at, completed_at, comparable, "
+        "comparable_reason, isolation_verified, cache_asymmetric, "
+        "planning_diverged, exec_diverged, material_divergences, "
+        "planning_insights, execution_insights, extractor_empty, replay_of, "
+        "pinned, evidence_pruned"
+    )
+
+    def _distillation_ready(self) -> bool:
+        return self.has_feature(FEATURE_DISTILLATION_V1)
+
+    def list_distillation_runs(
+        self,
+        channel_id: Optional[str] = None,
+        conversation_id: Optional[int] = None,
+        comparable: Optional[bool] = None,
+        diverged: Optional[bool] = None,
+        include_replays: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """The run list, newest first (§12.1 row 1).
+
+        Replays are excluded by default for the same reason every §15 recipe
+        carries ``replay_of IS NULL``: a replay is a TEST of an insight, not
+        independent evidence for it, and listing the two together invites
+        exactly the double-count `[DR54]` caught in the promotion query.
+        """
+        if not self._distillation_ready():
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        if channel_id is not None:
+            clauses.append("channel_id=?")
+            params.append(channel_id)
+        if conversation_id is not None:
+            clauses.append("conversation_id=?")
+            params.append(conversation_id)
+        if comparable is not None:
+            clauses.append("comparable=?")
+            params.append(1 if comparable else 0)
+        if diverged is not None:
+            clauses.append(
+                "(planning_diverged=1 OR exec_diverged=1)"
+                if diverged
+                else "(planning_diverged=0 AND exec_diverged=0)"
+            )
+        if not include_replays:
+            clauses.append("replay_of IS NULL")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = (
+            f"SELECT {self._RUN_LIST_COLUMNS} FROM distillation_runs{where} "
+            "ORDER BY COALESCE(started_at, turn_key) DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+    def get_distillation_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        """One run plus its passes in execution order (§12.1 row 2).
+
+        ``run_json`` is parsed into ``record``, mirroring how
+        ``/api/turn/<k>`` treats ``record_json`` — the SPA reads one shape for
+        both, and a malformed blob degrades to None rather than a 500.
+        """
+        if not self._distillation_ready():
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM distillation_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            run = dict(row)
+            passes = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM distillation_passes WHERE run_id=? ORDER BY seq",
+                    (run_id,),
+                ).fetchall()
+            ]
+        try:
+            run["record"] = json.loads(run.pop("run_json"))
+        except (ValueError, TypeError, KeyError):
+            run["record"] = None
+        for pass_row in passes:
+            pass_row["model_params"] = _loads_or_none(pass_row.get("model_params_json"))
+            pass_row["entry_inputs"] = _loads_or_none(pass_row.get("entry_inputs_json"))
+        return {"run": run, "passes": passes}
+
+    def list_distillation_divergences(
+        self,
+        run_id: str,
+        kind: Optional[str] = None,
+        material: Optional[str] = None,
+        level: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """A run's aligned divergence rows, in alignment order (§12.1 row 3).
+
+        ``material`` takes ``'1'``, ``'0'`` or ``'null'`` because the column is
+        three-valued by design ([DR20]: NULL means the run was not comparable,
+        so materiality was never computed) and a bool cannot say that.
+        """
+        if not self._distillation_ready():
+            return []
+        clauses = ["run_id=?"]
+        params: list[Any] = [run_id]
+        if kind is not None:
+            clauses.append("kind=?")
+            params.append(kind)
+        if level is not None:
+            clauses.append("level=?")
+            params.append(level)
+        if material is not None:
+            if material == "null":
+                clauses.append("material IS NULL")
+            else:
+                clauses.append("material=?")
+                params.append(1 if material in ("1", "true", "True") else 0)
+        query = (
+            "SELECT * FROM distillation_divergences WHERE "
+            f"{' AND '.join(clauses)} ORDER BY level, align_index"
+        )
+        with self._connect() as conn:
+            rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+        for row in rows:
+            row["param_diff"] = _loads_or_none(row.get("param_diff_json"))
+            row["detail"] = _loads_or_none(row.get("detail_json"))
+        return rows
+
+    def distillation_insights(
+        self,
+        run_id: Optional[str] = None,
+        insight_id: Optional[str] = None,
+        text_hash: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """§13.2's provenance closure, in whichever direction was asked for.
+
+        Exactly one selector, and all three resolve to the same shape:
+        insights, the citations that bind them to divergence rows, and every
+        verdict recorded against them. ``insight_id`` additionally returns the
+        §15 support and contradiction run lists, which is the reverse
+        direction — from a rule back to the turns that argue for and against
+        it — and the whole point of acceptance criterion 7.
+        """
+        empty: dict[str, Any] = {"insights": [], "citations": [], "verdicts": []}
+        if not self._distillation_ready():
+            return empty
+        if insight_id is not None:
+            where, params = "i.insight_id=?", [insight_id]
+        elif run_id is not None:
+            where, params = "i.run_id=?", [run_id]
+        elif text_hash is not None:
+            where, params = "i.text_hash=?", [text_hash]
+        else:
+            return empty
+        with self._connect() as conn:
+            insights = [
+                dict(r)
+                for r in conn.execute(
+                    f"SELECT i.* FROM distillation_insights i WHERE {where} "
+                    "ORDER BY i.created_at, i.insight_id",
+                    params,
+                ).fetchall()
+            ]
+            if not insights:
+                return empty
+            ids = [row["insight_id"] for row in insights]
+            citations: list[dict[str, Any]] = []
+            verdicts: list[dict[str, Any]] = []
+            for chunk in _chunked(ids):
+                marks = _in_placeholders(len(chunk))
+                citations.extend(
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT c.insight_id, c.divergence_id, d.run_id, d.level, "
+                        "d.kind, d.material, d.command_name, d.align_index, "
+                        "d.left_span_id, d.right_span_id "
+                        "FROM distillation_insight_citations c "
+                        "LEFT JOIN distillation_divergences d "
+                        "  ON d.divergence_id = c.divergence_id "
+                        f"WHERE c.insight_id IN ({marks}) "
+                        "ORDER BY c.insight_id, d.align_index",
+                        chunk,
+                    ).fetchall()
+                )
+                verdicts.extend(
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM distillation_verdicts WHERE insight_id IN "
+                        f"({marks}) ORDER BY created_at DESC",
+                        chunk,
+                    ).fetchall()
+                )
+            result: dict[str, Any] = {
+                "insights": insights,
+                "citations": citations,
+                "verdicts": verdicts,
+            }
+            if insight_id is not None:
+                result["runs"] = {
+                    "support": [
+                        dict(r)
+                        for r in conn.execute(
+                            _SUPPORT_RUNS_SQL, {"insight_id": insight_id}
+                        ).fetchall()
+                    ],
+                    "contradict": [
+                        dict(r)
+                        for r in conn.execute(
+                            _CONTRADICT_RUNS_SQL, {"insight_id": insight_id}
+                        ).fetchall()
+                    ],
+                    "contradict_run_level": [
+                        dict(r)
+                        for r in conn.execute(
+                            _CONTRADICT_RUN_LEVEL_SQL, {"insight_id": insight_id}
+                        ).fetchall()
+                    ],
+                }
+        return result
+
+    # -- adjudication verdicts (`fix-sb8.9`, §12 [DR30]) -----------------
+
+    VERDICTS = (
+        "supported",
+        "not-supported-by-cited-evidence",
+        "overfit-to-single-turn",
+        "duplicate-of-existing",
+        "contradicted-by-other-turns",
+    )
+
+    def insert_verdict(
+        self,
+        insight_id: str,
+        verdict: str,
+        actor: str,
+        note: Optional[str] = None,
+        replay_run_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Append one adjudication verdict, superseding the previous one.
+
+        §12's normative constraints, all of them enforced here rather than at
+        the route so the CLI, the replay path and HTTP cannot diverge:
+
+        1. Touches ONLY `distillation_verdicts`. It cannot alter, delete or
+           rewrite a span, turn, artifact, run, pass, divergence, insight or
+           citation row — which is the property `[R12]` actually protects.
+        2. Append-only WITH SUPERSEDE, in one transaction: the history of
+           judgements is itself evidence. An insight accepted, then rejected
+           after a replay, is precisely the signal `fix-sb8.11` exists to
+           produce, and an in-place UPDATE would erase it.
+        3. `verdict` is validated against the closed §9 enum and `actor`
+           against `human` / `agent:<name>` / `replay`; `note` is capped at
+           4 KiB.
+
+        The consequential unpin of a rejected run is NOT written here: §12
+        rule 1 forbids it, and `prune()`'s sweep derives it ([DR52]).
+
+        Raises `ValueError` on a rejected input or an unknown insight.
+        """
+        if verdict not in self.VERDICTS:
+            raise ValueError(f"unknown verdict {verdict!r}")
+        if not (
+            actor == "human"
+            or actor == "replay"
+            or (actor.startswith("agent:") and len(actor) > len("agent:"))
+        ):
+            raise ValueError(
+                f"actor must be 'human', 'replay' or 'agent:<name>', not {actor!r}"
+            )
+        if note is not None and len(note.encode("utf-8")) > _VERDICT_NOTE_MAX_BYTES:
+            raise ValueError("note exceeds 4 KiB")
+        if not self.has_feature(FEATURE_DISTILLATION_V1):
+            raise ValueError("this database predates distillation recording")
+        row = {
+            "verdict_id": f"vd-{uuid.uuid4().hex[:12]}",
+            "insight_id": insight_id,
+            "verdict": verdict,
+            "note": note,
+            "actor": actor,
+            "replay_run_id": replay_run_id,
+            "superseded": 0,
+            "created_at": _utcnow_iso(),
+        }
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            known = conn.execute(
+                "SELECT 1 FROM distillation_insights WHERE insight_id=?",
+                (insight_id,),
+            ).fetchone()
+            if known is None:
+                conn.rollback()
+                raise ValueError(f"unknown insight {insight_id!r}")
+            conn.execute(
+                "UPDATE distillation_verdicts SET superseded=1 "
+                "WHERE insight_id=? AND superseded=0",
+                (insight_id,),
+            )
+            conn.execute(
+                "INSERT INTO distillation_verdicts (verdict_id, insight_id, "
+                "verdict, note, actor, replay_run_id, superseded, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["verdict_id"],
+                    row["insight_id"],
+                    row["verdict"],
+                    row["note"],
+                    row["actor"],
+                    row["replay_run_id"],
+                    0,
+                    row["created_at"],
+                ),
+            )
+            conn.commit()
+        return row
+
+    def distillation_retention_status(self, run_id: str) -> dict[str, Any]:
+        """Why this run's evidence is still here, or why it is not (`fix-sb8.13`).
+
+        §10.3's pin classes are computed, never stored as a label: `pinned` is
+        one bit and the reason it is set is spread across divergence flags,
+        insight rows and verdicts. A pin nobody can explain is a pin nobody
+        trusts, and the operator's actual question — "this trace is three
+        months old, why do I still have it, and when does it go?" — has no
+        answer anywhere in the schema. This composes one.
+
+        Returns the pin class, the release condition, and the `[DR43]`
+        shortfall so a run whose evidence an older build already pruned says
+        so rather than rendering an empty diff.
+        """
+        if not self._distillation_ready():
+            return {"run_id": run_id, "known": False}
+        negative_pin_days = _env_int(
+            "FW_OBS_DISTILL_NEGATIVE_PIN_DAYS", _DEFAULT_DISTILL_NEGATIVE_PIN_DAYS
+        )
+        retention_days = _env_int("FW_OBS_RETENTION_DAYS", _DEFAULT_RETENTION_DAYS)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT pinned, pinned_at, started_at, planning_diverged, "
+                "exec_diverged, comparable, comparable_reason, evidence_pruned "
+                "FROM distillation_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return {"run_id": run_id, "known": False}
+            insights = conn.execute(
+                "SELECT COUNT(*) FROM distillation_insights WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+            # The live verdict per insight, which is what decides whether the
+            # rejected-only arm will release this run on its next sweep.
+            live_verdicts = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT COALESCE((SELECT v.verdict FROM distillation_verdicts v "
+                    "  WHERE v.insight_id = i.insight_id AND v.superseded = 0 "
+                    "  ORDER BY v.created_at DESC LIMIT 1), 'unadjudicated') "
+                    "FROM distillation_insights i WHERE i.run_id=?",
+                    (run_id,),
+                ).fetchall()
+            ]
+        diverged = bool(row["planning_diverged"] or row["exec_diverged"])
+        open_verdicts = [
+            verdict
+            for verdict in live_verdicts
+            if verdict in ("unadjudicated", "supported")
+        ]
+        if not row["comparable"]:
+            pin_class, release = "non-comparable", "not pinned: " + (
+                row["comparable_reason"] or "the passes are not comparable"
+            )
+        elif insights and open_verdicts:
+            pin_class = "produced-an-insight"
+            release = (
+                "pinned until every insight on this run carries a rejecting "
+                "verdict; adjudication has not concluded"
+            )
+        elif insights:
+            pin_class = "rejected-only"
+            release = (
+                "every insight on this run is rejected; the next prune "
+                "releases the pin and the evidence goes at the "
+                f"{retention_days}-day horizon"
+            )
+        elif not diverged:
+            pin_class = "no-divergence"
+            release = (
+                f"pinned as the contradiction set for {negative_pin_days} days "
+                "from the pin, then released"
+            )
+        else:
+            pin_class = "diverged-no-insight"
+            release = (
+                "not pinned: nothing cites this run's evidence and it is not "
+                "the contradiction pool"
+            )
+        expected_pin = pin_class in ("produced-an-insight", "no-divergence")
+        if expected_pin and not row["pinned"]:
+            # The class says "keep this" and the bit says otherwise: the row
+            # was written by a build without §10.3's pin predicate, so the
+            # evidence is on the ordinary horizon and nobody was told. Worth
+            # saying out loud — it is the same class of silent loss `[DR43]`'s
+            # `pinned_span_count` exists to catch after the fact.
+            release = (
+                f"NOT PINNED despite falling in the {pin_class} class — this "
+                "run was recorded by a build without the retention pin, so "
+                f"its evidence goes at the {retention_days}-day horizon"
+            )
+        status = {
+            "run_id": run_id,
+            "known": True,
+            "pinned": bool(row["pinned"]),
+            "pinned_at": row["pinned_at"],
+            "pin_class": pin_class,
+            "pin_expected": expected_pin,
+            "release": release,
+            "insights": int(insights),
+            "open_verdicts": len(open_verdicts),
+            "negative_pin_days": negative_pin_days,
+            "retention_days": retention_days,
+        }
+        shortfall = self.distillation_evidence_shortfall(run_id)
+        if shortfall is not None:
+            status["evidence"] = shortfall
+        return status
+
+    def distillation_corpus(
+        self, channel_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        """§15's aggregates: one turn is an anecdote (`fix-sb8.10`).
+
+        Five views, each a §15 recipe executed verbatim so the UI and a
+        scripting agent read the same numbers:
+
+        * `weekly` — divergence rate over time, the signal for whether the
+          student improves as insights accumulate.
+        * `by_command` — material `missing-in-student` divergences by command.
+        * `by_kind` — the same denominator broken out by taxonomy kind.
+        * `promotion` — per-insight support and contradiction counts. This is
+          the ONE view carrying `isolation_verified = 1` ([DR48]), so until
+          `fix-35m.3` lands it is legitimately empty; `promotion_blocked` says
+          so rather than leaving a reader to read zero rows as "no support".
+        * `cost` — teacher vs student tokens, cost and latency, excluding
+          cache-asymmetric runs because that is precisely the confound that
+          makes the cost columns incomparable ([DR16]).
+        """
+        empty = {
+            "weekly": [],
+            "by_command": [],
+            "by_kind": [],
+            "promotion": [],
+            "promotion_blocked": True,
+            "cost": [],
+        }
+        if not self._distillation_ready():
+            return empty
+        scope = " AND r.channel_id = :channel" if channel_id else ""
+        params = {"channel": channel_id} if channel_id else {}
+        with self._connect() as conn:
+            weekly = [
+                dict(r)
+                for r in conn.execute(
+                    _WEEKLY_RATE_SQL.replace("{scope}", scope), params
+                ).fetchall()
+            ]
+            by_command = [
+                dict(r)
+                for r in conn.execute(
+                    _BY_COMMAND_SQL.replace("{scope}", scope), params
+                ).fetchall()
+            ]
+            by_kind = [
+                dict(r)
+                for r in conn.execute(
+                    _BY_KIND_SQL.replace("{scope}", scope), params
+                ).fetchall()
+            ]
+            promotion = [
+                dict(r) for r in conn.execute(_PROMOTION_SQL).fetchall()
+            ]
+            cost = [dict(r) for r in conn.execute(_COST_SQL).fetchall()]
+            isolation_verified = conn.execute(
+                "SELECT COUNT(*) FROM distillation_runs WHERE isolation_verified = 1"
+            ).fetchone()[0]
+        return {
+            "weekly": weekly,
+            "by_command": by_command,
+            "by_kind": by_kind,
+            "promotion": promotion,
+            # Not "there is no support" — "the causal claim promotion rests on
+            # is not yet checkable", which is a different thing to render.
+            "promotion_blocked": not isolation_verified,
+            "cost": cost,
+        }
+
+    def export_distillation_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        """One run as a self-contained JSON document (`fix-sb8.12`).
+
+        Built entirely out of STORED ROWS, never out of a live object: the
+        `Redactor` scrubs secrets at the sink boundary ([R20]), so an export
+        assembled from memory would route around redaction and put credentials
+        in a file whose whole purpose is to be handed to an extraction agent.
+
+        Carries both passes' spans, so an agent working offline from the file
+        can reach the evidence a divergence row cites without the DB.
+        """
+        if not self._distillation_ready():
+            return None
+        detail = self.get_distillation_run(run_id)
+        if detail is None:
+            return None
+        run = detail["run"]
+        provenance = self.distillation_insights(run_id=run_id)
+        traces = sorted(
+            {p["trace_id"] for p in detail["passes"] if p.get("trace_id")}
+            | ({run["turn_key"]} if run.get("turn_key") else set())
+        )
+        spans: dict[str, list[dict[str, Any]]] = {}
+        for trace_id in traces:
+            for span in self.get_spans(trace_id):
+                span["attributes"] = _loads_or_none(span.get("attributes"))
+                spans.setdefault(trace_id, []).append(span)
+        return {
+            "export_version": 1,
+            "exported_at": _utcnow_iso(),
+            "run": run,
+            "passes": detail["passes"],
+            "divergences": self.list_distillation_divergences(run_id),
+            "insights": provenance["insights"],
+            "citations": provenance["citations"],
+            "verdicts": provenance["verdicts"],
+            "retention": self.distillation_retention_status(run_id),
+            "spans": spans,
+        }
+
+    def distillation_run_for_turn(self, turn_key: str) -> Optional[str]:
+        """The run id recorded against a user-visible turn, if any.
+
+        What lets the turn list mark a distillation turn without a second
+        round trip per row.
+        """
+        if not self._distillation_ready():
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT run_id FROM distillation_runs WHERE turn_key=? "
+                "AND replay_of IS NULL ORDER BY started_at LIMIT 1",
+                (turn_key,),
+            ).fetchone()
+            return row[0] if row is not None else None
+
+    def distillation_turn_markers(
+        self, turn_keys: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Run markers for a page of turn rows, keyed by turn_key.
+
+        One statement for the whole page rather than one per row: the turn list
+        renders 100 rows by default and a per-row query would be 100 opens of
+        the read-only handle.
+        """
+        if not self._distillation_ready() or not turn_keys:
+            return {}
+        markers: dict[str, dict[str, Any]] = {}
+        with self._connect() as conn:
+            for chunk in _chunked(list(turn_keys)):
+                marks = _in_placeholders(len(chunk))
+                for row in conn.execute(
+                    "SELECT run_id, turn_key, comparable, comparable_reason, "
+                    "planning_diverged, exec_diverged, material_divergences, "
+                    "planning_insights, execution_insights, extractor_empty, "
+                    "pinned, evidence_pruned FROM distillation_runs "
+                    f"WHERE replay_of IS NULL AND turn_key IN ({marks})",
+                    chunk,
+                ).fetchall():
+                    markers[row["turn_key"]] = dict(row)
+        return markers
+
     def writer_health(self) -> Optional[dict[str, Any]]:
         with self._connect() as conn:
             row = conn.execute(
@@ -1096,6 +2342,8 @@ class ObservabilityStore:
         retention_days: Optional[int] = None,
         max_bytes: Optional[int] = None,
         include_conversationless_turns: bool = False,
+        negative_pin_days: Optional[int] = None,
+        pin_max_fraction: Optional[float] = None,
     ) -> dict[str, int]:
         """Bounded prune of spans/artifacts beyond the retention horizon, plus
         oldest-first eviction while over the size cap. Conversations and turn
@@ -1105,32 +2353,59 @@ class ObservabilityStore:
         deletes conversation-less turn records (e.g. per-invocation CLI
         channels) older than the horizon, with their feedback — otherwise no
         retention knob ever reaches them.
+
+        Distillation (design §10): a pinned run's traces are exempt from both
+        arms, the predicate riding INSIDE each victim-selection subquery
+        ([DR52] — on the outer DELETE, the ``rowcount == 0`` break below turns
+        one all-pinned batch into "stop evicting altogether"); the six
+        distillation tables are themselves under retention, an unpinned run
+        past the horizon losing its divergences and its ``entry_inputs_json``
+        while its conclusions survive marked ``evidence_pruned``; and the
+        bounded pin-release sweep runs first, so a run released this pass is
+        prunable this pass ([DR52]). The distillation counters join the result
+        dict only when non-zero, so the historical two-key result is what a
+        workflow that never distills still gets.
         """
         if retention_days is None:
             retention_days = _env_int("FW_OBS_RETENTION_DAYS", _DEFAULT_RETENTION_DAYS)
         if max_bytes is None:
             max_bytes = _env_int("FW_OBS_DB_MAX_BYTES", _DEFAULT_DB_MAX_BYTES)
+        if negative_pin_days is None:
+            negative_pin_days = _env_int(
+                "FW_OBS_DISTILL_NEGATIVE_PIN_DAYS", _DEFAULT_DISTILL_NEGATIVE_PIN_DAYS
+            )
+        if pin_max_fraction is None:
+            pin_max_fraction = _env_float(
+                "FW_OBS_DISTILL_PIN_MAX_FRACTION", _DEFAULT_DISTILL_PIN_MAX_FRACTION
+            )
 
         horizon_ns = int(
             (time.time() - retention_days * 86_400) * 1_000_000_000
         )
-        horizon_key = datetime.fromtimestamp(
+        horizon_dt = datetime.fromtimestamp(
             max(0.0, time.time() - retention_days * 86_400), tz=timezone.utc
-        ).strftime("%Y%m%dT%H%M%S")
+        )
+        horizon_key = horizon_dt.strftime("%Y%m%dT%H%M%S")
+        horizon_iso = horizon_dt.isoformat()
         deleted = {"spans": 0, "artifacts": 0}
 
         with self._connect() as conn:
+            _merge_nonzero(
+                deleted, self._release_distillation_pins(conn, negative_pin_days)
+            )
             for _ in range(_PRUNE_MAX_BATCHES):
                 conn.execute("BEGIN IMMEDIATE")
                 spans_cur = conn.execute(
                     "DELETE FROM spans WHERE span_id IN "
-                    "(SELECT span_id FROM spans WHERE start_ns < ? LIMIT ?)",
+                    "(SELECT span_id FROM spans WHERE start_ns < ? "
+                    f"AND trace_id NOT IN ({_PINNED_TRACES_SQL}) LIMIT ?)",
                     (horizon_ns, _PRUNE_BATCH_ROWS),
                 )
                 deleted["spans"] += spans_cur.rowcount
                 artifacts_cur = conn.execute(
                     "DELETE FROM artifacts WHERE artifact_id IN "
-                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? LIMIT ?)",
+                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? "
+                    f"AND turn_key NOT IN ({_PINNED_TRACES_SQL}) LIMIT ?)",
                     (horizon_key, _PRUNE_BATCH_ROWS),
                 )
                 deleted["artifacts"] += artifacts_cur.rowcount
@@ -1140,6 +2415,11 @@ class ObservabilityStore:
                     and artifacts_cur.rowcount < _PRUNE_BATCH_ROWS
                 ):
                     break
+
+            _merge_nonzero(
+                deleted,
+                self._prune_distillation_evidence(conn, horizon_key, horizon_iso),
+            )
 
             if include_conversationless_turns:
                 deleted["conversationless_turns"] = 0
@@ -1153,34 +2433,410 @@ class ObservabilityStore:
                             (horizon_key, _PRUNE_BATCH_ROWS),
                         ).fetchall()
                     ]
+                    run_ids = []
+                    # A replay trace goes with the turn it replays (§3.5 row 4):
+                    # its trace_id is '<turn_key>~replay.<n>'. Hoisted out of
+                    # the per-key loop for the same reason as in
+                    # forget_channel: the per-key LIKE is a full scan of
+                    # `spans`, and this batch holds up to _PRUNE_BATCH_ROWS keys.
+                    self._delete_derived_trace_spans(conn, keys)
                     for key in keys:
                         conn.execute("DELETE FROM feedback WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
                         conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
+                        run_ids.extend(
+                            r[0]
+                            for r in conn.execute(
+                                "SELECT run_id FROM distillation_runs WHERE turn_key=?",
+                                (key,),
+                            ).fetchall()
+                        )
+                    # The whole turn is being erased on operator request, so
+                    # its distillation closure goes with it rather than
+                    # surviving as a run row pointing at a turn that is gone.
+                    # No pin exemption here: this arm is opt-in and total.
+                    self._delete_distillation_runs(conn, run_ids)
                     conn.commit()
                     deleted["conversationless_turns"] += len(keys)
                     if len(keys) < _PRUNE_BATCH_ROWS:
                         break
 
-            # Size-cap eviction, oldest spans first (turn keys sort by time).
-            for _ in range(_PRUNE_MAX_BATCHES):
-                if self.db_size_bytes() <= max_bytes:
-                    break
-                conn.execute("BEGIN IMMEDIATE")
-                cur = conn.execute(
-                    "DELETE FROM spans WHERE span_id IN "
-                    "(SELECT span_id FROM spans ORDER BY start_ns LIMIT ?)",
-                    (_PRUNE_BATCH_ROWS,),
-                )
-                conn.commit()
-                if cur.rowcount == 0:
-                    break
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # Size-cap eviction, oldest first and TRACE-ATOMICALLY [DR27].
+            _merge_nonzero(deleted, self._evict_oldest_traces(conn, max_bytes))
+
+            _merge_nonzero(
+                deleted, self._enforce_pin_ceiling(conn, max_bytes, pin_max_fraction)
+            )
 
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
         return deleted
+
+
+    # -- distillation retention [DR25][DR43][DR52] -----------------------
+
+    def pin_distillation_run(self, run_id: str, pinned: bool = True) -> bool:
+        """Pin (or release) one run's evidence against retention.
+
+        Pinning records ``pinned_at`` and the live span count at that moment
+        ([DR43]): the pin only binds builds that carry the prune predicate, so
+        a later shortfall against ``pinned_span_count`` is how a loss caused
+        by an older binary is detected rather than discovered. Returns False
+        when the run row does not exist.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if pinned:
+                span_count = conn.execute(
+                    "SELECT COUNT(*) FROM spans WHERE trace_id IN "
+                    "(SELECT trace_id FROM distillation_passes WHERE run_id=?)",
+                    (run_id,),
+                ).fetchone()[0]
+                cur = conn.execute(
+                    "UPDATE distillation_runs SET pinned=1, pinned_at=?, "
+                    "pinned_span_count=? WHERE run_id=?",
+                    (_utcnow_iso(), int(span_count), run_id),
+                )
+            else:
+                # pinned_at/pinned_span_count survive a release: they are the
+                # record of what was protected and when.
+                cur = conn.execute(
+                    "UPDATE distillation_runs SET pinned=0 WHERE run_id=?", (run_id,)
+                )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def distillation_evidence_shortfall(self, run_id: str) -> Optional[dict[str, Any]]:
+        """Live span count vs the count recorded at pin time [DR43].
+
+        ``incomplete`` is what the run header renders as "evidence incomplete
+        — N of M spans are gone; a build without the retention pin may have
+        pruned them", and what excludes the run from the promotion view.
+        Returns None when the run does not exist.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT pinned, pinned_at, pinned_span_count, evidence_pruned "
+                "FROM distillation_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            live = conn.execute(
+                "SELECT COUNT(*) FROM spans WHERE trace_id IN "
+                "(SELECT trace_id FROM distillation_passes WHERE run_id=?)",
+                (run_id,),
+            ).fetchone()[0]
+        recorded = row["pinned_span_count"]
+        missing = 0
+        if recorded is not None and int(recorded) > int(live):
+            missing = int(recorded) - int(live)
+        return {
+            "run_id": run_id,
+            "pinned": bool(row["pinned"]),
+            "pinned_at": row["pinned_at"],
+            "pinned_span_count": recorded,
+            "live_span_count": int(live),
+            "missing_span_count": missing,
+            "evidence_pruned": bool(row["evidence_pruned"]),
+            "incomplete": bool(missing) or bool(row["evidence_pruned"]),
+        }
+
+    def _release_distillation_pins(
+        self, conn: sqlite3.Connection, negative_pin_days: int
+    ) -> dict[str, int]:
+        """The bounded pin-release sweep [DR52], run before both prune arms.
+
+        Two classes lose their pin here, and both are computed rather than
+        written by anyone: a no-divergence run that produced NO insight and is
+        older than FW_OBS_DISTILL_NEGATIVE_PIN_DAYS (the contradiction set is
+        valuable, but not forever), and a run whose every insight's newest
+        non-superseded verdict is a rejection — the verdict route writes only
+        ``distillation_verdicts`` (§12 rule 1), so the unpin has to be a
+        consequence the pruner derives.
+
+        The two arms partition on "has an insight", not on "diverged": a run
+        can agree and still carry an insight, and that row is pinned by the
+        insight class (`fix-sb8.17`).
+        """
+        cutoff = datetime.fromtimestamp(
+            max(0.0, time.time() - negative_pin_days * 86_400), tz=timezone.utc
+        ).isoformat()
+        released = 0
+        conn.execute("BEGIN IMMEDIATE")
+        # The no-divergence class is time-limited, but "no divergence" and
+        # "produced no insight" are not the same predicate (`fix-sb8.17`).
+        # §10.3 pins an insight-producing run FOREVER, so a run that agreed and
+        # still yielded an insight belongs to the insight class and is released
+        # only by the rejected-only arm below. Nothing produces such a row today
+        # — extraction is gated on divergence — but `fix-sb8.11`'s replay is
+        # precisely an agreeing run that says something about an insight, and
+        # the failure mode is silent evidence loss for the most interesting
+        # insight there is.
+        released += conn.execute(
+            "UPDATE distillation_runs SET pinned=0 WHERE run_id IN "
+            "(SELECT run_id FROM distillation_runs r WHERE r.pinned=1 "
+            " AND r.planning_diverged=0 AND r.exec_diverged=0 "
+            " AND NOT EXISTS (SELECT 1 FROM distillation_insights i "
+            "                  WHERE i.run_id = r.run_id) "
+            " AND COALESCE(r.pinned_at, r.started_at) IS NOT NULL "
+            " AND COALESCE(r.pinned_at, r.started_at) < ? LIMIT ?)",
+            (cutoff, _PRUNE_BATCH_ROWS),
+        ).rowcount
+        # Rejected-only runs: every insight adjudicated, none supported and
+        # none left unadjudicated. A run with no insights is not in scope here
+        # — that is the no-divergence class above. Divergence is deliberately
+        # not part of this predicate, so an agreeing run carrying an insight
+        # is released here and only here.
+        released += conn.execute(
+            """UPDATE distillation_runs SET pinned=0 WHERE run_id IN (
+                 SELECT r.run_id FROM distillation_runs r
+                  WHERE r.pinned=1
+                    AND EXISTS (SELECT 1 FROM distillation_insights i
+                                 WHERE i.run_id = r.run_id)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM distillation_insights i
+                         WHERE i.run_id = r.run_id
+                           AND COALESCE((SELECT v.verdict FROM distillation_verdicts v
+                                          WHERE v.insight_id = i.insight_id
+                                            AND v.superseded = 0
+                                          ORDER BY v.created_at DESC LIMIT 1),
+                                        'unadjudicated')
+                               IN ('unadjudicated', 'supported'))
+                  LIMIT ?)""",
+            (_PRUNE_BATCH_ROWS,),
+        ).rowcount
+        conn.commit()
+        return {"distillation_pins_released": released}
+
+    def _prune_distillation_evidence(
+        self, conn: sqlite3.Connection, horizon_key: str, horizon_iso: str
+    ) -> dict[str, int]:
+        """The six tables under retention [DR52].
+
+        Past the horizon an UNPINNED run loses the bulk — its divergence rows
+        and its passes' ``entry_inputs_json`` — while the conclusions (the run
+        row and its insights) survive, small, marked ``evidence_pruned`` so
+        the UI can say "the trace behind this is gone" instead of rendering an
+        empty diff.
+        """
+        deleted = {"distillation_divergences": 0, "distillation_evidence_pruned": 0}
+        for _ in range(_PRUNE_MAX_BATCHES):
+            conn.execute("BEGIN IMMEDIATE")
+            run_ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT run_id FROM distillation_runs "
+                    " WHERE pinned=0 AND evidence_pruned=0 "
+                    "   AND ((started_at IS NOT NULL AND started_at < ?) "
+                    "        OR (started_at IS NULL AND turn_key < ?)) LIMIT ?",
+                    (horizon_iso, horizon_key, _PRUNE_BATCH_ROWS),
+                ).fetchall()
+            ]
+            for chunk in _chunked(run_ids):
+                marks = _in_placeholders(len(chunk))
+                # Citations first: a divergence deleted out from under one
+                # leaves a citation pointing at nothing, which §15's recipes
+                # would read as real provenance.
+                conn.execute(
+                    "DELETE FROM distillation_insight_citations WHERE divergence_id IN "
+                    "(SELECT divergence_id FROM distillation_divergences "
+                    f"WHERE run_id IN ({marks}))",
+                    chunk,
+                )
+                deleted["distillation_divergences"] += conn.execute(
+                    f"DELETE FROM distillation_divergences WHERE run_id IN ({marks})",
+                    chunk,
+                ).rowcount
+                conn.execute(
+                    "UPDATE distillation_passes SET entry_inputs_json=NULL "
+                    f"WHERE run_id IN ({marks})",
+                    chunk,
+                )
+                deleted["distillation_evidence_pruned"] += conn.execute(
+                    f"UPDATE distillation_runs SET evidence_pruned=1 "
+                    f"WHERE run_id IN ({marks})",
+                    chunk,
+                ).rowcount
+            conn.commit()
+            if len(run_ids) < _PRUNE_BATCH_ROWS:
+                break
+        return deleted
+
+    @staticmethod
+    def _read_diagnostic(conn: sqlite3.Connection, key: str) -> Optional[dict[str, Any]]:
+        row = conn.execute(
+            "SELECT value FROM diagnostics WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            loaded = json.loads(row[0])
+        except (ValueError, TypeError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    def _pinned_span_bytes(self, conn: sqlite3.Connection) -> int:
+        """Estimated bytes held by pinned traces: attribute bytes (97% of a
+        trace's cost, design §10.1) plus a flat per-row allowance for the row
+        header and index entries LENGTH(attributes) cannot see."""
+        row = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(attributes)), 0) FROM spans "
+            f"WHERE trace_id IN ({_PINNED_TRACES_SQL})"
+        ).fetchone()
+        return int(row[1]) + int(row[0]) * _PINNED_ROW_OVERHEAD_BYTES
+
+    def _evict_oldest_traces(
+        self, conn: sqlite3.Connection, max_bytes: int
+    ) -> dict[str, int]:
+        """Size-cap eviction, oldest trace first and whole traces only `[DR27]`.
+
+        This arm used to delete `LIMIT 5000` spans in `start_ns` order with no
+        trace awareness, which cuts across trace boundaries by construction:
+        the surviving half of a trace renders as a waterfall with silently
+        missing rows — a turn that reads as though the agent skipped steps it
+        actually took. That is worse than losing the trace outright, because
+        nothing about it looks lossy. Whole traces, and an eviction marker so
+        the loss is a fact somebody can find rather than an inference from a
+        gap.
+
+        The pin predicate stays INSIDE the victim selection `[DR52]`: on the
+        outer `DELETE`, a batch whose oldest rows are all pinned deletes
+        nothing, rowcount is 0, and the loop abandons eviction with the DB over
+        its cap and evictable spans still present — no error and no marker.
+        Pinned traces are evicted only by `_enforce_pin_ceiling`, and only
+        once the pinned set has itself outgrown its share of the cap.
+        """
+        evicted = 0
+        for _ in range(_PRUNE_MAX_BATCHES):
+            if self.db_size_bytes() <= max_bytes:
+                break
+            conn.execute("BEGIN IMMEDIATE")
+            traces = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT trace_id FROM spans "
+                    f"WHERE trace_id NOT IN ({_PINNED_TRACES_SQL}) "
+                    "GROUP BY trace_id ORDER BY MIN(start_ns) LIMIT ?",
+                    (_EVICT_TRACES_PER_BATCH,),
+                ).fetchall()
+            ]
+            if not traces:
+                conn.commit()
+                break
+            marks = _in_placeholders(len(traces))
+            # A distillation run whose evidence goes must say so, or its UI
+            # renders an empty diff instead of "the trace behind this is gone".
+            conn.execute(
+                "UPDATE distillation_runs SET evidence_pruned=1 WHERE run_id IN "
+                f"(SELECT run_id FROM distillation_passes WHERE trace_id IN ({marks}))",
+                traces,
+            )
+            conn.execute(f"DELETE FROM spans WHERE trace_id IN ({marks})", traces)
+            evicted += len(traces)
+            marker = self._read_diagnostic(conn, "span_evictions") or {}
+            self.set_diagnostic(
+                conn,
+                "span_evictions",
+                {
+                    "at": _utcnow_iso(),
+                    "reason": "size-cap",
+                    "traces_evicted": len(traces),
+                    "total_traces_evicted": int(marker.get("total_traces_evicted") or 0)
+                    + len(traces),
+                },
+            )
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return {"traces_evicted": evicted}
+
+    def _enforce_pin_ceiling(
+        self, conn: sqlite3.Connection, max_bytes: int, pin_max_fraction: float
+    ) -> dict[str, int]:
+        """The pinned set's ceiling [DR52]: the cap wins over the pin, loudly.
+
+        Two of the five retention classes pin indefinitely, so a pinned set
+        left unbounded reaches the cap on its own and the cap silently stops
+        holding. When eviction has finished and the DB is still over cap, this
+        records ``distill_pin_over_cap``; if the pinned set alone is over
+        FW_OBS_DISTILL_PIN_MAX_FRACTION of the cap it then evicts pinned
+        traces oldest-first and TRACE-ATOMICALLY — a half-deleted trace
+        renders as a waterfall with silently missing rows [DR27] — marking
+        each evicted run ``evidence_pruned`` and writing the eviction marker.
+        """
+        size = self.db_size_bytes()
+        if size <= max_bytes:
+            return {}
+        pinned_bytes = self._pinned_span_bytes(conn)
+        ceiling = int(max_bytes * pin_max_fraction)
+        conn.execute("BEGIN IMMEDIATE")
+        self.set_diagnostic(
+            conn,
+            "distill_pin_over_cap",
+            {
+                "at": _utcnow_iso(),
+                "db_size_bytes": size,
+                "max_bytes": max_bytes,
+                "over_cap_bytes": size - max_bytes,
+                "pinned_bytes": pinned_bytes,
+                "pin_max_fraction": pin_max_fraction,
+                "ceiling_bytes": ceiling,
+                "evicting_pinned": pinned_bytes > ceiling,
+            },
+        )
+        conn.commit()
+        logger.warning(
+            f"Observability DB is {size} bytes over a {max_bytes}-byte cap with "
+            f"~{pinned_bytes} bytes of pinned distillation evidence "
+            f"(ceiling {ceiling}) [DR52]"
+        )
+        if pinned_bytes <= ceiling:
+            return {"pinned_traces_evicted": 0}
+
+        evicted = 0
+        for _ in range(_PRUNE_MAX_BATCHES):
+            if self.db_size_bytes() <= max_bytes:
+                break
+            if self._pinned_span_bytes(conn) <= ceiling:
+                break
+            conn.execute("BEGIN IMMEDIATE")
+            traces = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT trace_id FROM spans "
+                    f"WHERE trace_id IN ({_PINNED_TRACES_SQL}) "
+                    "GROUP BY trace_id ORDER BY MIN(start_ns) LIMIT 32"
+                ).fetchall()
+            ]
+            if not traces:
+                conn.commit()
+                break
+            marks = _in_placeholders(len(traces))
+            conn.execute(
+                f"UPDATE distillation_runs SET evidence_pruned=1 WHERE run_id IN "
+                f"(SELECT run_id FROM distillation_passes WHERE trace_id IN ({marks}))",
+                traces,
+            )
+            conn.execute(
+                f"DELETE FROM spans WHERE trace_id IN ({marks})", traces
+            )
+            evicted += len(traces)
+            marker = self._read_diagnostic(conn, "span_evictions") or {}
+            self.set_diagnostic(
+                conn,
+                "span_evictions",
+                {
+                    "at": _utcnow_iso(),
+                    "reason": "pinned-set-over-ceiling",
+                    "traces_evicted": len(traces),
+                    "total_traces_evicted": int(marker.get("total_traces_evicted") or 0)
+                    + len(traces),
+                },
+            )
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return {"pinned_traces_evicted": evicted}
 
     def forget_channel(self, channel_id: str) -> dict[str, int]:
         """First-class erasure [R21]: delete a channel across all tables, then
@@ -1188,6 +2844,25 @@ class ObservabilityStore:
         deleted: dict[str, int] = {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # [DR44]: the id sets are collected BEFORE anything is deleted.
+            # PRAGMA foreign_keys is off and the schema declares no
+            # REFERENCES, so nothing cascades and the wrong order leaves
+            # orphan divergences that read as real evidence.
+            turn_keys = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT turn_key FROM turns WHERE channel_id=?", (channel_id,)
+                ).fetchall()
+            ]
+            run_rows = conn.execute(
+                "SELECT run_id, turn_key FROM distillation_runs "
+                "WHERE channel_id=? OR turn_key IN "
+                "(SELECT turn_key FROM turns WHERE channel_id=?)",
+                (channel_id, channel_id),
+            ).fetchall()
+            run_ids = [r[0] for r in run_rows]
+            turn_keys.extend(r[1] for r in run_rows if r[1])
+            deleted.update(self._delete_distillation_runs(conn, run_ids))
             deleted["feedback"] = conn.execute(
                 "DELETE FROM feedback WHERE turn_key IN "
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
@@ -1198,6 +2873,12 @@ class ObservabilityStore:
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
                 (channel_id, channel_id),
             ).rowcount
+            # Replay traces are '<turn_key>~replay.<n>' [DR41]: the channel_id
+            # arm above catches the ones that carry a channel, this catches
+            # the rest [DR44]. Set-based on purpose — see
+            # _delete_derived_trace_spans: one statement per turn key made
+            # [R21] erasure quadratic in channel size.
+            deleted["spans"] += self._delete_derived_trace_spans(conn, turn_keys)
             deleted["artifacts"] = conn.execute(
                 "DELETE FROM artifacts WHERE channel_id=? OR turn_key IN "
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
@@ -1215,6 +2896,108 @@ class ObservabilityStore:
             conn.commit()
         return deleted
 
+    @staticmethod
+    def _delete_derived_trace_spans(
+        conn: sqlite3.Connection, turn_keys: Iterable[str]
+    ) -> int:
+        """Delete the spans of every trace derived from one of *turn_keys*.
+
+        Derived trace ids are ``'<turn_key>~<suffix>'`` — today only
+        ``~replay.<n>`` (§3.5 row 4, `[DR41]`) — and `[DR44]` requires erasure
+        to reach them.
+
+        Deliberately ONE statement rather than one ``trace_id LIKE key || '~%'``
+        per key: a LIKE with an ESCAPE clause cannot use ``idx_spans_trace``, so
+        the per-key shape was a full scan of `spans` per turn of the channel,
+        all of it inside the caller's ``BEGIN IMMEDIATE`` — quadratic in channel
+        size on the ordinary-turn erasure path (measured here at 0.039s for 500
+        turns and 3.06s for 4000: 8x the turns for 78x the work; the regression
+        auditor measured 0.08s -> 9.26s on a larger seed). The keys go into a
+        temp table so the count of statements against `spans` stays constant
+        however large the channel is.
+
+        Turn keys are minted by `mint_turn_key` (`turn.py:91`) as
+        ``YYYYMMDDTHHMMSSZ-<hex>`` and never contain '~', so the text before the
+        first '~' of a derived trace id is exactly the turn key it derives from.
+        """
+        keys = sorted({key for key in turn_keys if key})
+        if not keys:
+            return 0
+        conn.execute("DROP TABLE IF EXISTS temp._forget_turn_keys")
+        conn.execute(
+            "CREATE TEMP TABLE _forget_turn_keys (turn_key TEXT PRIMARY KEY)"
+        )
+        try:
+            conn.executemany(
+                "INSERT OR IGNORE INTO temp._forget_turn_keys(turn_key) VALUES (?)",
+                [(key,) for key in keys],
+            )
+            return conn.execute(
+                "DELETE FROM spans WHERE instr(trace_id, '~') > 0 AND "
+                "substr(trace_id, 1, instr(trace_id, '~') - 1) IN "
+                "(SELECT turn_key FROM temp._forget_turn_keys)"
+            ).rowcount
+        finally:
+            conn.execute("DROP TABLE IF EXISTS temp._forget_turn_keys")
+
+    def _delete_distillation_runs(
+        self, conn: sqlite3.Connection, run_ids: list[str]
+    ) -> dict[str, int]:
+        """Delete the distillation closure of *run_ids*, children first [DR44].
+
+        Called inside the caller's transaction with the parent rows still
+        present; verdicts hang off insight ids, so those are collected before
+        the insights they belong to are deleted.
+        """
+        deleted = {table: 0 for table in _DISTILL_TABLES}
+        if not run_ids:
+            return deleted
+        insight_ids: list[str] = []
+        for chunk in _chunked(run_ids):
+            insight_ids.extend(
+                r[0]
+                for r in conn.execute(
+                    "SELECT insight_id FROM distillation_insights WHERE run_id IN "
+                    f"({_in_placeholders(len(chunk))})",
+                    chunk,
+                ).fetchall()
+            )
+        for chunk in _chunked(insight_ids):
+            marks = _in_placeholders(len(chunk))
+            deleted["distillation_verdicts"] += conn.execute(
+                f"DELETE FROM distillation_verdicts WHERE insight_id IN ({marks})",
+                chunk,
+            ).rowcount
+            deleted["distillation_insight_citations"] += conn.execute(
+                "DELETE FROM distillation_insight_citations WHERE insight_id IN "
+                f"({marks})",
+                chunk,
+            ).rowcount
+        for chunk in _chunked(run_ids):
+            marks = _in_placeholders(len(chunk))
+            # Citations also hang off divergence ids: an insight from another
+            # run may cite a divergence of this one.
+            deleted["distillation_insight_citations"] += conn.execute(
+                "DELETE FROM distillation_insight_citations WHERE divergence_id IN "
+                "(SELECT divergence_id FROM distillation_divergences "
+                f"WHERE run_id IN ({marks}))",
+                chunk,
+            ).rowcount
+            deleted["distillation_insights"] += conn.execute(
+                f"DELETE FROM distillation_insights WHERE run_id IN ({marks})", chunk
+            ).rowcount
+            deleted["distillation_divergences"] += conn.execute(
+                f"DELETE FROM distillation_divergences WHERE run_id IN ({marks})",
+                chunk,
+            ).rowcount
+            deleted["distillation_passes"] += conn.execute(
+                f"DELETE FROM distillation_passes WHERE run_id IN ({marks})", chunk
+            ).rowcount
+            deleted["distillation_runs"] += conn.execute(
+                f"DELETE FROM distillation_runs WHERE run_id IN ({marks})", chunk
+            ).rowcount
+        return deleted
+
     def clear_conversations(self) -> dict[str, int]:
         """Delete every recorded conversation and its turn-level observability.
 
@@ -1225,7 +3008,17 @@ class ObservabilityStore:
         deleted: dict[str, int] = {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            for table in ("feedback", "spans", "artifacts", "turns", "conversations"):
+            # All six distillation tables included [DR44]: they hold verbatim
+            # user content (user_message, entry_inputs_json, param_diff_json,
+            # detail_json, insight text) and the parent design's erasure
+            # wording is "across all tables".
+            for table in (
+                "feedback",
+                "spans",
+                "artifacts",
+                "turns",
+                "conversations",
+            ) + _DISTILL_TABLES:
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1245,6 +3038,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
+        self._features: frozenset[str] = frozenset()
         conn = self._connect()
         try:
             found = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -1255,6 +3049,10 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
                 )
         finally:
             conn.close()
+        # This handle can never migrate, so feature detection is the only
+        # thing standing between a pre-distillation snapshot and a bare
+        # "no such column" 500 [DR29].
+        self._features = self._load_features()
 
     def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
         conn = sqlite3.connect(
@@ -1265,6 +3063,32 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
         )
         conn.row_factory = sqlite3.Row
         return conn
+
+
+class _FlushTicket:
+    """One outstanding `SQLiteTraceSink.flush()` barrier `[DR49]`.
+
+    A bare `threading.Event` could only say that the writer *reached* the
+    barrier, which is what made §7.5's read barrier a liveness barrier rather
+    than a durability one: `_apply_batch` set the event in its `finally`, so a
+    caller was told the flush had succeeded even when the batch had just been
+    rolled back and its spans discarded. The ticket carries the outcome too.
+
+    It also carries the barrier's WATERMARK: the enqueue sequence numbers the
+    writer has to reach for this barrier's work to be done. Settling on that
+    rather than on global queue quiescence is what keeps the barrier from
+    being starved (`fix-sb8.15`) — one sink is shared by every channel on a
+    workflow DB, so "both queues are empty" is a condition another channel's
+    steady span emission can prevent forever.
+    """
+
+    __slots__ = ("event", "ok", "span_mark", "record_mark")
+
+    def __init__(self, span_mark: int = 0, record_mark: int = 0) -> None:
+        self.event = threading.Event()
+        self.ok = False
+        self.span_mark = span_mark
+        self.record_mark = record_mark
 
 
 # ----------------------------------------------------------------------
@@ -1294,6 +3118,32 @@ class SQLiteTraceSink:
         )
         self._closed = False
         self._stop = threading.Event()
+        # [DR49] durability-barrier state. `_write_failures` counts batches
+        # that rolled back; `_pending_flushes` holds barriers whose batch
+        # committed but whose watermark the writer has not reached yet. Both
+        # are touched only on the writer thread.
+        self._write_failures = 0
+        self._failures_reported = 0
+        self._pending_flushes: list[_FlushTicket] = []
+        # Barrier watermarks (`fix-sb8.15`). `_span_enq`/`_record_enq` count
+        # everything ever accepted onto each queue and are bumped by producer
+        # threads under `_seq_lock`; `_span_done`/`_record_done` count what the
+        # writer has dequeued and are touched only on the writer thread. Each
+        # queue is FIFO and drained in order, so `done >= mark` is exactly
+        # "the first `mark` items enqueued on that queue have been applied".
+        #
+        # `_trace_last_seq` is what makes a barrier SCOPED: for each trace it
+        # holds `_span_enq` as of that trace's most recent span, so a
+        # `flush(trace_id=...)` caller waits for its own trace's spans and not
+        # for a backlog another channel piled on afterwards. Entries at or
+        # below `_span_done` are already satisfied and are dropped when the
+        # map grows — a missing entry reads as 0, which is the same answer.
+        self._seq_lock = threading.Lock()
+        self._span_enq = 0
+        self._record_enq = 0
+        self._span_done = 0
+        self._record_done = 0
+        self._trace_last_seq: dict[str, int] = {}
         self._health = {
             "spans_dropped": 0,
             "records_dropped": 0,
@@ -1343,8 +3193,10 @@ class SQLiteTraceSink:
                 end_ns=span.end_ns,
                 status=span.status,
                 attributes=dict(span.attributes),
+                distillation_pass=span.distillation_pass,
             )
             self._span_queue.put_nowait(("span", snapshot))
+            self._note_enqueued("span", snapshot.trace_id)
         except queue.Full:
             self._count("spans_dropped")
         except Exception as exc:
@@ -1462,6 +3314,7 @@ class SQLiteTraceSink:
             self._record_queue.put(
                 ("turn", turn_row, artifact_rows, 0), timeout=_RECORD_PUT_TIMEOUT_S
             )
+            self._note_enqueued("record")
         except queue.Full:
             self._count("records_dropped")
             logger.warning(
@@ -1520,21 +3373,149 @@ class SQLiteTraceSink:
                 ("label", channel_id, conversation_id, topic, summary, 0),
                 timeout=_RECORD_PUT_TIMEOUT_S,
             )
+            self._note_enqueued("record")
         except queue.Full:
             self._count("records_dropped")
         except Exception as exc:
             self._count("write_errors", error=repr(exc))
 
+    def emit_distillation_record(self, kind: str, payload: dict[str, Any]) -> None:
+        """Queue one distillation row on the record queue [DR46].
+
+        Deliberately the record queue and not a direct store write: it
+        inherits the existing writer thread, busy-retry, breaker and
+        writer_health counters, so a lock contention or OperationalError can
+        never surface on the turn thread ([R14]). Records are small and rare
+        (a handful per distillation run) next to spans, so the small bounded
+        queue is the right one.
+        """
+        if self._closed:
+            return
+        if kind not in _DISTILL_RECORD_TABLES:
+            self._count("write_errors", error=f"distillation kind: {kind!r}")
+            return
+        try:
+            # Copied: the producer owns its dict and may keep mutating it
+            # while this one waits on the writer thread.
+            self._record_queue.put(
+                ("distill", kind, dict(payload), 0), timeout=_RECORD_PUT_TIMEOUT_S
+            )
+            self._note_enqueued("record")
+        except queue.Full:
+            self._count("records_dropped")
+            logger.warning(
+                f"Observability record queue full; DROPPED distillation "
+                f"{kind} record [R13]"
+            )
+        except Exception as exc:
+            self._count("write_errors", error=repr(exc))
+
     # -- lifecycle -------------------------------------------------------
 
-    def flush(self, timeout: float = 10.0) -> bool:
-        """Block until everything enqueued so far is written (tests, close)."""
-        done = threading.Event()
+    def flush(
+        self, timeout: float = 10.0, trace_id: Optional[str] = None
+    ) -> bool:
+        """Durability barrier: block until everything enqueued so far is
+        COMMITTED, and report whether it was `[DR49]`.
+
+        Returns ``True`` only when both queues drained to empty and no batch
+        has been discarded since the previous barrier settled. Returns
+        ``False`` when:
+
+        * a batch rolled back — ``sqlite3.OperationalError`` (SQLITE_BUSY under
+          multi-process contention `[R8]`, whose recovery drops the batch's
+          spans outright) or any other write error — and no later barrier has
+          reported that loss yet;
+        * the barrier could not be enqueued (record queue full);
+        * the barrier did not complete within *timeout* (a wedged or stopped
+          writer).
+
+        A malformed individual distillation record is NOT a barrier failure:
+        `_apply_distillation` counts it in ``writer_health['write_errors']`` and
+        keeps the rest of its batch, so the batch is not discarded. Detecting
+        that loss is `records_dropped` / `write_errors` monitoring, not this.
+
+        The bool is load-bearing, not a courtesy: §7.5's read barrier is the
+        only thing standing between "the aligner holds these `Span` objects in
+        memory" and "the table holds the rows a divergence record is about to
+        cite". A ``False`` return means spans or records enqueued before the
+        call may not be in the table, so the caller must record the run
+        ``comparable = 0`` / ``evidence-incomplete`` rather than treat what it
+        holds in memory as persisted evidence.
+
+        Committing the one batch the sentinel happens to land in is NOT enough
+        for that meaning. ``_next_item`` takes the record queue first, so the
+        sentinel can be dequeued ahead of spans that were enqueued before it;
+        completing the barrier there would let the caller cite spans still
+        sitting in a 10,000-slot queue. The barrier therefore waits on a
+        WATERMARK — enqueue sequence numbers taken as the ticket is created —
+        rather than on the queues being empty.
+
+        *trace_id* SCOPES the barrier, and is what a caller with a trace to
+        cite should pass. Waiting for empty was the original spelling and it is
+        starvable (`fix-sb8.15`): `get_observability_sink` caches one sink per
+        workflow DB and shares it across channels, so any other channel
+        emitting spans steadily keeps both-queues-empty from ever being true
+        and burns the whole timeout. An unscoped watermark narrows that window
+        but does not close it — a backlog another channel piles up between the
+        caller's last span and its `flush()` call is still enqueued "before"
+        the ticket. Scoped to a trace, the barrier waits for the caller's own
+        spans and nothing else: `_trace_last_seq[trace_id]` is the sequence of
+        that trace's most recent span, and the span queue is FIFO, so
+        `_span_done` reaching it means every span of that trace has been
+        applied. Records are not scoped — they are rare and small, and a
+        distillation run's own rows ride that queue.
+
+        Passing no *trace_id* keeps the original whole-sink meaning, which is
+        what `close`-time and test callers want.
+        """
+        with self._seq_lock:
+            span_mark = (
+                self._trace_last_seq.get(trace_id, 0)
+                if trace_id is not None
+                else self._span_enq
+            )
+            ticket = _FlushTicket(span_mark, self._record_enq)
         try:
-            self._record_queue.put(("flush", done), timeout=timeout)
+            self._record_queue.put(("flush", ticket), timeout=timeout)
         except queue.Full:
             return False
-        return done.wait(timeout)
+        self._note_enqueued("record")
+        if not ticket.event.wait(timeout):
+            return False
+        return ticket.ok
+
+    def _note_enqueued(self, which: str, trace_id: Optional[str] = None) -> None:
+        """Count one accepted enqueue for the `fix-sb8.15` barrier watermark."""
+        with self._seq_lock:
+            if which == "span":
+                self._span_enq += 1
+                if trace_id:
+                    self._trace_last_seq[trace_id] = self._span_enq
+                    if len(self._trace_last_seq) > _TRACE_MARK_CEILING:
+                        self._trim_trace_marks()
+            else:
+                self._record_enq += 1
+
+    def _trim_trace_marks(self) -> None:
+        """Drop `_trace_last_seq` entries the writer has already passed.
+
+        Called from the one place the map grows, because a session that never
+        takes a barrier would otherwise accumulate one int per trace for the
+        life of the process — a slow leak in the ordinary path, paid for by a
+        feature only distillation uses.
+
+        Dropping is safe: a trace whose last span has been applied cannot hold
+        a barrier open, so a later `flush(trace_id=...)` for it reads the
+        missing entry as 0 and settles immediately — the same answer the
+        retained mark would give. `_span_done` is the writer thread's, read
+        here without the lock; an under-read only keeps an entry one sweep
+        longer. Caller holds `_seq_lock`.
+        """
+        done = self._span_done
+        self._trace_last_seq = {
+            trace: seq for trace, seq in self._trace_last_seq.items() if seq > done
+        }
 
     def close(self, timeout: float = 10.0) -> None:
         """Stop signal + bounded join + final drain and commit [R7]. Idempotent.
@@ -1567,12 +3548,17 @@ class SQLiteTraceSink:
             while not self._stop.is_set():
                 item = self._next_item()
                 if item is None:
+                    # Idle: both queues are empty, so every parked [DR49]
+                    # barrier's watermark has been reached.
+                    self._settle_flushes([])
                     self._heartbeat(conn)
                     continue
                 self._apply_batch(conn, [item] + self._drain_pending())
+                self._settle_flushes([])
             # Final drain: everything enqueued before close() is written.
             while items := self._drain_pending():
                 self._apply_batch(conn, items)
+            self._settle_flushes([])
             # Then the retry ring, which holds terminal rows the queue may have
             # dropped — the last thing standing between a wedged-then-recovered
             # DB and a permanently missing turn.
@@ -1581,6 +3567,7 @@ class SQLiteTraceSink:
             self._count("write_errors", error=repr(exc))
             logger.warning(f"Observability writer loop error: {exc!r}")
         finally:
+            self._abandon_flushes()
             if conn is not None:
                 try:
                     self._maybe_write_health(conn, force=True)
@@ -1671,13 +3658,23 @@ class SQLiteTraceSink:
         logger.info("Observability sync-write breaker re-armed after a successful probe")
 
     def _next_item(self) -> Any:
-        """One item, records first; None on idle timeout (health heartbeat)."""
+        """One item, records first; None on idle timeout (health heartbeat).
+
+        Every dequeue advances the matching `fix-sb8.15` watermark. Advancing
+        at dequeue rather than after the commit is safe because
+        `_settle_flushes` is only ever called once a batch has been fully
+        applied — committed, or rolled back and force-settled.
+        """
         try:
-            return self._record_queue.get_nowait()
+            item = self._record_queue.get_nowait()
+            self._record_done += 1
+            return item
         except queue.Empty:
             pass
         try:
-            return self._span_queue.get(timeout=0.25)
+            item = self._span_queue.get(timeout=0.25)
+            self._span_done += 1
+            return item
         except queue.Empty:
             return None
 
@@ -1686,17 +3683,19 @@ class SQLiteTraceSink:
         for _ in range(limit):
             try:
                 items.append(self._record_queue.get_nowait())
+                self._record_done += 1
                 continue
             except queue.Empty:
                 pass
             try:
                 items.append(self._span_queue.get_nowait())
+                self._span_done += 1
             except queue.Empty:
                 break
         return items
 
     def _apply_batch(self, conn: sqlite3.Connection, items: list) -> None:
-        flush_events: list[threading.Event] = []
+        tickets: list[_FlushTicket] = []
         spans: list[tracing.Span] = []
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -1708,23 +3707,100 @@ class SQLiteTraceSink:
                     self._apply_turn(conn, item)
                 elif kind == "label":
                     self._apply_label(conn, item)
+                elif kind == "distill":
+                    self._apply_distillation(conn, item)
                 elif kind == "flush":
-                    flush_events.append(item[1])
+                    tickets.append(item[1])
             if spans:
                 self.store.upsert_span_rows(conn, spans, self._redactor)
             self._maybe_write_health(conn, in_txn=True)
             conn.commit()
         except sqlite3.OperationalError as exc:
-            # SQLITE_BUSY under multi-process contention [R8].
+            # SQLITE_BUSY under multi-process contention [R8]. The batch is
+            # gone — _requeue_records drops its spans outright — so any barrier
+            # covering it has failed [DR49].
             self._rollback(conn)
             self._count("busy_retries", error=repr(exc))
+            self._write_failures += 1
+            self._settle_flushes(tickets, force=True)
             self._requeue_records(items)
+            return
         except Exception as exc:
+            # Nothing is requeued on this arm at all, so the loss is total.
             self._rollback(conn)
             self._count("write_errors", error=repr(exc))
-        finally:
-            for event in flush_events:
-                event.set()
+            self._write_failures += 1
+            self._settle_flushes(tickets, force=True)
+            return
+        # Committed. A barrier is still not satisfied until everything
+        # enqueued before its ticket has been applied, so a ticket whose
+        # watermark this batch did not reach is parked rather than completed.
+        self._settle_flushes(tickets)
+
+    def _settle_flushes(
+        self, tickets: list[_FlushTicket], *, force: bool = False
+    ) -> None:
+        """Complete the [DR49] barriers whose work is finished.
+
+        A barrier is satisfied once every item enqueued BEFORE its ticket has
+        been dequeued and applied — `_span_done`/`_record_done` have reached
+        the ticket's watermark — AND no batch has been discarded since the
+        previous barrier settled. `force` completes every outstanding ticket
+        now, because a batch just rolled back and those barriers can no longer
+        be met.
+
+        The watermark test replaced a both-queues-empty test, which was
+        starvable by any other producer on the shared sink (`fix-sb8.15`).
+        Tickets whose watermark is not yet reached stay parked and are
+        re-examined after every batch and on every idle tick, so a ticket is
+        never left waiting on an event that has already passed.
+
+        The unreported-failure watermark, rather than a per-ticket baseline, is
+        what makes the guarantee hold in the case the auditor's sequence does
+        not cover: a batch can fail *before* `flush()` is called and still have
+        carried spans the caller is about to cite, because it was that
+        caller's own earlier `emit_span`. Comparing against a baseline taken at
+        call time would report that batch as a satisfied barrier. Charging
+        every loss to the next barrier costs at most one conservative ``False``
+        per loss, and no loss goes unreported.
+        """
+        pending = self._pending_flushes
+        pending.extend(tickets)
+        if not pending:
+            return
+        if force:
+            ready, parked = list(pending), []
+        else:
+            span_done, record_done = self._span_done, self._record_done
+            ready, parked = [], []
+            for ticket in pending:
+                target = (
+                    ready
+                    if ticket.span_mark <= span_done
+                    and ticket.record_mark <= record_done
+                    else parked
+                )
+                target.append(ticket)
+            if not ready:
+                return
+        self._pending_flushes = parked
+        ok = self._write_failures == self._failures_reported
+        self._failures_reported = self._write_failures
+        for ticket in ready:
+            ticket.ok = ok
+            ticket.event.set()
+
+    def _abandon_flushes(self) -> None:
+        """Release still-waiting barriers when the writer thread is going away.
+
+        Without this a `flush()` caller would block for its whole timeout on a
+        writer that has already exited. It reports failure, which is the truth:
+        the queues were not drained.
+        """
+        for ticket in self._pending_flushes:
+            ticket.ok = False
+            ticket.event.set()
+        self._pending_flushes.clear()
 
     def _apply_turn(self, conn: sqlite3.Connection, item: tuple) -> None:
         _, turn_row, artifact_rows, _retries = item
@@ -1738,6 +3814,28 @@ class SQLiteTraceSink:
         # failure rolls the batch back and requeues it, and the ring entry is
         # re-added by that path if it is still needed.
         self._forget_pending(turn_row["turn_key"])
+
+    def _apply_distillation(self, conn: sqlite3.Connection, item: tuple) -> None:
+        _, record_kind, payload, _retries = item
+        try:
+            self.store.upsert_distillation_row(
+                conn, record_kind, payload, self._redactor
+            )
+        except sqlite3.OperationalError:
+            # SQLITE_BUSY and friends belong to the batch handler, which
+            # rolls back and requeues the whole batch [R8].
+            raise
+        except OrphanedCitation as exc:
+            # Not malformed and not this batch's fault: the divergence row it
+            # names was lost earlier. Counted as a write error so the run is
+            # completed `comparable = 0` / `evidence-incomplete` rather than
+            # silently losing one edge of §13.2's provenance chain.
+            self._count("write_errors", error=f"distillation citation: {exc}")
+            logger.warning(f"Observability: {exc} [fix-sb8.16]")
+        except Exception as exc:
+            # A malformed record is this record's problem: counting it here
+            # keeps it from rolling back the rest of a good batch.
+            self._count("write_errors", error=f"distillation {record_kind}: {exc!r}")
 
     def _apply_label(self, conn: sqlite3.Connection, item: tuple) -> None:
         _, channel_id, conversation_id, topic, summary, _retries = item
@@ -1757,7 +3855,9 @@ class SQLiteTraceSink:
                 self._count("spans_dropped")
                 continue
             if kind == "flush":
-                item[1].set()
+                # Barrier tickets are settled by _settle_flushes on the failure
+                # arm that called us; requeueing one would report a rolled-back
+                # batch as a satisfied barrier [DR49].
                 continue
             retries = item[-1]
             if retries >= _RECORD_BUSY_MAX_RETRIES:
@@ -1766,6 +3866,7 @@ class SQLiteTraceSink:
             retried = item[:-1] + (retries + 1,)
             try:
                 self._record_queue.put_nowait(retried)
+                self._note_enqueued("record")
             except queue.Full:
                 self._count("records_dropped")
 

@@ -51,6 +51,7 @@ class RecordingTraceSink:
         self.spans: list[tracing.Span] = []
         self.turn_records: list = []
         self.labels: list[tuple] = []
+        self.distillation_records: list[tuple] = []
 
     def emit_span(self, span: tracing.Span) -> None:
         self.spans.append(span)
@@ -62,6 +63,9 @@ class RecordingTraceSink:
         self, channel_id, conversation_id, topic, summary
     ) -> None:
         self.labels.append((channel_id, conversation_id, topic, summary))
+
+    def emit_distillation_record(self, kind: str, payload: dict) -> None:
+        self.distillation_records.append((kind, payload))
 
     def named(self, name: str) -> list[tracing.Span]:
         return [s for s in self.spans if s.name == name]
@@ -77,6 +81,9 @@ class RaisingTraceSink:
         raise RuntimeError("sink is broken")
 
     def record_conversation_label(self, *args) -> None:
+        raise RuntimeError("sink is broken")
+
+    def emit_distillation_record(self, *args) -> None:
         raise RuntimeError("sink is broken")
 
 
@@ -990,3 +997,91 @@ class TestDisabledObservabilityDspyCost:
         with dspy_logger.observe_dspy_host(ctx):
             assert dspy_logger._active_observability_host.get() is ctx
         assert dspy_logger._active_observability_host.get() is None
+
+
+# ----------------------------------------------------------------------
+# Distillation span namespace and record write path (design §8 [DR21],
+# §9 [DR23][DR46])
+# ----------------------------------------------------------------------
+
+
+class TestDistillationSpanNamespace:
+    def test_the_five_reserved_names(self):
+        assert tracing.SPAN_DISTILL_RUN == "fw.distill.run"
+        assert tracing.SPAN_DISTILL_PASS == "fw.distill.pass"
+        assert tracing.SPAN_DISTILL_COMPARE == "fw.distill.compare"
+        assert tracing.SPAN_DISTILL_EXTRACT == "fw.distill.extract"
+        assert tracing.SPAN_DISTILL_REPLAY == "fw.distill.replay"
+        assert tracing.DISTILL_SPAN_NAMES == frozenset(
+            {
+                "fw.distill.run",
+                "fw.distill.pass",
+                "fw.distill.compare",
+                "fw.distill.extract",
+                "fw.distill.replay",
+            }
+        )
+
+    def test_the_namespace_is_its_own(self):
+        """[DR21]: fw.distill.*, never fw.train.* — that prefix means the
+        training pipeline, and it is stored as a prefix rather than a name, so
+        set membership against it is already ambiguous."""
+        assert not (tracing.DISTILL_SPAN_NAMES & tracing.V1_SPAN_NAMES)
+        assert not (tracing.DISTILL_SPAN_NAMES & tracing.AGENT_LOOP_SPAN_NAMES)
+        assert not (tracing.DISTILL_SPAN_NAMES & tracing.RESERVED_V2_SPAN_NAMES)
+        assert all(
+            name.startswith("fw.distill.") for name in tracing.DISTILL_SPAN_NAMES
+        )
+        assert not any(
+            name.startswith(tracing.SPAN_TRAIN_PREFIX)
+            for name in tracing.DISTILL_SPAN_NAMES
+        )
+
+    def test_span_carries_a_distillation_pass_field(self):
+        """[DR23]: a real field, defaulting to None, so the 99.9% of spans
+        that are not distillation are unaffected."""
+        plain = tracing.Span(span_id="s", trace_id="t", name=tracing.SPAN_TURN)
+        assert plain.distillation_pass is None
+        labelled = tracing.Span(
+            span_id="s",
+            trace_id="t",
+            name=tracing.SPAN_COMMAND_EXECUTE,
+            distillation_pass="teacher",
+        )
+        assert labelled.distillation_pass == "teacher"
+
+
+class TestDistillationRecordEmission:
+    def test_sinks_still_satisfy_the_protocol(self):
+        """[DR46] adds a fourth method; the protocol is what every sink is
+        checked against."""
+        assert isinstance(tracing.NoOpTraceSink(), tracing.TraceSink)
+        assert isinstance(RecordingTraceSink(), tracing.TraceSink)
+        assert hasattr(tracing.NoOpTraceSink(), "emit_distillation_record")
+
+    def test_helper_hands_the_record_to_the_sink(self):
+        sink = RecordingTraceSink()
+        host = SimpleNamespace(trace_sink=sink)
+        assert tracing.emit_distillation_record(host, "run", {"run_id": "r"}) is True
+        assert sink.distillation_records == [("run", {"run_id": "r"})]
+
+    def test_unknown_kind_is_refused_before_the_sink(self):
+        sink = RecordingTraceSink()
+        host = SimpleNamespace(trace_sink=sink)
+        assert tracing.emit_distillation_record(host, "verdict", {}) is False
+        assert sink.distillation_records == []
+
+    def test_no_sink_and_a_broken_sink_are_both_silent(self):
+        assert (
+            tracing.emit_distillation_record(
+                SimpleNamespace(trace_sink=tracing.NoOpTraceSink()), "run", {}
+            )
+            is False
+        )
+        # A sink whose every method raises must never fail a turn.
+        assert (
+            tracing.emit_distillation_record(
+                SimpleNamespace(trace_sink=RaisingTraceSink()), "run", {}
+            )
+            is False
+        )

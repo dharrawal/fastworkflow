@@ -9,10 +9,16 @@ description: >-
   Covers the span taxonomy and structured attributes (classifier confidence and
   thresholds, matcher layers, per-field db_lookup outcomes, validation-hook
   verdicts, context mutations), the failure-triage decision tree, and the
-  read-only access rules. Use when asked why a workflow task or conversation
-  failed, when a chat turn did the wrong thing, when deciding which fastWorkflow
-  feature would prevent a failure, or before recommending changes to commands,
-  contexts, seeds or signatures based on observed behavior.
+  read-only access rules. Also covers DISTILLATION review — the teacher/student
+  passes a `--generate_insights` run records, the aligned divergences between
+  them, and the insight ledger the rules in planning_agent_insights.md /
+  execution_agent_anti_patterns.md are drawn from — with verified SQL for
+  "which turns support this rule and which contradict it". Use when asked why a
+  workflow task or conversation failed, when a chat turn did the wrong thing,
+  when deciding which fastWorkflow feature would prevent a failure, before
+  recommending changes to commands, contexts, seeds or signatures based on
+  observed behavior, or when judging whether an extracted insight is supported
+  by the evidence it cites and worth promoting to a planner skill.
 ---
 
 # Debugging workflows from conversation logs
@@ -182,7 +188,13 @@ name the feature, and load the companion skill before writing the change:
 - A turn resumed in a different process finalizes without `context_mutations`
   (the baseline is not serialized), and `--generate_insights` CLI runs emit
   teacher *and* student passes into the same trace (roughly double the tool
-  calls).
+  calls). Filter on `spans.distillation_pass` to get one trajectory back;
+  `reference.md` § "Distillation" documents the six run/pass/divergence/insight
+  tables, their joins, and the recipes for "which turns support this rule and
+  which contradict it". Every recipe there filters `comparable = 1` and
+  `replay_of IS NULL` — a run whose passes did not start from the same state
+  proves nothing, and a counterfactual replay is a TEST of a rule, never
+  support for it.
 - Rows with `conversation_id NULL` are real turns from conversation-less
   embedders; query by `turn_key`/`channel_id` instead of the conversation
   drill-down.
