@@ -1503,7 +1503,21 @@ class DistillationSession:
         tracing.end_span(
             chat,
             span,
-            attributes=result.compare_attributes(level, left_pass, right_pass),
+            # Spelled out rather than `result.compare_attributes(...)` so the
+            # §12.0-delta-5 contract test can recover this emitter's key set by
+            # AST: its resolver follows helpers defined in the emitting module
+            # or in `tracing`, and a method on an imported dataclass is neither.
+            attributes={
+                "level": level,
+                "left_pass": left_pass,
+                "right_pass": right_pass,
+                "left_steps": result.left_steps,
+                "right_steps": result.right_steps,
+                "matched_pairs": result.matched_pairs,
+                "divergence_counts": dict(result.divergence_counts),
+                "material_count": result.material_count,
+                "algorithm": result.algorithm,
+            },
         )
         return result
 
