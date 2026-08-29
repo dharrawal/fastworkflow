@@ -352,6 +352,21 @@ class TestChatbotTestModeAssets:
 # ---------------------------------------------------------------------------
 
 
+def _an_unused_port() -> int:
+    """A loopback port free at this instant.
+
+    Bind-and-release rather than a literal: the chatbot deliberately refuses to
+    spawn onto a busy port, so any hard-coded number makes a test depend on what
+    else is running on the developer's machine. The bind/close/rebind window is
+    the same one `_free_server_port` itself lives with.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 class TestSpawnDecision:
     KW = dict(
         workflow_path="/wf",
@@ -462,9 +477,18 @@ class TestSpawnDecision:
         monkeypatch.setattr(
             "fastworkflow.run_chatbot.server.time.sleep", lambda s: None
         )
+        # A port that is genuinely free right now, rather than a literal.
+        # `_free_server_port` MOVES off a busy port by design, so hard-coding
+        # one made this test assert the machine's state as much as the code's:
+        # it failed whenever anything happened to hold that port, and failed
+        # pointing at JWT behaviour when the cause was a squatter. What the
+        # port assertion is worth keeping for is the happy path — preferred
+        # port free, so the spawn uses it — which nothing else covers;
+        # test_busy_server_port_moves_to_a_free_one owns the moved path.
+        free_port = _an_unused_port()
         srv, wf = self._chatbot(
             tmp_path, monkeypatch,
-            {"no_server": False, "server_port": 8123,
+            {"no_server": False, "server_port": free_port,
              "env_file_path": "/env/.env", "passwords_file_path": "/passwords/.env"},
         )
         try:
@@ -474,7 +498,8 @@ class TestSpawnDecision:
         assert captured["allow_unsigned_jwt"] is True
         assert captured["expect_encrypted_jwt"] is False
         assert session["server_running"] is True
-        assert session["server_url"] == "http://127.0.0.1:8123"
+        assert session["server_url"] == f"http://127.0.0.1:{free_port}"
+        assert session["server_note"] is None, "a free port must not report a move"
         assert session["jwt_mode"] == "unsigned"
         # Fixed, not per-launch: restarts stay in one channel so the debug
         # rail groups a developer's history together instead of by process.
