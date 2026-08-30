@@ -42,7 +42,9 @@ import sqlite3
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import fastworkflow
@@ -50,6 +52,7 @@ from fastworkflow import state_paths, tracing
 from fastworkflow.utils.logging import logger
 
 SCHEMA_VERSION = 1
+CAPTURE_PROFILE_VAR = "FW_OBS_CAPTURE_PROFILE"
 
 TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned"})
 
@@ -76,10 +79,163 @@ _PENDING_RETRY_MAX = 64
 
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_MAX_BATCHES = 20
+_pruning_lock = threading.Lock()
+_pruning_suppression_depth = 0
+
+# Additive feature markers deliberately do not bump SCHEMA_VERSION. Readers use
+# these markers to avoid querying tables/columns that older snapshots lack.
+FEATURE_DISTILLATION_V1 = "distillation_v1"
+FEATURE_EXPERIMENTS_V1 = "experiments_v1"
+
+
+@dataclass(frozen=True)
+class WriterHealthDelta:
+    """Change in writer-health counters across one measured interval."""
+
+    records_dropped: int = 0
+    spans_dropped: int = 0
+    write_errors: int = 0
+    refused_terminal_writes: int = 0
+    busy_retries: int = 0
+    sync_fallbacks: int = 0
+    incomparable: bool = False
+
+    @property
+    def evidence_valid(self) -> bool:
+        return not self.incomparable and self.records_dropped == 0
+
+    def problems(self) -> tuple[str, ...]:
+        problems: list[str] = []
+        if self.incomparable:
+            problems.append("writer health could not be compared")
+        if self.records_dropped:
+            problems.append(f"{self.records_dropped} turn record(s) were dropped")
+        if self.spans_dropped:
+            problems.append(f"{self.spans_dropped} span(s) were dropped")
+        if self.write_errors:
+            problems.append(f"{self.write_errors} writer error(s) occurred")
+        return tuple(problems)
+
+    def model_dump(self, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return {
+            "records_dropped": self.records_dropped,
+            "spans_dropped": self.spans_dropped,
+            "write_errors": self.write_errors,
+            "refused_terminal_writes": self.refused_terminal_writes,
+            "busy_retries": self.busy_retries,
+            "sync_fallbacks": self.sync_fallbacks,
+            "incomparable": self.incomparable,
+            "evidence_valid": self.evidence_valid,
+            "problems": list(self.problems()),
+        }
+
+
+def observability_config() -> dict[str, str]:
+    return {
+        "FW_OBSERVABILITY": _env("FW_OBSERVABILITY", "1"),
+        CAPTURE_PROFILE_VAR: _env(CAPTURE_PROFILE_VAR, "debug"),
+    }
+
+
+def health_delta(
+    before: Optional[dict[str, Any]], after: Optional[dict[str, Any]]
+) -> WriterHealthDelta:
+    fields = (
+        "records_dropped",
+        "spans_dropped",
+        "write_errors",
+        "refused_terminal_writes",
+        "busy_retries",
+        "sync_fallbacks",
+    )
+    values = {
+        field: max(0, int((after or {}).get(field) or 0) - int((before or {}).get(field) or 0))
+        for field in fields
+    }
+    return WriterHealthDelta(**values, incomparable=before is None or after is None)
+
+
+@contextlib.contextmanager
+def suppress_pruning():
+    global _pruning_suppression_depth
+    with _pruning_lock:
+        _pruning_suppression_depth += 1
+    try:
+        yield
+    finally:
+        with _pruning_lock:
+            _pruning_suppression_depth -= 1
+
+
+def pruning_suppressed() -> bool:
+    with _pruning_lock:
+        return _pruning_suppression_depth > 0
 
 
 class IncompatibleObservabilityDB(RuntimeError):
     """The DB was written by a newer fastWorkflow; readers refuse it [R11]."""
+
+
+class ExperimentNotFound(KeyError):
+    """An experiment write matched no row.
+
+    Raised rather than passed over: `clear_conversations` is an HTTP-triggered
+    whole-DB erase that can land while a harness is running, and a silent no-op
+    there leaves turns labelled against a container that no longer exists
+    (`[XR15]`).
+    """
+
+    def __init__(self, experiment_id: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(f"no experiment {experiment_id!r} in this database")
+
+
+class ExperimentIsClosed(ValueError):
+    """An attempt was written to an experiment that is no longer running.
+
+    `complete` and `invalid` are terminal: their attempt rows are the evidence a
+    reported score rests on, and a second run under the same id would overwrite
+    them in place.
+    """
+
+    def __init__(self, experiment_id: str, status: str) -> None:
+        self.experiment_id = experiment_id
+        self.status = status
+        super().__init__(
+            f"experiment {experiment_id!r} is {status!r}, not running; its "
+            "attempts are closed. Start a new experiment rather than rewriting "
+            "the record a score was reported from."
+        )
+
+
+class CaptureRegimeChanged(ValueError):
+    """An experiment was re-created under a different capture profile/policy."""
+
+    def __init__(self, experiment_id: str, stored: str, incoming: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(
+            f"experiment {experiment_id!r} was captured under {stored} and is "
+            f"now being written under {incoming}. The two halves would not be "
+            "measuring the same columns; record the second half as its own "
+            "experiment."
+        )
+
+
+class HypothesisIsWriteOnce(ValueError):
+    """A stored hypothesis was rewritten to a different value (`[XR12]`).
+
+    One mutable description (`notes`) beside one immutable one is what makes the
+    immutable one mean anything: a pre-registered prediction that can be revised
+    after the outcome is not a pre-registration.
+    """
+
+    def __init__(self, experiment_id: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(
+            f"experiment {experiment_id!r} already has a hypothesis; it is "
+            "write-once by design. Record the revision in `notes` instead."
+        )
 
 
 def _env(name: str, default: str) -> str:
@@ -101,6 +257,11 @@ def _env_int(name: str, default: int) -> int:
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _chunked(values: list[Any], size: int = 400) -> Iterable[list[Any]]:
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
 
 def _iso_to_ms(value: Optional[str]) -> int:
@@ -287,6 +448,19 @@ def serialize_turn_result(turn_result: Any) -> tuple[dict[str, Any], list[dict[s
         ),
         "suspended_ms": int(turn_result.suspended_ms or 0),
         "continuation_of": turn_result.continuation_of,
+        # The experiment container's labels (`fix-bn1` `[XR17]`). Bound on the
+        # WEC before the turn and copied off the TurnResult here, so they take
+        # the same path as channel_id rather than being stitched on by a later
+        # query. NULL on every ordinary turn. `upsert_turn_row` derives its
+        # column list from this dict, so these three keys are also what writes
+        # them -- and a key here with no matching column raises on `_sync_write`
+        # and trips the sync breaker, which is why the DDL and this projection
+        # must ship together.
+        "experiment_id": turn_result.experiment_id,
+        "task_id": turn_result.task_id,
+        "attempt": (
+            None if turn_result.attempt is None else int(turn_result.attempt)
+        ),
         "record_version": 1,
         "record_json": json.dumps(record, ensure_ascii=False),
     }
@@ -298,10 +472,16 @@ def serialize_turn_result(turn_result: Any) -> tuple[dict[str, Any], list[dict[s
 # ----------------------------------------------------------------------
 
 _SCHEMA_STATEMENTS = [
+    # experiment_id/task_id/attempt are the experiment container's labels
+    # (`[XR4]`). They are here AND in the guarded ALTER block in _ensure_schema:
+    # on a fresh DB this literal is what creates them (PRAGMA table_info returns
+    # nothing, so the ALTER guard is False), on an existing DB the ALTER is.
+    # NULL means "not part of an experiment", so no backfill is needed.
     """CREATE TABLE IF NOT EXISTS conversations (
         channel_id TEXT NOT NULL, conversation_id INTEGER NOT NULL,
         topic TEXT, summary TEXT, status TEXT, next_ordinal INTEGER,
         started_at TEXT, last_turn_at TEXT, updated_at TEXT,
+        experiment_id TEXT, task_id TEXT, attempt INTEGER,
         PRIMARY KEY (channel_id, conversation_id))""",
     """CREATE TABLE IF NOT EXISTS conversation_counters (
         channel_id TEXT PRIMARY KEY, next_id INTEGER NOT NULL)""",
@@ -315,6 +495,7 @@ _SCHEMA_STATEMENTS = [
         conversation_summary TEXT, conversation_traces TEXT,
         started_at TEXT, completed_at TEXT, suspended_ms INTEGER,
         continuation_of TEXT, record_version INTEGER NOT NULL,
+        experiment_id TEXT, task_id TEXT, attempt INTEGER,
         record_json TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS feedback (
         turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL,
@@ -338,11 +519,56 @@ _SCHEMA_STATEMENTS = [
         completed_at TEXT, metrics_json TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS diagnostics (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS experiments (
+        experiment_id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        hypothesis TEXT,
+        notes TEXT,
+        arm TEXT,
+        baseline_experiment_id TEXT,
+        status TEXT NOT NULL,
+        invalid_reason TEXT,
+        invalid_detail TEXT,
+        declared_tasks INTEGER NOT NULL,
+        declared_attempts INTEGER NOT NULL,
+        workflow_name TEXT,
+        capture_profile TEXT NOT NULL,
+        capture_policy_version TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        completed_at TEXT)""",
+    """CREATE TABLE IF NOT EXISTS experiment_attempts (
+        experiment_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        channel_id TEXT NOT NULL,
+        conversation_id INTEGER,
+        outcome TEXT,
+        outcome_source TEXT,
+        reward REAL,
+        restarts INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        detail_json TEXT,
+        PRIMARY KEY (experiment_id, task_id, attempt))""",
+    """CREATE TABLE IF NOT EXISTS experiment_evidence_runs (
+        experiment_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        evidence_run_id TEXT NOT NULL,
+        valid INTEGER NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        record_json TEXT NOT NULL,
+        PRIMARY KEY (experiment_id, seq))""",
     "CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_spans_command ON spans(command_name) WHERE command_name IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(channel_id, conversation_id, ordinal)",
     "CREATE INDEX IF NOT EXISTS idx_turns_status ON turns(status)",
     "CREATE INDEX IF NOT EXISTS idx_artifacts_turn ON artifacts(turn_key)",
+    "CREATE INDEX IF NOT EXISTS idx_turns_experiment ON turns(experiment_id, task_id, attempt) WHERE experiment_id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_experiment_attempt ON conversations(experiment_id, task_id, attempt) WHERE experiment_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_experiments_baseline ON experiments(baseline_experiment_id) WHERE baseline_experiment_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_experiment_attempts_channel ON experiment_attempts(channel_id)",
 ]
 
 
@@ -353,9 +579,23 @@ class ObservabilityStore:
     short-lived WAL connection (timeout=30, ``BEGIN IMMEDIATE`` for writes).
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, migrate: bool = True) -> None:
         self.db_path = db_path
-        self._ensure_schema()
+        if migrate:
+            self._ensure_schema()
+        self._features = self._load_features()
+
+    @staticmethod
+    def open_for_annotation(db_path: str) -> "ObservabilityStore":
+        """Open an existing DB read-write without creating or migrating it."""
+        return ObservabilityStore(db_path, migrate=False)
+
+    def _store_redactor(self) -> Redactor:
+        redactor = getattr(self, "_redactor", None)
+        if redactor is None:
+            redactor = Redactor()
+            self._redactor = redactor
+        return redactor
 
     # -- connections ----------------------------------------------------
 
@@ -389,6 +629,25 @@ class ObservabilityStore:
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
+            # Existing databases need the experiment labels before the indexes
+            # below are created. Each column is guarded separately so a
+            # partially interrupted migration self-heals.
+            for table in ("turns", "conversations"):
+                cols = {
+                    row[1]
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if not cols:
+                    continue
+                for column, declaration in (
+                    ("experiment_id", "TEXT"),
+                    ("task_id", "TEXT"),
+                    ("attempt", "INTEGER"),
+                ):
+                    if column not in cols:
+                        conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                        )
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
             # Pre-release column migration (schema v1 was never shipped, but
@@ -412,6 +671,7 @@ class ObservabilityStore:
                      value=excluded.value, updated_at=excluded.updated_at""",
                 ("schema_opened", json.dumps({"schema_version": SCHEMA_VERSION}), _utcnow_iso()),
             )
+            self._merge_schema_features(conn, [FEATURE_EXPERIMENTS_V1])
             conn.commit()
         finally:
             conn.close()
@@ -423,9 +683,75 @@ class ObservabilityStore:
         except OSError:
             pass
 
+    @staticmethod
+    def _merge_schema_features(
+        conn: sqlite3.Connection, features: list[str]
+    ) -> None:
+        """Merge feature markers without dropping markers from other builds."""
+        row = conn.execute(
+            "SELECT value FROM diagnostics WHERE key='schema_features'"
+        ).fetchone()
+        known: list[str] = []
+        if row is not None:
+            try:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, list):
+                    known = [str(name) for name in loaded]
+            except (ValueError, TypeError):
+                known = []
+        merged = sorted(set(known) | set(features))
+        conn.execute(
+            """INSERT INTO diagnostics (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                 value=excluded.value, updated_at=excluded.updated_at""",
+            ("schema_features", json.dumps(merged), _utcnow_iso()),
+        )
+
+    def _load_features(self) -> frozenset[str]:
+        """Read feature markers, falling back to additive schema detection."""
+        conn = None
+        try:
+            conn = self._connect(timeout=5.0)
+            row = conn.execute(
+                "SELECT value FROM diagnostics WHERE key='schema_features'"
+            ).fetchone()
+            if row is not None:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, list):
+                    return frozenset(str(name) for name in loaded)
+            detected: set[str] = set()
+            turn_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
+            if "experiment_id" in turn_cols:
+                detected.add(FEATURE_EXPERIMENTS_V1)
+            span_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(spans)").fetchall()
+            }
+            if "distillation_pass" in span_cols:
+                detected.add(FEATURE_DISTILLATION_V1)
+            return frozenset(detected)
+        except Exception:
+            return frozenset()
+        finally:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+
+    def has_feature(self, name: str) -> bool:
+        return name in self._features
+
     # -- identity [R1] ---------------------------------------------------
 
-    def mint_conversation_id(self, channel_id: str, legacy_floor: int = 0) -> int:
+    def mint_conversation_id(
+        self,
+        channel_id: str,
+        legacy_floor: int = 0,
+        *,
+        experiment_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        attempt: Optional[int] = None,
+    ) -> int:
         """Atomically reserve the next conversation id for a channel.
 
         The observability DB is the sole id-minting authority; dual-write
@@ -466,12 +792,26 @@ class ObservabilityStore:
                 (channel_id, new_id + 1),
             )
             now = _utcnow_iso()
+            # The experiment labels ride the mint because this is where the
+            # conversation row is created, and an attempt IS a conversation
+            # (`[XR4]`). Scrub-only, on the same terms as the turn path, so the
+            # two copies stay byte-identical and joinable (`[XR7]`).
+            redactor = self._store_redactor()
             conn.execute(
                 """INSERT INTO conversations
                    (channel_id, conversation_id, topic, summary, status,
-                    next_ordinal, started_at, last_turn_at, updated_at)
-                   VALUES (?, ?, NULL, NULL, 'open', 1, ?, NULL, ?)""",
-                (channel_id, new_id, now, now),
+                    next_ordinal, started_at, last_turn_at, updated_at,
+                    experiment_id, task_id, attempt)
+                   VALUES (?, ?, NULL, NULL, 'open', 1, ?, NULL, ?, ?, ?, ?)""",
+                (
+                    channel_id,
+                    new_id,
+                    now,
+                    now,
+                    experiment_id,
+                    redactor.redact(task_id),
+                    None if attempt is None else int(attempt),
+                ),
             )
             conn.commit()
         return new_id
@@ -632,6 +972,21 @@ class ObservabilityStore:
         turn_row = dict(turn_row)
         # failure_reason is included because it can embed exception/provider
         # text (e.g. a LiteLLM AuthenticationError body) — the [R20] scenario.
+        # task_id is SCRUB-ONLY and not policed (`[XR6]`/`[XR7]`): policing it
+        # would withhold nothing (the plaintext rides into record_json above,
+        # which `_apply_capture_policy` never walks) while breaking every
+        # equality lookup the experiment read layer is built on. It must be
+        # scrubbed on BOTH label routes -- here and in mint_conversation_id --
+        # and in the container tables, or the copies stop being joinable.
+        #
+        # `experiment_id` is deliberately NOT in this list. It is a machine-minted
+        # opaque id (`exp-<32 hex>`, `[XR1]`) and the join key of every score, and
+        # it is stored raw in `experiments`/`experiment_attempts`/
+        # `experiment_evidence_runs`. Scrubbing it here and not there is what
+        # makes a join silently return nothing -- the same class of defect the
+        # scrub-on-both-routes rule above exists to prevent. Every other
+        # machine-minted join key in this file (turn_key, trace_id, run_id,
+        # artifact_id) is likewise stored as-is.
         for text_col in (
             "user_message",
             "refined_user_message",
@@ -639,6 +994,7 @@ class ObservabilityStore:
             "failure_reason",
             "conversation_summary",
             "conversation_traces",
+            "task_id",
             "record_json",
         ):
             if turn_row.get(text_col):
@@ -674,7 +1030,12 @@ class ObservabilityStore:
             and turn_row.get("ordinal") is None
         ):
             turn_row["ordinal"] = self._assign_ordinal(
-                conn, turn_row["channel_id"], turn_row["conversation_id"]
+                conn,
+                turn_row["channel_id"],
+                turn_row["conversation_id"],
+                experiment_id=turn_row.get("experiment_id"),
+                task_id=turn_row.get("task_id"),
+                attempt=turn_row.get("attempt"),
             )
 
         columns = list(turn_row.keys())
@@ -727,7 +1088,14 @@ class ObservabilityStore:
         return True
 
     def _assign_ordinal(
-        self, conn: sqlite3.Connection, channel_id: str, conversation_id: int
+        self,
+        conn: sqlite3.Connection,
+        channel_id: str,
+        conversation_id: int,
+        *,
+        experiment_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        attempt: Optional[int] = None,
     ) -> int:
         row = conn.execute(
             "SELECT next_ordinal FROM conversations WHERE channel_id=? AND conversation_id=?",
@@ -736,12 +1104,30 @@ class ObservabilityStore:
         if row is None:
             # Conversation row not minted here (e.g. restored session) —
             # create it so ordinals stay dense from 1.
+            # The labels are copied off the turn row being inserted: this row
+            # was not minted here (restored session, or a turn whose conversation
+            # predates the experiment binding), so the turn is the only carrier.
+            #
+            # Scrubbed HERE rather than trusting the caller: three routes reach
+            # this insert (`upsert_turn_row`'s text loop, which has scrubbed;
+            # `reserve_turn_ordinal` from the sink's degraded queue path, which
+            # has not; and a direct call), and a value scrubbed on one route and
+            # not another is what makes the turns/conversations join silently
+            # return nothing. The scrub is idempotent, so doing it again is free.
             conn.execute(
                 """INSERT INTO conversations
                    (channel_id, conversation_id, topic, summary, status,
-                    next_ordinal, started_at, last_turn_at)
-                   VALUES (?, ?, NULL, NULL, 'open', 2, ?, NULL)""",
-                (channel_id, conversation_id, _utcnow_iso()),
+                    next_ordinal, started_at, last_turn_at,
+                    experiment_id, task_id, attempt)
+                   VALUES (?, ?, NULL, NULL, 'open', 2, ?, NULL, ?, ?, ?)""",
+                (
+                    channel_id,
+                    conversation_id,
+                    _utcnow_iso(),
+                    experiment_id,
+                    self._store_redactor().redact(task_id),
+                    None if attempt is None else int(attempt),
+                ),
             )
             return 1
         ordinal = int(row["next_ordinal"] or 1)
@@ -751,7 +1137,15 @@ class ObservabilityStore:
         )
         return ordinal
 
-    def reserve_turn_ordinal(self, channel_id: str, conversation_id: int) -> Optional[int]:
+    def reserve_turn_ordinal(
+        self,
+        channel_id: str,
+        conversation_id: int,
+        *,
+        experiment_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        attempt: Optional[int] = None,
+    ) -> Optional[int]:
         """Reserve a turn ordinal in a tiny standalone transaction.
 
         Used by the sync-first emit's degraded fallback so ordinals stay
@@ -761,7 +1155,18 @@ class ObservabilityStore:
         try:
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                ordinal = self._assign_ordinal(conn, channel_id, conversation_id)
+                # The labels ride along because `_assign_ordinal` CREATES the
+                # conversations row when it is missing: reserving without them
+                # would mint an unlabelled attempt conversation on the degraded
+                # path, and the UNIQUE index would then refuse the labelled one.
+                ordinal = self._assign_ordinal(
+                    conn,
+                    channel_id,
+                    conversation_id,
+                    experiment_id=experiment_id,
+                    task_id=task_id,
+                    attempt=attempt,
+                )
                 conn.commit()
             return ordinal
         except Exception:
@@ -1003,10 +1408,17 @@ class ObservabilityStore:
         success: Optional[bool] = None,
         command_name: Optional[str] = None,
         context: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        attempt: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Turn rows, newest first, without record_json (fetch one turn for that)."""
+        """Turn rows, newest first, without record_json (fetch one turn for that).
+
+        The experiment filters extend this route rather than getting a parallel
+        implementation (`[XR9]`); they ride `idx_turns_experiment`.
+        """
         clauses: list[str] = []
         params: list[Any] = []
         if channel_id is not None:
@@ -1035,12 +1447,35 @@ class ObservabilityStore:
                 "turn_key IN (SELECT trace_id FROM spans WHERE command_name=?)"
             )
             params.append(command_name)
+        # [DR29]: a DB written before the experiment columns existed must
+        # degrade, not raise. The base turn list is the whole point of the debug
+        # UI, and a viewer opened on a post-mortem snapshot never migrates it
+        # ([R12]), so an unguarded projection would 500 the main view forever
+        # with "internal error: OperationalError" and no actionable reason.
+        labelled = self.has_feature(FEATURE_EXPERIMENTS_V1)
+        if labelled:
+            if experiment_id is not None:
+                clauses.append("experiment_id=?")
+                params.append(experiment_id)
+            if task_id is not None:
+                clauses.append("task_id=?")
+                params.append(task_id)
+            if attempt is not None:
+                clauses.append("attempt=?")
+                params.append(int(attempt))
+        elif experiment_id is not None or task_id is not None or attempt is not None:
+            # An experiment filter against a DB that records no experiments
+            # matches nothing. Returning [] is the honest answer; silently
+            # ignoring the filter and returning every turn would be worse than
+            # raising.
+            return []
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = (
             "SELECT turn_key, channel_id, conversation_id, ordinal, user_message, "
             "entry_workflow_name, entry_context, status, success, failure_reason, "
-            "answer, started_at, completed_at, suspended_ms "
-            f"FROM turns{where} ORDER BY turn_key DESC LIMIT ? OFFSET ?"
+            "answer, started_at, completed_at, suspended_ms"
+            + (", experiment_id, task_id, attempt " if labelled else " ")
+            + f"FROM turns{where} ORDER BY turn_key DESC LIMIT ? OFFSET ?"
         )
         params.extend([limit, offset])
         with self._connect() as conn:
@@ -1079,6 +1514,915 @@ class ObservabilityStore:
             health["updated_at"] = row["updated_at"]
             return health
 
+    # -- the experiment container (`fix-bn1`, experiment_container_design.md) --
+    #
+    # CAPTURE POLICY, decided here rather than by omission (`[XR6]`): every text
+    # column of `experiments`, `experiment_attempts` and
+    # `experiment_evidence_runs` is SCRUB-ONLY -- `redactor.redact(value)` with
+    # no `policy.apply` call, the `spans.channel_id` code shape.
+    #
+    # The precedent is `set_diagnostic` plus `_POLICY_EXEMPT_TURN_COLUMNS`, not
+    # `spans.channel_id`'s erasure argument. These rows are not evidence ABOUT a
+    # tenant; they are the record of whether the evidence may be used at all --
+    # an `EvidenceRun`'s valid/problems, an attempt's outcome, a pre-registered
+    # hypothesis. Withholding them reduces nothing a tenant would care about and
+    # makes the bundle uninterpretable under exactly the profile an
+    # evidence-grade run uses, since `opaque-payload` and `user-text` both map to
+    # `omit` there. The claim that makes this safe is a DATAFLOW claim and is
+    # tested: no code path exists by which workflow, model or user content
+    # reaches these tables, except `task_id`, which the caller supplies from its
+    # own task-set file. The residual risk -- an operator pasting a credential
+    # into `notes`, an exception repr inside `record_json.problems` -- is exactly
+    # what the scrub catches, which is why this is scrub-only and not untouched.
+    #
+    # No `POLICY_PATH_EXPERIMENT_*` constants are declared: a constant never
+    # passed to `policy.apply` is inert, and the one genuinely scrub-only column
+    # in this file, `spans.channel_id`, deliberately has none either.
+
+    _EXPERIMENT_STATUSES = frozenset({"running", "complete", "invalid"})
+    _ATTEMPT_OUTCOMES = frozenset({"pass", "fail", "error", "incomplete"})
+    _INVALID_REASONS = frozenset(
+        {
+            "attempt_shortfall",
+            "evidence_run_invalid",
+            "turns_erased",
+            "never_completed",
+            "operator",
+        }
+    )
+
+    def _scrub(self, value: Any) -> Any:
+        """Credential-scrub one experiment-surface value. Falsy passes through."""
+        return self._store_redactor().redact(value)
+
+    def create_experiment(
+        self,
+        experiment_id: str,
+        label: str,
+        *,
+        declared_tasks: int,
+        declared_attempts: int,
+        hypothesis: Optional[str] = None,
+        arm: Optional[str] = None,
+        baseline_experiment_id: Optional[str] = None,
+        workflow_name: Optional[str] = None,
+        capture_profile: Optional[str] = None,
+        capture_policy_version: Optional[str] = None,
+    ) -> None:
+        """Pre-register an experiment. Written BEFORE any task runs.
+
+        `declared_tasks` and `declared_attempts` are required and positive: they
+        are the denominator every score is computed against (`[XR14]`), and a
+        score computed over surviving rows instead is the exact failure
+        `EvidenceRun` exists to prevent one layer down.
+
+        Re-creating an existing experiment is how a resume re-attaches. The
+        `DO UPDATE` set deliberately excludes `hypothesis`, `status`,
+        `invalid_reason` and `invalid_detail`: a resume must not be able to
+        launder a rewritten prediction or an `invalid` verdict back to
+        `running` (`[XR12]`).
+        """
+        if not experiment_id or not label:
+            raise ValueError("experiment_id and label are required")
+        declared_tasks = int(declared_tasks)
+        declared_attempts = int(declared_attempts)
+        if declared_tasks <= 0 or declared_attempts <= 0:
+            raise ValueError(
+                "declared_tasks and declared_attempts must both be positive: "
+                "they are the denominator, and a score over an undeclared "
+                "denominator is computed over whatever survived"
+            )
+        capture_profile = capture_profile or _env("FW_OBS_CAPTURE_PROFILE", "debug")
+        capture_policy_version = capture_policy_version or "1"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # A re-create (the resume path) under a DIFFERENT capture regime is
+            # refused rather than silently keeping the first one. The stored
+            # profile is what `compare_experiments` gates on, so a run whose
+            # second half was captured under another policy would compare as if
+            # both halves matched -- and the column would say so.
+            existing = conn.execute(
+                """SELECT capture_profile, capture_policy_version, status
+                     FROM experiments WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if existing is not None and (
+                existing["capture_profile"] != capture_profile
+                or existing["capture_policy_version"] != capture_policy_version
+            ):
+                conn.rollback()
+                raise CaptureRegimeChanged(
+                    experiment_id,
+                    f"{existing['capture_profile']}/"
+                    f"{existing['capture_policy_version']}",
+                    f"{capture_profile}/{capture_policy_version}",
+                )
+            conn.execute(
+                """INSERT INTO experiments
+                   (experiment_id, label, hypothesis, notes, arm,
+                    baseline_experiment_id, status, invalid_reason,
+                    invalid_detail, declared_tasks, declared_attempts,
+                    workflow_name, capture_profile, capture_policy_version,
+                    created_at, completed_at)
+                   VALUES (?, ?, ?, NULL, ?, ?, 'running', NULL, NULL,
+                           ?, ?, ?, ?, ?, ?, NULL)
+                   ON CONFLICT(experiment_id) DO UPDATE SET
+                     label=excluded.label,
+                     arm=excluded.arm,
+                     baseline_experiment_id=excluded.baseline_experiment_id,
+                     -- The denominator is rewritable only while the experiment
+                     -- is still running. Once it is complete or invalid, its
+                     -- score has been computed against the declaration, and
+                     -- changing the declaration afterwards silently restates
+                     -- every number already reported from it -- the same
+                     -- after-the-fact rewrite `hypothesis` is write-once to
+                     -- prevent, one field over.
+                     declared_tasks=CASE WHEN experiments.status='running'
+                       THEN excluded.declared_tasks ELSE experiments.declared_tasks END,
+                     declared_attempts=CASE WHEN experiments.status='running'
+                       THEN excluded.declared_attempts ELSE experiments.declared_attempts END,
+                     workflow_name=excluded.workflow_name""",
+                (
+                    experiment_id,
+                    self._scrub(label),
+                    self._scrub(hypothesis),
+                    self._scrub(arm),
+                    baseline_experiment_id,
+                    declared_tasks,
+                    declared_attempts,
+                    self._scrub(workflow_name),
+                    capture_profile,
+                    capture_policy_version,
+                    _utcnow_iso(),
+                ),
+            )
+            conn.commit()
+
+    def set_experiment_hypothesis(self, experiment_id: str, hypothesis: str) -> None:
+        """Write-once (`[XR12]`), enforced here and nowhere else.
+
+        The single enforcement point, the `apply_label_txn` shape. A UI-only
+        guard would be a guard against honest mistakes, and the failure this
+        must prevent -- rewriting a prediction after seeing the outcome -- is
+        not an honest mistake. `non-NULL -> different` and `non-NULL -> NULL`
+        are both refused; an identical rewrite is an idempotent success, the
+        `upsert_turn_row` precedent.
+        """
+        scrubbed = self._scrub(hypothesis)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT hypothesis FROM experiments WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                raise ExperimentNotFound(experiment_id)
+            stored = row["hypothesis"]
+            if stored is not None and stored != scrubbed:
+                raise HypothesisIsWriteOnce(experiment_id)
+            conn.execute(
+                "UPDATE experiments SET hypothesis=? WHERE experiment_id=?",
+                (scrubbed, experiment_id),
+            )
+            conn.commit()
+
+    def update_experiment_notes(self, experiment_id: str, notes: Optional[str]) -> None:
+        """Freely editable, by design and by contrast with `hypothesis`."""
+        self._update_experiment(
+            "UPDATE experiments SET notes=? WHERE experiment_id=?",
+            (self._scrub(notes), experiment_id),
+            experiment_id,
+        )
+
+    def _update_experiment(
+        self, sql: str, params: tuple, experiment_id: str
+    ) -> None:
+        """Run an experiment UPDATE, raising when it matches no row.
+
+        A 0-row update means the container is gone -- `clear_conversations` is
+        an HTTP-triggered whole-DB erase and can land mid-run. Failing the
+        harness loudly beats accumulating turns labelled against a container
+        that no longer exists (`[XR15]`).
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(sql, params)
+            if cursor.rowcount == 0:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            conn.commit()
+
+    def record_evidence_segment(
+        self,
+        experiment_id: str,
+        seq: int,
+        evidence_run_id: str,
+        record: dict[str, Any],
+    ) -> None:
+        """Record one `evidence_run()` segment (`[XR1]`).
+
+        One row per segment rather than an appended JSON array, because
+        appending to a column is a read-modify-write and `[XR20]` forbids that
+        on any column a capture policy might act on. Here each segment is an
+        independent INSERT and `valid` is a queryable column.
+
+        `record` is the WHOLE `EvidenceRun.as_record()`, not its `observability`
+        sub-dict: the sub-dict alone carries neither the run id, nor `valid`,
+        nor `problems`, nor the archive digest.
+        """
+        payload = json.dumps(_sanitize_json_value(record), ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
+            ).fetchone() is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            conn.execute(
+                """INSERT INTO experiment_evidence_runs
+                   (experiment_id, seq, evidence_run_id, valid, started_at,
+                    completed_at, record_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(experiment_id, seq) DO UPDATE SET
+                     evidence_run_id=excluded.evidence_run_id,
+                     -- Monotone in invalidity, like `status <> 'invalid'` one
+                     -- table over: once a segment has reported that evidence
+                     -- was lost, re-writing that seq must not be able to erase
+                     -- the report. Every other invalidity in this container is
+                     -- terminal or write-once, and a rewritable one is a
+                     -- verdict that can be revised after seeing the outcome.
+                     valid=CASE WHEN experiment_evidence_runs.valid = 0
+                                THEN 0 ELSE excluded.valid END,
+                     started_at=excluded.started_at,
+                     completed_at=excluded.completed_at,
+                     record_json=excluded.record_json""",
+                (
+                    experiment_id,
+                    int(seq),
+                    evidence_run_id,
+                    1 if record.get("valid") else 0,
+                    record.get("started_at"),
+                    record.get("completed_at"),
+                    self._scrub(payload),
+                ),
+            )
+            conn.commit()
+
+    def start_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        channel_id: str,
+        conversation_id: Optional[int] = None,
+    ) -> None:
+        """Open an attempt row before its first turn.
+
+        The row's existence is not the completion marker -- `finished_at` is
+        (`[XR13]`). An attempt that crashed halfway has rows and an open marker,
+        which is what makes it visible to the resume selector and fatal to a
+        `complete` verdict.
+        """
+        if not task_id:
+            raise ValueError("task_id is required")
+        attempt = int(attempt)
+        if attempt <= 0:
+            raise ValueError("attempt must be a positive integer")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM experiments WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            if row["status"] != "running":
+                # A closed experiment's verdicts are not rewritable. Without
+                # this, re-invoking a driver script that pins its experiment_id
+                # would silently overwrite all 45 stored outcomes and the
+                # evidence segment of a `complete` run whose numbers had already
+                # been quoted -- and `run()` has no guard of its own, unlike
+                # `resume()`. Enforced here, where the `[XR12]` invariants live.
+                conn.rollback()
+                raise ExperimentIsClosed(experiment_id, row["status"])
+            conn.execute(
+                """INSERT INTO experiment_attempts
+                   (experiment_id, task_id, attempt, channel_id, conversation_id,
+                    outcome, outcome_source, reward, restarts, started_at,
+                    finished_at, detail_json)
+                   VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?, NULL, NULL)
+                   ON CONFLICT(experiment_id, task_id, attempt) DO UPDATE SET
+                     channel_id=excluded.channel_id,
+                     conversation_id=COALESCE(excluded.conversation_id,
+                                              experiment_attempts.conversation_id)""",
+                (
+                    experiment_id,
+                    self._scrub(task_id),
+                    attempt,
+                    self._scrub(channel_id),
+                    conversation_id,
+                    _utcnow_iso(),
+                ),
+            )
+            conn.commit()
+
+    def finish_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        *,
+        outcome: str,
+        outcome_source: str,
+        reward: Optional[float] = None,
+        detail: Optional[dict[str, Any]] = None,
+        conversation_id: Optional[int] = None,
+    ) -> None:
+        """Record an attempt's verdict (`[XR13]`).
+
+        The verdict is WRITTEN, never derived from turn columns at read time.
+        `outcome_source` names who decided -- a benchmark's reward function, a
+        contract evaluator, an operator, or the literal `derived` for the
+        turn-status fallback. Recording the source is what keeps a fallback from
+        masquerading as a measurement.
+        """
+        if outcome not in self._ATTEMPT_OUTCOMES:
+            raise ValueError(
+                f"outcome {outcome!r} is not one of {sorted(self._ATTEMPT_OUTCOMES)}"
+            )
+        if not outcome_source:
+            raise ValueError(
+                "outcome_source is required: an unattributed verdict cannot be "
+                "told apart from a fallback"
+            )
+        self._update_experiment(
+            """UPDATE experiment_attempts
+                  SET outcome=?, outcome_source=?, reward=?, finished_at=?,
+                      detail_json=?,
+                      conversation_id=COALESCE(?, conversation_id)
+                WHERE experiment_id=? AND task_id=? AND attempt=?""",
+            (
+                outcome,
+                self._scrub(outcome_source),
+                None if reward is None else float(reward),
+                _utcnow_iso(),
+                None
+                if detail is None
+                else self._scrub(
+                    json.dumps(_sanitize_json_value(detail), ensure_ascii=False)
+                ),
+                conversation_id,
+                experiment_id,
+                self._scrub(task_id),
+                int(attempt),
+            ),
+            experiment_id,
+        )
+
+    def restart_attempt(self, experiment_id: str, task_id: str, attempt: int) -> int:
+        """Clear a crashed attempt so it can be re-run under the same labels.
+
+        Deletes that attempt's conversations and turns in ONE transaction and
+        bumps `restarts`. The deletion is deliberate (`[XR18]`): the abandoned
+        partial trajectory is evidence of nothing, `idx_conv_experiment_attempt`
+        is UNIQUE so a second conversation under the same three labels is
+        refused outright, and leaving the rows would pin the attempt's derived
+        diagnostic to 0 forever. `restarts` is what makes a task that keeps
+        crashing visible rather than silently retried.
+
+        Returns the number of turn rows deleted.
+        """
+        task_id = self._scrub(task_id)
+        attempt = int(attempt)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT 1 FROM experiment_attempts
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (experiment_id, task_id, attempt),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            turn_keys = [
+                r[0]
+                for r in conn.execute(
+                    """SELECT turn_key FROM turns
+                        WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                    (experiment_id, task_id, attempt),
+                ).fetchall()
+            ]
+            if turn_keys:
+                for chunk in _chunked(turn_keys):
+                    marks = ", ".join("?" for _ in chunk)
+                    conn.execute(
+                        f"DELETE FROM feedback WHERE turn_key IN ({marks})", chunk
+                    )
+                    conn.execute(
+                        f"DELETE FROM artifacts WHERE turn_key IN ({marks})", chunk
+                    )
+                    conn.execute(
+                        f"DELETE FROM spans WHERE trace_id IN ({marks})", chunk
+                    )
+            deleted = conn.execute(
+                """DELETE FROM turns
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (experiment_id, task_id, attempt),
+            ).rowcount
+            conn.execute(
+                """DELETE FROM conversations
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (experiment_id, task_id, attempt),
+            )
+            conn.execute(
+                """UPDATE experiment_attempts
+                      SET restarts=restarts+1, outcome=NULL, outcome_source=NULL,
+                          reward=NULL, finished_at=NULL, detail_json=NULL,
+                          conversation_id=NULL, started_at=?
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (_utcnow_iso(), experiment_id, task_id, attempt),
+            )
+            conn.commit()
+        return deleted
+
+    def complete_experiment(
+        self,
+        experiment_id: str,
+        *,
+        force_invalid: Optional[str] = None,
+        detail: Optional[str] = None,
+    ) -> str:
+        """Close an experiment. The STORE decides `complete` (`[XR14]`).
+
+        The caller may request completion or force `invalid`; it may not assert
+        completeness. `set_experiment_hypothesis` makes the strictly weaker
+        pre-registration invariant store-enforced for exactly this reason, and a
+        headline score rests on this one.
+
+        `complete` requires all three: every declared (task, attempt) pair
+        finished with an outcome, no outcome of `incomplete`, and no evidence
+        segment marked invalid. Anything else is `invalid` with a closed reason
+        code naming which check failed.
+
+        `invalid` is TERMINAL: the UPDATE carries `AND status <> 'invalid'`, so
+        neither a resume nor a later completion can clear a verdict recorded by
+        `forget_channel` or by a failed evidence run.
+
+        Returns the status actually stored.
+        """
+        if force_invalid is not None and force_invalid not in self._INVALID_REASONS:
+            raise ValueError(
+                f"invalid_reason {force_invalid!r} is not one of "
+                f"{sorted(self._INVALID_REASONS)}"
+            )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT status, declared_tasks, declared_attempts
+                     FROM experiments WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            if row["status"] == "invalid":
+                conn.rollback()
+                return "invalid"
+
+            reason: Optional[str] = force_invalid
+            if reason is None:
+                expected = int(row["declared_tasks"]) * int(row["declared_attempts"])
+                # The SHAPE must match the declaration, not merely the count.
+                # Counting finished rows against `expected` alone lets a row
+                # outside the declared set pay for a declared pair that never
+                # ran: a resume whose task list gained two tasks and lost one
+                # reaches `finished == expected` with a declared task missing,
+                # and `experiment_scores` then divides more scored attempts than
+                # the denominator and reports pass@1 = 1.33 as a headline number.
+                # So: every row finished, exactly as many rows as declared, and
+                # exactly as many distinct tasks as declared.
+                counts = conn.execute(
+                    """SELECT
+                         COUNT(*) AS rows_total,
+                         COUNT(DISTINCT task_id) AS tasks_total,
+                         SUM(CASE WHEN finished_at IS NOT NULL AND outcome IS NOT NULL
+                                  THEN 1 ELSE 0 END) AS finished,
+                         SUM(CASE WHEN outcome='incomplete' THEN 1 ELSE 0 END)
+                              AS incomplete
+                       FROM experiment_attempts WHERE experiment_id=?""",
+                    (experiment_id,),
+                ).fetchone()
+                rows_total = int(counts["rows_total"] or 0)
+                tasks_total = int(counts["tasks_total"] or 0)
+                finished = int(counts["finished"] or 0)
+                incomplete = int(counts["incomplete"] or 0)
+                declared_tasks = int(row["declared_tasks"])
+                bad_segments = conn.execute(
+                    """SELECT COUNT(*) FROM experiment_evidence_runs
+                        WHERE experiment_id=? AND valid=0""",
+                    (experiment_id,),
+                ).fetchone()[0]
+                if (
+                    finished != expected
+                    or rows_total != expected
+                    or tasks_total != declared_tasks
+                    or incomplete
+                ):
+                    reason = "attempt_shortfall"
+                    detail = (
+                        f"{finished} finished and {rows_total} recorded of "
+                        f"{expected} declared attempts across {tasks_total} of "
+                        f"{declared_tasks} declared tasks; {incomplete} incomplete"
+                    )
+                elif bad_segments:
+                    reason = "evidence_run_invalid"
+                    detail = f"{bad_segments} evidence segment(s) reported invalid"
+
+            status = "invalid" if reason is not None else "complete"
+            detail_text = self._scrub(detail) if reason is not None else None
+            cursor = conn.execute(
+                """UPDATE experiments
+                      SET status=?, completed_at=?, invalid_reason=?,
+                          invalid_detail=CASE
+                              WHEN ? IS NULL THEN invalid_detail
+                              WHEN invalid_detail IS NULL THEN ?
+                              ELSE invalid_detail || char(10) || ? END
+                    WHERE experiment_id=? AND status <> 'invalid'""",
+                (
+                    status,
+                    _utcnow_iso(),
+                    reason,
+                    # Bound to None on the `complete` branch: `invalid_detail`
+                    # is the explanation of an invalid verdict, and a detail
+                    # string sitting on a complete experiment reads as one.
+                    detail_text,
+                    detail_text,
+                    detail_text,
+                    experiment_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                conn.rollback()
+                return "invalid"
+            conn.commit()
+        return status
+
+    def invalidate_experiments_in_txn(
+        self,
+        conn: sqlite3.Connection,
+        experiment_ids: Iterable[str],
+        reason: str,
+        detail: Optional[str] = None,
+    ) -> int:
+        """Mark experiments invalid inside the caller's transaction.
+
+        Used by `forget_channel`, which must not DELETE an experiment (44 of its
+        45 attempts may live in other channels) but must never leave one
+        scoreable after its turns are gone. `invalid_detail` is append-only so a
+        second cause does not erase the first (`[XR15]`).
+        """
+        ids = [e for e in dict.fromkeys(experiment_ids) if e]
+        if not ids:
+            return 0
+        scrubbed = self._scrub(detail)
+        touched = 0
+        for chunk in _chunked(ids):
+            marks = ", ".join("?" for _ in chunk)
+            touched += conn.execute(
+                f"""UPDATE experiments
+                       SET status='invalid', invalid_reason=?,
+                           completed_at=COALESCE(completed_at, ?),
+                           invalid_detail=CASE
+                               WHEN ? IS NULL THEN invalid_detail
+                               WHEN invalid_detail IS NULL THEN ?
+                               ELSE invalid_detail || char(10) || ? END
+                     WHERE experiment_id IN ({marks})""",
+                [reason, _utcnow_iso(), scrubbed, scrubbed, scrubbed, *chunk],
+            ).rowcount
+        return touched
+
+    # -- experiment reads ------------------------------------------------
+
+    def get_experiment(self, experiment_id: str) -> Optional[dict[str, Any]]:
+        """One experiment plus its evidence segments, or None."""
+        if not self.has_feature(FEATURE_EXPERIMENTS_V1):
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM experiments WHERE experiment_id=?", (experiment_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            experiment = dict(row)
+            segments = []
+            for seg in conn.execute(
+                """SELECT * FROM experiment_evidence_runs
+                    WHERE experiment_id=? ORDER BY seq""",
+                (experiment_id,),
+            ).fetchall():
+                segment = dict(seg)
+                try:
+                    segment["record"] = json.loads(segment.pop("record_json"))
+                except (ValueError, KeyError):
+                    segment["record"] = None
+                segments.append(segment)
+        experiment["evidence_runs"] = segments
+        return experiment
+
+    def list_experiments(
+        self,
+        status: Optional[str] = None,
+        arm: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Experiments newest first, each with its observed attempt counts."""
+        if not self.has_feature(FEATURE_EXPERIMENTS_V1):
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("e.status=?")
+            params.append(status)
+        if arm is not None:
+            clauses.append("e.arm=?")
+            params.append(arm)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = (
+            "SELECT e.experiment_id, e.label, e.status, e.arm, "
+            "e.baseline_experiment_id, e.declared_tasks, e.declared_attempts, "
+            "e.invalid_reason, e.workflow_name, e.capture_profile, "
+            "e.created_at, e.completed_at, "
+            "(SELECT COUNT(*) FROM experiment_attempts a "
+            "  WHERE a.experiment_id=e.experiment_id) AS attempts_started, "
+            "(SELECT COUNT(*) FROM experiment_attempts a "
+            "  WHERE a.experiment_id=e.experiment_id AND a.finished_at IS NOT NULL "
+            "    AND a.outcome IS NOT NULL) AS attempts_finished "
+            f"FROM experiments e{where} ORDER BY e.created_at DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+    def experiment_attempt_rows(
+        self, experiment_id: str, task_id: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Attempt rows, ordered by task then attempt."""
+        if not self.has_feature(FEATURE_EXPERIMENTS_V1):
+            return []
+        clauses = ["experiment_id=?"]
+        params: list[Any] = [experiment_id]
+        if task_id is not None:
+            clauses.append("task_id=?")
+            params.append(task_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM experiment_attempts
+                     WHERE {' AND '.join(clauses)}
+                     ORDER BY task_id, attempt""",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def experiment_tasks(self, experiment_id: str) -> list[dict[str, Any]]:
+        """One row per task: its attempts' outcomes, and whether all passed."""
+        attempts = self.experiment_attempt_rows(experiment_id)
+        by_task: dict[str, dict[str, Any]] = {}
+        for row in attempts:
+            task = by_task.setdefault(
+                row["task_id"],
+                {"task_id": row["task_id"], "attempts": [], "outcomes": []},
+            )
+            task["attempts"].append(row)
+            task["outcomes"].append(row["outcome"])
+        for task in by_task.values():
+            outcomes = task["outcomes"]
+            task["passed_all"] = bool(outcomes) and all(o == "pass" for o in outcomes)
+            task["passed_any"] = any(o == "pass" for o in outcomes)
+        return [by_task[k] for k in sorted(by_task)]
+
+    def experiment_scores(self, experiment_id: str) -> dict[str, Any]:
+        """pass@1 / pass^k over an experiment (`[XR13]`, `[XR14]`).
+
+        Both are computed against the DECLARED denominator, never against
+        surviving rows: a run that lost 12 of 45 attempts must not score 33/33
+        and look perfect.
+
+        A headline number is returned ONLY for `status='complete'`. A running or
+        invalid experiment gets its per-task detail and its status in place of a
+        score -- a provisional number in a UI becomes a quoted number in a
+        document.
+        """
+        experiment = self.get_experiment(experiment_id)
+        if experiment is None:
+            raise ExperimentNotFound(experiment_id)
+        tasks = self.experiment_tasks(experiment_id)
+        declared_tasks = int(experiment["declared_tasks"])
+        declared_attempts = int(experiment["declared_attempts"])
+        expected = declared_tasks * declared_attempts
+        scored = [
+            row
+            for task in tasks
+            for row in task["attempts"]
+            if row["finished_at"] is not None and row["outcome"] is not None
+        ]
+        result: dict[str, Any] = {
+            "experiment_id": experiment_id,
+            "status": experiment["status"],
+            "invalid_reason": experiment["invalid_reason"],
+            "declared_tasks": declared_tasks,
+            "declared_attempts": declared_attempts,
+            "expected_attempts": expected,
+            "scored_attempts": len(scored),
+            "tasks": tasks,
+            "outcome_sources": sorted(
+                {row["outcome_source"] for row in scored if row["outcome_source"]}
+            ),
+            "pass_at_1": None,
+            "pass_at_k": None,
+            "reportable": False,
+        }
+        if experiment["status"] != "complete":
+            result["reason_not_reportable"] = (
+                f"experiment status is {experiment['status']!r}; a score is only "
+                "reportable for a complete experiment"
+            )
+            return result
+        if len(scored) != expected or len(tasks) != declared_tasks:
+            # Unreachable while `complete_experiment` is the only way to reach
+            # `complete`, and kept anyway: this function divides by the DECLARED
+            # denominator, so a set of rows that does not match the declaration
+            # produces a ratio above 1.0 rather than an error. A score that can
+            # exceed 1.0 is worse than no score.
+            result["reportable"] = False
+            result["reason_not_reportable"] = (
+                f"{len(scored)} scored attempts across {len(tasks)} tasks do not "
+                f"match the declared {expected} across {declared_tasks}; the "
+                "experiment is marked complete but its rows do not support a score"
+            )
+            return result
+        passed = sum(1 for row in scored if row["outcome"] == "pass")
+        # pass^k is over DECLARED tasks: a task with no attempt row at all is a
+        # task that did not pass every attempt, and dividing by the tasks that
+        # happen to be present is the denominator error this guards against.
+        all_passed = sum(1 for task in tasks if task["passed_all"])
+        result["pass_at_1"] = passed / expected
+        result["pass_at_k"] = all_passed / declared_tasks
+        result["reportable"] = True
+        return result
+
+    def compare_experiments(
+        self, experiment_id: str, baseline_experiment_id: str
+    ) -> dict[str, Any]:
+        """Treatment vs baseline, per task (`[XR19]`).
+
+        Reports flip counts and sample size; it does NOT claim significance. A
+        query layer that emits a p-value is a query layer that will be quoted as
+        if it had run the protocol.
+
+        Refuses unless both are complete, both declare the same shape, their
+        task-id SETS are equal, and they were captured under the same profile.
+        Cardinality is not comparability: two 15x3 runs over disjoint task sets
+        would otherwise report "0 regressions" while sharing no task.
+        """
+        treatment = self.get_experiment(experiment_id)
+        baseline = self.get_experiment(baseline_experiment_id)
+        if treatment is None:
+            raise ExperimentNotFound(experiment_id)
+        if baseline is None:
+            raise ExperimentNotFound(baseline_experiment_id)
+        problems: list[str] = []
+        for side, exp in (("treatment", treatment), ("baseline", baseline)):
+            if exp["status"] != "complete":
+                problems.append(
+                    f"{side} {exp['experiment_id']} is {exp['status']!r}, not complete"
+                )
+        if (treatment["declared_tasks"], treatment["declared_attempts"]) != (
+            baseline["declared_tasks"],
+            baseline["declared_attempts"],
+        ):
+            problems.append(
+                f"declared shapes differ: treatment "
+                f"{treatment['declared_tasks']}x{treatment['declared_attempts']} "
+                f"vs baseline {baseline['declared_tasks']}x"
+                f"{baseline['declared_attempts']}"
+            )
+        if treatment["capture_profile"] != baseline["capture_profile"] or (
+            treatment["capture_policy_version"] != baseline["capture_policy_version"]
+        ):
+            problems.append(
+                f"capture regimes differ: treatment "
+                f"{treatment['capture_profile']}/"
+                f"{treatment['capture_policy_version']} vs baseline "
+                f"{baseline['capture_profile']}/"
+                f"{baseline['capture_policy_version']}; the two arms are not "
+                "measuring the same columns"
+            )
+        t_tasks = {t["task_id"]: t for t in self.experiment_tasks(experiment_id)}
+        b_tasks = {
+            t["task_id"]: t for t in self.experiment_tasks(baseline_experiment_id)
+        }
+        only_treatment = sorted(set(t_tasks) - set(b_tasks))
+        only_baseline = sorted(set(b_tasks) - set(t_tasks))
+        if only_treatment or only_baseline:
+            problems.append(
+                f"task sets differ: {len(only_treatment)} only in treatment, "
+                f"{len(only_baseline)} only in baseline"
+            )
+        if problems:
+            return {
+                "comparable": False,
+                "problems": problems,
+                "only_in_treatment": only_treatment,
+                "only_in_baseline": only_baseline,
+            }
+        improved, regressed, unchanged = [], [], []
+        expected_flips = 0.0
+        k = int(treatment["declared_attempts"])
+        for task_id in sorted(t_tasks):
+            t_pass = t_tasks[task_id]["passed_all"]
+            b_pass = b_tasks[task_id]["passed_all"]
+            if t_pass and not b_pass:
+                improved.append(task_id)
+            elif b_pass and not t_pass:
+                regressed.append(task_id)
+            else:
+                unchanged.append(task_id)
+            expected_flips += self._expected_flip_probability(
+                t_tasks[task_id], b_tasks[task_id], k
+            )
+        return {
+            "comparable": True,
+            "problems": [],
+            "treatment": self.experiment_scores(experiment_id),
+            "baseline": self.experiment_scores(baseline_experiment_id),
+            "improved": improved,
+            "regressed": regressed,
+            "unchanged": unchanged,
+            "tasks_compared": len(t_tasks),
+            "attempts_per_task": k,
+            "expected_flips_if_nothing_changed": round(expected_flips, 3),
+            "observed_flips": len(improved) + len(regressed),
+        }
+
+    @staticmethod
+    def _expected_flip_probability(
+        treatment_task: dict[str, Any], baseline_task: dict[str, Any], k: int
+    ) -> float:
+        """How often this task's pass^k verdict would flip if NOTHING changed.
+
+        The question `fix-bn1.7` asks -- "how many flips are attributable to
+        variance rather than the change" -- has an answer that does not require
+        claiming significance, and this is it. Pool both arms' attempts for one
+        task to estimate a single per-attempt pass rate p, then a flip in either
+        direction has probability 2 * p^k * (1 - p^k) under the hypothesis that
+        the arms are identical. Summed over tasks, that is the number of flips a
+        pair of arms that differ in nothing would be expected to produce.
+
+        **What this is not.** It is not a p-value and it is not a test. It is an
+        expectation under one crude null, offered so that "3 tasks flipped"
+        stops reading as "3 tasks improved" when the expected number is 2.6. The
+        statistical protocol lives outside this file, deliberately: a query layer
+        that emits a significance verdict is a query layer that will be quoted as
+        if it had run one.
+
+        A task with no attempts contributes 0: nothing that was never run can
+        flip.
+        """
+        outcomes = [
+            o
+            for o in (treatment_task["outcomes"] + baseline_task["outcomes"])
+            if o is not None
+        ]
+        if not outcomes or k <= 0:
+            return 0.0
+        p = sum(1 for o in outcomes if o == "pass") / len(outcomes)
+        p_all = p ** k
+        return 2.0 * p_all * (1.0 - p_all)
+
+    def experiment_labels_for_turn(
+        self, turn_key: str
+    ) -> Optional[dict[str, Any]]:
+        """Return experiment labels attached to a turn, if any."""
+        if not self.has_feature(FEATURE_EXPERIMENTS_V1):
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT t.experiment_id, t.task_id, t.attempt, e.label, e.status
+                     FROM turns t LEFT JOIN experiments e
+                       ON e.experiment_id = t.experiment_id
+                    WHERE t.turn_key=? AND t.experiment_id IS NOT NULL""",
+                (turn_key,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def list_distillation_runs(
+        self, *, experiment_id: Optional[str] = None, **_: Any
+    ) -> list[dict[str, Any]]:
+        """Compatibility read seam; distillation is not shipped by this port."""
+        return []
+
     # -- maintenance [R12] and erasure [R21] -----------------------------
 
     def db_size_bytes(self) -> int:
@@ -1090,6 +2434,30 @@ class ObservabilityStore:
             except OSError:
                 pass
         return total
+
+    def archive_to(self, destination: str) -> dict[str, Any]:
+        """Create a consistent, read-only SQLite archive with a digest."""
+        target = Path(destination)
+        if target.exists():
+            raise FileExistsError(
+                f"refusing to overwrite an existing evidence archive: {target}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("VACUUM INTO ?", (str(target),))
+        digest = hashlib.sha256()
+        with open(target, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        size_bytes = target.stat().st_size
+        target.chmod(0o444)
+        return {
+            "path": str(target),
+            "size_bytes": size_bytes,
+            "sha256": digest.hexdigest(),
+            "schema_version": SCHEMA_VERSION,
+            "read_only": True,
+        }
 
     def prune(
         self,
@@ -1106,6 +2474,8 @@ class ObservabilityStore:
         channels) older than the horizon, with their feedback — otherwise no
         retention knob ever reaches them.
         """
+        if pruning_suppressed():
+            return {"suppressed": 1}
         if retention_days is None:
             retention_days = _env_int("FW_OBS_RETENTION_DAYS", _DEFAULT_RETENTION_DAYS)
         if max_bytes is None:
@@ -1188,6 +2558,14 @@ class ObservabilityStore:
         deleted: dict[str, int] = {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            touched_experiments = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT experiment_id FROM experiment_attempts "
+                    "WHERE channel_id=?",
+                    (channel_id,),
+                ).fetchall()
+            ]
             deleted["feedback"] = conn.execute(
                 "DELETE FROM feedback WHERE turn_key IN "
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
@@ -1209,6 +2587,24 @@ class ObservabilityStore:
             deleted["conversations"] = conn.execute(
                 "DELETE FROM conversations WHERE channel_id=?", (channel_id,)
             ).rowcount
+            # The experiment container `[XR15]`. An experiment is NOT the
+            # channel's to delete -- 44 of its 45 attempts may live in other
+            # channels -- but it must never stay scoreable once its turns are
+            # gone, because after this its denominator is unreconstructable.
+            # So: delete this channel's attempt rows, and mark every experiment
+            # they belonged to terminally invalid. Ids collected BEFORE the
+            # deletes, per [DR44].
+            deleted["experiment_attempts"] = conn.execute(
+                "DELETE FROM experiment_attempts WHERE channel_id=?", (channel_id,)
+            ).rowcount
+            invalidated = self.invalidate_experiments_in_txn(
+                conn,
+                touched_experiments,
+                "turns_erased",
+                f"turns erased by forget_channel for channel {channel_id!r}",
+            )
+            if invalidated:
+                deleted["experiments_invalidated"] = invalidated
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("PRAGMA incremental_vacuum")
@@ -1225,6 +2621,12 @@ class ObservabilityStore:
         deleted: dict[str, int] = {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            for table in (
+                "experiment_evidence_runs",
+                "experiment_attempts",
+                "experiments",
+            ):
+                deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             for table in ("feedback", "spans", "artifacts", "turns", "conversations"):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             conn.commit()
@@ -1255,6 +2657,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
                 )
         finally:
             conn.close()
+        self._features = self._load_features()
 
     def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
         conn = sqlite3.connect(
@@ -1454,7 +2857,11 @@ class SQLiteTraceSink:
             and turn_row.get("ordinal") is None
         ):
             turn_row["ordinal"] = self.store.reserve_turn_ordinal(
-                turn_row["channel_id"], turn_row["conversation_id"]
+                turn_row["channel_id"],
+                turn_row["conversation_id"],
+                experiment_id=turn_row.get("experiment_id"),
+                task_id=turn_row.get("task_id"),
+                attempt=turn_row.get("attempt"),
             )
         if turn_row["status"] in TERMINAL_TURN_STATUSES:
             self._remember_pending(turn_row, artifact_rows)
@@ -1505,6 +2912,17 @@ class SQLiteTraceSink:
         """Terminal records still awaiting a confirmed write (tests, health)."""
         with self._sync_lock:
             return len(self._pending)
+
+    def health_snapshot(self) -> dict[str, Any]:
+        with self._health_lock:
+            return dict(self._health)
+
+    def persist_health(self) -> None:
+        conn = self.store._connect()
+        try:
+            self._maybe_write_health(conn, force=True)
+        finally:
+            conn.close()
 
     def record_conversation_label(
         self,
@@ -1839,6 +3257,18 @@ def get_observability_sink(
     except Exception as exc:
         logger.warning(f"Observability sink unavailable for {workflow_path}: {exc!r}")
         return None
+
+
+def existing_observability_sink(
+    workflow_path: str,
+) -> Optional[SQLiteTraceSink]:
+    """Return this process's live sink without constructing one."""
+    db_path = state_paths.observability_db(workflow_path)
+    with _sinks_lock:
+        sink = _sinks.get(db_path)
+        if sink is None or sink._closed or _sink_is_stale(sink, db_path):
+            return None
+        return sink
 
 
 def _sink_is_stale(sink: SQLiteTraceSink, db_path: str) -> bool:

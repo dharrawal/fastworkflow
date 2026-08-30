@@ -40,6 +40,18 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
         # LITELLM_PROXY_API_KEY=proxy-key-...
         lm = get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")  # api_key_env_var is ignored for proxy
     """
+    # `FW_LM_CACHE=0` defeats the DSPy response cache process-wide
+    # (`fix-bn1` `[XR16]`). Without it, k repeated attempts of one task in a
+    # pass^k experiment send identical prompts, hit the disk+memory cache that
+    # dspy enables by default, and come back byte-identical -- so pass^k equals
+    # pass@1 by construction and the run looks like a spectacular result. The
+    # lever is process-wide because nothing threads per-call kwargs down to
+    # here; `**kwargs` already reaches `dspy.LM`, but no caller passes any.
+    #
+    # Unset leaves today's behavior exactly as it was.
+    if fastworkflow.get_env_var("FW_LM_CACHE", default="1") in ("0", "false", "False"):
+        kwargs.setdefault("cache", False)
+
     model = fastworkflow.get_env_var(model_env_var)
     if not model:
         logger.critical(f"Critical Error: DSPy Language Model not provided. Set {model_env_var} environment variable.")
