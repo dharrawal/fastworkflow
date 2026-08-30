@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import time
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -168,6 +169,12 @@ class WorkflowExecutionContext:
         self._channel_id: Optional[str] = None
         self._conversation_id: Optional[int] = None
         self._embedder_owns_conversations: bool = False
+        # The experiment container's labels, bound beside channel/conversation
+        # identity and stamped onto every TurnResult this context produces
+        # (`fix-bn1`, `[XR17]`). None on every ordinary turn.
+        self._experiment_id: Optional[str] = None
+        self._task_id: Optional[str] = None
+        self._attempt: Optional[int] = None
         self._trace_span_stack: list[tracing.Span] = []
         self._turn_root_span: Optional[tracing.Span] = None
 
@@ -253,6 +260,9 @@ class WorkflowExecutionContext:
         channel_id: Optional[str] = None,
         conversation_id: Optional[int] = None,
         embedder_owns_conversations: Optional[bool] = None,
+        experiment_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        attempt: Optional[int] = None,
     ) -> None:
         """Bind channel/conversation identity BEFORE the turn [R1].
 
@@ -269,12 +279,60 @@ class WorkflowExecutionContext:
         a floor-less id that can alias a legacy conversation and split the
         session across two ids once the chokepoint's own mint succeeds.
         """
+        # Validate FIRST, mutate second: a rejected experiment triple must not
+        # leave the context half-bound with a new channel_id and the old labels.
+        if experiment_id is not None or task_id is not None or attempt is not None:
+            self._bind_experiment_labels(experiment_id, task_id, attempt)
         if channel_id is not None:
             self._channel_id = channel_id
         if conversation_id is not None:
             self._conversation_id = conversation_id
         if embedder_owns_conversations is not None:
             self._embedder_owns_conversations = embedder_owns_conversations
+
+    def _bind_experiment_labels(
+        self,
+        experiment_id: Optional[str],
+        task_id: Optional[str],
+        attempt: Optional[int],
+    ) -> None:
+        """Validate and bind the experiment triple (`fix-bn1` `[XR17]`).
+
+        All three or none. A turn labelled with an experiment but no task
+        belongs to an experiment and to no task: it contributes to a numerator
+        and to no denominator, and every GROUP BY in the scoring layer is
+        silently wrong. Refusing here is the only cheap place to catch it.
+
+        The `isinstance(attempt, int)` check is load-bearing and not decorative.
+        SQLite's INTEGER is a type AFFINITY, not a constraint -- a string bound
+        to it that cannot be losslessly converted is stored as TEXT -- so the
+        column's declared type protects nothing on its own. This is what makes
+        `attempt` safe to leave unpoliced (`[XR7]`).
+        """
+        resolved = self._validate_experiment_labels(
+            experiment_id if experiment_id is not None else self._experiment_id,
+            task_id if task_id is not None else self._task_id,
+            attempt if attempt is not None else self._attempt,
+        )
+        self._experiment_id, self._task_id, self._attempt = resolved
+
+    @staticmethod
+    def _validate_experiment_labels(
+        experiment_id: Optional[str],
+        task_id: Optional[str],
+        attempt: Optional[int],
+    ) -> tuple[str, str, int]:
+        """Check the triple and return it. Pure: assigns nothing."""
+        if not experiment_id or not task_id:
+            raise ValueError(
+                "an experiment binding needs both experiment_id and task_id; "
+                f"got experiment_id={experiment_id!r}, task_id={task_id!r}"
+            )
+        if isinstance(attempt, bool) or not isinstance(attempt, int):
+            raise ValueError(f"attempt must be an int, got {type(attempt).__name__}")
+        if attempt <= 0:
+            raise ValueError(f"attempt must be positive, got {attempt}")
+        return experiment_id, task_id, attempt
 
     def _ensure_observability_conversation(self) -> None:
         """Mint a conversation id when no embedder bound one.
@@ -305,7 +363,22 @@ class WorkflowExecutionContext:
             return
         try:
             # Mint against the channel the sink files this turn's row under.
-            self._conversation_id = store.mint_conversation_id(self._channel_id or "")
+            self._conversation_id = store.mint_conversation_id(
+                self._channel_id or "",
+                experiment_id=self._experiment_id,
+                task_id=self._task_id,
+                attempt=self._attempt,
+            )
+        except sqlite3.IntegrityError:
+            # NOT swallowed. `idx_conv_experiment_attempt` is UNIQUE precisely so
+            # that a second conversation under one (experiment, task, attempt)
+            # is refused, and degrading that refusal to a conversation-less turn
+            # would defeat the invariant silently: the attempt would keep running
+            # and its turns would land outside any conversation, which is exactly
+            # the unreconstructable state the index exists to prevent. An
+            # ordinary turn cannot reach this arm -- the index is partial on
+            # experiment_id IS NOT NULL.
+            raise
         except Exception as exc:
             logger.warning(
                 f"Could not mint a conversation id ({type(exc).__name__}: {exc}); "
@@ -891,6 +964,15 @@ class WorkflowExecutionContext:
                 self.conversation_history
             ),
             "last_completed_turn_key": self._last_completed_turn_key,
+            # The experiment labels ride the suspension blob for the same
+            # reason channel_id does: a turn suspended on ask_user and resumed
+            # in another process must land in the same attempt, and the labels
+            # are the only thing that says which one. Absent on every state
+            # written before fix-bn1, which `apply_serialized_state` reads as
+            # "not part of an experiment".
+            "experiment_id": self._experiment_id,
+            "task_id": self._task_id,
+            "attempt": self._attempt,
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -908,6 +990,14 @@ class WorkflowExecutionContext:
         found = state.get("schema_version", 0)
         if found != SCHEMA_VERSION:
             raise IncompatibleSessionState(found)
+        # Validated up here with the version check, not applied halfway down:
+        # this method's contract is "raises having applied nothing", and a
+        # malformed experiment triple must not be the one exception that leaves
+        # a half-restored context behind.
+        if state.get("experiment_id") is not None:
+            self._validate_experiment_labels(
+                state.get("experiment_id"), state.get("task_id"), state.get("attempt")
+            )
 
         self._awaiting_user = bool(state.get("awaiting_user"))
         self._suspended_user_message = state.get("suspended_user_message")
@@ -919,6 +1009,16 @@ class WorkflowExecutionContext:
         # Absent from blobs written before ruling I3 landed; a missing key just
         # means feedback has no turn to attach to until the next turn completes.
         self._last_completed_turn_key = state.get("last_completed_turn_key")
+        # Absent from blobs written before fix-bn1, which reads as "not part of
+        # an experiment". Restored through the same validating chokepoint the
+        # live binding uses, so a hand-edited blob cannot smuggle a partial
+        # triple past `[XR17]`.
+        if state.get("experiment_id") is not None:
+            self._bind_experiment_labels(
+                state.get("experiment_id"),
+                state.get("task_id"),
+                state.get("attempt"),
+            )
 
         if turns := state.get("conversation_history_turns") or []:
             from fastworkflow.conversation_history_io import restore_history_from_turns
@@ -1283,6 +1383,9 @@ class WorkflowExecutionContext:
             turn_output=turn_output,
             channel_id=self._channel_id,
             conversation_id=self._conversation_id,
+            experiment_id=self._experiment_id,
+            task_id=self._task_id,
+            attempt=self._attempt,
             user_message=self._turn_user_message,
             refined_user_message=self._turn_refined_message,
             entry_workflow_name=self._turn_entry_workflow_name,

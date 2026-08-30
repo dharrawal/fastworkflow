@@ -279,6 +279,15 @@ main { flex: 1; display: flex; min-height: 0; }
 .nonComparable { border-left: 4px solid var(--warn-border);
   background: var(--warn-bg); padding: 8px 10px; border-radius: 6px;
   margin-top: 8px; }
+/* An INVALID experiment must be unmistakable (fix-bn1.6): a run with dropped
+   or erased turn records has a denominator nobody can reconstruct, and it must
+   never read as a clean score sitting next to a valid one. */
+.expInvalid { border-left: 4px solid var(--fail); background: var(--fail-soft);
+  padding: 8px 10px; border-radius: 6px; margin-top: 8px; }
+.expReadonly { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.expNotes { width: 100%; min-height: 60px; font: inherit; font-size: 12px;
+  padding: 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: inherit; box-sizing: border-box; }
 .diffToolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   margin: 8px 0; }
 .diffGrid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr);
@@ -530,6 +539,7 @@ button.newConv:hover { filter: brightness(1.1); }
       <input type="text" id="fCommand" placeholder="command filter">
       <input type="text" id="fContext" placeholder="context filter">
       <button id="corpusBtn">Distillation corpus</button>
+      <button id="experimentsBtn">Experiments</button>
     </div>
     <div id="convList"></div>
   </div>
@@ -581,8 +591,36 @@ var TOKEN = new URLSearchParams(location.search).get("token") || "";
 function api(path) {
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
     .then(function (r) {
-      if (!r.ok) { throw new Error("API " + path + " -> " + r.status); }
-      return r.json();
+      /* Read the body even on a failure. Routes that refuse deliberately —
+         /api/experiment/<id>/compare answers 409 with the per-problem reason
+         the pair is incomparable — put the whole diagnostic in the body, and
+         rejecting on status alone threw it away and left the user with a bare
+         number. apiPost/apiPatch already did this; api() did not. */
+      return r.json().then(function (data) {
+        if (!r.ok) {
+          throw new Error(
+            data && data.error ? data.error : ("API " + path + " -> " + r.status));
+        }
+        return data;
+      }, function () {
+        if (!r.ok) { throw new Error("API " + path + " -> " + r.status); }
+        return {};
+      });
+    });
+}
+/* A refusal whose BODY is the answer. 409 from the compare route is not an
+   error to report, it is the comparison result saying "these two are not
+   comparable, here is why" — so it resolves rather than rejects. */
+function apiAllowing409(path) {
+  return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
+    .then(function (r) {
+      return r.json().then(function (data) {
+        if (!r.ok && r.status !== 409) {
+          throw new Error(
+            data && data.error ? data.error : ("API " + path + " -> " + r.status));
+        }
+        return data;
+      });
     });
 }
 function apiRaw(path) {
@@ -591,6 +629,19 @@ function apiRaw(path) {
 function apiPost(path, body) {
   return fetch(path, {
     method: "POST",
+    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    return r.json().then(function (data) {
+      if (!r.ok) { throw new Error(data && data.error ? data.error : ("API " + path + " -> " + r.status)); }
+      return data;
+    });
+  });
+}
+
+function apiPatch(path, body) {
+  return fetch(path, {
+    method: "PATCH",
     headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
     body: JSON.stringify(body || {})
   }).then(function (r) {
@@ -625,7 +676,12 @@ var state = {
   distillView: "passes",    // passes | diff | insights
   divergences: null,
   provenance: null,
-  divergencesOnly: false
+  divergencesOnly: false,
+  /* Experiment browser (fix-bn1.6). experiment -> task -> attempt is the same
+     three-level shape the rail already renders over channel -> conversation ->
+     turn, so this drills down inside #detail rather than adding a second tree. */
+  experimentId: null,
+  experimentTask: null
 };
 var session = null;          // /api/session payload: workflow + server + identity
 
@@ -1433,8 +1489,393 @@ function corpusTable(container, heading, headers, rows, keys) {
 
 document.getElementById("corpusBtn").addEventListener("click", showCorpus);
 
+/* -- the experiment browser (fix-bn1.6) --------------------------------
+   experiment -> task -> attempt is the same three-level grouping the rail
+   already builds over channel -> conversation -> turn, so this drills down
+   inside #detail (the showCorpus precedent) rather than adding a second tree
+   or a third top-level panel. Every attempt row links into the existing trace
+   views through openTurnInDebug, so no trace rendering is rewritten. */
+/* A monotonic navigation token. The three experiment views and selectTurn all
+   own #detail and all render from a promise, so a slow response would otherwise
+   repaint a view the user has already navigated away from. Every async handler
+   below bails when its captured token is stale. */
+var expNav = 0;
+function expNavToken() { return ++expNav; }
+function expNavStale(token) { return token !== expNav; }
+
+function expCrumbs(container, trail) {
+  var bar = el("div", "crumbs");
+  trail.forEach(function (step, i) {
+    if (i) { bar.appendChild(el("span", "sep", "/")); }
+    if (step.onClick) {
+      var b = el("button", null, step.label);
+      b.addEventListener("click", step.onClick);
+      bar.appendChild(b);
+    } else {
+      bar.appendChild(el("span", "here", step.label));
+    }
+  });
+  container.appendChild(bar);
+}
+
+function expStatusPill(status) {
+  var cls = status === "complete" ? "pill ok"
+    : (status === "invalid" ? "pill err" : "pill wait");
+  var pill = el("span", cls);
+  pill.appendChild(el("span", "dot"));
+  pill.appendChild(el("span", null, status));
+  return pill;
+}
+
+function showExperiments() {
+  var nav = expNavToken();
+  state.experimentId = null;
+  state.experimentTask = null;
+  var d = document.getElementById("detail");
+  clear(d);
+  d.appendChild(el("div", "empty", "loading experiments…"));
+  /* limit=201 so 201 rows means "there are more than 200", which is said out
+     loud rather than silently truncating the list. */
+  api("/api/experiments?limit=201").then(function (data) {
+    if (expNavStale(nav)) { return; }
+    clear(d);
+    var card = el("div", "card");
+    expCrumbs(card, [{ label: "Experiments" }]);
+    card.appendChild(el("h2", null, "Experiments"));
+    card.appendChild(el("div", "sub",
+      "A labelled set of tasks, each run one or more times, scored as one " +
+      "object. An experiment is not a channel: attempts run on their own " +
+      "channels so they stay independent."));
+    var rows = data.experiments || [];
+    var truncated = rows.length > 200;
+    if (truncated) { rows = rows.slice(0, 200); }
+    if (!rows.length) {
+      card.appendChild(el("div", "empty", "no experiments recorded"));
+      d.appendChild(card);
+      return;
+    }
+    if (truncated) {
+      card.appendChild(el("div", "sub",
+        "Showing the 200 most recent experiments; there are more. "
+        + "Add ?offset=200 to /api/experiments to see the next page."));
+    }
+    rows.forEach(function (row) {
+      var item = el("div", "listItem");
+      var title = el("div", "title");
+      title.appendChild(el("span", null, row.label + "  "));
+      title.appendChild(expStatusPill(row.status));
+      if (row.arm) { title.appendChild(el("span", null, "  [" + row.arm + "]")); }
+      item.appendChild(title);
+      var declared = row.declared_tasks + "×" + row.declared_attempts;
+      var sub = declared + " declared, " + row.attempts_finished + " finished"
+        + (row.invalid_reason ? "  — " + row.invalid_reason : "")
+        + "  · " + (row.created_at || "");
+      item.appendChild(el("div", "sub", sub));
+      item.addEventListener("click", function () { showExperiment(row.experiment_id); });
+      card.appendChild(item);
+    });
+    d.appendChild(card);
+  }).catch(function (e) {
+    if (expNavStale(nav)) { return; }
+    clear(d);
+    d.appendChild(el("div", "empty", "No experiments available: " + e.message));
+  });
+}
+
+function showExperiment(experimentId) {
+  var nav = expNavToken();
+  state.experimentId = experimentId;
+  state.experimentTask = null;
+  var d = document.getElementById("detail");
+  clear(d);
+  d.appendChild(el("div", "empty", "loading experiment…"));
+  Promise.all([
+    api("/api/experiment/" + encodeURIComponent(experimentId)),
+    api("/api/experiment/" + encodeURIComponent(experimentId) + "/score"),
+    api("/api/experiment/" + encodeURIComponent(experimentId) + "/tasks")
+  ]).then(function (results) {
+    if (expNavStale(nav)) { return; }
+    var exp = results[0].experiment;
+    var score = results[1].score;
+    var tasks = results[2].tasks || [];
+    clear(d);
+    var card = el("div", "card");
+    expCrumbs(card, [
+      { label: "Experiments", onClick: showExperiments },
+      { label: exp.label }
+    ]);
+
+    /* An invalid experiment first, and loudly. A run whose turns were dropped
+       or erased has an unreconstructable denominator; showing its label beside
+       a valid one with only a small badge to tell them apart is how a dead run
+       gets quoted. */
+    if (exp.status === "invalid") {
+      var bad = el("div", "expInvalid");
+      bad.appendChild(el("strong", null, "This experiment is INVALID and carries no score."));
+      bad.appendChild(el("div", null,
+        "Reason: " + (exp.invalid_reason || "unknown") + ". "
+        + "Its attempts can no longer be counted against the denominator it "
+        + "declared, so no pass@1 or pass^k is computed for it."));
+      if (exp.invalid_detail) { bad.appendChild(el("div", null, exp.invalid_detail)); }
+      card.appendChild(bad);
+    }
+
+    card.appendChild(el("h2", null, "Hypothesis"));
+    card.appendChild(el("div", null, exp.hypothesis || "— none recorded —"));
+    /* Read-only, with the reason attached. Without it the first person to try
+       editing this files a bug against what is deliberate. */
+    card.appendChild(el("div", "expReadonly",
+      "Read-only. The hypothesis is write-once, fixed before the run started: " +
+      "a prediction that can be revised after seeing the outcome is not a " +
+      "pre-registration. Record revisions in Notes."));
+
+    card.appendChild(el("h2", null, "Notes"));
+    var notes = el("textarea", "expNotes");
+    notes.value = exp.notes || "";
+    card.appendChild(notes);
+    var saveRow = el("div", "diffToolbar");
+    var save = el("button", null, "Save notes");
+    var saveMsg = el("span", "sub", "");
+    save.addEventListener("click", function () {
+      saveMsg.textContent = "saving…";
+      apiPatch("/api/experiment/" + encodeURIComponent(experimentId),
+               { notes: notes.value }).then(function () {
+        saveMsg.textContent = "saved";
+      }).catch(function (e) { saveMsg.textContent = e.message; });
+    });
+    saveRow.appendChild(save);
+    saveRow.appendChild(saveMsg);
+    card.appendChild(saveRow);
+
+    card.appendChild(el("h2", null, "Result"));
+    var kv = el("dl", "kv");
+    function pair(k, v) {
+      kv.appendChild(el("dt", null, k));
+      kv.appendChild(el("dd", null, v === null || v === undefined ? "—" : String(v)));
+    }
+    pair("status", exp.status);
+    pair("declared", exp.declared_tasks + " tasks × " + exp.declared_attempts + " attempts");
+    pair("scored attempts", score.scored_attempts + " of " + score.expected_attempts);
+    pair("pass@1", score.reportable ? score.pass_at_1.toFixed(3) : "not reportable");
+    pair("pass^" + exp.declared_attempts,
+         score.reportable ? score.pass_at_k.toFixed(3) : "not reportable");
+    pair("verdict sources", (score.outcome_sources || []).join(", "));
+    pair("arm", exp.arm);
+    pair("baseline", exp.baseline_experiment_id);
+    pair("capture profile", exp.capture_profile);
+    pair("workflow", exp.workflow_name);
+    pair("created", exp.created_at);
+    card.appendChild(kv);
+    if (!score.reportable && score.reason_not_reportable) {
+      card.appendChild(el("div", "sub", score.reason_not_reportable));
+    }
+    /* Named for what it is. A verdict source of "derived" is the turn-status
+       fallback, which measures "no command reported a failure code" and not
+       whether the task was accomplished. */
+    if ((score.outcome_sources || []).indexOf("derived") >= 0) {
+      var derived = el("div", "nonComparable");
+      derived.appendChild(el("strong", null, "Some verdicts are derived, not graded."));
+      derived.appendChild(el("div", null,
+        "A 'derived' outcome reports only that no command returned a failure " +
+        "code. It is not a judgement that the task was accomplished."));
+      card.appendChild(derived);
+    }
+
+    /* The baseline comparison, when this experiment declares one. Rendered
+       here rather than in a separate view because "did the change help" is a
+       question about THIS experiment, and a separate route is one the UI would
+       never call. */
+    if (exp.baseline_experiment_id) {
+      card.appendChild(el("h2", null, "Versus baseline"));
+      var cmpBox = el("div");
+      card.appendChild(cmpBox);
+      cmpBox.appendChild(el("div", "sub", "comparing…"));
+      apiAllowing409("/api/experiment/" + encodeURIComponent(experimentId) + "/compare")
+        .then(function (cmp) { renderComparison(cmpBox, cmp); })
+        .catch(function (e) {
+          clear(cmpBox);
+          var box = el("div", "nonComparable");
+          box.appendChild(el("strong", null, "Not comparable."));
+          box.appendChild(el("div", null, e.message));
+          cmpBox.appendChild(box);
+        });
+    }
+
+    card.appendChild(el("h2", null, "Evidence runs"));
+    var segs = exp.evidence_runs || [];
+    if (!segs.length) {
+      card.appendChild(el("div", "empty", "no evidence segments recorded"));
+    } else {
+      segs.forEach(function (seg) {
+        var line = el("div", seg.valid ? "sub" : "expInvalid");
+        var problems = (seg.record && seg.record.problems) || [];
+        line.textContent = "#" + seg.seq + "  " + seg.evidence_run_id + "  "
+          + (seg.valid ? "valid" : "INVALID: " + problems.join("; "));
+        card.appendChild(line);
+      });
+    }
+
+    card.appendChild(el("h2", null, "Tasks"));
+    if (!tasks.length) {
+      card.appendChild(el("div", "empty", "no attempts recorded yet"));
+    }
+    tasks.forEach(function (task) {
+      var item = el("div", "listItem");
+      var title = el("div", "title", task.task_id);
+      item.appendChild(title);
+      var outcomes = (task.outcomes || []).map(function (o) { return o || "unfinished"; });
+      item.appendChild(el("div", "sub",
+        outcomes.join(", ") + (task.passed_all ? "  — all passed" : "")));
+      item.addEventListener("click", function () {
+        showExperimentTask(experimentId, task.task_id, exp.label);
+      });
+      card.appendChild(item);
+    });
+    d.appendChild(card);
+  }).catch(function (e) {
+    if (expNavStale(nav)) { return; }
+    clear(d);
+    d.appendChild(el("div", "empty", "Could not load experiment: " + e.message));
+  });
+}
+
+function renderComparison(container, cmp) {
+  clear(container);
+  if (!cmp.comparable) {
+    var box = el("div", "nonComparable");
+    box.appendChild(el("strong", null, "Not comparable."));
+    (cmp.problems || []).forEach(function (p) { box.appendChild(el("div", null, p)); });
+    container.appendChild(box);
+    return;
+  }
+  var kv = el("dl", "kv");
+  function pair(k, v) {
+    kv.appendChild(el("dt", null, k));
+    kv.appendChild(el("dd", null, v === null || v === undefined ? "—" : String(v)));
+  }
+  pair("tasks compared", cmp.tasks_compared);
+  pair("improved", (cmp.improved || []).join(", ") || "none");
+  pair("regressed", (cmp.regressed || []).join(", ") || "none");
+  pair("observed flips", cmp.observed_flips);
+  pair("expected flips if nothing changed", cmp.expected_flips_if_nothing_changed);
+  container.appendChild(kv);
+  /* The caveat has to sit next to the number, not in a doc. "3 tasks flipped"
+     reads as "3 tasks improved" unless the expectation under no change is
+     right there beside it. */
+  var note = el("div", "sub");
+  note.textContent =
+    "Two arms that differ in nothing still flip tasks, because pass^k is a "
+    + "threshold on a noisy quantity. The expectation above is what chance "
+    + "alone would produce at these pass rates. It is not a significance test.";
+  container.appendChild(note);
+}
+
+function showExperimentTask(experimentId, taskId, label) {
+  var nav = expNavToken();
+  state.experimentId = experimentId;
+  state.experimentTask = taskId;
+  var d = document.getElementById("detail");
+  clear(d);
+  d.appendChild(el("div", "empty", "loading attempts…"));
+  api("/api/experiment/" + encodeURIComponent(experimentId)
+      + "/attempts?task=" + encodeURIComponent(taskId)).then(function (data) {
+    if (expNavStale(nav)) { return; }
+    clear(d);
+    var card = el("div", "card");
+    expCrumbs(card, [
+      { label: "Experiments", onClick: showExperiments },
+      /* the experiment's LABEL, matching the parent view; the id is the
+         fallback for a deep link that has no label in hand */
+      { label: label || experimentId,
+        onClick: function () { showExperiment(experimentId); } },
+      { label: taskId }
+    ]);
+    card.appendChild(el("h2", null, "Attempts"));
+    card.appendChild(el("div", "sub",
+      "Per-attempt outcomes are retained rather than collapsed to a per-task " +
+      "rate: an agent that passes a task often can still fail pass^k, and a " +
+      "rate stored at write time cannot say which."));
+    (data.attempts || []).forEach(function (row) {
+      var item = el("div", "listItem");
+      var title = el("div", "title");
+      title.appendChild(el("span", null, "attempt " + row.attempt + "  "));
+      title.appendChild(el("span", null, row.outcome || "unfinished"));
+      item.appendChild(title);
+      var sub = "source: " + (row.outcome_source || "—")
+        + (row.reward === null || row.reward === undefined ? "" : "  reward " + row.reward)
+        + (row.restarts ? "  restarts " + row.restarts : "")
+        + "  · " + row.channel_id;
+      item.appendChild(el("div", "sub", sub));
+      item.addEventListener("click", function () {
+        openExperimentAttempt(experimentId, taskId, row.attempt);
+      });
+      card.appendChild(item);
+    });
+    d.appendChild(card);
+  }).catch(function (e) {
+    if (expNavStale(nav)) { return; }
+    clear(d);
+    d.appendChild(el("div", "empty", "Could not load attempts: " + e.message));
+  });
+}
+
+function openExperimentAttempt(experimentId, taskId, attempt) {
+  var nav = expNavToken();
+  /* Resolve the attempt to its turns through the SHIPPED /api/turns route,
+     which now filters by experiment/task/attempt, then hand the first turn to
+     the existing trace view. Nothing about trace rendering is duplicated. */
+  api("/api/turns?experiment=" + encodeURIComponent(experimentId)
+      + "&task=" + encodeURIComponent(taskId)
+      + "&attempt=" + encodeURIComponent(attempt)
+      + "&limit=500").then(function (data) {
+    if (expNavStale(nav)) { return; }
+    var turns = data.turns || [];
+    if (!turns.length) {
+      var d = document.getElementById("detail");
+      clear(d);
+      d.appendChild(el("div", "empty",
+        "This attempt has no turn records. If it was restarted, its earlier "
+        + "turns were deleted so the attempt could be re-run under the same "
+        + "labels."));
+      return;
+    }
+    /* /api/turns returns newest-first, so the last element is the attempt's
+       FIRST turn — which is where a reader wants to start. The route caps at
+       500, so past that the last element is merely the oldest turn ON THIS PAGE
+       and opening it silently would be opening the wrong turn.
+       The warning is a STOP, not a note rendered a moment before
+       openTurnInDebug repaints #detail over it. */
+    if (turns.length >= 500) {
+      var d = document.getElementById("detail");
+      clear(d);
+      var card = el("div", "card");
+      card.appendChild(el("h2", null, "Attempt too long to open at its start"));
+      card.appendChild(el("div", null,
+        "This attempt has 500 or more turns, which is the page limit, so its "
+        + "first turn cannot be identified from one page. Opening the oldest "
+        + "turn on this page would start you mid-trajectory."));
+      var go = el("button", null, "Open the oldest turn on this page anyway");
+      go.addEventListener("click", function () {
+        openTurnInDebug(turns[turns.length - 1].turn_key);
+      });
+      card.appendChild(go);
+      d.appendChild(card);
+      return;
+    }
+    openTurnInDebug(turns[turns.length - 1].turn_key);
+  }).catch(function (e) {
+    if (expNavStale(nav)) { return; }
+    var d = document.getElementById("detail");
+    clear(d);
+    d.appendChild(el("div", "empty", "Could not resolve the attempt: " + e.message));
+  });
+}
+
+document.getElementById("experimentsBtn").addEventListener("click", showExperiments);
+
 /* -- turn detail ------------------------------------------------------- */
 function selectTurn(turnKey, runId) {
+  expNavToken();   // this view now owns #detail; stale experiment renders bail
   state.turnKey = turnKey;
   state.turn = null;
   state.path = [];

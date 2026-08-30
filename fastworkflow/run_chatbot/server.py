@@ -41,11 +41,14 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from fastworkflow import state_paths
 from fastworkflow.observability_store import (
     FEATURE_DISTILLATION_V1,
+    FEATURE_EXPERIMENTS_V1,
+    ExperimentNotFound,
+    HypothesisIsWriteOnce,
     IncompatibleObservabilityDB,
     ObservabilityStore,
     ReadOnlyObservabilityStore,
@@ -981,7 +984,44 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
 
     do_PUT = _refuse_write  # noqa: N815
     do_DELETE = _refuse_write  # noqa: N815
-    do_PATCH = _refuse_write  # noqa: N815
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        """The one admitted PATCH: an experiment's notes (`fix-bn1.5`).
+
+        The Host/Origin and bearer-token gates are applied per verb method with
+        no shared chokepoint -- `_handle_get` and `do_POST` each run their own --
+        so this repeats them rather than inheriting anything. A do_PATCH written
+        without them would be an ungated cross-origin write.
+        """
+        try:
+            split = urlsplit(self.path)
+            if not split.path.startswith("/api/experiment/"):
+                self._refuse_write()
+                return
+            query = parse_qs(split.query)
+            if not self._host_origin_allowed():
+                self._error(403, "forbidden: host/origin not allowed")
+                return
+            if not self._token_valid(query):
+                self._error(401, "unauthorized: missing or invalid token")
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, TypeError):
+                self._error(400, "invalid JSON body")
+                return
+            if not isinstance(body, dict):
+                self._error(400, "body must be a JSON object")
+                return
+            self._handle_experiment_patch(split.path, body)
+        except BrokenPipeError:
+            pass
+        except Exception as exc:
+            try:
+                self._error(500, f"internal error: {type(exc).__name__}")
+            except Exception:
+                pass
 
     # -- API endpoints ---------------------------------------------------
 
@@ -1020,6 +1060,11 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     {"channels": [], "conversations": [], "turns": []}
                 )
+            elif path == "/api/experiments":
+                # An empty state, not "observability DB not found": a cold start
+                # has no experiments, which is a fact about the DB rather than
+                # an error the operator can act on.
+                self._send_json({"experiments": []})
             else:
                 self._error(404, "observability DB not found")
         elif path == "/api/channels":
@@ -1036,6 +1081,13 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/turns":
             success = q("success")
+            attempt_filter = None
+            if q("attempt") is not None:
+                try:
+                    attempt_filter = int(q("attempt"))
+                except ValueError:
+                    self._error(400, "attempt must be an integer")
+                    return
             turns = store.list_turns(
                 channel_id=q("channel"),
                 conversation_id=(
@@ -1049,6 +1101,16 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 ),
                 command_name=q("command"),
                 context=q("context"),
+                # The experiment filters extend this route rather than getting a
+                # parallel implementation (`[XR9]`); they ride
+                # idx_turns_experiment.
+                experiment_id=q("experiment"),
+                task_id=q("task"),
+                # Strict: `_int` swallows a bad value and returns the default,
+                # which `list_turns` reads as "no attempt clause" -- so a typo
+                # WIDENS the filter instead of narrowing it, and the caller sees
+                # more rows than they asked for and no error.
+                attempt=attempt_filter,
                 limit=self._int(q("limit"), 100),
                 offset=self._int(q("offset"), 0),
             )
@@ -1089,6 +1151,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 except (ValueError, TypeError, KeyError):
                     pass
             self._send_json({"spans": spans})
+        elif path == "/api/experiments" or path.startswith("/api/experiment/"):
+            self._handle_experiments(store, path, q)
         elif path.startswith("/api/distillation/"):
             self._handle_distillation(store, path, q)
         elif path.startswith("/api/artifact/"):
@@ -1103,6 +1167,167 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
         else:
             self._error(404, "not found")
+
+    def _handle_experiments(
+        self,
+        store: ReadOnlyObservabilityStore,
+        path: str,
+        q: Any,
+    ) -> None:
+        """The `/api/experiment*` GET surface (`fix-bn1.5`, `[XR9]`).
+
+        The noun split is deliberate: `/api/distillation/*` owns "run" (one row
+        per compared MESSAGE) and this surface never uses that word. An
+        experiment has tasks, a task has attempts, and an attempt resolves to
+        the channel/conversation/turn keys the existing trace views already
+        render — so nothing here re-implements a viewer.
+
+        `[DR29]`'s posture: a DB written before the experiment tables existed
+        404s with a reason a human can act on, rather than raising `no such
+        table` behind a generic 500.
+        """
+        if not store.has_feature(FEATURE_EXPERIMENTS_V1):
+            self._error(404, "this database predates experiment recording")
+            return
+        if path == "/api/experiments":
+            self._send_json(
+                {
+                    "experiments": store.list_experiments(
+                        status=q("status"),
+                        arm=q("arm"),
+                        limit=self._int(q("limit"), 100),
+                        offset=self._int(q("offset"), 0),
+                    )
+                }
+            )
+            return
+
+        rest = path[len("/api/experiment/"):]
+        # Split first, THEN decode: decoding first would let a %2F inside an id
+        # invent a sub-path segment. The SPA sends encodeURIComponent(id) and
+        # create_experiment accepts any caller-supplied id, so an id containing
+        # a space or a slash would otherwise 404 forever.
+        experiment_id, _, sub = rest.partition("/")
+        experiment_id = unquote(experiment_id)
+        if not experiment_id:
+            self._error(404, "not found")
+            return
+        if sub == "":
+            detail = store.get_experiment(experiment_id)
+            if detail is None:
+                self._error(404, "experiment not found")
+                return
+            self._send_json({"experiment": detail})
+        elif sub == "tasks":
+            if store.get_experiment(experiment_id) is None:
+                self._error(404, "experiment not found")
+                return
+            self._send_json({"tasks": store.experiment_tasks(experiment_id)})
+        elif sub == "attempts":
+            if store.get_experiment(experiment_id) is None:
+                self._error(404, "experiment not found")
+                return
+            self._send_json(
+                {
+                    "attempts": store.experiment_attempt_rows(
+                        experiment_id, task_id=q("task")
+                    )
+                }
+            )
+        elif sub == "score":
+            try:
+                self._send_json({"score": store.experiment_scores(experiment_id)})
+            except ExperimentNotFound:
+                self._error(404, "experiment not found")
+        elif sub == "compare":
+            # Resolve the experiment BEFORE branching on the baseline: folding
+            # a missing experiment into `(detail or {})` reported it as 400
+            # "no baseline" rather than 404 "experiment not found", which sends
+            # the reader looking for the wrong thing.
+            detail = store.get_experiment(experiment_id)
+            if detail is None:
+                self._error(404, "experiment not found")
+                return
+            baseline = q("baseline") or detail.get("baseline_experiment_id")
+            if not baseline:
+                self._error(
+                    400,
+                    "no baseline: pass ?baseline=<experiment_id> or set "
+                    "baseline_experiment_id on the experiment",
+                )
+                return
+            try:
+                comparison = store.compare_experiments(experiment_id, baseline)
+            except ExperimentNotFound as exc:
+                self._error(404, f"experiment not found: {exc.experiment_id}")
+                return
+            # 409, not 200-with-a-flag: an incomparable pair is a refusal, and a
+            # client that renders whatever it got would render a comparison of
+            # two runs that share no task.
+            status = 200 if comparison.get("comparable") else 409
+            self._send_json(comparison, status=status)
+        else:
+            self._error(404, "not found")
+
+    def _handle_experiment_patch(self, path: str, body: dict[str, Any]) -> None:
+        """`PATCH /api/experiment/<id>` -- notes only (`fix-bn1.5`).
+
+        Admitted on the argument `[DR30]` made for `POST
+        /api/distillation/verdict`: the invariant protected is "recorded
+        observability data stays read-only over HTTP" (studio design §3.4, the
+        access-control section), and `notes` is an annotation column that cannot
+        alter any span, turn, artifact, attempt outcome or score.
+
+        `hypothesis` is refused with 409 and a reason, never a 500: it is
+        write-once by design, and the first person to hit a 500 here would file
+        it as a bug rather than read it as a contract.
+        """
+        rest = path[len("/api/experiment/"):]
+        # partition, not split-and-discard: the GET side validates its sub-path
+        # and 404s on an unknown one, and a write route that silently accepted
+        # /api/experiment/<id>/anything would make every GET sub-path an
+        # undocumented alias for the notes PATCH.
+        experiment_id, _, sub = rest.partition("/")
+        experiment_id = unquote(experiment_id)
+        if not experiment_id or sub:
+            self._error(404, "not found")
+            return
+        store = self.chatbot.open_store()
+        if store is None or not store.has_feature(FEATURE_EXPERIMENTS_V1):
+            self._error(404, "this database predates experiment recording")
+            return
+        if "hypothesis" in body:
+            self._error(
+                409,
+                "hypothesis is write-once and is fixed at experiment creation: "
+                "a prediction that can be revised after seeing the outcome is "
+                "not a pre-registration. Record the revision in notes instead.",
+            )
+            return
+        if "notes" not in body:
+            self._error(400, "nothing to patch: send {\"notes\": \"...\"}")
+            return
+        notes = body.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            self._error(400, "notes must be a string or null")
+            return
+        try:
+            # `[DR53]`: the feature check above ran through the per-request
+            # READ-ONLY handle, so a PATCH against a pre-experiments snapshot
+            # cannot be what creates the tables in it.
+            ObservabilityStore.open_for_annotation(
+                self.chatbot.db_path
+            ).update_experiment_notes(experiment_id, notes)
+        except ExperimentNotFound:
+            self._error(404, "experiment not found")
+            return
+        except HypothesisIsWriteOnce as exc:
+            self._error(409, str(exc))
+            return
+        except (OSError, sqlite3.Error) as exc:
+            self._error(500, f"could not update notes: {type(exc).__name__}")
+            return
+        self._send_json({"experiment": store.get_experiment(experiment_id)})
 
     def _handle_verdict(self, body: dict[str, Any]) -> None:
         """`POST /api/distillation/verdict` — §12 `[DR30]` + `[DR53]`.
@@ -1167,6 +1392,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                             if q("conversation") is not None
                             else None
                         ),
+                        experiment_id=q("experiment"),
                         comparable=flag("comparable"),
                         diverged=flag("diverged"),
                         include_replays=bool(flag("include_replays")),
@@ -1186,6 +1412,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             detail["retention"] = store.distillation_retention_status(
                 detail["run"]["run_id"]
             )
+            # The distillation -> experiment direction of `[XR9]`'s cross-link:
+            # "which experiment was this run part of" is a question about THIS
+            # run, and a separate route would be one the UI never calls.
+            experiment = store.experiment_labels_for_turn(
+                detail["run"].get("turn_key") or ""
+            )
+            if experiment is not None:
+                detail["experiment"] = experiment
             self._send_json(detail)
         elif rest.startswith("divergences/"):
             self._send_json(

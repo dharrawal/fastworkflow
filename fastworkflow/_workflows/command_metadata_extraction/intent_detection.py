@@ -291,7 +291,7 @@ class CommandNamePrediction:
 
         self.convo_path = os.path.join(self.app_workflow_folderpath, "___convo_info")
         self.cache_path = self._get_cache_path(self.app_workflow_id, self.convo_path)
-        self.path = self._get_cache_path_cache(self.convo_path)
+        self.path = self._get_cache_path_cache(self.convo_path, self.app_workflow_id)
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         """Predict, wrapped in a ``fw.nlu.intent`` span (D3 as amended).
@@ -592,13 +592,29 @@ class CommandNamePrediction:
         return os.path.join(base_dir, f"{workflow_id}.sqlite3")
 
     @staticmethod
-    def _get_cache_path_cache(convo_path):
+    def _get_cache_path_cache(convo_path, workflow_id=None):
         """
-        Generate cache file path based on workflow ID
+        Path to the utterance/clarification cache.
+
+        Shared across sessions by default, which is the point of the cache: a
+        disambiguation learned in one session helps the next.
+
+        `FW_UTTERANCE_CACHE_SCOPE=workflow` shards it by workflow id instead
+        (`fix-bn1` `[XR16]`). A pass^k experiment must not have correlated
+        attempts, and this file is read on the runtime turn path
+        (`cache_match`) and written on it (`store_utterance_cache`) while being
+        keyed on nothing -- so attempt 2 would inherit attempt 1's
+        disambiguation decisions, and a treatment arm would inherit the
+        baseline arm's, both arms running against the same workflow folder.
+        The sibling `_get_cache_path` is already sharded this way; this is the
+        same treatment, opt-in so ordinary runs keep their shared cache.
         """
         base_dir = convo_path
         # Create directory if it doesn't exist
         os.makedirs(base_dir, exist_ok=True)
+        scope = fastworkflow.get_env_var("FW_UTTERANCE_CACHE_SCOPE", default="shared")
+        if scope == "workflow" and workflow_id is not None:
+            return os.path.join(base_dir, f"cache-{workflow_id}.sqlite3")
         return os.path.join(base_dir, "cache.sqlite3")
 
     # Store the suggested commands with the flag type

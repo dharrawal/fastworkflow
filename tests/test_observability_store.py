@@ -1156,7 +1156,13 @@ class TestDistillationSchema:
         value = _rows(
             db_path, "SELECT value FROM diagnostics WHERE key='schema_features'"
         )[0]["value"]
-        assert set(json.loads(value)) == {"someone_elses_v9", "distillation_v1"}
+        # experiments_v1 joins the marker list as of fix-bn1.2; the point of
+        # this test is that another build's marker SURVIVES, which it still does.
+        assert set(json.loads(value)) == {
+            "someone_elses_v9",
+            "distillation_v1",
+            "experiments_v1",
+        }
 
     def test_has_feature_is_false_for_unknown_names(self, db_path):
         store = obs.ObservabilityStore(db_path)

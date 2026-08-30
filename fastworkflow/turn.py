@@ -448,3 +448,15 @@ class TurnResult(BaseModel):
     # than copies of §6.6's field list.
     execution_records: tuple[ExecutionRecordRef, ...] = ()
     routing_events: tuple[RoutingEvent, ...] = ()
+    # The experiment container's labels (`fix-bn1`,
+    # docs/experiment_container_design.md `[XR4]`/`[XR17]`). Appended, never
+    # reordered, all defaulted: an already-serialized record with none of them
+    # still validates, and every existing keyword construction still works.
+    #
+    # NULL means "not part of an experiment", which is every ordinary chatbot
+    # and CLI turn. They are bound onto the WorkflowExecutionContext before the
+    # turn by whatever is running the experiment, exactly as channel_id and
+    # conversation_id are, and copied here at construction.
+    experiment_id: Optional[str] = None
+    task_id: Optional[str] = None
+    attempt: Optional[int] = None

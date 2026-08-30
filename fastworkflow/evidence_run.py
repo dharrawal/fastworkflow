@@ -264,7 +264,14 @@ def evidence_run(
     Archiving and verification run even when the body raises, because a run that
     crashed is exactly when its evidence is most worth keeping.
     """
-    run_id = run_id or f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+    # `evr-`, not `run-` (`fix-bn1` `[XR10]`). The distillation run id is also
+    # spelled `run_id` and also starts with the literal `run-`, differing only in
+    # body shape, so a log line reading `run-...` did not say which subsystem it
+    # belonged to. That was a legibility defect until an `experiment_evidence_runs`
+    # row held one beside a `distillation_runs` join, at which point `run_id`
+    # became ambiguous in SQL. Safe to change: no DB row is keyed on it and no id
+    # is derived from it.
+    run_id = run_id or f"evr-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     db_path = state_paths.observability_db(workflow_folderpath)
     # PEEK, never construct. Constructing here is what made a cross-process run
     # certify itself: the harness got a sink of its own, both snapshots then read
@@ -355,7 +362,21 @@ def evidence_run(
             # Flush first: an unflushed queue makes the "after" snapshot describe
             # a moment before the last turns were written, so a drop during that
             # final write would land outside the measured interval.
-            sink.flush()
+            # The bool is load-bearing, not a courtesy (`SQLiteTraceSink.flush`
+            # says so in its own docstring). `_apply_batch`'s generic failure arm
+            # rolls back the whole batch, counts ONE write_error and requeues
+            # NOTHING — its comment says "the loss is total" — while
+            # `records_dropped` stays 0. `WriterHealthDelta.evidence_valid` reads
+            # only the drop counters, so without this check a run that lost an
+            # entire batch of turn records, or whose writer thread died, reports
+            # itself zero-drop and valid. False here is the only signal that the
+            # durability barrier did not settle. fix-bn1 review round 2.
+            if not sink.flush():
+                run.extra_problems.append(
+                    "the durability barrier did not settle: records enqueued "
+                    "during this run may not have been committed, so this run "
+                    "cannot claim that nothing was lost"
+                )
             sink.persist_health()
             run.health_after = _health_snapshot(db_path, sink)
         else:

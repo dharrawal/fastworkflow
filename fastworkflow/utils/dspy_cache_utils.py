@@ -17,11 +17,15 @@ def clear_dspy_cache_completely():
     """Clear DSPy cache by disabling all caching mechanisms."""
     print("🗑️  Clearing DSPy cache (disabling all cache mechanisms)...")
     
-    # Disable all DSPy caching
+    # Disable all DSPy caching.
+    #
+    # `enable_litellm_cache=` was removed from `dspy.configure_cache` before the
+    # pinned dspy 3.3.0, so passing it raised TypeError and this function could
+    # not run at all (fix-bn1 `[XR16]`). LiteLLM's own cache is off by default
+    # and is not configured here, so dropping the argument loses nothing.
     dspy.configure_cache(
         enable_disk_cache=False,
         enable_memory_cache=False,
-        enable_litellm_cache=False
     )
     
     print("✅ DSPy cache cleared - all future LLM calls will be fresh")
@@ -55,13 +59,13 @@ def clear_dspy_disk_cache(cache_dir: Optional[str] = None):
 
 
 def reset_dspy_cache_settings():
-    """Reset DSPy cache to defaults (memory + disk on, LiteLLM cache off)."""
+    """Reset DSPy cache to defaults (memory + disk on)."""
     print("🔄 Resetting DSPy cache to default settings...")
 
+    # See `clear_dspy_cache_completely` for why `enable_litellm_cache=` is gone.
     dspy.configure_cache(
         enable_disk_cache=True,
         enable_memory_cache=True,
-        enable_litellm_cache=False
     )
 
     print("✅ DSPy cache reset to defaults")
