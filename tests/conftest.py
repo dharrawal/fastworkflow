@@ -20,6 +20,10 @@ if project_root not in sys.path:
 # Set up environment for tests
 os.environ.setdefault("PYTEST_RUNNING", "1")
 
+# Imported after the sys.path insert above so the LOCAL package is the one whose
+# process-global `_env_vars` the isolation fixture snapshots and restores.
+import fastworkflow  # noqa: E402
+
 
 @pytest.fixture(autouse=True, scope="function")
 def isolate_state_root(tmp_path_factory):
@@ -31,8 +35,30 @@ def isolate_state_root(tmp_path_factory):
     state would write into the developer's real home directory and could observe
     another test's records. Tests that need a specific root still override it via
     their own init dict (the dict wins over the OS environment).
+
+    **The env dict is restored too, and that half is load-bearing** (`fix-s21`).
+    `state_paths._optional_env` reads `fastworkflow._env_vars` BEFORE
+    `os.environ`, and `fastworkflow.init()` REPLACES that dict wholesale
+    (`__init__.py:253`) — so a single test calling
+    `init({"FASTWORKFLOW_STATE_ROOT": ...})` pinned every later test in the
+    process to its own tmp directory, silently overriding the OS variable this
+    fixture sets. The symptom was 82 ERRORs in an unrelated module's fixture
+    (`assert conv_id == 1` failing with 2, 3, 4… because every test was minting
+    into one leaked database) — visible only when the two files shared a process
+    in an order that put the offender first. Collection order is alphabetical
+    here, and `test_run_chatbot_server` happens to sort BEFORE
+    `test_turn_and_cme_continuation`, which is the only reason the full suite
+    stayed green while the leak was live for everything sorting after it.
+
+    Restoring here keeps the documented "dict wins" behaviour inside a test
+    while making it impossible for that win to escape one. Note the ordering
+    that makes this safe: pytest instantiates module- and session-scoped
+    fixtures BEFORE function-scoped ones, so the snapshot below is taken after
+    any higher-scoped `init()` has run and the restore preserves it. Only what a
+    function-scoped fixture or the test body sets is reverted.
     """
     previous = os.environ.get("FASTWORKFLOW_STATE_ROOT")
+    previous_env_vars = dict(fastworkflow._env_vars)
     root = tmp_path_factory.mktemp("fw_state_root")
     os.environ["FASTWORKFLOW_STATE_ROOT"] = str(root)
     try:
@@ -42,6 +68,9 @@ def isolate_state_root(tmp_path_factory):
             os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         else:
             os.environ["FASTWORKFLOW_STATE_ROOT"] = previous
+        # Rebind rather than mutate: `init` rebinds the module global, so the
+        # object this fixture saw at setup may no longer be the live one.
+        fastworkflow._env_vars = previous_env_vars
         shutil.rmtree(root, ignore_errors=True)
 
 
