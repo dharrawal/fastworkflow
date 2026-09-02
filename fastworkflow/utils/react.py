@@ -12,7 +12,8 @@ from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 
 from fastworkflow import external_operations, tracing
-from fastworkflow.turn_budget import LegacyTurnBudget, LogicalTurnBudget, budget_from_state
+from fastworkflow.turn_budget import (LegacyTurnBudget, LogicalTurnBudget,
+                                      TurnPartial, budget_from_state)
 from fastworkflow.typed_failure import (
     CODE_ADAPTER_PARSE,
     CODE_EXTRACTION_FAILED,
@@ -528,6 +529,43 @@ class fastWorkflowReAct(Module):
         self._step_seals[idx] = seal
         return seal
 
+    def _turn_partial(self, trajectory, budget):
+        """The declared partial for a turn that stopped short, or None.
+
+        Built from the budget's counters and from `trajectory`, which the LOOP
+        wrote — a `tool_name_N` entry exists because a tool actually ran, not
+        because the model said so. That provenance is the point (EXP-027).
+        """
+        if not getattr(self, "_exhausted_last_run", False):
+            return None
+        executed = tuple(
+            str(value) for key, value in trajectory.items()
+            if key.startswith("tool_name_"))
+        return TurnPartial(
+            reason="budget-exhausted",
+            iterations_consumed=budget.iterations_consumed,
+            iteration_limit=budget.iteration_limit,
+            commands_executed=executed,
+        )
+
+    @staticmethod
+    def _exhaustion_notice(partial: TurnPartial) -> str:
+        """What the model is told before it writes the final answer.
+
+        Without this the model is handed a truncated trajectory and asked for a
+        final answer with no indication it was truncated — it sees four
+        completed walks and a request, and reports eight. The instruction is
+        explicit about the failure mode rather than merely factual, because
+        "you were cut short" and "do not report what you did not retrieve" are
+        different instructions and only the second one changes the answer.
+        """
+        return (
+            "%s You did NOT finish the requested work. Report only what you "
+            "actually retrieved above, say plainly which parts you did not "
+            "reach, and do not present a partial walk as a complete one."
+            % partial.summary
+        )
+
     def _consult_finish_policy(self, extract, trajectory, input_args):
         """The BEFORE_FINISH decision, or None when the table says nothing.
 
@@ -538,6 +576,17 @@ class fastWorkflowReAct(Module):
         """
         point = getattr(self, "decision_point", None)
         if point is None or point.mode is PolicyMode.OFF:
+            return None
+        # An exhausted turn is exempt, and the exemption is load-bearing rather
+        # than tidy. `E-defers-read-only-work` catches an answer that hands the
+        # operator commands to run — and an honest partial report legitimately
+        # says "open the remaining identities". Measured in EXP-027's stage (c):
+        # the row fired on 12 of 13 exhausted turns, on exactly the behaviour
+        # EXP-027 exists to produce. Its rewrite tells the agent to "carry out
+        # that inspection or say it is out of scope", and the agent can do
+        # neither: it has no budget left, and the work is in scope. Left alone,
+        # the policy pushes an honest partial back toward a confident whole.
+        if getattr(self, "_exhausted_last_run", False):
             return None
         answer = ""
         for key in ("final_answer", "answer", "output"):
@@ -618,6 +667,15 @@ class fastWorkflowReAct(Module):
         clause 3 forbids.
         """
         snapshot = dict(trajectory)
+        # EXP-027: the runtime knows the loop was cut short and the model does
+        # not. Appended to the SEALED snapshot before the first attempt, so
+        # every extraction retry sees the same thing — a notice that arrived
+        # only on attempt two would make the retries disagree about what
+        # happened.
+        partial = self._turn_partial(trajectory, budget)
+        if partial is not None:
+            snapshot[f"observation_{len(snapshot)}"] = self._exhaustion_notice(
+                partial)
         last_error: Optional[BaseException] = None
         corrected = False
         for attempt in range(EXTRACT_PARSE_ATTEMPTS + 1):
@@ -667,6 +725,10 @@ class fastWorkflowReAct(Module):
                     # Carried out so `fw.agent.execute` can record it: this
                     # decision has no span of its own.
                     finish_policy=corrected or None,
+                    # `exhausted` says THAT it stopped; this says what it had
+                    # done when it did, which is what a planner needs to decide
+                    # whether to allocate more (EXP-027).
+                    turn_partial=partial,
                     **extract,
                 )
             last_error = last_error or ValueError(

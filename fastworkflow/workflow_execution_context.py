@@ -69,6 +69,21 @@ def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
     # the tool loop has ended, so it has no step span to hang off, and without it
     # a corrected answer is indistinguishable from an answer that never deferred.
     # Absent on every run where the policy said nothing, which is most of them.
+    # EXP-027: a turn that stopped short says so, with counts taken from the
+    # runtime's own record. `exhausted` alone is a boolean nobody can act on.
+    partial = getattr(result, "turn_partial", None)
+    if partial is not None:
+        # Written out key by key rather than through a helper: the span-contract
+        # test reads emission sites STATICALLY, and a `partial.as_attributes()`
+        # call is opaque to it — it refused this file until the keys were
+        # visible here. That refusal is the guard working, and the keys being
+        # readable at the point they are emitted is worth more than the tidier
+        # call it replaced.
+        attributes["partial_reason"] = partial.reason
+        attributes["partial_iterations_consumed"] = partial.iterations_consumed
+        attributes["partial_iteration_limit"] = partial.iteration_limit
+        attributes["partial_commands_executed"] = len(partial.commands_executed)
+
     decision = getattr(result, "finish_policy", None)
     if decision is not None:
         attributes["finish_policy_outcome"] = decision.outcome.value

@@ -25,6 +25,8 @@ job; this model is handed a number.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Optional
@@ -51,6 +53,43 @@ class BudgetExhausted(Exception):
         super().__init__(
             f"logical-turn budget exhausted: {resource} limit {limit!r} "
             f"with {consumed!r} consumed"
+        )
+
+
+@dataclass(frozen=True)
+class TurnPartial:
+    """A turn that stopped short, and what a caller needs to decide what next.
+
+    `exhausted=True` on a Prediction is a boolean, and a boolean cannot be acted
+    on. This is what a planner can act on: how much was spent, what the bound
+    was, and what the runtime actually executed before it stopped.
+
+    **Every count here comes from the runtime's own record** — the budget's
+    counters and the trajectory the loop wrote — and none of it from the model.
+    That is the whole point (EXP-027). A completed-count the model supplied
+    would reintroduce, one level up, exactly the trust problem this exists to
+    close: an agent that truncates a walk and reports it whole is not fixed by
+    asking it how much it walked.
+
+    What this deliberately does NOT carry is a count of domain ITEMS — "four of
+    eight identities". The runtime does not know what an item is; only a
+    population cursor does, and that is EXP-026's to build. Naming what was
+    executed is what this layer can say truthfully, and stopping there is the
+    difference between a partial report and a better-dressed guess.
+    """
+
+    reason: str
+    iterations_consumed: int
+    iteration_limit: int
+    commands_executed: tuple[str, ...] = ()
+
+    @property
+    def summary(self) -> str:
+        return (
+            "Stopped early: %s after %d of %d iterations, having executed %d "
+            "command call(s)."
+            % (self.reason, self.iterations_consumed, self.iteration_limit,
+               len(self.commands_executed))
         )
 
 

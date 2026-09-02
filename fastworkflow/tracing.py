@@ -373,7 +373,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # cannot be observed cannot be measured, which is the whole objection this
     # programme exists to answer.
     SPAN_AGENT_EXECUTE: SpanContract(
-        version=2,
+        version=3,
         attributes=frozenset(
             {
                 "agent_input",
@@ -388,6 +388,15 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "finish_policy_outcome",
                 "finish_policy_source",
                 "finish_policy_table_version",
+                # v3 (EXP-027): a turn that stopped short, with counts from the
+                # runtime's own record. `exhausted` already said THAT it
+                # stopped; a reader could not tell how much had been done when
+                # it did, which is the difference between a partial result and
+                # an unexplained short answer.
+                "partial_reason",
+                "partial_iterations_consumed",
+                "partial_iteration_limit",
+                "partial_commands_executed",
             }
         ),
     ),
