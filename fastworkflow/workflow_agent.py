@@ -6,6 +6,7 @@ Provides workflow tool agent functionality for intelligent tool selection.
 import time
 import traceback
 from datetime import datetime, timezone
+from enum import Enum
 
 import dspy
 
@@ -15,8 +16,30 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.typed_failure import classify_exception
+from fastworkflow.worker_health import unwrap_request
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+
+# Where the command text a workflow is about to execute came from (FW-REQ-001
+# clause 3). This used to be inferred from `iteration_counter <= 0` — a
+# process-lifetime counter read as an origin signal, which is why a clarification
+# had to reset it to -1 and why the second turn of a session inferred the wrong
+# answer. Stated by the dispatcher instead of guessed from a budget.
+CONTEXT_KEY_INVOCATION_ORIGIN = "invocation_origin"
+
+
+class InvocationOrigin(str, Enum):
+    """Who chose the command text being executed."""
+
+    # A human typed it: the deterministic / assistant path, where the message
+    # goes to the command executor without an agent choosing anything.
+    USER = "user"
+    # The ReAct agent selected it as a tool call. True of every command the
+    # agent dispatches, including the first of a turn and the first after a
+    # clarification answer — both of which the old heuristic called `user`.
+    AGENT = "agent"
+
 
 class WorkflowAgentSignature(dspy.Signature):
     """
@@ -404,10 +427,11 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             trace_trigger="parameter_extraction_error",
         )
 
-    # Clean up the context flag after command execution
+    # Clean up the origin marker after command execution: it describes one
+    # dispatch, and a value left behind would describe the next one wrongly.
     workflow = chat_session_obj.get_active_workflow()
-    if "is_user_command" in workflow.context:
-        del workflow.context["is_user_command"]
+    if CONTEXT_KEY_INVOCATION_ORIGIN in workflow.context:
+        del workflow.context[CONTEXT_KEY_INVOCATION_ORIGIN]
 
     return response_text
 
@@ -541,7 +565,13 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     # Topology A (blocking): a persistent worker thread runs the agent and a human
     # is expected to answer, so we block indefinitely. (Topology B has no queue and
     # suspends via AskUserSuspend instead — see the ask_user tool closure.)
-    user_query = user_queue.get()
+    #
+    # Unwrapped because the answer may arrive as a request envelope (arch §13.3):
+    # a clarification answer is a submission like any other. The envelope's
+    # completion belongs to the TURN, which the worker loop delivers, so nothing
+    # is completed here — completing it on receipt would tell the submitter the
+    # turn was done while the agent was still running.
+    user_query, _envelope = unwrap_request(user_queue.get())
 
     return _post_ask_user_response(
         clarification_request, user_query, chat_session_obj
@@ -605,25 +635,39 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
         Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
         """
-        # Check if this command originated from user input (iteration_counter == 0)
-        # Set flag in workflow context so validate_extracted_parameters can access it
-        is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
+        # The agent chose this command, so the origin is stated, not inferred.
+        # `is_user_command` — the old flag, written from `iteration_counter <= 0`
+        # — had no reader anywhere in fastWorkflow or in the IDO workflow; the
+        # comment claiming validate_extracted_parameters consumed it was stale.
         workflow = chat_session_obj.get_active_workflow()
         if workflow:
-            workflow.context["is_user_command"] = is_user_command
+            workflow.context[CONTEXT_KEY_INVOCATION_ORIGIN] = (
+                InvocationOrigin.AGENT.value
+            )
         
-        # Retry logic for workflow execution
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
-            except Exception as e:
-                if attempt == max_retries - 1:  # Last attempt
-                    message = f"Terminate immediately! Exception processing {command}: {str(e)}"
-                    logger.critical(message)                    
-                    return message
-                # Continue to next attempt
-                logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
+        # Executed ONCE (EXP-011, arch §8.4 phase 2). The blind two-attempt
+        # loop this replaces re-dispatched the command on any exception, which
+        # is a second effect for anything that had already reached the backend —
+        # exactly the replay FW-REQ-008B clause 3 forbids, made with no
+        # knowledge of whether the first attempt landed.
+        #
+        # Control signals (AskUserSuspend, CommandCancelledError, ControlSignal)
+        # subclass BaseException and pass straight through: a suspension or a
+        # reconciliation-required signal must never become an observation the
+        # model can read as ordinary data.
+        try:
+            return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+        except Exception as e:
+            failure = classify_exception(e)
+            logger.error(
+                "Command %r failed (%s/%s): %s",
+                command, failure.disposition, failure.code, failure.detail,
+            )
+            # The classification is the observation, so the trajectory carries
+            # what kind of failure this was rather than a bare error string —
+            # and the model is not told to "Terminate immediately", which was a
+            # directive the runtime had no standing to issue.
+            return failure.as_observation()
 
     def ask_user(clarification_request: str) -> str:
         """
@@ -631,11 +675,9 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         The clarification_request must be plain text without any formatting.
         Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used 
         """
-        # reset iteration counter, everytime we ask the user
-        # reset to -1, because we are dual purposing (iteration_counter <= 0) to check
-        # if command passed to execute_workflow_query() originated either:
-        # externally or inside agent loop immediately after an ask_user()_call 
-        chat_session_obj.workflow_tool_agent.iteration_counter = -1
+        # No budget reset here. Asking the user does not buy the turn a fresh
+        # iteration budget (FW-REQ-001 clause 2, arch §6.4): the same
+        # LogicalTurnBudget is serialized at suspension and restored on resume.
         if chat_session_obj.user_message_queue is not None:
             return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
         raise AskUserSuspend(clarification_request)
@@ -653,7 +695,109 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         tools=tools,
         max_iters=max_iters,
         on_step_complete=on_step_complete,
+        decision_point=_policy_decision_point(),
+        contract_facts=_contract_facts(chat_session_obj),
     )
+
+
+def _contract_facts(chat_session_obj):
+    """The declared facts a `proceed` row may rest on — computed, not asserted.
+
+    `read_only_surface` is true when every command the manifest declares is
+    either `read_only` or write-capable **and not G1W-enabled**. Architecture
+    §7.3 makes an undeclared command `unknown` and §6.6.1 makes `unknown`
+    write-capable, so a single undeclared command drops the surface — the
+    conservative direction, and the one
+    `consequence-distribution-degenerate` forces, since `effect_kind` is the
+    only informative field the effect contract carries.
+
+    **Why write-capable-but-disabled still counts as read-only.** FW-REQ-021
+    clause 2 evaluates consequence for the candidate action *in its binding*,
+    not for the command in the abstract. A write that cannot dispatch has no
+    write consequence. In this workflow the declared writes are exactly the
+    three G1W-track commands — `add_tag`, `remove_tag`, `apply_remediation` —
+    and per-command write enablement is its own approval (plan §6), none of
+    which has been given. Reading the surface as write-capable because those
+    three exist would silence the policy on a surface where no write can happen.
+
+    **The enablement list is read, never assumed.** `FW_G1W_ENABLED` is a
+    comma-separated set of G1W-approved definition ids, empty by default. Enable
+    one and the surface stops being read-only and this table goes silent, which
+    is the conservative direction arriving on its own rather than by anyone
+    remembering to arrange it.
+
+    A missing manifest yields the default facts, which are `unknown` — so a
+    workflow that ships no manifest gets caution rather than a free proceed.
+    """
+    from fastworkflow.policy_decision import ContractFacts
+
+    from fastworkflow.runtime_manifest import load_manifest
+
+    workflow = getattr(chat_session_obj, "app_workflow", None)
+    folderpath = getattr(workflow, "folderpath", None)
+    if not folderpath:
+        return ContractFacts()
+    try:
+        manifest = load_manifest(folderpath)
+    except Exception:  # noqa: BLE001 - absence is a legitimate state, see above
+        return ContractFacts()
+    if manifest is None or not getattr(manifest, "commands", None):
+        return ContractFacts()
+    import os
+
+    enabled_writes = {
+        name.strip()
+        for name in os.environ.get("FW_G1W_ENABLED", "").split(",")
+        if name.strip()
+    }
+    unguarded = sorted(
+        name for name, declaration in manifest.commands.items()
+        if declaration.effect_kind() != "read_only" and name in enabled_writes
+    )
+    undeclared = sorted(
+        name for name, declaration in manifest.commands.items()
+        if declaration.effect_kind() == "unknown"
+    )
+    read_only = not unguarded and not undeclared
+    return ContractFacts(
+        effect_kind="read_only" if read_only else "unknown",
+        read_only_surface=read_only,
+        authorization_scope=getattr(chat_session_obj, "authorization_scope",
+                                    "unknown") or "unknown",
+    )
+
+
+def _policy_decision_point():
+    """Build FW-REQ-017's decision point from the workflow's declared table.
+
+    Two env vars, both defaulting to the clause-5 no-op, because a policy that
+    turns itself on is not a feature flag. `FW_ASK_POLICY` is the mode; the
+    table is imported from the module the workflow names in
+    `FW_ASK_POLICY_TABLE` (`package.module:ATTR`).
+
+    Import failure is a hard error rather than a silent fall back to OFF. A run
+    configured to ENFORCE that quietly enforced nothing would be recorded as a
+    treatment arm and measured as one, which is the confound the whole
+    experiment exists to avoid.
+    """
+    import importlib
+    import os
+
+    from fastworkflow.policy_decision import (
+        NO_OP_TABLE, PolicyDecisionPoint, PolicyMode)
+
+    mode = PolicyMode(os.environ.get("FW_ASK_POLICY", PolicyMode.OFF.value))
+    if mode is PolicyMode.OFF:
+        return PolicyDecisionPoint(NO_OP_TABLE, PolicyMode.OFF)
+    reference = os.environ.get("FW_ASK_POLICY_TABLE", "")
+    if not reference:
+        raise ValueError(
+            "FW_ASK_POLICY=%s with no FW_ASK_POLICY_TABLE: the mechanism is "
+            "framework-side but the table is workflow content (FW-REQ-017 "
+            "clause 2), so there is nothing to enforce" % mode.value)
+    module_name, _, attribute = reference.partition(":")
+    table = getattr(importlib.import_module(module_name), attribute or "TABLE")
+    return PolicyDecisionPoint(table, mode)
 
 
 def build_query_with_next_steps(user_query: str,

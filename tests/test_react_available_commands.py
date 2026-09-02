@@ -5,6 +5,7 @@ Integration tests for ReAct agent with available_commands injection.
 import pytest
 import dspy
 from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.turn_budget import LogicalTurnBudget
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 
 
@@ -43,7 +44,8 @@ def test_react_accepts_available_commands_parameter():
             # This should not raise a TypeError about unexpected keyword argument
             result = agent(
                 question="What is Python?",
-                available_commands="Command 1: get_info - Get information about a topic"
+                available_commands="Command 1: get_info - Get information about a topic",
+                budget=LogicalTurnBudget(iteration_limit=3),
             )
     except Exception as e:
         # We expect API errors, not signature errors

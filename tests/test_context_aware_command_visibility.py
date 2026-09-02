@@ -20,6 +20,7 @@ import fastworkflow
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.turn_budget import LogicalTurnBudget
 from fastworkflow.workflow_agent import _refresh_agent_available_commands
 
 
@@ -117,7 +118,8 @@ def test_bound_method_listener_can_be_removed(todo_list_env):
 def test_react_resume_aliases_inputs_to_active_run_args():
     """resume must set self.inputs to the stashed input_args dict (same object)."""
     agent = fastWorkflowReAct.__new__(fastWorkflowReAct)
-    agent.iteration_counter = 0
+    agent._budget = LogicalTurnBudget(iteration_limit=5)
+    agent._step_seals = {}
     agent.max_iters = 5
     agent.inputs = {"available_commands": "stale"}
     agent.current_trajectory = {}
@@ -159,7 +161,7 @@ def test_react_resume_aliases_inputs_to_active_run_args():
     )
 
     # Simpler: patch _run_loop to assert alias then complete
-    def fake_run_loop(trajectory, idx, input_args, max_iters, exception_count):
+    def fake_run_loop(trajectory, idx, input_args, budget, exception_count):
         assert agent.inputs is active_args
         assert input_args is active_args
         # Simulate a mid-run refresh mutating available_commands

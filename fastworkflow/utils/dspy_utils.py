@@ -52,6 +52,17 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     if fastworkflow.get_env_var("FW_LM_CACHE", default="1") in ("0", "false", "False"):
         kwargs.setdefault("cache", False)
 
+    # Per-role provider bounds (arch §13.2.1, FW-REQ-008 clause 1). Every model
+    # call had the provider's own default timeout and the provider's own default
+    # retry count — neither chosen here, neither visible, and neither related to
+    # the turn the call belongs to. A hung provider therefore hung a turn for as
+    # long as the provider felt like it.
+    #
+    # `setdefault`, so an explicit caller kwarg still wins, and the values are
+    # clamped to whatever remains of the active external-operation deadline: a
+    # per-call timeout longer than the turn's own bound is not a bound.
+    _apply_role_policy(kwargs, model_env_var)
+
     model = fastworkflow.get_env_var(model_env_var)
     if not model:
         logger.critical(f"Critical Error: DSPy Language Model not provided. Set {model_env_var} environment variable.")
@@ -89,6 +100,56 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
         if api_key
         else dspy.LM(model=model, **kwargs)
     )
+
+# Per-role LM policy (arch §13.2.1). The role is read from the env-var name the
+# caller asked for, because that is the only thing distinguishing one model call
+# from another at this seam — `LLM_AGENT`, `LLM_PLANNER`, `LLM_PARAM_EXTRACTION`
+# and the distillation roles all arrive here as a string.
+#
+# Retries are PINNED rather than left to the provider default, because an
+# unpinned provider retry is a retry nobody counted: it multiplies the wall time
+# of a call whose deadline was computed for one attempt, and for a write it
+# would re-dispatch an effect the runtime never learned about.
+_ROLE_TIMEOUTS: dict[str, float] = {
+    "LLM_PLANNER": 120.0,
+    "LLM_AGENT": 120.0,
+    "LLM_PARAM_EXTRACTION": 90.0,
+    "LLM_SUMMARIZATION": 90.0,
+    "LLM_CLARIFICATION": 90.0,
+    "LLM_TEACHER": 180.0,
+    "LLM_STUDENT": 180.0,
+    "LLM_INSIGHT_EXTRACTION": 180.0,
+}
+_DEFAULT_ROLE_TIMEOUT = 120.0
+# Pinned at dspy's own default rather than changed. What matters here is that
+# the number is CHOSEN and visible — arch §13.2.1 asks for a pinned retry count,
+# not for a smaller one — so a provider-library upgrade cannot silently change
+# how many times a turn's model call is retried underneath a phase that thinks
+# it made one attempt.
+#
+# Lowering it was tried and reverted the same day: at 1, transient provider 503s
+# ("Service temporarily unavailable due to high load") started failing turns
+# that had always ridden them out. The retry these attempts represent is
+# recovery from a TRANSPORT failure, which is a different question from the
+# phase-scoped retry of a bad RESPONSE (arch §8.4), and removing it was
+# removing a recovery rather than relocating one.
+_PINNED_NUM_RETRIES = 3
+
+
+def _apply_role_policy(kwargs: dict, model_env_var: str) -> None:
+    """Set provider timeout and retry count for this role, clamped to the deadline."""
+    from fastworkflow.external_operations import clamp_timeout
+
+    timeout = _ROLE_TIMEOUTS.get(model_env_var, _DEFAULT_ROLE_TIMEOUT)
+    clamped = clamp_timeout(timeout)
+    if clamped is not None:
+        # A deadline with nothing left would ask the provider for a zero-second
+        # call, which most clients treat as "no timeout" — the opposite of what
+        # is meant. The floor keeps the request honestly bounded and lets the
+        # deadline check that follows report the expiry as what it is.
+        kwargs.setdefault("timeout", max(1.0, float(clamped)))
+    kwargs.setdefault("num_retries", _PINNED_NUM_RETRIES)
+
 
 def _process_field(field_info, is_input: bool) -> Tuple[Any, Any, bool]:
     """Process a single field and return its type, DSPy field, and optional status."""

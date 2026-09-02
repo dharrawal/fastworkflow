@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 import os
 from pathlib import Path
 
@@ -60,6 +60,10 @@ class CommandContextModel:
     _resolved_ancestors: dict[str, list[str]] = field(
         default_factory=dict, init=False
     )
+    # Built on first use and kept for the model's lifetime: it reads the same
+    # raw declarations the model was loaded from, so it cannot go stale without
+    # the model going stale first.
+    _capability_index: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         # Inheritance is resolved lazily on first `commands()` call to
@@ -264,6 +268,72 @@ class CommandContextModel:
         visiting.remove(context_name)
 
         return final_effective_commands_list
+
+    # ---------------------------------------------------------------------
+    # Occupancy and effective capability (arch §11.1, FW-REQ-004/005)
+    # ---------------------------------------------------------------------
+
+    def is_occupiable(self, context_name: str) -> bool:
+        """Whether this context can be the workflow's CURRENT context.
+
+        A base or mixin context contributes inherited commands and cannot be
+        entered (requirements §4.4). The runtime manifest is authoritative when
+        a workflow declares one; without a manifest this answers True for every
+        known context, which is compatibility mode — exactly current behavior,
+        because refusing to enter an undeclared context would break every
+        workflow that has no manifest (arch §7.1).
+        """
+        occupiable = self._manifest_occupiable()
+        if occupiable is None:
+            return context_name in self._command_contexts or context_name == "*"
+        return context_name in occupiable
+
+    def occupiable_contexts(self) -> tuple[str, ...]:
+        """Every context that can be entered, sorted."""
+        occupiable = self._manifest_occupiable()
+        if occupiable is None:
+            return tuple(sorted(self._command_contexts))
+        return tuple(sorted(name for name in self._command_contexts if name in occupiable))
+
+    def _manifest_occupiable(self) -> Optional[frozenset[str]]:
+        """The manifest's occupancy declaration, or None when there is none.
+
+        None is not "nothing is occupiable" — it is "nobody said", and the two
+        must not be confused (the same rule `RuntimeMetadata.is_occupiable`
+        states for a single context).
+        """
+        from fastworkflow.runtime_manifest import get_runtime_metadata
+
+        metadata = get_runtime_metadata(self._workflow_path)
+        if metadata is None or not metadata.has_workflow_manifest:
+            return None
+        declared = metadata.occupiable_contexts()
+        return frozenset(declared) if declared else None
+
+    def capability_index(self) -> "CommandCapabilityIndex":
+        """The raw-definition capability index (arch §10.1).
+
+        Built from `_command_contexts` — the merged raw declarations, before
+        `commands()` flattens them onto simple names — and cached per model
+        instance. `commands()` is deliberately not used as a source: it has
+        already picked one winner per simple name, so the collisions this index
+        exists to represent are gone by then.
+        """
+        if self._capability_index is None:
+            from fastworkflow.command_resolution import CommandCapabilityIndex
+
+            cmd_dir = get_cached_command_directory(self._workflow_path)
+            occupiable = self._manifest_occupiable()
+            self._capability_index = CommandCapabilityIndex.build(
+                self._command_contexts,
+                core_command_names=tuple(cmd_dir.core_command_names),
+                occupiable_contexts=occupiable,
+            )
+        return self._capability_index
+
+    def effective_capabilities(self, context_name: str) -> tuple:
+        """Everything callable from `context_name`, as effective capabilities."""
+        return self.capability_index().effective_capabilities(context_name)
 
     # ---------------------------------------------------------------------
     # Context callback class resolution

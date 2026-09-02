@@ -29,7 +29,10 @@ def run_main(args):
         check_startup_conformance,
         deployment_env,
         register_runtime_metadata,
+        resolve_runtime_config,
     )
+    from fastworkflow.runtime_config import register_runtime_config
+    from fastworkflow.worker_health import WorkerDeadError
 
     # Progress bar helper
     from fastworkflow.utils.startup_progress import StartupProgress
@@ -170,6 +173,14 @@ def run_main(args):
                 args.workflow_path, env=deployment_env(fastworkflow._env_vars)
             ),
         )
+
+        # The per-logical-turn ReAct budget's deployment maximum (arch §6.0).
+        # Registered here for the same reason the manifest metadata is: resolved
+        # once at startup, so a turn reads a limit somebody configured rather
+        # than one it read out of the environment mid-run.
+        register_runtime_config(
+            resolve_runtime_config(deployment_env(fastworkflow._env_vars))
+        )
     except ManifestConformanceError as e:
         StartupProgress.end()
         console.print(f"[bold red]Error:[/bold red] {e}")
@@ -303,7 +314,17 @@ def run_main(args):
             console.print("[bold]Agent >[/bold] New conversation started!\n", end="")
             user_command = prompt_session.prompt()
 
-        fastworkflow.chat_session.user_message_queue.put(user_command)
+        # Submitted through the health-aware API rather than raw-queued (arch
+        # §13.3): when the worker has died, this raises here with the
+        # classification instead of leaving the drain loop below spinning on a
+        # sentinel that is never coming.
+        try:
+            fastworkflow.chat_session.submit(user_command)
+        except WorkerDeadError as dead:
+            console.print(
+                f"[bold red]Session failed:[/bold red] {dead.failure.detail}"
+            )
+            break
 
         # Show spinner while draining trace events until sentinel signals completion
         with console.status("[bold cyan]Processing command...[/bold cyan]", spinner="dots") as status:

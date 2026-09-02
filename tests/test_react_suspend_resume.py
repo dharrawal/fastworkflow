@@ -7,12 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
+from fastworkflow.turn_budget import LogicalTurnBudget
 
 
 def _bare_react_agent(**tools):
     """Construct a fastWorkflowReAct without running Module.__init__ (no dspy Tool wiring)."""
     agent = fastWorkflowReAct.__new__(fastWorkflowReAct)
-    agent.iteration_counter = 0
+    agent._budget = LogicalTurnBudget(iteration_limit=5)
+    agent._step_seals = {}
     agent.max_iters = 5
     agent.inputs = {}
     agent.current_trajectory = {}
@@ -33,7 +35,7 @@ def test_run_loop_returns_suspended_prediction_without_observation():
         next_tool_args={"clarification_request": "Which one?"},
     )
 
-    result = agent._run_loop({}, 0, {"query": "hello"}, max_iters=5, exception_count=0)
+    result = agent._run_loop({}, 0, {"query": "hello"}, LogicalTurnBudget(iteration_limit=5), 0)
 
     assert result is not None
     assert result.suspended is True
@@ -91,7 +93,7 @@ def test_run_loop_mirrors_full_step_into_current_trajectory():
     agent.react = lambda trajectory, **input_args: next(preds)  # type: ignore[method-assign]
     agent.extract = lambda trajectory, **input_args: {"final_answer": "ok"}  # type: ignore[method-assign]
 
-    result = agent._run_loop({}, 0, {"query": "hello"}, max_iters=5, exception_count=0)
+    result = agent._run_loop({}, 0, {"query": "hello"}, LogicalTurnBudget(iteration_limit=5), 0)
 
     assert result is None  # completed normally
     ct = agent.current_trajectory
@@ -136,13 +138,15 @@ def test_current_trajectory_resets_each_forward_turn():
 
     # Turn 1: 3 tool steps -> populates indices up to thought_3/observation_3.
     agent._call_with_potential_trajectory_truncation = make_turn(3)  # type: ignore[method-assign]
-    agent.forward(query="first")
+    # Each forward() is a fresh logical turn, so each gets its own budget —
+    # which is the FW-REQ-001 property this test now also documents.
+    agent.forward(query="first", budget=LogicalTurnBudget(iteration_limit=5))
     assert "observation_3" in agent.current_trajectory  # deep turn
 
     # Turn 2: 1 tool step -> only indices 0 and 1. If forward() reset the mirror,
     # the leftover observation_3 from turn 1 must be GONE.
     agent._call_with_potential_trajectory_truncation = make_turn(1)  # type: ignore[method-assign]
-    agent.forward(query="second")
+    agent.forward(query="second", budget=LogicalTurnBudget(iteration_limit=5))
     second_keys = set(agent.current_trajectory.keys())
 
     assert "thought_0" in second_keys

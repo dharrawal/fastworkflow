@@ -31,7 +31,18 @@ PENDING_STATE_KEY = "pending"
 # pre-3.0 pending blob is both at an abandoned path and, by policy, refused
 # rather than migrated. The bump makes the refusal explicit even if an old blob
 # is somehow presented to a 3.0 build.
-SCHEMA_VERSION = 3
+# 4: the per-logical-turn budget (FW-REQ-001, arch §6.4/§9.2). The suspended
+# ReAct blob carries a whole `LogicalTurnBudget` instead of a bare
+# `iteration_counter`, so a resumed turn continues on the budget it had left.
+SCHEMA_VERSION = 4
+
+# The versions this build can restore. Unlike the 2→3 break, 3 is *readable*:
+# the only difference is a field the v3 writer did not have, and a v3 blob is a
+# suspended turn minutes old that a user is still waiting on. It is restored
+# into an explicit `LegacyTurnBudget` (arch §9.2) — the persisted counter is
+# kept, a per-turn reconstruction is not claimed, and that one turn stays pinned
+# to legacy semantics until it completes or is cancelled.
+READABLE_SCHEMA_VERSIONS: frozenset[int] = frozenset({3, SCHEMA_VERSION})
 
 
 class IncompatibleSessionState(Exception):
@@ -48,13 +59,31 @@ class IncompatibleSessionState(Exception):
     asking again; a partial restore is not.
     """
 
-    def __init__(self, found: Any, expected: int = SCHEMA_VERSION):
+    def __init__(
+        self,
+        found: Any,
+        expected: int = SCHEMA_VERSION,
+        *,
+        preserve: bool = False,
+    ):
         self.found = found
         self.expected = expected
+        # Whether the caller must LEAVE the blob on disk. True for a
+        # forward-version blob: arch §9.2 requires that state written by a newer
+        # engine be preserved and failed closed on, not deleted, so a rollback
+        # does not destroy a turn the newer engine can still finish. False for
+        # anything unreadable in the other direction or malformed, where nothing
+        # will ever read it and keeping it only re-raises on every cold start.
+        self.preserve = preserve
+        readable = ", ".join(str(v) for v in sorted(READABLE_SCHEMA_VERSIONS))
         super().__init__(
             f"pending session state is schema version {found!r}, "
-            f"but this build reads version {expected}"
+            f"but this build reads version {expected} (readable: {readable})"
         )
+
+    @classmethod
+    def forward_version(cls, found: Any) -> "IncompatibleSessionState":
+        return cls(found, preserve=True)
 
 
 SAVED_AT_KEY = "_saved_at"

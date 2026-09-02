@@ -279,7 +279,13 @@ def test_an_awaiting_user_turn_reports_its_question_in_the_answer():
 
 
 def test_a_deferred_turn_reports_only_its_polling_handle():
-    """Nothing to project yet, so the 202 body stays the handle plus exec_state."""
+    """Nothing to project yet, so the 202 body stays the handle plus its state.
+
+    `phase` joins `exec_state` here (EXP-011, arch §13.4): a poller that only
+    sees "running" cannot tell a slow backend call from an execution parked on
+    a lock it will never get, which is the difference between waiting and
+    escalating.
+    """
     execn = TurnExecution(
         turn_key=fastworkflow.mint_turn_key(),
         channel_id=_channel("defer"),
@@ -291,7 +297,11 @@ def test_a_deferred_turn_reports_only_its_polling_handle():
     code, body = render_turn_response(execn)
 
     assert code == 202
-    assert body == {"turn_key": execn.turn_key, "exec_state": "running"}
+    assert body == {
+        "turn_key": execn.turn_key,
+        "exec_state": "running",
+        "phase": "queued",
+    }
 
 
 # ---------------------------------------------------------------------------

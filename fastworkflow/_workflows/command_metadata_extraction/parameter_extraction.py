@@ -10,6 +10,7 @@ from pydantic_core import PydanticUndefined
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
+from fastworkflow.command_resolution import strip_command_token
 from fastworkflow import ModuleType, tracing
 from fastworkflow.decision_signals import (
     DecisionUncertainty,
@@ -240,7 +241,11 @@ class ParameterExtraction:
 
         stored_params = self._get_stored_parameters(self.cme_workflow)
 
-        self.command = self.command.replace(self.command_name, "").strip()
+        # Only the leading token, once (FW-REQ-003 clause 5). `str.replace`
+        # removed EVERY occurrence: a parameter value containing the command
+        # name — a search for `show_properties`, a tag named after a command —
+        # came back mutilated, and still looked like a valid string.
+        self.command = strip_command_token(self.command, self.command_name)
 
         input_for_param_extraction = InputForParamExtraction.create(
             self.app_workflow, self.command_name, 

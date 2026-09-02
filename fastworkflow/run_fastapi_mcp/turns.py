@@ -42,8 +42,14 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 import fastworkflow
+from fastworkflow import external_operations
 from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.turn import TurnStatus
+from fastworkflow.typed_failure import (
+    CODE_WORKER_STUCK,
+    TypedFailure,
+    classify_exception,
+)
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.react import NoSuspendedAgentStateError
 
@@ -84,6 +90,38 @@ class ExecState(str, enum.Enum):
 
 
 _TERMINAL_STATES = (ExecState.DONE, ExecState.LOST)
+
+
+class TurnPhase(str, enum.Enum):
+    """Where inside the execution the work is (arch §13.4).
+
+    ``ExecState`` says whether an answer is available; the phase says what the
+    execution is doing while it is not. The distinction is what makes a stalled
+    execution diagnosable: RUNNING for nine minutes means nothing on its own,
+    RUNNING/`awaiting-lock` for nine minutes names the thing it is waiting for.
+    """
+
+    QUEUED = "queued"
+    AWAITING_LOCK = "awaiting-lock"
+    RUNNING_WORK = "running-work"
+    COLLECTING = "collecting"
+    PERSISTING = "persisting"
+    TERMINALIZING = "terminalizing"
+    DONE = "done"
+
+
+# How long an execution may run before the watchdog calls it stuck. Generous by
+# design: the point is to detect an execution that will never terminalize, not
+# to bound a slow turn — bounding those is EXP-013's deadline classes, applied
+# at the call that is actually slow.
+DEFAULT_TURN_DEADLINE_SECONDS = 900.0
+# Added to the deadline before anything is declared lost, so a turn finishing
+# right at its deadline is not raced by the watchdog.
+DEADLINE_GRACE_SECONDS = 30.0
+WATCHDOG_INTERVAL_SECONDS = 5.0
+# Above this many stuck executions the server is not safe to send traffic to:
+# each one holds an executor thread that never comes back.
+DEFAULT_MAX_STUCK_EXECUTIONS = 4
 
 
 # Kinds worth keeping after they finish. ``/initialize`` re-polls its startup
@@ -193,9 +231,55 @@ class TurnExecution:
     finished_at: Optional[datetime] = None
     ttl_expires_at: Optional[datetime] = None
 
+    # ---- supervision (arch §13.4, EXP-011) --------------------------------
+    # When this execution stops being believable. Not a cancellation: nothing
+    # here stops a running backend call (the epoch fence below is process-local
+    # and says so), it decides when the execution is reported as lost.
+    deadline_at: Optional[datetime] = None
+    phase: TurnPhase = TurnPhase.QUEUED
+    # Advanced at every phase change, so "stuck" is measurable without reading
+    # a thread stack (FW-REQ-008 clause 4).
+    heartbeat_at: datetime = field(default_factory=_now)
+    # Why this execution became terminal, when it was not the work finishing.
+    terminalization_reason: Optional[str] = None
+    # The journal operation this execution owns, once EXP-014's journal exists.
+    # Carried now because a LOST execution's operation must be *preserved*
+    # (arch §13.4) and there has to be a field naming what to preserve.
+    operation_id: Optional[str] = None
+    failure: Optional[TypedFailure] = None
+    # Per-channel ownership fence. Every publication and terminalization checks
+    # it, so a late thread from a previous execution cannot publish over the
+    # one that replaced it.
+    epoch: int = 0
+
     @property
     def is_terminal(self) -> bool:
         return self.exec_state in _TERMINAL_STATES
+
+    @property
+    def is_overdue(self) -> bool:
+        """Past deadline plus grace, and still not terminal."""
+        if self.deadline_at is None or self.is_terminal:
+            return False
+        return _now() >= self.deadline_at + timedelta(seconds=DEADLINE_GRACE_SECONDS)
+
+    def beat(self, phase: Optional[TurnPhase] = None) -> None:
+        self.heartbeat_at = _now()
+        if phase is not None:
+            self.phase = phase
+
+    def health(self) -> dict[str, Any]:
+        """Coarse status only. Never channel, tenant, principal, or command."""
+        return {
+            "exec_state": self.exec_state.value,
+            "phase": self.phase.value,
+            "age_seconds": round((_now() - self.created_at).total_seconds(), 3),
+            "heartbeat_age_seconds": round(
+                (_now() - self.heartbeat_at).total_seconds(), 3
+            ),
+            "overdue": self.is_overdue,
+            "terminalization_reason": self.terminalization_reason,
+        }
 
 
 class ChannelBusyError(Exception):
@@ -236,6 +320,8 @@ class TurnRegistry:
         collectable_kinds: frozenset[str] = COLLECTABLE_TERMINAL_KINDS,
         max_retained_terminal: int = MAX_RETAINED_STARTUP_TURNS,
         retention_seconds: float = TURN_RETENTION_SECONDS,
+        turn_deadline_seconds: float = DEFAULT_TURN_DEADLINE_SECONDS,
+        max_stuck_executions: int = DEFAULT_MAX_STUCK_EXECUTIONS,
     ) -> None:
         self._by_key: dict[str, TurnExecution] = {}
         # channel_id -> turn_key of the live (non-terminal) execution.
@@ -245,6 +331,17 @@ class TurnRegistry:
         self._max_retained_terminal = max_retained_terminal
         self._retention_seconds = retention_seconds
         self._admission_closed = False
+        # Per-channel execution epoch (arch §13.4). Incremented for every new
+        # execution, so a thread from a previous one can be recognised as stale
+        # by comparing the number it captured against the current value.
+        self._epoch_by_channel: dict[str, int] = {}
+        self._turn_deadline_seconds = turn_deadline_seconds
+        self._max_stuck = max_stuck_executions
+        self._watchdog_task: Optional[asyncio.Task] = None
+        # Executions the watchdog gave up on. Retained rather than discarded:
+        # each one may still be holding an executor thread and an unresolved
+        # operation, and readiness has to be able to count them.
+        self._stuck_keys: set[str] = set()
 
     async def close_admission(self) -> None:
         """Stop admitting new turns, atomically with respect to submission.
@@ -342,6 +439,8 @@ class TurnRegistry:
                     return existing
                 raise ChannelBusyError(existing)
 
+            epoch = self._epoch_by_channel.get(channel_id, 0) + 1
+            self._epoch_by_channel[channel_id] = epoch
             execn = TurnExecution(
                 turn_key=fastworkflow.mint_turn_key(),
                 channel_id=channel_id,
@@ -349,6 +448,8 @@ class TurnRegistry:
                 idempotency_key=idempotency_key,
                 user_id=user_id,
                 http_bearer_token=http_bearer_token,
+                epoch=epoch,
+                deadline_at=_now() + timedelta(seconds=self._turn_deadline_seconds),
             )
             self._by_key[execn.turn_key] = execn
             self._active_by_channel[channel_id] = execn.turn_key
@@ -365,6 +466,126 @@ class TurnRegistry:
                     self._active_by_channel.pop(channel_id, None)
                 raise
             return execn
+
+    # ------------------------------------------------------------------
+    # Supervision (arch §13.4)
+    # ------------------------------------------------------------------
+
+    def current_epoch(self, channel_id: str) -> int:
+        return self._epoch_by_channel.get(channel_id, 0)
+
+    def owns_channel(self, execn: TurnExecution) -> bool:
+        """Whether this execution is still the channel's owner.
+
+        The process-local fence of arch §13.4: a late thread from a replaced
+        execution cannot publish state or terminalize. It does **not** stop an
+        already-running backend call, which is why G1W additionally requires
+        native adapter deadlines and a no-transfer journal owner — recorded
+        here so nobody reads this as more protection than it is.
+        """
+        return self.current_epoch(execn.channel_id) == execn.epoch
+
+    def mark_lost(self, execn: TurnExecution, reason: str) -> bool:
+        """Give up on an execution that will not terminalize.
+
+        Four things this deliberately does NOT do (arch §13.4):
+
+        * it does not clear the active pointer — the deadline elapsing is not
+          evidence that the work stopped, and handing the channel to a new turn
+          while the old one may still be writing is how two turns end up
+          interleaved on one workflow;
+        * it does not cancel the task — cancelling an executor thread that is
+          inside a blocking backend call does nothing except lie about it;
+        * it does not resolve the operation — an unknown outcome stays unknown
+          (FW-REQ-008B), which is why `operation_id` is preserved here;
+        * it does not decrement stuck capacity — the thread is still gone.
+
+        It does release the waiters, with a classification, because a caller
+        blocked on `done_event` for a turn nobody will finish is the failure
+        mode this whole slice exists to remove.
+        """
+        if execn.is_terminal:
+            return False
+        execn.exec_state = ExecState.LOST
+        execn.phase = TurnPhase.TERMINALIZING
+        execn.terminalization_reason = reason
+        execn.failure = TypedFailure(
+            # Not `permanent`: we do not know what the work did, only that it
+            # stopped reporting. Anything that later reads this must go through
+            # reconciliation rather than assume a failure.
+            disposition="outcome-unknown",
+            code=CODE_WORKER_STUCK,
+            detail=f"{reason}; execution {execn.turn_key} preserved for reconciliation",
+        )
+        execn.error = execn.error or execn.failure.as_observation()
+        execn.finished_at = _now()
+        self._stuck_keys.add(execn.turn_key)
+        execn.done_event.set()
+        logger.error(
+            "Turn %s (kind=%s) marked LOST: %s. Active pointer and operation "
+            "state retained.", execn.turn_key, execn.kind, reason,
+        )
+        return True
+
+    def sweep(self) -> list[TurnExecution]:
+        """One watchdog pass. Returns the executions it lost this time."""
+        lost = []
+        for execn in list(self._by_key.values()):
+            if execn.is_overdue:
+                if self.mark_lost(
+                    execn,
+                    f"no terminalization within {self._turn_deadline_seconds:.0f}s "
+                    f"+ {DEADLINE_GRACE_SECONDS:.0f}s grace (phase={execn.phase.value})",
+                ):
+                    lost.append(execn)
+        return lost
+
+    async def _watchdog(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+                self.sweep()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - the watchdog must not die
+                logger.error("Turn watchdog pass failed: %s", exc)
+
+    def start_watchdog(self) -> None:
+        """Start the supervision loop. Idempotent."""
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.ensure_future(self._watchdog())
+
+    async def stop_watchdog(self) -> None:
+        task, self._watchdog_task = self._watchdog_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    @property
+    def stuck_count(self) -> int:
+        return len(self._stuck_keys)
+
+    def readiness(self) -> dict[str, Any]:
+        """Coarse supervision health for the readiness probe (arch §13.4).
+
+        Counts and coarse status only — never a channel, tenant, principal,
+        command, or parameter — because the probe is unauthenticated.
+        """
+        active = sum(
+            1 for execn in self._by_key.values() if not execn.is_terminal
+        )
+        stuck = self.stuck_count
+        return {
+            "ready": stuck < self._max_stuck and not self._admission_closed,
+            "active_executions": active,
+            "stuck_executions": stuck,
+            "max_stuck_executions": self._max_stuck,
+            "admission_closed": self._admission_closed,
+            "watchdog_running": bool(
+                self._watchdog_task is not None and not self._watchdog_task.done()
+            ),
+        }
 
     async def clear_active(self, channel_id: str, turn_key: str) -> None:
         """Retire a finished execution: clear its active pointer and bound retention.
@@ -606,10 +827,12 @@ async def _run_turn(
     # finally to decide whether the conversation crossed a refresh milestone. A
     # turn whose work raised never reaches the save and leaves this at 0.
     turns_appended = 0
+    execn.beat(TurnPhase.AWAITING_LOCK)
     try:
         async with runtime.lock:
             execn.exec_state = ExecState.RUNNING
             execn.started_at = _now()
+            execn.beat(TurnPhase.RUNNING_WORK)
 
             # [R9] record the execution↔logical mapping as early as knowable,
             # under the lock, before the worker thread exists (no race). A
@@ -622,8 +845,28 @@ async def _run_turn(
                 execn.logical_turn_key = ctx.current_turn_key
 
             with installed_credential(runtime, execn.http_bearer_token):
-                result = await loop.run_in_executor(None, work_fn)
+                # The deadline is explicitly copied into the executor thread
+                # (arch §13.2 last paragraph). A ContextVar does not cross a
+                # thread boundary, and every blocking backend call in a turn
+                # runs on the far side of this one — so without the copy the
+                # bound would apply exactly where nothing needs it.
+                result = await loop.run_in_executor(
+                    None, external_operations.copy_into_thread(work_fn)
+                )
+            # The epoch fence (arch §13.4): every state publication checks it,
+            # so a thread that outlived its execution cannot write a result over
+            # the turn that replaced it. Checked here — the first publication
+            # after the blocking call — not only at terminalization.
+            if not registry.owns_channel(execn):
+                logger.error(
+                    "Turn %s finished after ownership moved (epoch %d, current "
+                    "%d); discarding its result rather than publishing it.",
+                    execn.turn_key, execn.epoch,
+                    registry.current_epoch(execn.channel_id),
+                )
+                return
             execn.result = result
+            execn.beat(TurnPhase.COLLECTING)
             if result is not None:
                 execn.logical_turn_key = result.turn_key
 
@@ -641,6 +884,7 @@ async def _run_turn(
             # poller can never see "done" with unsaved state. What is left is
             # windowing the in-memory history, which defers itself if that
             # write degraded to the queue (ruling I2).
+            execn.beat(TurnPhase.PERSISTING)
             turns_appended = _turns_appended(runtime)
             trim_conversation_window(runtime, logger)
             _persist_after_turn(session_manager, runtime, result)
@@ -653,21 +897,45 @@ async def _run_turn(
         )
     except Exception as exc:
         execn.error = str(exc)
+        # Classified rather than only logged (FW-REQ-008 clause 7), so a reader
+        # can tell a permanent failure from a transient one without parsing the
+        # message text.
+        execn.failure = classify_exception(exc)
+        execn.terminalization_reason = execn.failure.code
         logger.error(
             f"Turn {execn.turn_key} (kind={execn.kind}, "
             f"channel={execn.channel_id}) failed: {exc}"
         )
         traceback.print_exc()
     finally:
-        execn.finished_at = _now()
-        # Before the outcome becomes observable: this is the path /initialize's
-        # startup turn takes, so it is the one that has to make the fact durable.
-        _commit_startup_outcome(session_manager, runtime, execn)
-        execn.exec_state = ExecState.DONE
-        await registry.clear_active(execn.channel_id, execn.turn_key)
-        execn.done_event.set()
-        # Last, and outside everything above: see _label_conversation_after_turn.
-        await _label_conversation_after_turn(runtime, execn, turns_appended)
+        # `if/else` rather than an early `return`: a `return` inside a `finally`
+        # SWALLOWS whatever exception is propagating through it, so a cancelled
+        # task would come out of here looking like a completed one.
+        if execn.is_terminal:
+            # The watchdog already gave up on this execution and released its
+            # waiters. Re-terminalizing would overwrite the recorded
+            # `outcome-unknown` with a tidier answer that arrived after anyone
+            # could act on it.
+            logger.warning(
+                "Turn %s completed after being marked %s (%s); its late result "
+                "is not published.",
+                execn.turn_key, execn.exec_state.value,
+                execn.terminalization_reason,
+            )
+        else:
+            execn.beat(TurnPhase.TERMINALIZING)
+            execn.finished_at = _now()
+            # Before the outcome becomes observable: this is the path
+            # /initialize's startup turn takes, so it is the one that has to
+            # make the fact durable.
+            _commit_startup_outcome(session_manager, runtime, execn)
+            execn.exec_state = ExecState.DONE
+            execn.phase = TurnPhase.DONE
+            await registry.clear_active(execn.channel_id, execn.turn_key)
+            execn.done_event.set()
+            # Last, and outside everything above: see
+            # _label_conversation_after_turn.
+            await _label_conversation_after_turn(runtime, execn, turns_appended)
 
 
 async def run_owned_turn(
@@ -704,10 +972,12 @@ async def run_owned_turn(
     ``execn.error`` when deciding what to deliver.
     """
     turns_appended = 0
+    execn.beat(TurnPhase.AWAITING_LOCK)
     try:
         async with runtime.lock:
             execn.exec_state = ExecState.RUNNING
             execn.started_at = _now()
+            execn.beat(TurnPhase.RUNNING_WORK)
 
             # [R9] same execution↔logical capture as _run_turn (see there).
             ctx = runtime.execution_context
@@ -716,10 +986,21 @@ async def run_owned_turn(
                 execn.logical_turn_key = ctx.current_turn_key
 
             with installed_credential(runtime, execn.http_bearer_token):
-                execn.result = await work()
+                owned_result = await work()
+            if not registry.owns_channel(execn):
+                logger.error(
+                    "Owned turn %s finished after ownership moved (epoch %d, "
+                    "current %d); discarding its result.",
+                    execn.turn_key, execn.epoch,
+                    registry.current_epoch(execn.channel_id),
+                )
+                return
+            execn.result = owned_result
+            execn.beat(TurnPhase.COLLECTING)
             if execn.result is not None:
                 execn.logical_turn_key = execn.result.turn_key
 
+            execn.beat(TurnPhase.PERSISTING)
             turns_appended = _turns_appended(runtime)
             trim_conversation_window(runtime, logger)
     except NoSuspendedAgentStateError as exc:
@@ -731,16 +1012,37 @@ async def run_owned_turn(
         )
     except Exception as exc:
         execn.error = str(exc)
+        # Classified rather than only logged (FW-REQ-008 clause 7), so a reader
+        # can tell a permanent failure from a transient one without parsing the
+        # message text.
+        execn.failure = classify_exception(exc)
+        execn.terminalization_reason = execn.failure.code
         logger.error(
             f"Turn {execn.turn_key} (kind={execn.kind}, "
             f"channel={execn.channel_id}) failed: {exc}"
         )
         traceback.print_exc()
     finally:
-        execn.finished_at = _now()
-        execn.exec_state = ExecState.DONE
-        await registry.clear_active(execn.channel_id, execn.turn_key)
-        execn.done_event.set()
+        # `if/else`, not an early `return`: see the note in `_run_turn` — a
+        # `return` in a `finally` swallows a propagating exception.
+        if execn.is_terminal:
+            logger.warning(
+                "Owned turn %s completed after being marked %s (%s); its late "
+                "result is not published.",
+                execn.turn_key, execn.exec_state.value,
+                execn.terminalization_reason,
+            )
+            # `on_done` still runs below. It is the streaming endpoint's flush
+            # of its own response body, and a client whose stream never ends is
+            # a worse outcome than one that ends with the failure the watchdog
+            # already recorded.
+        else:
+            execn.beat(TurnPhase.TERMINALIZING)
+            execn.finished_at = _now()
+            execn.exec_state = ExecState.DONE
+            execn.phase = TurnPhase.DONE
+            await registry.clear_active(execn.channel_id, execn.turn_key)
+            execn.done_event.set()
         if on_done is not None:
             # Before the trim and the label, both of which do I/O the caller's
             # client should not be waiting on. Its own try: a caller's delivery
@@ -922,6 +1224,10 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
         body = {
             "turn_key": execn.turn_key,
             "exec_state": ExecState.RUNNING.value,
+            # What it is doing while it is not done (arch §13.4). A poller that
+            # only sees "running" cannot tell a slow backend call from an
+            # execution parked on a lock it will never get.
+            "phase": execn.phase.value,
         }
         if execn.logical_turn_key:
             body["logical_turn_key"] = execn.logical_turn_key
@@ -933,6 +1239,12 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
             "exec_state": execn.exec_state.value,
             "error": execn.error,
         }
+        if execn.failure is not None:
+            # The classification beside the message, so an unknown outcome is
+            # readable as one instead of being inferred from wording.
+            body["failure"] = execn.failure.to_state()
+        if execn.terminalization_reason:
+            body["terminalization_reason"] = execn.terminalization_reason
         if execn.logical_turn_key:
             body["logical_turn_key"] = execn.logical_turn_key
         return 200, body

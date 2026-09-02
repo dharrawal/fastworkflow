@@ -16,6 +16,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.utils.react import NoSuspendedAgentStateError
+from fastworkflow.turn_budget import LogicalTurnBudget
 from fastworkflow.workflow_agent import _ask_user_tool
 from fastworkflow.workflow_execution_context import (
     CommandCancelledError,
@@ -213,7 +214,7 @@ def test_run_agent_threads_planning_context_to_planner(
     _set_agents(ctx, mock_agent)
     monkeypatch.setattr(
         ctx,
-        "_call_agent_with_retry",
+        "_call_agent",
         # **kwargs absorbs the fw.agent.execute trace parameters (trace_input,
         # resumed) this test does not care about.
         lambda agent_call, lm=None, **kwargs: SimpleNamespace(final_answer="done"),
@@ -266,7 +267,14 @@ def test_topology_b_resume_parity_steps(
     parity_log: dict[str, object] = {}
 
     def tracking_post(clarification_request, user_response, chat_session_obj):
-        parity_log["iteration_counter"] = chat_session_obj._workflow_tool_agent.iteration_counter
+        # What the budget looks like at the moment the clarification answer is
+        # processed. It used to read -1: ask_user reset the counter and resume
+        # reset it again, so every round-trip bought the turn a fresh budget.
+        # FW-REQ-001 clause 2 forbids that, so the recorded value is now the
+        # spend the turn had already made.
+        parity_log["iterations_consumed"] = (
+            chat_session_obj._workflow_tool_agent.budget.iterations_consumed
+        )
         parity_log["clarification"] = clarification_request
         parity_log["user_response"] = user_response
         wf.context["raw_user_message"] = user_response
@@ -287,8 +295,10 @@ def test_topology_b_resume_parity_steps(
     suspended = SimpleNamespace(suspended=True, clarification="Need detail?")
     completed = SimpleNamespace(final_answer="Finished")
 
+    suspended_budget = LogicalTurnBudget(iteration_limit=25, iterations_consumed=3)
+
     mock_agent = MagicMock()
-    mock_agent.iteration_counter = 3
+    mock_agent.budget = suspended_budget
     mock_agent.return_value = suspended
     mock_agent.resume.return_value = completed
     _set_agents(ctx, mock_agent)
@@ -296,7 +306,10 @@ def test_topology_b_resume_parity_steps(
     ctx._execute_message("start")
     ctx._execute_message("user answer")
 
-    assert parity_log["iteration_counter"] == -1
+    assert parity_log["iterations_consumed"] == 3
+    # The resumed turn continues on the suspended turn's own budget object,
+    # rather than on one this process minted for it.
+    assert ctx.turn_budget is suspended_budget
     assert parity_log["clarification"] == "Need detail?"
     assert parity_log["user_response"] == "user answer"
     assert parity_log["replan_called"] is True

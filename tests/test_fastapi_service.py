@@ -557,7 +557,14 @@ def test_admin_endpoints_absent_from_openapi_when_disabled(app_module):
 
 
 def test_leading_slash_stripping(app_module):
-    """Test that /invoke_agent strips leading slashes (404 for missing session)"""
+    """Test that /invoke_agent strips leading slashes (404 for missing session)
+
+    Accepts 202 for the same reason `test_session_not_found_errors` already
+    does: this makes a real LLM call, and `/invoke_*` is wait-or-defer, so 202
+    is as correct as 200 when the provider is slower than the wait window.
+    Pinning 200 made the test fail on provider latency rather than on the
+    slash handling it is named after.
+    """
     client = TestClient(app_module.app)
     token = app_module.create_access_token("nonexistent_user")
     headers = {"Authorization": f"Bearer {token}"}
@@ -565,7 +572,7 @@ def test_leading_slash_stripping(app_module):
         "user_query": "///test query with multiple slashes",
         "timeout_seconds": 10,
     })
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
 
 
 def test_concurrent_request_handling(app_module, unique_user_id):

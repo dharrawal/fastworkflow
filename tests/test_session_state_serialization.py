@@ -161,7 +161,7 @@ def test_disk_session_state_store_roundtrip(tmp_path):
 
 @pytest.mark.parametrize(
     "found",
-    [SCHEMA_VERSION + 1, SCHEMA_VERSION - 1, 0, None, "1"],
+    [SCHEMA_VERSION + 1, 2, 0, None, "1"],
     ids=["newer", "older", "missing-as-zero", "null", "string"],
 )
 def test_unreadable_schema_version_applies_nothing(
@@ -194,6 +194,10 @@ def test_unreadable_schema_version_applies_nothing(
 
     assert excinfo.value.found == found
     assert excinfo.value.expected == SCHEMA_VERSION
+    # Only a FORWARD version is preserved on disk (arch §9.2): a rollback must
+    # not delete a turn the newer engine can still finish, while nothing will
+    # ever make an older-than-readable or malformed blob readable.
+    assert excinfo.value.preserve is (isinstance(found, int) and found > SCHEMA_VERSION)
 
     assert not ctx.awaiting_user
     assert ctx._suspended_user_message is None

@@ -74,7 +74,9 @@ def _metadata(**manifest_fields):
 # ======================================================================
 
 
-@pytest.mark.parametrize("module", ["runtime_manifest.py", "provenance.py"])
+@pytest.mark.parametrize(
+    "module", ["runtime_manifest.py", "provenance.py", "runtime_config.py"]
+)
 def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     """Arch §22, checked structurally so it cannot rot.
 
@@ -82,7 +84,15 @@ def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     rule is about what they import, so read the imports rather than trusting a
     comment: any `fastworkflow.*` import must name another declared leaf.
     """
-    leaves = {"fastworkflow.runtime_manifest", "fastworkflow.provenance"}
+    leaves = {
+        "fastworkflow.runtime_manifest",
+        "fastworkflow.provenance",
+        # The deployment configuration surface FW-REQ-001 clause 5 introduces.
+        # A leaf by the same rule as the other two: stdlib and dataclasses only,
+        # taking an environment mapping rather than reaching for the package
+        # root's `_env_vars` (arch §22).
+        "fastworkflow.runtime_config",
+    }
     tree = ast.parse((REPO_ROOT / "fastworkflow" / module).read_text(encoding="utf-8"))
 
     imported: list[str] = []

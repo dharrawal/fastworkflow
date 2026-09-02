@@ -12,6 +12,18 @@ import litellm
 
 import fastworkflow
 from fastworkflow import active_workflow
+from fastworkflow.typed_failure import (
+    CODE_WORKER_FAILED,
+    TypedFailure,
+    classify_exception,
+)
+from fastworkflow.worker_health import (
+    TurnRequest,
+    WorkerDeadError,
+    WorkerHealth,
+    WorkerState,
+    unwrap_request,
+)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.startup_progress import StartupProgress
@@ -28,23 +40,54 @@ class ChatWorker(Thread):
         super().__init__()
         self.chat_session = chat_session
         self.daemon = True
-        
+
     def run(self):
-        """Process messages for the root workflow"""
+        """Process messages for the root workflow, under supervision.
+
+        Arch §13.3, FW-REQ-008 clause 3. This used to be a bare try/finally, so
+        an exception escaping the message loop terminated the only worker
+        silently: the thread died, `_status` went to STOPPED, and every caller
+        blocked on `command_output_queue.get()` waited for a reply nobody was
+        left to send. The loop below catches the outer-loop terminal failure,
+        classifies it, records it on health, and *delivers* it — a failure
+        CommandOutput and its trace sentinel — so a waiting caller is released
+        with an answer instead of a timeout.
+        """
+        session = self.chat_session
+        session._health.beat(WorkerState.RUNNING)
         try:
-            self.chat_session._status = SessionStatus.RUNNING
-            workflow = self.chat_session._current_workflow
+            session._status = SessionStatus.RUNNING
+            workflow = session._current_workflow
             if workflow:
                 logger.debug(f"Started root workflow {workflow.id}")
-            
-            # Run the workflow loop
-            self.chat_session._run_workflow_loop()
-            
+
+            session._run_workflow_loop()
+        except BaseException as exc:  # noqa: BLE001 - terminal supervision point
+            failure = classify_exception(exc)
+            failure = TypedFailure(
+                disposition=failure.disposition,
+                code=CODE_WORKER_FAILED,
+                detail=f"worker loop terminated: {failure.detail}",
+            )
+            session._health.record_worker_failure(
+                failure, turn_key=session._core.current_turn_key
+            )
+            logger.critical(
+                "Chat worker terminated: %s", failure.as_observation(), exc_info=True
+            )
+            session._deliver_worker_failure(failure)
+            # Not re-raised: the thread is ending either way, and a traceback on
+            # a daemon thread is not a delivery mechanism. The classification is
+            # on health and in the output queue, which is where a caller looks.
         finally:
-            self.chat_session._status = SessionStatus.STOPPED
+            session._status = SessionStatus.STOPPED
+            # `set_state` refuses to un-poison, so a worker that FAILED above is
+            # not relabelled STOPPED here (§13.3: the poisoning stays visible).
+            session._health.set_state(WorkerState.STOPPED)
+            session._fail_queued_requests(session._health.rejection_failure())
             # Ensure workflow is popped if thread terminates unexpectedly
-            if self.chat_session.get_active_workflow() is not None:
-                self.chat_session.pop_active_workflow()
+            if session.get_active_workflow() is not None:
+                session.pop_active_workflow()
 
 class ChatSession:
     def get_active_workflow(self) -> Optional[fastworkflow.Workflow]:
@@ -79,22 +122,32 @@ class ChatSession:
         """
         # Set status to stopping to signal the workflow loop to exit
         self._status = SessionStatus.STOPPING
-        
+        self._health.set_state(WorkerState.STOPPING)
+
         # Wait for the chat worker thread to finish if it exists
         if self._chat_worker and self._chat_worker.is_alive():
             self._chat_worker.join(timeout=5.0)  # Wait up to 5 seconds
             if self._chat_worker.is_alive():
-                logger.warning("Chat worker thread did not terminate within timeout")
-        
+                # Arch §13.3: a timed-out join() does not clear ownership and
+                # does not claim termination. The thread may still be inside a
+                # call; clearing the stack and reporting STOPPED — which is what
+                # this used to do unconditionally — hands the next workflow a
+                # session whose predecessor is still running in it.
+                detail = "chat worker did not terminate within 5s of stop_workflow"
+                logger.error("%s; ownership retained and worker marked stuck", detail)
+                self._health.mark_stuck(detail)
+                return
+
         # Clear the workflow stack
         self.clear_workflow_stack()
-        
+
         # Reset status to stopped
         self._status = SessionStatus.STOPPED
-        
+        self._health.set_state(WorkerState.STOPPED)
+
         # Clear current workflow reference
         self._current_workflow = None
-        
+
         logger.debug("Workflow stopped and workflow stack cleared")
 
     def __init__(
@@ -141,6 +194,10 @@ class ChatSession:
         self._chat_worker = None
         self._current_workflow = None
         self._keep_alive = False
+        # Worker health as a value (FW-REQ-008 clause 4): observable without
+        # reading a thread stack, and the thing `submit`/`receive_turn` consult
+        # so a caller fails promptly instead of blocking on a dead worker.
+        self._health = WorkerHealth()
 
         from fastworkflow.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
@@ -253,7 +310,11 @@ class ChatSession:
         
         command_output = None
         if self._keep_alive:
-            # Root workflow gets a worker thread
+            # Root workflow gets a worker thread. Refuse to start one over a
+            # poisoned predecessor: its ownership was retained deliberately.
+            if self._health.is_poisoned:
+                raise WorkerDeadError(self._health)
+            self._health = WorkerHealth(state=WorkerState.STARTING)
             self._chat_worker = ChatWorker(self)
             self._chat_worker.start()
         else:
@@ -363,6 +424,111 @@ class ChatSession:
         #         f"conversation_traces_{datetime.now().strftime('%m_%d_%Y:%H_%M_%S')}.jsonl"
         #     )
 
+    # ------------------------------------------------------------------
+    # Worker supervision (arch §13.3, FW-REQ-008 clauses 3-5)
+    # ------------------------------------------------------------------
+
+    @property
+    def health(self) -> WorkerHealth:
+        """Observable worker health — state, heartbeat, last classified failure."""
+        return self._health
+
+    def _failure_output(
+        self, failure: TypedFailure
+    ) -> fastworkflow.CommandOutput:
+        """A CommandOutput that says a turn failed, and says how.
+
+        `success` is left to the response's own failure flag rather than being
+        described in prose: a caller reading the transport must be able to tell
+        a failed turn from a successful one without parsing text.
+        """
+        active = self.get_active_workflow()
+        response = fastworkflow.CommandResponse(
+            response=failure.as_observation(), success=False
+        )
+        response.artifacts["failure"] = failure.to_state()
+        output = fastworkflow.CommandOutput(command_response=response)
+        if active is not None:
+            output.workflow_name = active.folderpath.split("/")[-1]
+        return output
+
+    def _publish_failure(self, output: fastworkflow.CommandOutput) -> None:
+        """Put a failure on the transport, output before sentinel.
+
+        The ordering is the existing transport contract (see `_ask_user_tool`):
+        the payload must be visible before the sentinel releases the reader.
+        """
+        if self._command_output_queue is not None:
+            self._command_output_queue.put(output)
+        if self._command_trace_queue is not None:
+            self._command_trace_queue.put(None)
+
+    def _deliver_worker_failure(self, failure: TypedFailure) -> None:
+        """Release whoever is waiting, with the classification."""
+        with contextlib.suppress(Exception):
+            self._publish_failure(self._failure_output(failure))
+
+    def _fail_queued_requests(self, failure: TypedFailure) -> int:
+        """Fail every envelope still queued for a worker that is gone.
+
+        Raw (non-envelope) submissions are drained too — there is nowhere to
+        deliver their failure, which is exactly the gap envelopes close — and
+        the count is logged so the loss is visible rather than silent.
+        """
+        failed = raw = 0
+        while True:
+            try:
+                item = self._user_message_queue.get_nowait()
+            except Empty:
+                break
+            _payload, request = unwrap_request(item)
+            if request is not None:
+                request.fail(failure)
+                failed += 1
+            else:
+                raw += 1
+        if raw:
+            logger.warning(
+                "Dropped %d queued message(s) submitted without an envelope; "
+                "they have no failure delivery path", raw
+            )
+        return failed
+
+    def submit(self, message, *, envelope: bool = True):
+        """Submit a message to the worker, failing fast when it cannot run it.
+
+        FW-REQ-008 clause 5. The raw `user_message_queue.put()` path still works
+        and is what `envelope=False` reproduces; it just cannot tell the caller
+        that nobody will ever read it.
+        """
+        if self._keep_alive and not self._health.is_alive:
+            raise WorkerDeadError(self._health)
+        if not envelope:
+            self._user_message_queue.put(message)
+            return None
+        request = TurnRequest(payload=message, request_id=str(time.time_ns()))
+        self._user_message_queue.put(request)
+        return request
+
+    def receive_turn(self, timeout: Optional[float] = None):
+        """Health-aware replacement for `command_output_queue.get()`.
+
+        Arch §13.3: supported callers migrate off raw queue polling. The
+        difference that matters is at the bottom of this loop — when the queue
+        is empty *and* the worker is gone, this raises instead of waiting out a
+        timeout that cannot end in an answer.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            try:
+                return self._command_output_queue.get(timeout=0.1)
+            except Empty:
+                pass
+            if not self._health.is_alive:
+                raise WorkerDeadError(self._health)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("no turn output within the requested window")
+
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
         """
         Run the workflow message processing loop.
@@ -385,8 +551,10 @@ class ChatSession:
             while (
                 not self.workflow_is_complete or self._keep_alive
             ) and self._status != SessionStatus.STOPPING:
+                request = None
                 try:
-                    message = self.user_message_queue.get()
+                    self._health.beat(WorkerState.RUNNING)
+                    message, request = unwrap_request(self.user_message_queue.get())
 
                     if isinstance(message, fastworkflow.Action):
                         last_output = self._core.process_action(message)
@@ -395,8 +563,36 @@ class ChatSession:
                     # Emit the turn record/root-span close for observability;
                     # the CLI transport itself still rides the queues.
                     self._core.finalize_turn_for_observability(last_output)
+                    if request is not None:
+                        request.complete(last_output)
+                    self._health.beat()
 
                 except Empty:
+                    continue
+                except Exception as exc:
+                    # FW-REQ-008 clause 3: an unhandled turn exception is a
+                    # terminal FAILED TURN, not a dead worker. The turn's
+                    # failure is classified, delivered on the transport, and
+                    # the loop goes back for the next message — which is what
+                    # makes the acceptance criterion "a following independent
+                    # turn can run" true rather than aspirational.
+                    #
+                    # `except Exception`, deliberately not BaseException: the
+                    # control signals (CommandCancelledError, AskUserSuspend)
+                    # and thread-level signals subclass BaseException and must
+                    # keep their existing handling, which is above this frame.
+                    failure = classify_exception(exc)
+                    self._health.record_turn_failure(
+                        failure, turn_key=self._core.current_turn_key
+                    )
+                    logger.error(
+                        "Turn failed: %s", failure.as_observation(), exc_info=True
+                    )
+                    last_output = self._failure_output(failure)
+                    self._publish_failure(last_output)
+                    if request is not None:
+                        request.fail(failure)
+                    self._health.beat()
                     continue
 
             # Return final output for child workflows, regardless of success/failure

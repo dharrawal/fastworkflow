@@ -5,7 +5,7 @@ including a centralized API for extracting command metadata.
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import inspect
 from pathlib import Path
 import json
@@ -641,6 +641,19 @@ class CommandMetadataAPI:
             crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
             already_listed = set(crd.contexts.get(active_context_name, ()))
 
+            # Occupancy filter (arch §11.2, FW-REQ-004). A base or mixin context
+            # is a command-surface contribution, not a place: nothing navigates
+            # into `Resource`, so a heading saying "commands available after
+            # entering the Resource context" describes an action the agent
+            # cannot take, and the plans it writes against that heading cannot
+            # be executed. The commands themselves are not removed — they
+            # appear under each concrete context that inherits them, which is
+            # where they are actually callable.
+            #
+            # Base contexts stay in routing and training data untouched (§11.2
+            # last clause): this is a rendering filter, not a surface change.
+            occupiable = CommandMetadataAPI._occupiable_context_names(crd)
+
             # Order sections shallowest-first so the command
             # that ENTERS a context is introduced before the context that requires it.
             def _depth(context_name: str) -> int:
@@ -652,6 +665,8 @@ class CommandMetadataAPI:
             sections: List[str] = [base_text]
             for context_name in sorted(crd.contexts, key=lambda c: (_depth(c), c)):
                 if context_name == active_context_name:
+                    continue
+                if occupiable is not None and context_name not in occupiable:
                     continue
                 new_commands = [
                     qualified_name
@@ -674,7 +689,12 @@ class CommandMetadataAPI:
                         qualified_command_name=qualified_name,
                         for_agents=for_agents,
                     ):
-                        parts.append(part)
+                        parts.append(
+                            part
+                            + CommandMetadataAPI._definition_metadata(
+                                context_name, qualified_name
+                            )
+                        )
                 # Do not re-list these under a later context that also inherits them.
                 already_listed.update(new_commands)
                 sections.append("\n".join(parts))
@@ -736,6 +756,42 @@ class CommandMetadataAPI:
             combined_lines.extend(lines)
 
         return "\n".join(combined_lines)
+
+    @staticmethod
+    def _occupiable_context_names(crd) -> Optional[set]:
+        """Contexts that can be entered, or None when nobody has said.
+
+        None is not "none of them": a workflow with no runtime manifest has
+        declared no occupancy, and filtering everything out on that basis would
+        empty the menu. It means "render as before" (arch §7.1 compatibility).
+        """
+        try:
+            declared = crd.context_model.occupiable_contexts()
+        except Exception:
+            return None
+        if not declared:
+            return None
+        # `*` is the global surface and is always enterable; it is spelled
+        # differently in different tables, so both spellings are admitted.
+        return set(declared) | {"*", "global"}
+
+    @staticmethod
+    def _definition_metadata(context_name: str, qualified_command_name: str) -> str:
+        """The canonical definition ID, when the alias is not the definition.
+
+        Arch §11.2: an inherited command is shown under the context it is
+        callable in, and the definition that owns it is metadata rather than the
+        heading. Empty for a command the context owns, where the alias and the
+        definition are the same string and repeating it is noise.
+        """
+        owner = (
+            qualified_command_name.split("/")[0]
+            if "/" in qualified_command_name
+            else "*"
+        )
+        if owner == context_name:
+            return ""
+        return f"\n  definition: {qualified_command_name}"
 
     @staticmethod
     def get_command_display_text_for_command(

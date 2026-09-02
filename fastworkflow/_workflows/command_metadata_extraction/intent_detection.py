@@ -9,6 +9,11 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow import NLUPipelineStage, tracing
 from fastworkflow.cache_matching import cache_match, store_utterance_cache
+from fastworkflow.command_resolution import (
+    index_for_workflow,
+    simple_name_resolution_enforced,
+    strip_command_token,
+)
 from fastworkflow.decision_signals import (
     DecisionUncertainty,
     UncertaintySignal,
@@ -426,13 +431,48 @@ class CommandNamePrediction:
                 ].plain_utterances
             }
 
+        # Exact identity FIRST (arch §10.3, FW-REQ-003 clauses 1-2): a command
+        # the caller named exactly is resolved without a fuzzy matcher and
+        # without a model call. Only text that resolves to `unknown-command`
+        # continues to the layers below, which is step 6 of the resolution
+        # order.
+        command_name = None
+        exact = self._resolve_exact_identity(command, command_context_name)
+        if exact is not None and exact.resolved:
+            capability = exact.capability
+            nlu_trace["matcher_layer"] = "exact_identity"
+            nlu_trace["definition_id"] = capability.definition.definition_id
+            nlu_trace["effective_context"] = capability.effective_context_name
+            nlu_trace["capability_source"] = capability.source
+            nlu_trace["override_rank"] = capability.override_rank
+            command = strip_command_token(command, capability.simple_name)
+            self.cme_workflow.context["command"] = command
+            return CommandNamePrediction.Output(
+                command_name=capability.definition.definition_id,
+                is_cme_command=(
+                    capability.definition.definition_id in cme_command_names
+                    or capability.definition.definition_id
+                    in crd.get_command_names('ErrorCorrection')
+                ),
+            )
+        if exact is not None and exact.failure in ("not-callable-here", "ambiguous-route"):
+            # FW-REQ-005 clause 4: reclassification does not replace a known
+            # command identity. The identity is preserved and reported; nothing
+            # navigates, nothing infers a target, and no model is called.
+            nlu_trace["matcher_layer"] = "exact_identity"
+            nlu_trace["typed_failure"] = exact.failure
+            return CommandNamePrediction.Output(error_msg=exact.detail)
+
         # See if the command starts with a command name followed by a space or a '('
         tentative_command_name = command.split(" ", 1)[0].split("(", 1)[0]
         normalized_command_name = tentative_command_name.lower()
-        command_name = None
         if normalized_command_name in command_name_dict:
             command_name = normalized_command_name
-            command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
+            # Only the leading token's span, never every matching substring
+            # (FW-REQ-003 clause 5): a parameter whose value contains the
+            # command name used to be silently mutilated, and what came back
+            # was still a plausible-looking string.
+            command = strip_command_token(command, tentative_command_name)
             nlu_trace["matcher_layer"] = "exact_prefix"
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
@@ -580,6 +620,45 @@ class CommandNamePrediction:
             command_name=fully_qualified_command_name,
             is_cme_command=is_cme_command
         )
+
+    def _resolve_exact_identity(self, command: str, command_context_name: str):
+        """Arch §10.3 steps 1-5, or None when this layer does not apply.
+
+        Returns None — meaning "carry on to the existing matchers" — for every
+        case that is not an exact identity, so this is additive: the fuzzy,
+        cache and classifier layers below see exactly the text they saw before
+        unless an identity was actually named.
+
+        Scope note, and the reason this is not simply "resolve everything":
+        bare simple names are resolved by identity only where the workflow
+        declares `command_identity_v1` and the deployment enables it. A leading
+        word that happens to match a command name in another context is
+        ordinary natural language until somebody says otherwise, and answering
+        `not-callable-here` for it would move classifier predictions in a
+        non-training slice (requirements §12.3). Qualified tokens carry no such
+        ambiguity and are always resolved.
+        """
+        from fastworkflow.command_resolution import is_qualified_identity, parse_command
+
+        index = index_for_workflow(self.app_workflow_folderpath)
+        if index is None:
+            return None
+
+        token = parse_command(command).command_token
+        if not token:
+            return None
+        # A well-formed `Context/name`, not merely a token containing a slash:
+        # `/add_two_numbers` is a slash-command prefix, and reading its empty
+        # first half as a context made a callable command report
+        # `not-callable-here` in context '*'.
+        qualified = is_qualified_identity(token)
+        if not qualified and not simple_name_resolution_enforced(
+            self.app_workflow_folderpath
+        ):
+            return None
+
+        resolution = index.resolve_exact(token, command_context_name)
+        return None if resolution.is_unknown else resolution
 
     @staticmethod
     def _get_cache_path(workflow_id, convo_path):

@@ -32,6 +32,8 @@ from typing import Any, Optional
 import dspy
 
 import fastworkflow
+from fastworkflow import external_operations
+from fastworkflow.turn_budget import LogicalTurnBudget
 from fastworkflow import tracing
 from fastworkflow import distillation_alignment as alignment
 from fastworkflow.observability_store import COUNT_LIVE_SPANS
@@ -177,7 +179,12 @@ _FINGERPRINT_DROP_KEYS = frozenset(
     {
         "app_workflow",
         "raw_user_message",
-        "is_user_command",
+        "invocation_origin",
+        # Written by the pass itself, and DIFFERENT per pass by design (§13.5
+        # clause 2 wants teacher and student in distinct logical-call
+        # namespaces). Left in, it would make every pass differ from every other
+        # by construction — which is the exact reason this drop-set exists.
+        "distillation_invocation_path",
         "stored_parameters",
         "NLU_Pipeline_Stage",
     }
@@ -2020,10 +2027,29 @@ class DistillationSession:
             # agent-invocation contract (dspy.context + AdapterParseError retry).
             agent_lm = dspy_utils.get_lm(agent_lm_role, agent_api_key_role)
             self._record_lm_params("agent", agent_lm)
-            agent_result = self.chat_session._call_agent_with_retry(
+            # A fresh budget per pass, not the WEC turn's. Teacher and student
+            # are two alternative executions of the SAME logical turn, not
+            # sequential work inside it, so sharing one budget would starve
+            # whichever ran second. This is exact parity with the pre-budget
+            # behavior: each pass built a new agent whose iteration_counter
+            # started at zero.
+            pass_budget = LogicalTurnBudget(
+                iteration_limit=self.chat_session._effective_react_max_iterations()
+            )
+            # Distinct invocation path per pass (arch §13.5 clause 2). Teacher
+            # and student must not share a logical-call namespace: two passes
+            # that derived the same key for the same step would look to the
+            # operation journal like one call made twice, which is exactly the
+            # join EXP-014 uses to suppress a replay.
+            invocation_path = f"distill:{agent_lm_role}"
+            self.chat_session.get_active_workflow().context[
+                "distillation_invocation_path"
+            ] = invocation_path
+            agent_result = self.chat_session._call_agent(
                 lambda: agent(
                     user_query=command_info,
                     available_commands=available_commands,
+                    budget=pass_budget,
                 ),
                 lm=agent_lm,
             )
@@ -2319,7 +2345,13 @@ class DistillationSession:
                     "LLM_DISTILLATION", "LITELLM_API_KEY_DISTILLATION"
                 )
 
-                with dspy.context(lm=lm):
+                # Insight extraction is its own deadline class (arch §13.5
+                # clause 4): it runs after the turn's real work is finished, on
+                # the shared worker, so an extractor that never returns would
+                # hold a worker hostage to a development-mode feature. Its
+                # bound is its own and does not borrow the turn's.
+                with external_operations.operation("distillation.insight_extraction"), \
+                        dspy.context(lm=lm):
                     extractor = dspy.ChainOfThought(InsightExtractionSignature)
                     result = extractor(
                         user_query=user_query,
@@ -2493,7 +2525,13 @@ class DistillationSession:
                     "LLM_DISTILLATION", "LITELLM_API_KEY_DISTILLATION"
                 )
 
-                with dspy.context(lm=lm):
+                # Insight extraction is its own deadline class (arch §13.5
+                # clause 4): it runs after the turn's real work is finished, on
+                # the shared worker, so an extractor that never returns would
+                # hold a worker hostage to a development-mode feature. Its
+                # bound is its own and does not borrow the turn's.
+                with external_operations.operation("distillation.insight_extraction"), \
+                        dspy.context(lm=lm):
                     extractor = dspy.ChainOfThought(PlanningInsightExtractionSignature)
                     result = extractor(
                         user_query=user_query,
@@ -2564,6 +2602,84 @@ class DistillationSession:
 # ------------------------------------------------------------------
 
 
+class DistillationRefused(RuntimeError):
+    """Distillation would not be a comparison, so it does not start (§13.5)."""
+
+
+# Set to a truthy value to declare that the backend behind this workflow is a
+# fake or disposable one, and that a write applied twice therefore costs
+# nothing. Explicit, because the safe answer cannot be inferred: a workflow
+# cannot tell a disposable backend from a production one by looking at it.
+DISPOSABLE_BACKEND_ENV_VAR = "FW_DISTILLATION_DISPOSABLE_BACKEND"
+
+
+def _refuse_unless_read_only(chat_session) -> None:
+    """Refuse distillation on a write-capable surface (arch §13.5 clause 1).
+
+    Uses the manifest's declared effect kinds, and treats an UNDECLARED command
+    as write-capable — `unknown` is never `read_only` (arch §7.3). That is the
+    conservative direction and the reason a workflow with no manifest cannot
+    distill without the disposable-backend declaration: nobody has said what its
+    commands do.
+    """
+    if fastworkflow.get_env_var(DISPOSABLE_BACKEND_ENV_VAR, default=""):
+        logger.warning(
+            "Distillation is running against a backend declared disposable via "
+            "%s; write-capable commands are permitted for this run.",
+            DISPOSABLE_BACKEND_ENV_VAR,
+        )
+        return
+
+    workflow = chat_session.get_active_workflow()
+    if workflow is None:
+        return
+
+    from fastworkflow.command_context_model import CommandContextModel
+    from fastworkflow.runtime_manifest import get_runtime_metadata
+
+    metadata = get_runtime_metadata(workflow.folderpath)
+    if metadata is None or not metadata.has_workflow_manifest:
+        # Nothing has declared anything. Refusing here would break every
+        # workflow that distills today and has no manifest, so this warns and
+        # proceeds — the gap is real and is recorded rather than enforced,
+        # because enforcing it would be a compatibility break the slice does not
+        # own (arch §7.1).
+        logger.warning(
+            "Distillation cannot verify that %s is read-only: no runtime "
+            "manifest declares effect contracts. Proceeding; declare a manifest "
+            "or set %s to make this explicit.",
+            workflow.folderpath, DISPOSABLE_BACKEND_ENV_VAR,
+        )
+        return
+
+    try:
+        model = CommandContextModel.load(workflow.folderpath)
+        capabilities = [
+            capability
+            for context_name in model.occupiable_contexts()
+            for capability in model.effective_capabilities(context_name)
+        ]
+    except Exception:
+        logger.warning("Distillation could not compute the capability surface", exc_info=True)
+        return
+
+    writers = sorted(
+        {
+            capability.definition.definition_id
+            for capability in capabilities
+            if metadata.effect_kind(capability.definition.definition_id) != "read_only"
+        }
+    )
+    if writers:
+        raise DistillationRefused(
+            "distillation will not start: the effective capability surface is "
+            f"not proven read-only ({len(writers)} command(s), e.g. "
+            f"{', '.join(writers[:5])}). Teacher and student would each apply "
+            f"their effects to the same backend. Set {DISPOSABLE_BACKEND_ENV_VAR} "
+            "to declare an isolated fake or disposable backend."
+        )
+
+
 def distill_message(
     chat_session: "fastworkflow.WorkflowExecutionContext", message: str
 ) -> DistillationResult:
@@ -2586,6 +2702,15 @@ def distill_message(
     `distillation_runs` row plus one `distillation_passes` row per pass
     (fix-sb8.2), written through the sink's writer thread ([DR46]).
     """
+    # Arch §13.5: the effective capability surface is computed BEFORE the
+    # teacher runs, and distillation refuses to start on a surface that is not
+    # proven read-only. Distillation runs the same turn twice against the same
+    # backend; if any enabled command can write, the second pass is applying a
+    # second effect and the comparison it produces is between one world and a
+    # different one. Restoring local workflow state afterwards does not reverse
+    # that (§13.5 clause 3) — it only makes the tree look as if it had.
+    _refuse_unless_read_only(chat_session)
+
     ds = DistillationSession(chat_session)
 
     # Shed prior-turn action records at entry: the distillation branch bypasses

@@ -383,7 +383,7 @@ def _script_llm_boundaries(monkeypatch, ctx, agent_factory):
         "fastworkflow.utils.dspy_utils.get_lm", lambda *args, **kwargs: None
     )
     monkeypatch.setattr(
-        ctx, "_call_agent_with_retry", lambda agent_call, lm=None: agent_call()
+        ctx, "_call_agent", lambda agent_call, lm=None: agent_call()
     )
     monkeypatch.setattr(
         ctx, "summarize_and_record_turn", lambda *args, **kwargs: ("summary", None)
@@ -456,7 +456,7 @@ def test_canonical_drops_wall_clock_and_entry_written_keys():
             "started_ns": 2,
             "updated_by": "x",
             "raw_user_message": "hello",
-            "is_user_command": True,
+            "invocation_origin": "agent",
             "stored_parameters": {},
             "NLU_Pipeline_Stage": "one",
         }

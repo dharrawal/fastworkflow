@@ -3,11 +3,36 @@ import importlib
 import re
 import importlib.util
 import sys
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 from fastworkflow.utils.logging import logger
+
+# One lock for all hydration (bead ido-2l0.28).
+#
+# `get_module` loads a module by calling `spec.loader.exec_module` directly,
+# which is necessary — workflow command modules live outside any importable
+# package root — and it publishes the module to `sys.modules` BEFORE executing
+# it so that relative imports inside the module resolve. Both are required.
+# Together they are a race: thread A publishes an empty module and starts
+# executing it, and thread B's sibling module does a perfectly ordinary
+# `from .that_module import Thing`, which is a plain `sys.modules` lookup, finds
+# the empty module, and fails naming a class that is right there in the file.
+#
+# A PER-MODULE lock does not fix this, and the first version of the fix was one.
+# The two threads are loading *different* modules, so they take different locks;
+# the collision is between one thread's `get_module` and another thread's
+# ordinary import statement, which takes no lock of ours at all. Only
+# serializing hydration closes it.
+#
+# The cost is bounded and small: hydration happens once per module per process,
+# `get_module` is `lru_cache`d, and this contends only during cold start. The
+# alternative measured 3-7 failures per 8 concurrent cold loads of the IDO tree,
+# and cost 12 of 16 attempts in the first G2B generation.
+_hydration_lock = threading.RLock()
+
 
 # Normalize arguments so logically identical calls share the same cache key
 @lru_cache(maxsize=128)
@@ -93,11 +118,63 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot create module spec for {abs_module_path}")
         
-        module = importlib.util.module_from_spec(spec)
-        # Add to sys.modules before executing to support relative imports
-        sys.modules[module_pythonic_path] = module
-        spec.loader.exec_module(module)
-        return module
+        # Publishing to `sys.modules` before executing is REQUIRED for relative
+        # imports inside the module to resolve — importlib's own machinery does
+        # the same thing. What importlib also does, and this did not, is hold a
+        # per-module lock across the whole publish-and-execute.
+        #
+        # Without it (bead ido-2l0.28): thread A publishes an EMPTY
+        # `...list_controls_hit` and starts executing it; thread B imports the
+        # sibling composite `assess_risk`, whose `from .list_controls_hit import
+        # ResponseGenerator` finds the empty module already in `sys.modules`,
+        # takes it as finished, and fails with `cannot import name
+        # 'ResponseGenerator'` — naming a class that is right there in the file.
+        # Reproduced at 2-3 failures per 4 concurrent cold loads of the IDO
+        # tree, and it is what cost 12 of 16 attempts in the first G2B
+        # generation, where the caches were genuinely cold for the first time.
+        # Re-entrant: a module's own body can import a sibling through this
+        # same function, and a non-reentrant lock would deadlock on itself.
+        # Identity of the SOURCE, not just the path. The fast path below returns
+        # a module that is already in `sys.modules`, and without this it would
+        # keep returning it after the file on disk had changed — which is
+        # exactly wrong for selective retraining, whose whole job is to notice
+        # an edited command (bead ido-dpm). Before the lock landed, `get_module`
+        # re-executed on every call and staleness was impossible; the lock made
+        # module identity stable and took that property away with it.
+        try:
+            stat = os.stat(abs_module_path)
+            source_identity = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            # Unreadable here means the loader is about to fail anyway; fall
+            # through and let it, rather than serving a cached module for a
+            # file we can no longer see.
+            source_identity = None
+
+        with _hydration_lock:
+            # Re-checked under the lock: while we waited, the thread that held
+            # it may have finished the very import we are about to redo.
+            existing = sys.modules.get(module_pythonic_path)
+            if (existing is not None
+                    and getattr(existing, "__fw_loaded__", False)
+                    and source_identity is not None
+                    and getattr(existing, "__fw_source__", None) == source_identity):
+                return existing
+
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_pythonic_path] = module
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                # A half-built module left in `sys.modules` poisons every later
+                # import of it for the life of the process, which is how one
+                # racing failure became a whole generation of them. Retract it.
+                sys.modules.pop(module_pythonic_path, None)
+                raise
+            # Set last: the marker means "exec_module returned", so a waiter
+            # cannot mistake a module that is still executing for a finished one.
+            module.__fw_source__ = source_identity
+            module.__fw_loaded__ = True
+            return module
 
     except Exception as e:
         logger.critical(f"Could not import module from path: {module_path}. Error: {e}")

@@ -52,10 +52,12 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import state_paths
+from fastworkflow.runtime_config import register_runtime_config
 from fastworkflow.runtime_manifest import (
     check_startup_conformance,
     deployment_env,
     register_runtime_metadata,
+    resolve_runtime_config,
 )
 from fastworkflow.utils.logging import logger
 
@@ -406,6 +408,14 @@ async def lifespan(_app: FastAPI):
             ),
         )
 
+        # The per-logical-turn ReAct budget's deployment maximum (arch §6.0).
+        # Registered here for the same reason the manifest metadata is: resolved
+        # once at startup, so a turn reads a limit somebody configured rather
+        # than one it read out of the environment mid-run.
+        register_runtime_config(
+            resolve_runtime_config(deployment_env(fastworkflow._env_vars))
+        )
+
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
         # and checkpoint trees are namespaced under this workflow's state dir.
@@ -585,12 +595,18 @@ async def lifespan(_app: FastAPI):
         readiness_state.set_ready(True)
         logger.info("Application ready to accept traffic")
         reaper = asyncio.create_task(reap_checkpoints_periodically())
+        # Turn supervision (arch §13.4). Started after readiness rather than
+        # before, so its first sweep cannot see half-built state, and stopped in
+        # the finally below alongside the reaper — the same supervision applies
+        # to the lifespan as to the turns it watches.
+        turn_registry.start_watchdog()
         yield
     finally:
         logger.info("FastWorkflow FastAPI service shutting down...")
         reaper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reaper
+        await turn_registry.stop_watchdog()
         still_busy = await wait_for_active_turns_to_complete(
             max_wait_seconds=SHUTDOWN_DRAIN_SECONDS
         )
@@ -864,7 +880,19 @@ async def readiness_probe(
     if drift:
         status_info["dspy_memory_policy"] = f"drifted: {drift}"
 
+    # Turn supervision (arch §13.4): readiness becomes false when stuck work has
+    # exhausted safe capacity. Counts and coarse status only — this probe is
+    # unauthenticated, so it never carries channel, tenant, principal, command,
+    # or parameter identity.
+    supervision = turn_registry.readiness()
+    if not supervision["ready"]:
+        status_info["turn_supervision"] = (
+            f"unsafe: {supervision['stuck_executions']} stuck execution(s) of "
+            f"{supervision['max_stuck_executions']} allowed"
+        )
+
     content: dict[str, Any] = {"status": "ready", "checks": status_info}
+    content["turn_supervision"] = supervision
     if memory:
         content["memory"] = {
             "live_sessions": len(session_manager._sessions),
@@ -884,7 +912,11 @@ async def readiness_probe(
             "enabled": _obs.observability_enabled(default_on=True),
         }
 
-    if readiness_state.is_ready() and "dspy_memory_policy" not in status_info:
+    if (
+        readiness_state.is_ready()
+        and "dspy_memory_policy" not in status_info
+        and "turn_supervision" not in status_info
+    ):
         return JSONResponse(status_code=status.HTTP_200_OK, content=content)
 
     content["status"] = "not_ready"

@@ -20,6 +20,7 @@ import pytest
 import fastworkflow
 from fastworkflow import TurnStatus, metrics, tracing, workflow_agent
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.turn_budget import LogicalTurnBudget
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -588,7 +589,8 @@ class TestAgentLoopSpans:
 
     def _agent(self, script, tools):
         agent = fastWorkflowReAct.__new__(fastWorkflowReAct)
-        agent.iteration_counter = 0
+        agent._budget = LogicalTurnBudget(iteration_limit=5)
+        agent._step_seals = {}
         agent.max_iters = 5
         agent.inputs = {}
         agent.current_trajectory = {}
@@ -647,8 +649,11 @@ class TestAgentLoopSpans:
             },
         )
 
-        result = ctx._call_agent_with_retry(
-            lambda: agent.forward(user_query="add two numbers"),
+        result = ctx._call_agent(
+            lambda: agent.forward(
+                user_query="add two numbers",
+                budget=LogicalTurnBudget(iteration_limit=5),
+            ),
             trace_input="add two numbers",
         )
         assert result.final_answer == "42"
@@ -713,7 +718,7 @@ class TestAgentLoopSpans:
         )
 
         with tracing.host_scope(ctx):
-            result = agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
+            result = agent._run_loop({}, 0, {"q": "x"}, LogicalTurnBudget(iteration_limit=5), 0)
 
         assert result.suspended is True
         steps = sink.named(tracing.SPAN_AGENT_STEP)
@@ -735,7 +740,7 @@ class TestAgentLoopSpans:
         agent.react = lambda trajectory, **kw: None  # no tool selected
 
         with tracing.host_scope(ctx):
-            agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
+            agent._run_loop({}, 0, {"q": "x"}, LogicalTurnBudget(iteration_limit=5), 0)
 
         steps = sink.named(tracing.SPAN_AGENT_STEP)
         assert steps, "a step that failed to select a tool left no span"
@@ -848,7 +853,8 @@ class TestStepSpanExceptionSafety:
 
     def _agent(self, react_fn, tools):
         agent = fastWorkflowReAct.__new__(fastWorkflowReAct)
-        agent.iteration_counter = 0
+        agent._budget = LogicalTurnBudget(iteration_limit=5)
+        agent._step_seals = {}
         agent.max_iters = 5
         agent.inputs = {}
         agent.current_trajectory = {}
@@ -873,7 +879,7 @@ class TestStepSpanExceptionSafety:
         agent = self._agent(exploding_react, {"finish": lambda: "done"})
         with tracing.host_scope(ctx):
             with pytest.raises(RuntimeError):
-                agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
+                agent._run_loop({}, 0, {"q": "x"}, LogicalTurnBudget(iteration_limit=5), 0)
 
         steps = sink.named(tracing.SPAN_AGENT_STEP)
         assert len(steps) == 1
@@ -908,7 +914,7 @@ class TestStepSpanExceptionSafety:
         )
         with tracing.host_scope(ctx):
             with pytest.raises(CommandCancelledError):
-                agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
+                agent._run_loop({}, 0, {"q": "x"}, LogicalTurnBudget(iteration_limit=5), 0)
 
         steps = sink.named(tracing.SPAN_AGENT_STEP)
         assert len(steps) == 1

@@ -640,14 +640,25 @@ async def _create_user_runtime(
         try:
             ctx.apply_serialized_state(pending)
         except IncompatibleSessionState as exc:
-            # Drop it rather than retrying forever: nothing about a later read
-            # makes an unreadable version readable, and leaving it in place
-            # would re-raise on every cold create for this channel.
-            session_manager.session_state_store.clear(channel_id)
-            logger.error(
-                f"Discarded unreadable pending state for channel_id {channel_id}: "
-                f"{exc}. The suspended turn is lost; the session starts clean."
-            )
+            if exc.preserve:
+                # Written by a NEWER engine (arch §9.2). Deleting it would
+                # destroy a turn that engine can still finish, so this rollback
+                # fails closed instead: the session starts clean here and the
+                # blob waits for a build that reads it.
+                logger.error(
+                    f"Preserved forward-version pending state for channel_id "
+                    f"{channel_id}: {exc}. This build starts the session clean "
+                    f"and leaves the state for the engine that wrote it."
+                )
+            else:
+                # Drop it rather than retrying forever: nothing about a later
+                # read makes an unreadable version readable, and leaving it in
+                # place would re-raise on every cold create for this channel.
+                session_manager.session_state_store.clear(channel_id)
+                logger.error(
+                    f"Discarded unreadable pending state for channel_id {channel_id}: "
+                    f"{exc}. The suspended turn is lost; the session starts clean."
+                )
         else:
             logger.info(
                 f"Restored pending suspended session for channel_id {channel_id}"

@@ -366,8 +366,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    # v2 (EXP-025a): the BEFORE_FINISH decision. It has no step span of its own —
+    # it happens after the loop has ended — and without these keys the corrective
+    # re-extraction is invisible: a reader sees one more model call and an answer
+    # that does not defer, with nothing saying why. A treatment whose mechanism
+    # cannot be observed cannot be measured, which is the whole objection this
+    # programme exists to answer.
     SPAN_AGENT_EXECUTE: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "agent_input",
@@ -379,11 +385,27 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "clarification",
                 "exhausted",
                 "error_type",
+                "finish_policy_outcome",
+                "finish_policy_source",
+                "finish_policy_table_version",
             }
         ),
     ),
+    # v2 (EXP-011): the phase machine of arch §8.4 records two things a v1
+    # reader will not find. `logical_call_key` is the durable identity of the
+    # tool call at this step — the key a repeated decision derives again, and
+    # what the operation journal joins on. `control_signal` marks a step that
+    # ended on a reconciliation-required or write-safety signal rather than on
+    # an observation, which is a distinction a reader cannot recover from the
+    # status alone.
+    # v3 adds the three `policy_*` keys: FW-REQ-017's decision point rewrote
+    # this step instead of running the tool the agent selected. A reader
+    # comparing a run recorded before EXP-025a to one recorded after needs to
+    # see that a step with no `tool_error` and an observation the agent did not
+    # get from a tool is a POLICY rewrite, not a mystery — hence the version
+    # bump rather than a quiet widening.
     SPAN_AGENT_STEP: SpanContract(
-        version=1,
+        version=3,
         attributes=frozenset(
             {
                 "step_index",
@@ -395,6 +417,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "recovered",
                 "tool_error",
                 "error_type",
+                "logical_call_key",
+                "control_signal",
+                "policy_outcome",
+                "policy_source",
+                "policy_table_version",
             }
         ),
     ),
@@ -410,8 +437,16 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         version=1,
         attributes=frozenset({"model", "replan_trigger", "plan"}),
     ),
+    # v2 (EXP-012): exact-identity resolution adds a `matcher_layer` value
+    # (`exact_identity`) and, with it, the identity facts that layer knows and
+    # the classifier never did — which definition answered, through which
+    # effective context, whether it was owned or inherited, and at what
+    # precedence. `typed_failure` records a `not-callable-here` or
+    # `ambiguous-route` refusal, which is a decision the runtime MADE and would
+    # otherwise be invisible: a v1 record of the same turn shows no prediction
+    # at all, and a reader cannot tell that from a turn where nothing was asked.
     SPAN_NLU_INTENT: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "context",
@@ -435,6 +470,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "is_cme_command",
                 "ambiguous",
                 "resolved",
+                "definition_id",
+                "effective_context",
+                "capability_source",
+                "override_rank",
+                "typed_failure",
             }
         ),
     ),

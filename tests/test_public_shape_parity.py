@@ -134,6 +134,12 @@ TURN_RESULT_FIELDS = (
     # §12.2's additive pair, appended last (fix-ajv.5).
     "execution_records",
     "routing_events",
+    # The experiment container's labels, appended after them (fix-bn1). The pin
+    # was not moved when they landed, so this test was already failing before
+    # EXP-010 touched anything; recorded here rather than quietly re-pinned.
+    "experiment_id",
+    "task_id",
+    "attempt",
 )
 
 
@@ -237,7 +243,13 @@ def test_turn_result_field_set_is_pinned_and_grows_only_by_appending():
     """
     assert tuple(TurnResult.model_fields) == TURN_RESULT_FIELDS
     assert tuple(_turn_result().model_dump()) == TURN_RESULT_FIELDS
-    assert TURN_RESULT_FIELDS[-2:] == ("execution_records", "routing_events")
+    assert TURN_RESULT_FIELDS[-5:] == (
+        "execution_records",
+        "routing_events",
+        "experiment_id",
+        "task_id",
+        "attempt",
+    )
 
 
 def test_the_nested_structure_of_a_serialized_turn_is_pinned():

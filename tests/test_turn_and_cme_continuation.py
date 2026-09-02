@@ -358,7 +358,7 @@ def test_v1_blob_is_refused_rather_than_partly_restored(
 
 def test_schema_version_is_current(initialized_fastworkflow, todo_workflow_path):
     """Adding fields without bumping would let an old reader half-apply a new blob."""
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     channel_id = f"ver_{uuid.uuid4().hex[:8]}"
     ctx = _make_ctx(todo_workflow_path, channel_id)
     assert ctx.serialize_state(channel_id=channel_id)["schema_version"] == SCHEMA_VERSION

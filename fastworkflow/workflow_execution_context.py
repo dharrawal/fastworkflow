@@ -33,8 +33,16 @@ import dspy
 
 import fastworkflow
 import fastworkflow.turn
-from fastworkflow import active_workflow, metrics, tracing
-from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
+from fastworkflow import active_workflow, external_operations, metrics, tracing
+from fastworkflow.runtime_config import get_runtime_config
+from fastworkflow.runtime_manifest import get_runtime_metadata
+from fastworkflow.session_state_store import (
+    READABLE_SCHEMA_VERSIONS,
+    SCHEMA_VERSION,
+    IncompatibleSessionState,
+)
+from fastworkflow.turn_budget import LogicalTurnBudget
+from fastworkflow.typed_failure import TypedFailure, classify_exception
 from fastworkflow.state_serialization import validate_state
 from fastworkflow.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
@@ -50,13 +58,23 @@ def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
     ``final_answer``, and distillation passes their own result shapes through
     the same choke point.
     """
-    return {
+    attributes = {
         "attempts": attempts,
         "final_answer": getattr(result, "final_answer", None),
         "suspended": bool(getattr(result, "suspended", False)),
         "clarification": getattr(result, "clarification", None),
         "exhausted": bool(getattr(result, "exhausted", False)),
     }
+    # EXP-025a: the BEFORE_FINISH decision, when one was taken. It happens after
+    # the tool loop has ended, so it has no step span to hang off, and without it
+    # a corrected answer is indistinguishable from an answer that never deferred.
+    # Absent on every run where the policy said nothing, which is most of them.
+    decision = getattr(result, "finish_policy", None)
+    if decision is not None:
+        attributes["finish_policy_outcome"] = decision.outcome.value
+        attributes["finish_policy_source"] = decision.source_policy
+        attributes["finish_policy_table_version"] = decision.table_version
+    return attributes
 
 
 class CommandCancelledError(BaseException):
@@ -189,6 +207,17 @@ class WorkflowExecutionContext:
         # a null check. fix-ajv.20.
         self._execution_recorder: Optional[ExecutionRecorder] = None
         self._turn_key: Optional[str] = None
+        # The logical turn's budget (arch §6.4). Created at _begin_turn, handed
+        # to the planner and to ReAct, serialized at suspension, restored
+        # unchanged on resume. None between turns and on every deterministic
+        # turn, which spends no agent iterations at all.
+        self._turn_budget: Optional[LogicalTurnBudget] = None
+        self._turn_failure: Optional[TypedFailure] = None
+        # The host/request layer of the restrictive budget precedence (arch
+        # §6.0). None means the host declares no limit; a value may only lower
+        # the deployment maximum, never raise it.
+        self._host_react_max_iterations: Optional[int] = None
+        self._contract_react_max_iterations: Optional[int] = None
         # [DR41]: a SECOND, independent trace id for the counterfactual-replay
         # path. `_turn_key` is never overridden — overriding it is exactly the
         # corruption §3.3 rejects option (c) for — so a replay writes into
@@ -479,6 +508,66 @@ class WorkflowExecutionContext:
     # Turn accumulator (v2.21: capture + TurnResult return type only)
     # ------------------------------------------------------------------
 
+    def bind_turn_iteration_limits(
+        self,
+        *,
+        host_limit: Optional[int] = None,
+        contract_limit: Optional[int] = None,
+    ) -> None:
+        """Declare host/request and task-contract ceilings on the turn budget.
+
+        Both participate in the restrictive minimum of arch §6.0 and neither can
+        raise the deployment maximum. Takes effect from the next fresh turn: a
+        running turn keeps the budget it was created with, because a limit that
+        changed underneath a turn would make its exhaustion unattributable.
+        """
+        self._host_react_max_iterations = host_limit
+        self._contract_react_max_iterations = contract_limit
+
+    def _effective_react_max_iterations(self) -> int:
+        """Resolve this turn's iteration limit (arch §6.0 restrictive minimum).
+
+        Deployment maximum, workflow manifest ceiling, task-contract limit and
+        host/request limit, minimum wins. Resolved once per fresh turn and
+        persisted in the budget; resume never recomputes it, so a configuration
+        change mid-suspension cannot retroactively shrink or extend a turn that
+        is already running.
+        """
+        manifest_limit = None
+        if self._app_workflow is not None:
+            metadata = get_runtime_metadata(self._app_workflow.folderpath)
+            if metadata is not None:
+                manifest_limit = metadata.react_max_iterations
+        return get_runtime_config().effective_react_max_iterations(
+            manifest_limit=manifest_limit,
+            contract_limit=self._contract_react_max_iterations,
+            host_limit=self._host_react_max_iterations,
+        )
+
+    def _require_turn_budget(self) -> LogicalTurnBudget:
+        """This turn's budget, or a hard failure.
+
+        Agent work outside a begun turn has no budget it can be charged to, and
+        minting one here would restore exactly the accounting nobody could
+        attribute — the defect FW-REQ-001 closes.
+        """
+        if self._turn_budget is None:
+            raise RuntimeError(
+                "no logical turn budget: agent work reached the executor without "
+                "_begin_turn having started a turn (arch §6.4)"
+            )
+        return self._turn_budget
+
+    @property
+    def turn_budget(self) -> Optional[LogicalTurnBudget]:
+        """The active logical turn's budget, or None between turns."""
+        return self._turn_budget
+
+    @property
+    def turn_failure(self) -> Optional[TypedFailure]:
+        """The classified failure this turn ended with, or None."""
+        return self._turn_failure
+
     def _begin_turn(self, user_message: str) -> None:
         """Atomic turn start [A30]: reset accumulator, mint key, stamp started_at.
 
@@ -494,7 +583,20 @@ class WorkflowExecutionContext:
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
         self._turn_agent_result = None
+        # The classified failure this turn ended with, when it ended with one
+        # (FW-REQ-008 clause 7). None on every turn that did not fail, and
+        # cleared per turn like the rest of the accumulator.
+        self._turn_failure = None
         self._turn_history_baseline = len(self.conversation_history.messages)
+
+        # The logical turn's budget (arch §6.4, FW-REQ-001 clause 1). Created
+        # here and nowhere else: this is the only place a *fresh* turn starts,
+        # and resume deliberately does not pass through it, which is what makes
+        # "a clarification answer does not replenish the budget" structural
+        # rather than a rule somebody has to remember.
+        self._turn_budget = LogicalTurnBudget(
+            iteration_limit=self._effective_react_max_iterations()
+        )
 
         self._turn_entry_workflow_name = ""
         self._turn_entry_context = ""
@@ -986,9 +1088,18 @@ class WorkflowExecutionContext:
 
         Raises IncompatibleSessionState if the blob was written at a schema
         version this build does not read, having applied nothing.
+
+        Schema 3 is read (arch §9.2): its suspended ReAct blob carries an
+        `iteration_counter` instead of a budget, which is restored into an
+        explicit `LegacyTurnBudget` and pinned to that one turn. A
+        forward-version blob is refused with `preserve` set, so the caller
+        leaves it on disk for the engine that wrote it instead of deleting a
+        turn it cannot read.
         """
         found = state.get("schema_version", 0)
-        if found != SCHEMA_VERSION:
+        if found not in READABLE_SCHEMA_VERSIONS:
+            if isinstance(found, int) and found > SCHEMA_VERSION:
+                raise IncompatibleSessionState.forward_version(found)
             raise IncompatibleSessionState(found)
         # Validated up here with the version check, not applied halfway down:
         # this method's contract is "raises having applied nothing", and a
@@ -1041,7 +1152,19 @@ class WorkflowExecutionContext:
         if react_blob and self._awaiting_user:
             self._ensure_agent_initialized()
             if self._workflow_tool_agent is not None:
-                self._workflow_tool_agent.import_suspended(react_blob)
+                try:
+                    self._workflow_tool_agent.import_suspended(react_blob)
+                except (KeyError, TypeError, ValueError) as e:
+                    # Fail closed on malformed suspended state (arch §9.2)
+                    # rather than resuming a turn on a budget nobody set. The
+                    # blob is reported as unreadable, which is what it is.
+                    raise IncompatibleSessionState(
+                        f"{found} (malformed suspended agent state: {e})",
+                        expected=SCHEMA_VERSION,
+                    ) from e
+                # The restored budget IS the turn's budget: this process never
+                # ran _begin_turn for it.
+                self._turn_budget = self._workflow_tool_agent.budget
 
         saved_context_name = state.get("current_command_context_name")
         if (
@@ -1345,10 +1468,24 @@ class WorkflowExecutionContext:
             status = TurnStatus.COMPLETED
             completed_at = datetime.now(timezone.utc)
             if self._turn_agent_result is not None:
-                if getattr(self._turn_agent_result, "exhausted", False):
+                # A classified failure from the agent's finish phase (EXP-011,
+                # arch §8.4): the extraction could not produce a final answer,
+                # and the turn returns that as a typed failure carrying the
+                # sealed steps rather than re-running the loop. Checked before
+                # exhaustion because a turn can be both, and the specific
+                # classification is the more useful of the two.
+                agent_failure = getattr(self._turn_agent_result, "failure", None)
+                if agent_failure is not None:
+                    status = TurnStatus.FAILED
+                    failure_reason = agent_failure.code
+                    self._turn_failure = agent_failure
+                elif getattr(self._turn_agent_result, "exhausted", False):
                     # The turn failed to complete (agent ran out of iterations).
                     # status carries the failure; failure_reason elaborates it.
                     # Orthogonal to TurnOutput.success (command success codes).
+                    # `max_iters_exhausted` is kept verbatim: it is a recorded
+                    # shape G2A traces already carry, and renaming it would make
+                    # the paired comparison compare two different labels.
                     status = TurnStatus.FAILED
                     failure_reason = "max_iters_exhausted"
             elif self._turn_outputs:
@@ -1721,25 +1858,34 @@ class WorkflowExecutionContext:
 
         return lm, CommandsSystemPreludeAdapter()
 
-    def _call_agent_with_retry(self, agent_call, lm=None, *, trace_input=None,
-                               resumed=False):
-        """Run agent_call under an agent dspy.context, retrying on AdapterParseError.
+    def _call_agent(self, agent_call, lm=None, *, trace_input=None,
+                    resumed=False):
+        """Run agent_call once, under an agent dspy.context.
 
         lm: optional LM override (e.g. distillation's teacher/student model). When
         omitted, the default agent context (LLM_AGENT) is used.
 
         This is the one choke point both the fresh forward and the resume pass
         through, so it is where the executor phase is recorded: fw.agent.execute
-        wraps the whole loop (retries included), and ``host_scope`` binds this
-        context so ReAct's per-iteration fw.agent.step spans — several frames
-        down, with no reference to the WEC — reach the same sink ([R28]).
-        """
-        from dspy.utils.exceptions import AdapterParseError
+        wraps the call, and ``host_scope`` binds this context so ReAct's
+        per-iteration fw.agent.step spans — several frames down, with no
+        reference to the WEC — reach the same sink ([R28]).
 
+        **No retry here (EXP-011, arch §8.4).** This used to re-invoke the whole
+        agent on an ``AdapterParseError``, which re-executed every tool call the
+        failed attempt had already completed — the whole-agent replay FW-REQ-008B
+        clause 3 forbids. The recovery it was buying has not been dropped; it
+        moved to the phase that owns it, where nothing has executed yet:
+        ``fastWorkflowReAct._decide`` retries the decision parse, and
+        ``_finish`` retries the extraction against a sealed snapshot.
+
+        ``attempts`` stays on the span, now always 1, because the attribute is
+        part of a recorded shape and a reader comparing G2A traces to later ones
+        needs the field to exist in both.
+        """
         default_lm, agent_adapter = self._agent_dspy_context()
         if lm is None:
             lm = default_lm
-        max_retries = 2
         span = tracing.start_span(
             self,
             tracing.SPAN_AGENT_EXECUTE,
@@ -1749,22 +1895,15 @@ class WorkflowExecutionContext:
                 "model": getattr(lm, "model", None),
             },
         )
-        attempts = 0
+        attempts = 1
         try:
             with tracing.host_scope(self):
-                for attempt in range(max_retries):
-                    attempts = attempt + 1
-                    try:
-                        with dspy.context(lm=lm, adapter=agent_adapter):
-                            result = agent_call()
-                    except AdapterParseError:
-                        if attempt == max_retries - 1:
-                            raise
-                        continue
-                    tracing.end_span(
-                        self, span, attributes=_agent_result_attributes(result, attempts)
-                    )
-                    return result
+                with dspy.context(lm=lm, adapter=agent_adapter):
+                    result = agent_call()
+                tracing.end_span(
+                    self, span, attributes=_agent_result_attributes(result, attempts)
+                )
+                return result
         except BaseException as exc:
             # CommandCancelledError/AskUserSuspend are control signals, not
             # failures; either way the span must close rather than leak onto
@@ -1776,10 +1915,6 @@ class WorkflowExecutionContext:
                 attributes={"attempts": attempts, "error_type": type(exc).__name__},
             )
             raise
-        # Every retry raised AdapterParseError but the last re-raise was
-        # swallowed by the loop shape: close the span rather than leak it.
-        tracing.end_span(self, span, status=tracing.STATUS_ERROR,
-                         attributes={"attempts": attempts})
 
     def _run_agent(self, message: str):
         """Fresh agent turn setup and ReAct forward call."""
@@ -1788,8 +1923,19 @@ class WorkflowExecutionContext:
         if self._app_workflow:
             self._app_workflow.context["raw_user_message"] = message
 
-        refined_user_query = self._refine_user_query(message, self.conversation_history)
+        budget = self._require_turn_budget()
+
+        with external_operations.operation("model.summarization"):
+            refined_user_query = self._refine_user_query(
+                message, self.conversation_history
+            )
         self._turn_refined_message = refined_user_query
+
+        # Query refinement and planning are model calls the turn made. Counted
+        # on the turn's budget so the record is complete; unenforced today
+        # because `model_call_limit` is None until a host or contract sets one
+        # (arch §6.0: an absent limit records rather than forbids).
+        budget.consume_model_call()
 
         from fastworkflow.workflow_agent import build_query_with_next_steps, _what_can_i_do
 
@@ -1797,25 +1943,32 @@ class WorkflowExecutionContext:
         # inputs to the planner so it does not re-plan steps already completed in
         # earlier turns (uses TaskPlannerWithTrajectoryAndAgentInputsSignature).
         has_history = bool(self.conversation_history.messages)
-        command_info_and_refined_message_with_todolist = build_query_with_next_steps(
-            refined_user_query,
-            self,
-            with_agent_inputs_and_trajectory=has_history,
-            planning_insights=self._planning_insights,
-            planner_lm=getattr(self, "_current_planner_lm", None),
-        )
+        # The planner is its own deadline class (arch §13.2): it runs before any
+        # tool does, so a planner that never returns is a turn that never starts.
+        with external_operations.operation("model.planner"):
+            command_info_and_refined_message_with_todolist = build_query_with_next_steps(
+                refined_user_query,
+                self,
+                with_agent_inputs_and_trajectory=has_history,
+                planning_insights=self._planning_insights,
+                planner_lm=getattr(self, "_current_planner_lm", None),
+            )
         available_commands = _what_can_i_do(self)
+        budget.consume_model_call()
 
-        return self._call_agent_with_retry(
+        return self._call_agent(
             lambda: self._workflow_tool_agent(
                 user_query=command_info_and_refined_message_with_todolist,
                 available_commands=available_commands,
+                # The same object the planner above spent from — arch §6.4
+                # requires one budget per logical turn, not one per component.
+                budget=self._require_turn_budget(),
             ),
             trace_input=command_info_and_refined_message_with_todolist,
         )
 
     def _call_agent_resume(self, observation: str):
-        return self._call_agent_with_retry(
+        return self._call_agent(
             lambda: self._workflow_tool_agent.resume(observation),
             trace_input=observation,
             resumed=True,
@@ -1916,7 +2069,13 @@ class WorkflowExecutionContext:
 
         from fastworkflow.workflow_agent import _post_ask_user_response
 
-        self._workflow_tool_agent.iteration_counter = -1
+        # No budget reset. The agent restored the suspended turn's budget with
+        # its trajectory; re-bind it here so a cross-process resume finalizes
+        # against the same object rather than a WEC field that this process
+        # never created (FW-REQ-001 clause 2).
+        if agent.budget is not None:
+            self._turn_budget = agent.budget
+
         observation = _post_ask_user_response(
             self._pending_clarification_request,
             user_answer,
@@ -1998,6 +2157,19 @@ class WorkflowExecutionContext:
     # ------------------------------------------------------------------
 
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
+        # The deterministic / assistant path: a human's message goes straight to
+        # the command executor, so the origin is user and is stated rather than
+        # inferred from a counter (FW-REQ-001 clause 3).
+        from fastworkflow.workflow_agent import (
+            CONTEXT_KEY_INVOCATION_ORIGIN,
+            InvocationOrigin,
+        )
+
+        if self._app_workflow is not None:
+            self._app_workflow.context[CONTEXT_KEY_INVOCATION_ORIGIN] = (
+                InvocationOrigin.USER.value
+            )
+
         if self._command_trace_queue is not None:
             self._command_trace_queue.put(
                 fastworkflow.CommandTraceEvent(

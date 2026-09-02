@@ -687,6 +687,12 @@ class RuntimeManifest(_Strict):
     # name and every startup conformance check on that workflow fails.
     workflow_scope_rule_version: Optional[int] = None
     features: dict[str, FeatureMode] = Field(default_factory=dict)
+    # A workflow-declared ceiling on the per-logical-turn ReAct iteration budget
+    # (arch §6.0, FW-REQ-001 clause 5). It may only *lower* the deployment
+    # maximum: `RuntimeConfig.effective_react_max_iterations` takes the minimum,
+    # so a manifest declaring a larger number does not raise anything. Absent
+    # means the workflow declares no ceiling, which is not the same as zero.
+    react_max_iterations: Optional[int] = Field(default=None, gt=0)
     contexts: dict[str, ContextDeclaration] = Field(default_factory=dict)
     commands: dict[str, CommandDeclaration] = Field(default_factory=dict)
 
@@ -872,6 +878,10 @@ class RuntimeMetadata:
     # comparison happens (`FingerprintVerification.incomparable`) rather than by
     # refusing to run a workflow whose contexts and commands are all valid.
     workflow_scope_rule_version: Optional[int] = None
+    # The merged workflow ceiling on the per-turn ReAct budget, or None when no
+    # manifest declared one. WEC passes it to
+    # `RuntimeConfig.effective_react_max_iterations` as `manifest_limit`.
+    react_max_iterations: Optional[int] = None
 
     def is_occupiable(self, context_name: str) -> Optional[bool]:
         """True/False when declared, None when the manifest is silent.
@@ -1101,10 +1111,22 @@ def merge_and_gate(
     if problems:
         raise ManifestConformanceError(problems)
 
+    # Stricter-wins, like every other merged declaration: if the framework core
+    # manifest ever declares a ceiling, a workflow can lower it and not raise it.
+    react_limits = [
+        value
+        for value in (
+            core_manifest.react_max_iterations,
+            workflow_manifest.react_max_iterations if workflow_manifest else None,
+        )
+        if value is not None
+    ]
+
     return RuntimeMetadata(
         contexts=contexts,
         commands=commands,
         feature_modes=effective_modes,
+        react_max_iterations=min(react_limits) if react_limits else None,
         workflow_fingerprint=workflow_manifest.workflow_fingerprint if workflow_manifest else None,
         has_workflow_manifest=workflow_manifest is not None,
         workflow_scope_rule_version=(
@@ -1133,6 +1155,26 @@ def _stricter_command(core: CommandDeclaration, workflow: CommandDeclaration) ->
         effect=effect,
         capture=capture or None,
     )
+
+
+def resolve_runtime_config(
+    env: Optional[Mapping[str, str]] = None,
+) -> "RuntimeConfig":
+    """Validate the deployment runtime configuration at startup (arch §6.0).
+
+    A bad ``FASTWORKFLOW_REACT_MAX_ITERATIONS`` arrives as a
+    ``ManifestConformanceError`` like every other startup conformance failure,
+    so the entry points that already catch one need no new handling. Returned
+    rather than registered: registration stays explicit, for the same reason
+    ``register_runtime_metadata`` is (a test resolving configuration must not
+    change what a running turn reads).
+    """
+    from fastworkflow.runtime_config import RuntimeConfig
+
+    config, problems = RuntimeConfig.from_env(env)
+    if problems:
+        raise ManifestConformanceError(problems)
+    return config
 
 
 def check_startup_conformance(

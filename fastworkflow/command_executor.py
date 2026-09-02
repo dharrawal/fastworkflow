@@ -11,6 +11,7 @@ from fastworkflow.command_routing import RoutingDefinition
 from typing import Optional
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.utils.logging import logger
 
 
 # ------------------------------------------------------------------
@@ -321,11 +322,101 @@ class CommandExecutor(CommandExecutorInterface):
         return command_output
 
     @classmethod
+    def check_capability(
+        cls,
+        workflow: fastworkflow.Workflow,
+        command_name: str,
+        *,
+        requested_context: Optional[str] = None,
+    ) -> Optional["ExactResolution"]:
+        """The same capability check the agent path uses (arch §10.4).
+
+        A named direct action must not be able to reach a command the agent
+        path would refuse: `perform_action` had no eligibility check at all, so
+        anything with a response-generation class ran, in any context.
+
+        Returns the failed resolution when the command is not callable here, and
+        None when it is callable or when the check cannot be made (an unknown
+        workflow model falls through to current behavior rather than failing a
+        turn). `requested_context` is the MCP path's declared context; naming
+        anything but the current effective context is `not-callable-here` in P0
+        (arch §10.4), because the alternative — accepting it and executing
+        somewhere else — is the silent cross-context dispatch FW-REQ-005 exists
+        to stop.
+        """
+        from fastworkflow.command_resolution import ExactResolution, index_for_workflow
+
+        current = workflow.current_command_context_name or "*"
+        if requested_context and requested_context != current:
+            return ExactResolution(
+                token=command_name,
+                failure="not-callable-here",
+                detail=(
+                    f"MCP tool call requested context '{requested_context}' but the "
+                    f"current context is '{current}'; P0 dispatches only in the "
+                    "current effective context"
+                ),
+            )
+
+        index = index_for_workflow(workflow.folderpath)
+        if index is None:
+            return None
+        resolution = index.resolve_exact(command_name, current)
+        if resolution.resolved:
+            return None
+        # An identity nothing recognises is not this check's business: the
+        # command may be a core or CME command the index does not model, and
+        # refusing it here would be inventing a restriction.
+        return None if resolution.is_unknown else resolution
+
+    @classmethod
+    def _capability_refusal(
+        cls,
+        workflow: fastworkflow.Workflow,
+        command_name: str,
+        resolution: "ExactResolution",
+    ) -> Optional[fastworkflow.CommandOutput]:
+        """Refuse, or record and continue, depending on the feature mode.
+
+        `shadow` — the P0 default — records the would-be refusal on the span and
+        lets the dispatch proceed, so the check is measurable before it changes
+        an outcome (architecture §16's slice modes). `enforce` returns the typed
+        failure. Nothing navigates and no backend call is made either way
+        (FW-REQ-005 clauses 3 and 5).
+        """
+        from fastworkflow.command_resolution import simple_name_resolution_enforced
+
+        detail = resolution.detail or f"'{command_name}' is not callable here"
+        if not simple_name_resolution_enforced(workflow.folderpath):
+            logger.warning(
+                "Capability check (shadow) would refuse '%s': %s",
+                command_name, detail,
+            )
+            return None
+        response = fastworkflow.CommandResponse(response=detail, success=False)
+        response.artifacts["typed_failure"] = resolution.failure
+        response.artifacts["command_name"] = command_name
+        return CommandOutput(
+            command_name=command_name,
+            command_response=response,
+            workflow_name=workflow.folderpath.split("/")[-1],
+        )
+
+    @classmethod
     def perform_action(
         cls,
         workflow: fastworkflow.Workflow,
         action: fastworkflow.Action,
     ) -> fastworkflow.CommandOutput:  # sourcery skip: extract-method
+        # Arch §10.4: the direct-action path goes through the same capability
+        # check as everything else, so a named action cannot bypass current-
+        # context eligibility.
+        if refusal_source := cls.check_capability(workflow, action.command_name):
+            if refusal := cls._capability_refusal(
+                workflow, action.command_name, refusal_source
+            ):
+                return refusal
+
         workflow.command_context_for_response_generation = \
             workflow.current_command_context
 
@@ -429,6 +520,20 @@ class CommandExecutor(CommandExecutorInterface):
             context = tool_call.arguments.get('workitem_path', command_context)
             if not context:
                 raise ValueError("Context ('workitem_path') must be provided for an MCP tool call.")
+
+            # Arch §10.4: this used to read the requested context and then
+            # ignore it — every MCP call ran in whatever context the workflow
+            # happened to be in, whatever the caller asked for. In P0 the
+            # requested context may only be the current effective context;
+            # anything else is a typed not-callable-here rather than a silent
+            # dispatch somewhere the caller did not ask for.
+            if refusal_source := cls.check_capability(
+                workflow, tool_call.name, requested_context=context
+            ):
+                if refusal := cls._capability_refusal(
+                    workflow, tool_call.name, refusal_source
+                ):
+                    return refusal.to_mcp_result()
 
             # Convert MCP tool call to FastWorkflow Action using helper method
             action = fastworkflow.Action(
