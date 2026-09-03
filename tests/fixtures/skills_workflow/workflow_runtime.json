@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "manifest_version": "1.0.0",
+  "features": {
+    "skills_v1": "enforce"
+  },
+  "commands": {
+    "Directory/find_identity": {},
+    "Identity/list_accounts": {},
+    "DirectoryExplorer/open_account_by_uid": {},
+    "Resource/open_portrait": {},
+    "Resource/propose_fix": {}
+  }
+}

@@ -26,6 +26,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow.plan import PlanRecord
 
 # Key marking an artifacts-dict envelope whose value was offloaded to a store
 # and replaced in place by a scoped reference. [A10][A47]
@@ -460,3 +461,19 @@ class TurnResult(BaseModel):
     experiment_id: Optional[str] = None
     task_id: Optional[str] = None
     attempt: Optional[int] = None
+    # EXP-028 decision 5. Appended last and never reordered, on exactly the
+    # terms `execution_records` and `routing_events` were: an already-serialized
+    # record with no `plan` key still validates, and every existing keyword
+    # construction still works.
+    #
+    # It is one optional field rather than a spread of counters because the
+    # honest account of a truncated turn -- "N of M leaves done. Not reached:
+    # <goal>, <goal>." -- has to trace to a structure that OWNS which leaves
+    # those were. `TurnPartial`'s docstring is explicit that it must not carry
+    # domain items; a plan node is not a domain item, it is a plan node, and
+    # that distinction is the whole reason this record can say more than
+    # EXP-027's counters could.
+    #
+    # None means no plan was made, which is every turn under
+    # `FW_PLAN_DECOMPOSITION=off` -- that is, every turn today.
+    plan: Optional[PlanRecord] = None

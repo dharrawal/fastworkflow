@@ -164,6 +164,13 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
     _feature("context_capabilities", 1, modes=_ALL_MODES),
     _feature("external_operations", 1, modes=_ALL_MODES),
     _feature("side_effect_safety", 1, modes=_ALL_MODES),
+    # EXP-028 decision 1. Enablement is by manifest, never by file presence
+    # (FW-REQ-006 clause 1): a workflow that grows a `_skills/` directory must
+    # not change behaviour by accident, so `skill_catalog.load_skill_catalog`
+    # returns an empty catalogue -- without reading the folder -- until this
+    # entry says otherwise. `shadow` selects, binds, expands and records while
+    # executing the old way; `enforce` executes the plan.
+    _feature("skills", 1, modes=_ALL_MODES),
 )
 
 FEATURES_BY_ID: dict[str, FeatureDefinition] = {
@@ -686,6 +693,17 @@ class RuntimeManifest(_Strict):
     # cannot emit a key this class does not carry: the manifest is rejected by
     # name and every startup conformance check on that workflow fails.
     workflow_scope_rule_version: Optional[int] = None
+    # `sha256:<hex>` over the sorted (relative path, content) pairs of
+    # `<workflow>/_skills`, computed by `skill_catalog` with the same
+    # `canonical_content_hash` recipe as `workflow_fingerprint` (EXP-028
+    # decision 1). Absent is legitimate and is the state of every workflow that
+    # ships no skills; presence is not verified here for the same reason
+    # `workflow_fingerprint` is not -- verifying means rehashing the tree, which
+    # is the caller's decision. An experiment whose treatment is partly workflow
+    # *content* and whose ledger cannot say which content ran is not a treatment
+    # arm, which is why this rides in the manifest rather than in a span alone
+    # (FW-REQ-006 clause 9).
+    skills_fingerprint: Optional[str] = None
     features: dict[str, FeatureMode] = Field(default_factory=dict)
     # A workflow-declared ceiling on the per-logical-turn ReAct iteration budget
     # (arch §6.0, FW-REQ-001 clause 5). It may only *lower* the deployment
@@ -878,6 +896,10 @@ class RuntimeMetadata:
     # comparison happens (`FingerprintVerification.incomparable`) rather than by
     # refusing to run a workflow whose contexts and commands are all valid.
     workflow_scope_rule_version: Optional[int] = None
+    # The declared `_skills` fingerprint, carried alongside the workflow
+    # fingerprint because both answer "which content ran" and a reader joining a
+    # ledger row to a run needs them together (EXP-028 decision 1).
+    skills_fingerprint: Optional[str] = None
     # The merged workflow ceiling on the per-turn ReAct budget, or None when no
     # manifest declared one. WEC passes it to
     # `RuntimeConfig.effective_react_max_iterations` as `manifest_limit`.
@@ -1131,6 +1153,9 @@ def merge_and_gate(
         has_workflow_manifest=workflow_manifest is not None,
         workflow_scope_rule_version=(
             workflow_manifest.workflow_scope_rule_version if workflow_manifest else None
+        ),
+        skills_fingerprint=(
+            workflow_manifest.skills_fingerprint if workflow_manifest else None
         ),
     )
 

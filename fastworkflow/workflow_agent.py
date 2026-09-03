@@ -3,12 +3,18 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import importlib
+import json
+import os
 import time
 import traceback
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any, Union
 
 import dspy
+from pydantic import BaseModel, ConfigDict
+from pydantic import Field as PydanticField
 
 import fastworkflow
 from fastworkflow import tracing
@@ -19,6 +25,21 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.typed_failure import classify_exception
 from fastworkflow.worker_health import unwrap_request
 from fastworkflow.runtime_config import DEFAULT_REACT_MAX_ITERATIONS
+from fastworkflow.plan import (
+    Invocation,
+    PlanMode,
+    _validate_invocation,
+    plan_mode_from_env,
+    require_catalog,
+)
+from fastworkflow.policy_decision import (
+    ContractFacts,
+    NO_OP_TABLE,
+    PolicyDecisionPoint,
+    PolicyMode,
+)
+from fastworkflow.runtime_manifest import load_manifest, merge_and_gate
+from fastworkflow.skill_catalog import SkillCatalog, load_skill_catalog
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 
@@ -745,10 +766,6 @@ def _contract_facts(chat_session_obj):
     A missing manifest yields the default facts, which are `unknown` — so a
     workflow that ships no manifest gets caution rather than a free proceed.
     """
-    from fastworkflow.policy_decision import ContractFacts
-
-    from fastworkflow.runtime_manifest import load_manifest
-
     workflow = getattr(chat_session_obj, "app_workflow", None)
     folderpath = getattr(workflow, "folderpath", None)
     if not folderpath:
@@ -759,8 +776,6 @@ def _contract_facts(chat_session_obj):
         return ContractFacts()
     if manifest is None or not getattr(manifest, "commands", None):
         return ContractFacts()
-    import os
-
     enabled_writes = {
         name.strip()
         for name in os.environ.get("FW_G1W_ENABLED", "").split(",")
@@ -796,12 +811,6 @@ def _policy_decision_point():
     treatment arm and measured as one, which is the confound the whole
     experiment exists to avoid.
     """
-    import importlib
-    import os
-
-    from fastworkflow.policy_decision import (
-        NO_OP_TABLE, PolicyDecisionPoint, PolicyMode)
-
     mode = PolicyMode(os.environ.get("FW_ASK_POLICY", PolicyMode.OFF.value))
     if mode is PolicyMode.OFF:
         return PolicyDecisionPoint(NO_OP_TABLE, PolicyMode.OFF)
@@ -931,3 +940,164 @@ def build_query_with_next_steps(user_query: str,
         if with_agent_inputs_and_trajectory else
         user_query_and_next_steps
     )
+
+
+# ----------------------------------------------------------------------
+# Skill selection and plan decomposition (EXP-028 decisions 1, 2, 6)
+# ----------------------------------------------------------------------
+
+
+class SelectedInvocation(BaseModel):
+    """One invocation the selector chose, as a typed output element.
+
+    `slots` is `{slot: value}` where a value is the utterance's own words, or a
+    list of them for a slot the skill declares `list: true`. Typed rather than
+    free text because FW-REQ-010 clause 1's whole point is that a goal is never
+    recovered by parsing a sentence: `build_query_with_next_steps` asked its
+    model for "a numbered list of short sentences separated by line breaks" and
+    then destroyed the line breaks with `.split()`, and what reached the
+    executor could not have been parsed back into a plan by anything.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str = PydanticField(description="Exactly one skill name from the catalogue")
+    slots: dict[str, Union[str, list[str]]] = PydanticField(
+        default_factory=dict,
+        description="Slot values copied verbatim from the utterance",
+    )
+
+
+class SkillSelectionSignature(dspy.Signature):
+    """Choose which skills this request composes, and over which subjects.
+
+    Return an ORDERED list of skill invocations. Every value you put in a slot
+    is copied VERBATIM from the request - the operator's own words for the
+    person, the application, the right. Never invent a value, never normalise a
+    name, and never substitute an identifier the request did not contain: a slot
+    you cannot fill from the request is a slot you leave out.
+
+    SEVERAL INVOCATIONS OF ONE SKILL IS THE NORMAL CASE, NOT AN EDGE. "Devon
+    Morrison, Sean Lyons and Jennifer Sellers are all leaving" is THREE
+    invocations of the leaver skill with three different subjects - not one
+    invocation covering all three, and not one invocation of the first of them.
+    A request that names several subjects is a request for one invocation per
+    subject, in the order it named them.
+
+    Choose a skill on its description. If the request composes several different
+    skills, return them all, in the order the work has to happen.
+    """
+
+    utterance: str = dspy.InputField(desc="The operator's request, verbatim")
+    catalogue: str = dspy.InputField(
+        desc="The available skills as JSON: name, description, level, and the "
+             "slots each one takes. Bodies are deliberately not shown."
+    )
+    invocations: list[SelectedInvocation] = dspy.OutputField(
+        desc="Ordered skill invocations, as JSON. One object per invocation."
+    )
+
+
+class SkillSelection(list):
+    """`list[Invocation]`, plus which model produced it.
+
+    A list subclass rather than a `(model, invocations)` tuple so that callers
+    can treat the result as the list it is, and `PlanRecord.selection_model` can
+    still record what chose - which is not decoration: the selector is the ONE
+    model call in the whole mechanism, and a plan record that cannot say which
+    model made it cannot be compared across arms (FW-REQ-006 clause 9).
+    """
+
+    def __init__(self, invocations=(), *, selection_model=None, raw=None):
+        super().__init__(invocations)
+        self.selection_model = selection_model
+        self.raw = raw
+
+
+def select_skills(
+    utterance: str,
+    catalog: SkillCatalog,
+    lm: Any = None,
+) -> list[Invocation]:
+    """The one model call: which skills, over which subjects (decision 2).
+
+    Inputs are the utterance and the catalogue of **cards** - name, description,
+    level, slot names and slot descriptions. No bodies, no command map
+    (FW-REQ-006 clause 3): a body is read only after its skill is selected, and
+    only that skill's.
+
+    Everything below this call is deterministic. P-01 and FW-REQ-012 both say
+    recursion is deterministic expansion, and requirements §14.1 rejects "use a
+    ReAct self-tool as the recursive plan executor" by name - so this function
+    is the boundary, and `plan.py` does not import `dspy` at all.
+    """
+    cards = catalog.cards() if catalog is not None else ()
+    if not cards:
+        return SkillSelection((), selection_model=None)
+
+    if lm is None:
+        lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+
+    with dspy.context(lm=lm):
+        prediction = dspy.ChainOfThought(SkillSelectionSignature)(
+            utterance=utterance,
+            catalogue=json.dumps([card.as_dict() for card in cards]),
+        )
+
+    raw_invocations = getattr(prediction, "invocations", None)
+    if raw_invocations is None:
+        raw_invocations = []
+    if not isinstance(raw_invocations, list):
+        raise ValueError(
+            "skill selection must return a JSON list of invocation objects"
+        )
+
+    invocations: list[Invocation] = []
+    for raw_selected in raw_invocations:
+        # Parsed strictly, and never from prose. A malformed element raises
+        # rather than being repaired: repairing it is the moment a
+        # plan starts being reconstructed by guessing at a sentence.
+        selected = SelectedInvocation.model_validate(raw_selected)
+        invocation = Invocation(
+            skill_name=selected.skill_name.strip(),
+            slots=dict(selected.slots),
+        )
+        skill = catalog.get(invocation.skill_name)
+        if skill is not None:
+            _validate_invocation(skill, invocation, utterance)
+        invocations.append(invocation)
+
+    return SkillSelection(
+        invocations,
+        selection_model=getattr(lm, "model", None),
+        raw=getattr(prediction, "invocations", None),
+    )
+
+
+def _plan_decomposition_point(
+    chat_session_obj: Any = None,
+) -> tuple[PlanMode, SkillCatalog]:
+    """`(mode, catalog)` for this turn, read the way the ask policy is read.
+
+    `FW_PLAN_DECOMPOSITION=off|shadow|enforce`, an enum parse of the env var
+    defaulting to OFF, and a **hard error** - never a silent fall back to off -
+    when a non-off mode finds no manifest-enabled catalogue. EXP-025a's
+    reasoning applies unchanged: a run configured to ENFORCE that quietly
+    enforced nothing is recorded and measured as a treatment arm.
+
+    In `off` the catalogue is empty and `_skills/` is never opened. That is not
+    an optimisation: a loader that reads in `off` is a loader that can fail in
+    `off`, and FW-REQ-006 clause 7 makes a missing file a no-op for existing
+    workflows. `tests/test_skill_catalog.py` asserts it with a spy on `open`.
+    """
+    mode = plan_mode_from_env()
+    if mode is PlanMode.OFF:
+        return mode, SkillCatalog(mode="off")
+
+    workflow = getattr(chat_session_obj, "app_workflow", None)
+    folderpath = getattr(workflow, "folderpath", None)
+
+    metadata = merge_and_gate(load_manifest(folderpath)) if folderpath else None
+    catalog = load_skill_catalog(folderpath, metadata)
+    require_catalog(mode, catalog)
+    return mode, catalog

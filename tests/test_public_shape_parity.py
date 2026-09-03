@@ -55,6 +55,8 @@ from fastworkflow import (
     mint_turn_key,
 )
 from fastworkflow.command_routing import ModuleType, RoutingRegistry
+from fastworkflow.plan import Binding, PlanNode, PlanRecord
+from fastworkflow.state_serialization import encode_state
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -140,6 +142,8 @@ TURN_RESULT_FIELDS = (
     "experiment_id",
     "task_id",
     "attempt",
+    # EXP-028 decision 5's plan record, appended after them.
+    "plan",
 )
 
 
@@ -243,12 +247,13 @@ def test_turn_result_field_set_is_pinned_and_grows_only_by_appending():
     """
     assert tuple(TurnResult.model_fields) == TURN_RESULT_FIELDS
     assert tuple(_turn_result().model_dump()) == TURN_RESULT_FIELDS
-    assert TURN_RESULT_FIELDS[-5:] == (
+    assert TURN_RESULT_FIELDS[-6:] == (
         "execution_records",
         "routing_events",
         "experiment_id",
         "task_id",
         "attempt",
+        "plan",
     )
 
 
@@ -400,19 +405,53 @@ def test_turn_output_round_trips_with_its_computed_success():
 
 
 def test_turn_result_round_trips_whole():
+    plan = PlanRecord(
+        plan_id="plan-round-trip",
+        skills_fingerprint="sha256:catalogue",
+        selection_model="test-model",
+        mode="enforce",
+        nodes=(
+            PlanNode(
+                goal_id="g1",
+                level="atomic",
+                skill="inspect-entity",
+                goal_text="Devon Morrison is inspected.",
+                visibility="private",
+                bindings={
+                    "query": Binding(
+                        value="Devon Morrison",
+                        source="captured",
+                        command_call_id="call-find-identity",
+                    )
+                },
+                status="done",
+                budget_limit=25,
+                budget_consumed=4,
+                command_call_ids=("call-find-identity",),
+            ),
+        ),
+        budget_limit=25,
+        budget_consumed=4,
+    )
     original = _turn_result(
         started_at=datetime.now(timezone.utc),
         completed_at=datetime.now(timezone.utc),
         suspended_ms=12,
         metadata={"anything": "the framework does not interpret"},
+        plan=plan,
     )
-    restored = TurnResult.model_validate(original.model_dump(mode="json"))
+    encoded = encode_state(original.model_dump(mode="json"))
+    restored = TurnResult.model_validate_json(encoded)
 
     assert restored.user_message == original.user_message
     assert restored.channel_id == "chan"
     assert restored.suspended_ms == 12
     assert restored.metadata == {"anything": "the framework does not interpret"}
     assert restored.turn_output.turn_key == original.turn_output.turn_key
+    assert restored.plan == plan
+    assert restored.plan.nodes[0].bindings["query"].command_call_id == (
+        "call-find-identity"
+    )
 
 
 # ----------------------------------------------------------------------
