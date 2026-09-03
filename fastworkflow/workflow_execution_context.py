@@ -2216,10 +2216,21 @@ class WorkflowExecutionContext:
             # One arm, not two: a separate `except CommandCancelledError` left
             # AskUserSuspend — the other control signal — falling through to the
             # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
+            #
+            # ido-cex.7: the SUCCESS end_span below names the command and the
+            # context; this one did not, so the tool_call span for a failed
+            # dispatch was the one row in the taxonomy that could not say what
+            # it covered — the same gap fix-ajv.16's FW-3 closed one level down
+            # on fw.command.execute. The dispatch seams stamp the routed
+            # identity onto the exception, so it is readable here.
+            from fastworkflow.command_executor import _annotation
+
             tracing.end_span(
                 self,
                 span,
                 status=tracing.status_for_dispatch_exception(exc),
+                command_name=_annotation(exc, "_fw_command_name"),
+                context=_annotation(exc, "_fw_context"),
                 attributes={"error_type": type(exc).__name__},
             )
             raise
@@ -2342,10 +2353,21 @@ class WorkflowExecutionContext:
             # One arm, not two: a separate `except CommandCancelledError` left
             # AskUserSuspend — the other control signal — falling through to the
             # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
+            #
+            # ido-cex.7: the SUCCESS end_span below names the command and the
+            # context; this one did not, so the tool_call span for a failed
+            # dispatch was the one row in the taxonomy that could not say what
+            # it covered — the same gap fix-ajv.16's FW-3 closed one level down
+            # on fw.command.execute. The dispatch seams stamp the routed
+            # identity onto the exception, so it is readable here.
+            from fastworkflow.command_executor import _annotation
+
             tracing.end_span(
                 self,
                 span,
                 status=tracing.status_for_dispatch_exception(exc),
+                command_name=_annotation(exc, "_fw_command_name"),
+                context=_annotation(exc, "_fw_context"),
                 attributes={"error_type": type(exc).__name__},
             )
             raise

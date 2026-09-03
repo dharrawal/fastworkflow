@@ -18,6 +18,7 @@ from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.typed_failure import classify_exception
 from fastworkflow.worker_health import unwrap_request
+from fastworkflow.runtime_config import DEFAULT_REACT_MAX_ITERATIONS
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 
@@ -320,10 +321,18 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             _append_turn_output(chat_session_obj, failure_output)
         except Exception:
             pass  # capture failed — swallow, never mask the original exception
+        # ido-cex.7: the success end_span below names the command and context;
+        # this one did not, so the third producer of fw.agent.tool_call closed
+        # an anonymous row for exactly the failures the failure_output above
+        # has just finished naming. Read through _annotation, not getattr, for
+        # the reason that helper exists — a hostile __getattr__ here would
+        # replace the exception being reported with one about the reporting.
         tracing.end_span(
             chat_session_obj,
             span,
             status=tracing.STATUS_ERROR,
+            command_name=_annotation(e, "_fw_command_name") or None,
+            context=_annotation(e, "_fw_context") or None,
             attributes={"error_type": type(e).__name__},
         )
         raise
@@ -577,7 +586,8 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
         clarification_request, user_query, chat_session_obj
     )
 
-def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25,
+def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession,
+                                   max_iters: int = DEFAULT_REACT_MAX_ITERATIONS,
                                    execution_insights: str | None = None,
                                    on_step_complete=None):
     """
@@ -586,7 +596,13 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
 
     Args:
         chat_session: fastworkflow.ChatSession instance
-        max_iters: Maximum iterations for the ReAct agent
+        max_iters: Maximum iterations for the ReAct agent. Defaults to the
+            deployment default, which is derived from measured per-item command
+            cost (`runtime_config`, `ido-24b.4`) rather than being a second
+            hand-written copy of 25. Production turns take their limit from
+            `WorkflowExecutionContext._effective_react_max_iterations`, which
+            applies the restrictive minimum of arch §6.0; this default only
+            covers a caller that constructs an agent directly.
         execution_insights: Optional workflow-specific execution anti-patterns to
             append to the agent signature docstring (knowledge distillation).
         on_step_complete: Optional callback(step_idx, trajectory) -> bool for

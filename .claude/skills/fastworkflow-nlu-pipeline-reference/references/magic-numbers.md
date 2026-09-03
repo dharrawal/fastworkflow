@@ -72,7 +72,7 @@ executing path today; "dead" = present but unreached.
 
 | Value | Meaning | file:line | Owner skill |
 |---|---|---|---|
-| 25 | agent max_iters | `fastworkflow/workflow_agent.py:387` | architecture-contract |
+| 25 | agent max_iters — no longer a magic number: `DEFAULT_REACT_MAX_ITERATIONS`, checked against `DERIVED_REACT_MAX_ITERATIONS` (23 = 4 walk overhead + 3 items x 6.33 commands/item, p90, `ido-24b.4`) | `fastworkflow/runtime_config.py` | architecture-contract |
 | 5 | conversation-history entries used for query refinement | `workflow_execution_context.py:981-991` | architecture-contract |
 | 3 | invalid-tool-selection coaching bail-out | `fastworkflow/utils/react.py:219-236` | architecture-contract |
 

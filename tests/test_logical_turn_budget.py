@@ -12,6 +12,7 @@ defect made impossible are the first three.
 from __future__ import annotations
 
 import uuid
+from math import ceil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -21,10 +22,16 @@ import pytest
 import fastworkflow
 from fastworkflow.runtime_config import (
     DEFAULT_REACT_MAX_ITERATIONS,
+    DERIVED_REACT_MAX_ITERATIONS,
+    ITEMS_PER_TURN_TARGET,
+    MEASURED_COMMANDS_PER_ITEM_P90,
+    MEASURED_WALK_OVERHEAD_COMMANDS,
     REACT_MAX_ITERATIONS_ENV_VAR,
     RuntimeConfig,
     clear_runtime_config,
+    derive_react_max_iterations,
     get_runtime_config,
+    items_within_react_budget,
     register_runtime_config,
 )
 from fastworkflow.runtime_manifest import (
@@ -294,6 +301,47 @@ def test_deployment_default_is_the_compatible_value():
     config, problems = RuntimeConfig.from_env({})
     assert problems == []
     assert config.react_max_iterations == DEFAULT_REACT_MAX_ITERATIONS == 25
+
+
+def test_the_default_covers_the_floor_the_measurement_derives():
+    """`ido-24b.4`: the default is checked against measured cost, not inherited.
+
+    This is the test the derivation exists for. It fails when a re-measured
+    command surface pushes the floor above the deployment default — which is
+    the moment a reader has to choose between raising the default and accepting
+    that the target item count no longer fits in one turn. Either is a decision;
+    silently walking fewer items than the corpus assumes is not.
+    """
+    assert DERIVED_REACT_MAX_ITERATIONS == derive_react_max_iterations()
+    # 23 = 4 walk overhead + 3 items x 6.33 commands per item, p90.
+    assert DERIVED_REACT_MAX_ITERATIONS == ceil(
+        MEASURED_WALK_OVERHEAD_COMMANDS
+        + ITEMS_PER_TURN_TARGET * MEASURED_COMMANDS_PER_ITEM_P90
+    ) == 23
+    assert DEFAULT_REACT_MAX_ITERATIONS >= DERIVED_REACT_MAX_ITERATIONS
+
+
+def test_re_deriving_tracks_the_command_surface_in_both_directions():
+    """A dearer command surface derives a larger floor and a cheaper one a
+    smaller floor — the property that makes re-derivation worth doing at all
+    rather than a decoration on the constant it produced."""
+    assert derive_react_max_iterations(2.20) == 11   # cheapest contract measured
+    assert derive_react_max_iterations(6.33) == 23   # dearest contract measured
+    # A command split in two roughly doubles per-item cost.
+    assert derive_react_max_iterations(2 * 6.33) > DEFAULT_REACT_MAX_ITERATIONS
+
+
+def test_the_budget_reports_how_many_items_it_can_actually_walk():
+    """The inverse: at 25 the dearest contract reaches 3 items and the cheapest
+    9, which is why a 10-identity recertification is a multi-turn task and not a
+    budget to be raised (`ido-24b.4`, EXP-027)."""
+    assert items_within_react_budget(DEFAULT_REACT_MAX_ITERATIONS) == 3
+    assert items_within_react_budget(DEFAULT_REACT_MAX_ITERATIONS, 2.20) == 9
+    # The derived floor is the smallest limit that reaches the target, so one
+    # iteration less does not.
+    floor = derive_react_max_iterations()
+    assert items_within_react_budget(floor) >= ITEMS_PER_TURN_TARGET
+    assert items_within_react_budget(floor - 1) < ITEMS_PER_TURN_TARGET
 
 
 def test_every_layer_may_lower_the_limit_and_none_may_raise_it():

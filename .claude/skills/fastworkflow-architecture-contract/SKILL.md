@@ -325,5 +325,5 @@ Re-verification one-liners for every volatile fact:
 | Descriptor shadowing | `python -c "import fastworkflow; print(type(fastworkflow.chat_session))"` |
 | conversation_store finally bug | `sed -n '47,54p' fastworkflow/run_fastapi_mcp/conversation_store.py` |
 | Open issue statuses (fix-5ka/cgs/4od/6b4/5fv/85g/qtq/7kp) | `bd list --status open \| grep -E 'fix-(5ka\|cgs\|4od\|6b4\|5fv\|85g\|qtq\|7kp)'` |
-| max_iters=25 default | `grep -n 'max_iters: int = 25' fastworkflow/workflow_agent.py` |
+| max_iters=25 default, and the measurement it is derived from (`ido-24b.4`) | `grep -n 'DEFAULT_REACT_MAX_ITERATIONS\|DERIVED_REACT_MAX_ITERATIONS' fastworkflow/runtime_config.py` |
 | Training stack is torch/transformers | `sed -n '1,10p' fastworkflow/model_pipeline_training.py` |

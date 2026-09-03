@@ -268,25 +268,39 @@ class CommandExecutor(CommandExecutorInterface):
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
 
-        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
-            workflow.folderpath
-        )
-
-        response_generation_class = command_routing_definition.get_command_class(
-            command_name,
-            ModuleType.RESPONSE_GENERATION_INFERENCE,
-        )
-        if not response_generation_class:
-            raise ValueError(
-                f"Response generation class not found for command name '{command_name}' "
-            )
-        response_generation_object = response_generation_class()
-
-        raw_user_message = command
-        if "raw_user_message" in workflow.context:
-            raw_user_message = workflow.context['raw_user_message']
-
+        # ido-cex.7: the seam starts HERE, not at the response-generator call.
+        # command_name, workflow_name and context are bound three lines up, and
+        # everything between there and the call could still raise — the routing
+        # lookup, the missing-class check below, reading raw_user_message off a
+        # workflow context. Those raises unwound with nothing on them, so a
+        # failure this frame had already named arrived at workflow_agent as
+        # CommandOutput(command_name=''), indistinguishable from one that really
+        # did pre-empt routing.
         try:
+            command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
+                workflow.folderpath
+            )
+
+            response_generation_class = command_routing_definition.get_command_class(
+                command_name,
+                ModuleType.RESPONSE_GENERATION_INFERENCE,
+            )
+            if not response_generation_class:
+                # The message names the scope as well as the command: a command
+                # that exists but is not reachable from here and one that does
+                # not exist at all produce the same exception, and only the
+                # context tells a reader which happened.
+                raise ValueError(
+                    f"Response generation class not found for command name "
+                    f"'{command_name}' in context '{context}' of workflow "
+                    f"'{workflow_name}'"
+                )
+            response_generation_object = response_generation_class()
+
+            raw_user_message = command
+            if "raw_user_message" in workflow.context:
+                raw_user_message = workflow.context['raw_user_message']
+
             if command_parameters_class := (
                 command_routing_definition.get_command_class(
                     command_name, ModuleType.COMMAND_PARAMETERS_CLASS
@@ -428,73 +442,124 @@ class CommandExecutor(CommandExecutorInterface):
 
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
-        
-        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
 
-        response_generation_class = (
-            command_routing_definition.get_command_class(
-                action.command_name,
-                ModuleType.RESPONSE_GENERATION_INFERENCE,
-            )
-        )
-        if not response_generation_class:
-            raise ValueError(
-                f"Response generation class not found for command name '{action.command_name}'"
-            )
+        # ido-cex.7. The same annotating seam _invoke_command_impl has, for the
+        # same reason and with the same rule: from here down the identity is
+        # bound, so no failure below may unwind anonymously. fix-ajv.16 closed
+        # the NLU path and left this one — and this is the path the MCP tool
+        # call, the startup action, the agent's direct actions and
+        # invoke_command's own CME hop all take, so its raises were reaching
+        # workflow_agent as CommandOutput(command_name='') exactly the way the
+        # NLU path's used to.
+        #
+        # Six raises sit inside it: the missing response-generation class, a
+        # parameters model that rejects action.parameters, the two "did not
+        # return a CommandOutput" type checks, the validate_parameters refusal,
+        # and the response generator's own exception.
+        #
+        # The CME hop dispatches Action('wildcard') against the metadata-
+        # extraction workflow, so a failure during intent detection is now
+        # named 'wildcard' in 'command_metadata_extraction' rather than left
+        # blank. That is the truthful origin and it is what the blank name was
+        # hiding: a turn that died BEFORE routing now says so, instead of being
+        # indistinguishable from a routed command that lost its name.
+        try:
+            command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
 
-        response_generation_object = response_generation_class()
-
-        command_parameters_class = (
-            command_routing_definition.get_command_class(
-                action.command_name, ModuleType.COMMAND_PARAMETERS_CLASS
+            response_generation_class = (
+                command_routing_definition.get_command_class(
+                    action.command_name,
+                    ModuleType.RESPONSE_GENERATION_INFERENCE,
+                )
             )
-        )
-        if not command_parameters_class:
+            if not response_generation_class:
+                # Scope in the message, not only on the exception: the MCP
+                # entry point below stringifies this and drops the annotation,
+                # so the text is the only carrier left on that path.
+                raise ValueError(
+                    f"Response generation class not found for command name "
+                    f"'{action.command_name}' in context '{context}' of workflow "
+                    f"'{workflow_name}'"
+                )
+
+            response_generation_object = response_generation_class()
+
+            command_parameters_class = (
+                command_routing_definition.get_command_class(
+                    action.command_name, ModuleType.COMMAND_PARAMETERS_CLASS
+                )
+            )
+            if not command_parameters_class:
+                with tracing.call_scope(call_id, command_name=action.command_name):
+                    command_output = response_generation_object(workflow, action.command)
+
+                # Validate that response_generation_object returns a CommandOutput, not a string
+                if not isinstance(command_output, CommandOutput):
+                    raise TypeError(
+                        f"Response generation object for command '{action.command_name}' "
+                        f"in context '{context}' did not return a CommandOutput "
+                        f"(got {type(command_output).__name__}). This indicates an "
+                        f"implementation error in the response generator."
+                    )
+
+                # Set the additional attributes
+                command_output.workflow_name = workflow_name
+                command_output.context = context
+                command_output.command_call_id = call_id
+                return command_output
+
+            # Always resolve the command's Signature class via create() so
+            # validate_extracted_parameters (and db_lookup) run on the direct-action
+            # path the same way they do on the NLU path. Validate even when
+            # action.parameters is empty/falsy — context preconditions still apply.
+            if action.parameters:
+                input_obj = command_parameters_class(**action.parameters)
+            else:
+                input_obj = command_parameters_class()
+
+            input_for_param_extraction = InputForParamExtraction.create(
+                workflow, action.command_name, action.command
+            )
+            is_valid, error_msg, _, _ = input_for_param_extraction.validate_parameters(
+                workflow, action.command_name, input_obj
+            )
+            if not is_valid:
+                raise ValueError(
+                    f"Invalid action parameters for command '{action.command_name}' "
+                    f"in context '{context}'\n{error_msg}"
+                )
+
             with tracing.call_scope(call_id, command_name=action.command_name):
-                command_output = response_generation_object(workflow, action.command)
-            
+                command_output = response_generation_object(workflow, action.command, input_obj)
+
             # Validate that response_generation_object returns a CommandOutput, not a string
             if not isinstance(command_output, CommandOutput):
-                raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")
-                
-            # Set the additional attributes
-            command_output.workflow_name = workflow_name
-            command_output.context = context
-            command_output.command_call_id = call_id
-            return command_output
-
-        # Always resolve the command's Signature class via create() so
-        # validate_extracted_parameters (and db_lookup) run on the direct-action
-        # path the same way they do on the NLU path. Validate even when
-        # action.parameters is empty/falsy — context preconditions still apply.
-        if action.parameters:
-            input_obj = command_parameters_class(**action.parameters)
-        else:
-            input_obj = command_parameters_class()
-
-        input_for_param_extraction = InputForParamExtraction.create(
-            workflow, action.command_name, action.command
-        )
-        is_valid, error_msg, _, _ = input_for_param_extraction.validate_parameters(
-            workflow, action.command_name, input_obj
-        )
-        if not is_valid:
-            raise ValueError(
-                f"Invalid action parameters for command '{action.command_name}'\n{error_msg}"
+                raise TypeError(
+                    f"Response generation object for command '{action.command_name}' "
+                    f"in context '{context}' did not return a CommandOutput "
+                    f"(got {type(command_output).__name__}). This indicates an "
+                    f"implementation error in the response generator."
+                )
+        except BaseException as exc:
+            # First writer wins, so a nested dispatch that already named itself
+            # keeps its name and this outer frame does not overwrite it. Not
+            # gated on tracing.is_control_signal: _invoke_command_impl stamps
+            # control signals too, and two dispatch seams disagreeing about
+            # which exceptions carry identity is the drift fix-ajv.19 removed
+            # from the status mapping.
+            _annotate_exception(
+                exc,
+                _fw_command_name=action.command_name,
+                _fw_workflow_name=workflow_name,
+                _fw_context=context,
             )
+            raise
 
-        with tracing.call_scope(call_id, command_name=action.command_name):
-            command_output = response_generation_object(workflow, action.command, input_obj)
-        
-        # Validate that response_generation_object returns a CommandOutput, not a string
-        if not isinstance(command_output, CommandOutput):
-            raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")
-        
         # Set the additional attributes
         command_output.workflow_name = workflow_name
         command_output.context = context
         command_output.command_call_id = call_id
-        
+
         return command_output
 
     # MCP-compliant methods
@@ -519,7 +584,13 @@ class CommandExecutor(CommandExecutorInterface):
         try:
             context = tool_call.arguments.get('workitem_path', command_context)
             if not context:
-                raise ValueError("Context ('workitem_path') must be provided for an MCP tool call.")
+                # ido-cex.7: this arm is swallowed into an MCPToolResult below,
+                # where the annotation cannot travel, so the tool name has to be
+                # in the text or the caller gets a refusal that names nothing.
+                raise ValueError(
+                    f"Context ('workitem_path') must be provided for the MCP tool "
+                    f"call '{tool_call.name}'."
+                )
 
             # Arch §10.4: this used to read the requested context and then
             # ignore it — every MCP call ran in whatever context the workflow
@@ -549,8 +620,16 @@ class CommandExecutor(CommandExecutorInterface):
             return command_output.to_mcp_result()
 
         except Exception as e:
-            # Return error in MCP format
+            # Return error in MCP format. ido-cex.7: the MCP result is a flat
+            # string with no command_name field, and this handler is the end of
+            # the line for the identity perform_action stamped on the exception
+            # — so it is spelled into the text here. Without it every MCP
+            # failure read "Error: <message>" with nothing saying which tool
+            # produced it.
             return fastworkflow.MCPToolResult(
-                content=[fastworkflow.MCPContent(type="text", text=f"Error: {str(e)}")],
+                content=[fastworkflow.MCPContent(
+                    type="text",
+                    text=f"Error in MCP tool '{tool_call.name}': {str(e)}",
+                )],
                 isError=True
             )

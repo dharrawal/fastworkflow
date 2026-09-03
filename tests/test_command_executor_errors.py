@@ -469,3 +469,299 @@ def test_the_agent_tool_span_is_closed_even_when_a_control_signal_escapes(
     assert tool_spans, "the agent tool span must be emitted at all"
     assert tool_spans[-1].status == tracing.STATUS_CANCELLED
     assert tool_spans[-1].status != tracing.STATUS_OPEN
+
+
+# ---------------------------------------------------------------------------
+# ido-cex.7: the scope residue fix-ajv.16 left behind.
+#
+# fix-ajv.16 stamped the routed identity onto exceptions raised BY the response
+# generator ON THE NLU PATH, and named the fw.command.execute error span. Three
+# gaps survived it, and a crash coming through any of them was still recorded
+# without an origin — the anonymous failure the ido-cex epic exists to remove:
+#
+#   * every raise in perform_action, which is the direct-action, startup-action,
+#     MCP and CME-hop path;
+#   * the raises in _invoke_command_impl that sit ABOVE the generator call —
+#     routing lookup and the missing-class check — after command_name is bound;
+#   * fw.agent.tool_call's error arm at all THREE of its producers, whose
+#     success siblings have always named the command and context.
+#
+# The tests below are ordered the same way: the exception first, then the spans
+# that read it.
+# ---------------------------------------------------------------------------
+
+
+def _classless_registry(monkeypatch):
+    """Registry stand-in that resolves nothing: every lookup returns None."""
+
+    # init first: RoutingRegistry is None until then, so patching before it
+    # only works when an earlier test in the file happened to have inited.
+    fastworkflow.init({})
+
+    class EmptyCRD:
+        def get_command_class(self, name, module_type):
+            return None
+
+    monkeypatch.setattr(
+        fastworkflow.RoutingRegistry, "get_definition", lambda _: EmptyCRD()
+    )
+
+
+def _bare_workflow(suffix: str):
+    fastworkflow.init({})
+    return fastworkflow.Workflow.create(
+        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_id_str=f"cex7_{suffix}_{uuid.uuid4().hex}",
+    )
+
+
+def test_perform_action_carries_the_action_identity_out_on_the_exception(monkeypatch):
+    """The direct-action path stamps what the NLU path already stamped."""
+    # init before the registry patch: RoutingRegistry is None until then, so a
+    # test that patches first only passes when an earlier test happened to init.
+    fastworkflow.init({})
+    _raising_registry(monkeypatch, lambda: RuntimeError("boom"))
+    workflow = _bare_workflow("pa")
+    expected_context = workflow.current_command_context_displayname
+
+    with pytest.raises(RuntimeError, match="boom") as excinfo:
+        CommandExecutor.perform_action(
+            workflow, fastworkflow.Action(command_name="fail", command="fail")
+        )
+
+    exc = excinfo.value
+    assert exc._fw_command_name == "fail"
+    assert exc._fw_workflow_name == workflow.folderpath.split("/")[-1]
+    assert exc._fw_context == expected_context
+
+
+def test_a_missing_response_generator_names_the_command_on_the_action_path(monkeypatch):
+    """A raise ABOVE the generator call, where the identity was already bound.
+
+    This is the residue proper: nothing in perform_action ever reached the
+    annotating seam, because the seam started at the generator call.
+    """
+    _classless_registry(monkeypatch)
+    workflow = _bare_workflow("nogen_pa")
+    expected_context = workflow.current_command_context_displayname
+
+    with pytest.raises(ValueError) as excinfo:
+        CommandExecutor.perform_action(
+            workflow, fastworkflow.Action(command_name="ghost", command="ghost")
+        )
+
+    exc = excinfo.value
+    assert exc._fw_command_name == "ghost"
+    assert exc._fw_context == expected_context
+    # The scope is in the text too: the MCP entry point stringifies this and
+    # drops the annotation, so the message is the only carrier left there.
+    assert "ghost" in str(exc) and expected_context in str(exc)
+
+
+def test_a_missing_response_generator_names_the_command_on_the_nlu_path(monkeypatch):
+    """Same raise, reached through invoke_command after intent detection."""
+    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+
+    _classless_registry(monkeypatch)
+    monkeypatch.setattr(
+        CommandExecutor, "perform_action", _stub_cme_naming("ghost")
+    )
+    app_workflow = _bare_workflow("nogen_nlu")
+    expected_context = app_workflow.current_command_context_displayname
+
+    ctx = WorkflowExecutionContext(run_as_agent=False)
+    ctx.bind_app_workflow(app_workflow)
+    ctx.push_active_workflow(app_workflow)
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            CommandExecutor.invoke_command(ctx, "ghost")
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+
+    exc = excinfo.value
+    assert exc._fw_command_name == "ghost"
+    assert exc._fw_context == expected_context
+
+
+def test_a_generator_returning_the_wrong_type_names_the_command(monkeypatch):
+    """The TypeError guard is a decision this frame reached, so it is attributed."""
+
+    class StringRG:
+        def __call__(self, *args, **kwargs):
+            return "not a CommandOutput"
+
+    class StringCRD:
+        def get_command_class(self, name, module_type):
+            if module_type == ModuleType.RESPONSE_GENERATION_INFERENCE:
+                return StringRG
+            return None
+
+    fastworkflow.init({})
+    monkeypatch.setattr(
+        fastworkflow.RoutingRegistry, "get_definition", lambda _: StringCRD()
+    )
+    workflow = _bare_workflow("wrongtype")
+
+    with pytest.raises(TypeError) as excinfo:
+        CommandExecutor.perform_action(
+            workflow, fastworkflow.Action(command_name="stringy", command="stringy")
+        )
+
+    assert excinfo.value._fw_command_name == "stringy"
+    # The type that came back, not just the fact that it was wrong: without it
+    # the reader has to reproduce the call to learn what the generator returned.
+    assert "(got str)" in str(excinfo.value)
+
+
+def test_a_nested_dispatch_keeps_the_inner_command_name(monkeypatch):
+    """First writer wins: the frame that knew the identity owns it.
+
+    A response generator that dispatches a sub-action is the case the rule
+    exists for — the outer seam must not relabel the inner command's failure
+    as its own.
+    """
+
+    class OuterRG:
+        def __call__(self, workflow, *args, **kwargs):
+            return CommandExecutor.perform_action(
+                workflow,
+                fastworkflow.Action(command_name="inner", command="inner"),
+            )
+
+    class InnerRG:
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("inner boom")
+
+    class NestedCRD:
+        def get_command_class(self, name, module_type):
+            if module_type != ModuleType.RESPONSE_GENERATION_INFERENCE:
+                return None
+            return OuterRG if name == "outer" else InnerRG
+
+    fastworkflow.init({})
+    monkeypatch.setattr(
+        fastworkflow.RoutingRegistry, "get_definition", lambda _: NestedCRD()
+    )
+    workflow = _bare_workflow("nested")
+
+    with pytest.raises(RuntimeError, match="inner boom") as excinfo:
+        CommandExecutor.perform_action(
+            workflow, fastworkflow.Action(command_name="outer", command="outer")
+        )
+
+    assert excinfo.value._fw_command_name == "inner"
+
+
+def test_an_mcp_failure_names_the_tool_it_came_from(monkeypatch):
+    """The MCP result has no command_name field, so the text has to carry it.
+
+    Everything the annotation knows is discarded at this boundary; before this,
+    the caller got `Error: <message>` with nothing saying which tool produced it.
+
+    Driven with a generator that raises `boom` rather than an unresolvable tool:
+    a "class not found" message names the command by itself, so it would pass
+    against the unfixed code and pin nothing.
+    """
+    fastworkflow.init({})
+    _raising_registry(monkeypatch, lambda: RuntimeError("boom"))
+    workflow = _bare_workflow("mcp")
+
+    result = CommandExecutor.perform_mcp_tool_call(
+        workflow, fastworkflow.MCPToolCall(name="fail", arguments={})
+    )
+
+    assert result.isError
+    text = result.content[0].text
+    assert "boom" in text, "the real failure must survive"
+    assert "fail" in text, "and the result must say which tool produced it"
+
+
+def test_the_failed_tool_call_span_names_the_command_on_the_prose_path(monkeypatch):
+    """ido-cex.7: fw.agent.tool_call's error arm was anonymous.
+
+    Its success sibling below has always passed command_name and context;
+    the error arm passed only error_type, so the row a reader reaches
+    for when attributing a crash was the one row that could not say what it
+    covered. fix-ajv.16 closed exactly this on fw.command.execute one level
+    down and left the wrapper.
+    """
+    ctx, sink, app_workflow = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
+    expected_context = app_workflow.current_command_context_displayname
+    try:
+        with pytest.raises(RuntimeError):
+            ctx._process_message("fail")
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+
+    span = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[-1]
+    assert span.status == tracing.STATUS_ERROR
+    assert span.command_name == "fail"
+    assert span.context == expected_context
+
+
+def test_the_failed_tool_call_span_names_the_command_on_the_action_path(monkeypatch):
+    """The direct-action sibling, whose identity only exists because
+    perform_action now stamps it — CommandExecutor.perform_action opens no span
+    of its own, so this is the only span the direct-action path emits.
+
+    Built without _failing_ctx's perform_action stub: that stub stands in for
+    intent detection on the prose path, and here perform_action IS the thing
+    under test.
+    """
+    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+
+    fastworkflow.init({})
+    _raising_registry(monkeypatch, lambda: RuntimeError("boom"))
+    app_workflow = fastworkflow.Workflow.create(
+        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_id_str=f"cex7_action_span_{uuid.uuid4().hex}",
+    )
+    sink = RecordingTraceSink()
+    ctx = WorkflowExecutionContext(run_as_agent=False, trace_sink=sink)
+    ctx.bind_app_workflow(app_workflow)
+    ctx._begin_turn("fail")
+    ctx.push_active_workflow(app_workflow)
+
+    expected_context = app_workflow.current_command_context_displayname
+    try:
+        with pytest.raises(RuntimeError):
+            ctx._process_action(
+                fastworkflow.Action(command_name="fail", command="fail")
+            )
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+
+    span = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[-1]
+    assert span.status == tracing.STATUS_ERROR
+    assert span.command_name == "fail"
+    assert span.context == expected_context
+
+
+def test_the_failed_tool_call_span_names_the_command_on_the_agent_path(monkeypatch):
+    """The third producer of fw.agent.tool_call, and the one agent runs use.
+
+    _execute_workflow_query builds a failure CommandOutput that names the
+    command and then closed the covering span without it, so the outcome and
+    the span disagreed about whether the failure had an origin.
+    """
+    from fastworkflow.workflow_agent import _execute_workflow_query
+
+    ctx, sink, app_workflow = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
+    expected_context = app_workflow.current_command_context_displayname
+    try:
+        with pytest.raises(RuntimeError):
+            _execute_workflow_query("fail", ctx)
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+
+    span = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[-1]
+    assert span.status == tracing.STATUS_ERROR
+    assert span.command_name == "fail"
+    assert span.context == expected_context
+    # The outcome and the span now agree, which is what makes the two joinable
+    # for a reader attributing a crash.
+    assert ctx._turn_outputs[-1].command_name == span.command_name
