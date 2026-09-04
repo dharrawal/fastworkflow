@@ -1,5 +1,10 @@
 """The skill catalogue: `<workflow>/_skills/<name>/SKILL.md`, loaded and validated.
 
+Why there are three levels (`composite`, `task`, `atomic`) rather than two:
+``docs/skill_levels.md``. §4.6 is the one-liner; that note is the intern
+explanation. Collapsing ``task`` into ``composite`` confuses one operator job
+with a packet of jobs.
+
 EXP-028 decision 1. Ten SKILL.md files have sat in `ido_workflow/_skills` with
 `level`, `slots` and `uses` metadata and **no consumer** — `provenance.py`'s
 comment saying no Python reads it was the whole of the integration. This module
