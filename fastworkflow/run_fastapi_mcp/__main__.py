@@ -120,6 +120,8 @@ from fastworkflow.conversation_labeling import (
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
 )
 from fastworkflow.observability_store import ObservabilityStore
+from fastworkflow.observability_store import get_observability_sink
+from fastworkflow.experiment import experiment_store_readiness
 
  
 # ============================================================================
@@ -184,6 +186,7 @@ class ReadinessState:
     
     def __init__(self):
         self._is_ready = False
+        self._experiment_store_readiness: dict[str, str] | None = None
         # Debug attributes - do not control readiness, used for diagnostics
         self._is_initialized = False
         self._workflow_path_valid = False
@@ -199,6 +202,12 @@ class ReadinessState:
     def set_workflow_path_valid(self, value: bool = True):
         """Mark workflow path as validated (for debugging/diagnostics)."""
         self._workflow_path_valid = value
+
+    def set_experiment_store_readiness(
+        self, value: dict[str, str] | None
+    ) -> None:
+        """Publish the exact store identity external controllers must target."""
+        self._experiment_store_readiness = value
     
     def is_ready(self) -> bool:
         """Check if the application is ready to serve traffic."""
@@ -211,6 +220,9 @@ class ReadinessState:
             "fastworkflow_initialized": self._is_initialized,
             "workflow_path_valid": self._workflow_path_valid
         }
+
+    def get_experiment_store_readiness(self) -> dict[str, str] | None:
+        return self._experiment_store_readiness
 
 
 # Global readiness state
@@ -406,6 +418,13 @@ async def lifespan(_app: FastAPI):
         else:
             logger.warning(f"Workflow path not valid or not found: {ARGS.workflow_path}")
             readiness_state.set_workflow_path_valid(False)
+
+        trace_sink = get_observability_sink(ARGS.workflow_path)
+        readiness_state.set_experiment_store_readiness(
+            experiment_store_readiness(trace_sink.store.db_path)
+            if trace_sink is not None
+            else None
+        )
 
     async def wait_for_active_turns_to_complete(max_wait_seconds: int) -> list[str]:
         """Close admission, then drain. Returns the channels still busy at the deadline.
@@ -810,7 +829,13 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
     if drift:
         status_info["dspy_memory_policy"] = f"drifted: {drift}"
 
-    content: dict[str, Any] = {"status": "ready", "checks": status_info}
+    content: dict[str, Any] = {
+        "status": "ready",
+        "checks": status_info,
+        "experiment_store_readiness": (
+            readiness_state.get_experiment_store_readiness()
+        ),
+    }
     if memory:
         content["memory"] = {
             "live_sessions": len(session_manager._sessions),
@@ -1262,6 +1287,14 @@ async def initialize(
         async with session_manager.leased_session(channel_id) as existing_runtime:
             if existing_runtime:
                 refuse_registered_token_reissue(existing_runtime)
+                if request.experiment_bootstrap is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "an experiment bootstrap cannot bind an existing "
+                            "session"
+                        ),
+                    )
                 logger.info(f"Session for channel_id {channel_id} already exists, generating new tokens")
                 if startup_turn_key := (
                     existing_runtime.startup_turn_key
@@ -1312,7 +1345,8 @@ async def initialize(
             startup_command=None,
             startup_action=None,
             run_startup=False,
-            stream_format=(request.stream_format if request.stream_format in ("ndjson", "sse") else "ndjson")
+            stream_format=(request.stream_format if request.stream_format in ("ndjson", "sse") else "ndjson"),
+            experiment_bootstrap=request.experiment_bootstrap,
         )
 
         # No startup requested — just return tokens.

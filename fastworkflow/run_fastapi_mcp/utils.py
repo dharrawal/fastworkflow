@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import time
+import uuid
 import weakref
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -26,6 +27,10 @@ from fastworkflow.session_state_store import (
 from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
+from fastworkflow.experiment import (
+    MissingExperimentLifecycleFeature,
+    experiment_store_readiness,
+)
 
 from fastworkflow.checkpoint_store import (
     ChannelCheckpointStore,
@@ -35,7 +40,13 @@ from fastworkflow.checkpoint_store import (
     RetentionPolicy,
 )
 from fastworkflow.conversation_history_io import restore_history_from_turns
-from fastworkflow.observability_store import ObservabilityStore, SQLiteTraceSink
+from fastworkflow.observability_store import (
+    AttemptClaimError,
+    ObservabilityStore,
+    SQLiteTraceSink,
+    StoreIdentityMismatch,
+    get_observability_sink,
+)
 from . import checkpoint
 from .jwt_manager import verify_token
 
@@ -54,6 +65,11 @@ CHECKPOINT_REAP_INTERVAL_SECONDS = 300.0
 # __main__.lifespan, so that the startup check comparing the topic-generation
 # budget against it cannot drift away from the value actually used.
 SHUTDOWN_DRAIN_SECONDS = 30
+
+# One owner id for every registered attempt claimed by this server process.
+# Session incarnations are intentionally separate: eviction/recreation may
+# replace a live WEC without changing which process owns the external attempt.
+SERVER_INCARNATION = uuid.uuid4().hex
 
 
 def resolve_max_live_sessions() -> tuple[int, str]:
@@ -115,6 +131,14 @@ MAX_CONVERSATION_TURNS_IN_MEMORY = 20
 ChannelId = Annotated[str, Field(min_length=1)]
 
 
+class ExperimentBootstrapRequest(BaseModel):
+    """One-use external-attempt credential, without caller-supplied labels."""
+
+    registration_id: str = Field(min_length=1)
+    secret: str = Field(min_length=1, repr=False)
+    store_id: str = Field(min_length=1)
+
+
 class InitializationRequest(BaseModel):
     """Request to initialize a FastWorkflow session for a channel"""
     channel_id: ChannelId
@@ -130,6 +154,7 @@ class InitializationRequest(BaseModel):
     # How long the request blocks for the startup turn before deferring (202).
     # Same shape/default as InvokeRequest/PerformActionRequest.timeout_seconds.
     timeout_seconds: int = 60
+    experiment_bootstrap: Optional[ExperimentBootstrapRequest] = None
 
 
 class TokenResponse(BaseModel):
@@ -368,6 +393,94 @@ def _merge_workflow_context(
     return context
 
 
+def _claim_registered_attempt(
+    workflow_path: str,
+    channel_id: str,
+    bootstrap: ExperimentBootstrapRequest,
+) -> tuple[dict[str, Any], SQLiteTraceSink]:
+    """Consume a public bootstrap before any WEC or workflow is constructed."""
+    trace_sink = get_observability_sink(workflow_path)
+    if trace_sink is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "experiment bootstrap requires enabled observability and an "
+                "installed experiment-claim store"
+            ),
+        )
+
+    try:
+        readiness = experiment_store_readiness(trace_sink.store.db_path)
+        if readiness["store_id"] != bootstrap.store_id:
+            raise StoreIdentityMismatch(
+                f"bootstrap targets store {bootstrap.store_id!r}, but this "
+                f"server owns {readiness['store_id']!r}"
+            )
+        claim = trace_sink.store.claim_attempt(
+            {
+                "registration_id": bootstrap.registration_id,
+                "secret": bootstrap.secret,
+            },
+            channel_id=channel_id,
+            server_incarnation=SERVER_INCARNATION,
+        )
+    except MissingExperimentLifecycleFeature as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="experiment claim feature is unavailable",
+        ) from exc
+    except (AttemptClaimError, StoreIdentityMismatch) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"experiment bootstrap refused: {exc}",
+        ) from exc
+    return claim, trace_sink
+
+
+_REGISTERED_CLAIM_IDENTITY_FIELDS = (
+    "experiment_id",
+    "task_id",
+    "attempt",
+    "epoch",
+    "server_incarnation",
+)
+
+
+def _assert_restored_claim_matches(
+    restored_claim: Any,
+    active_claim: Optional[dict[str, Any]],
+    *,
+    source: str,
+) -> None:
+    """Refuse registered state unless it belongs to the active store claim."""
+    if restored_claim is None and active_claim is None:
+        return
+    if active_claim is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                f"{source} belongs to a registered experiment channel; "
+                "present a new one-use bootstrap"
+            ),
+        )
+    if not isinstance(restored_claim, dict):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{source} has no matching registered experiment claim",
+        )
+    restored_identity = tuple(
+        restored_claim.get(field) for field in _REGISTERED_CLAIM_IDENTITY_FIELDS
+    )
+    active_identity = tuple(
+        active_claim.get(field) for field in _REGISTERED_CLAIM_IDENTITY_FIELDS
+    )
+    if restored_identity != active_identity:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{source} experiment claim does not match the active claim",
+        )
+
+
 def _run_startup_sync(
     ctx: WorkflowExecutionContext,
     startup_command: Optional[str],
@@ -395,12 +508,19 @@ async def ensure_user_runtime_exists(
     http_bearer_token: Optional[str] = None,
     *,
     run_startup: bool = True,
+    experiment_bootstrap: Optional[ExperimentBootstrapRequest] = None,
 ) -> None:
     """
     Ensure a Topology-B runtime exists for channel_id (WorkflowExecutionContext, no worker thread).
     """
     existing_runtime = await session_manager.get_session(channel_id)
     if existing_runtime:
+        if experiment_bootstrap is not None:
+            refuse_registered_token_reissue(existing_runtime)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="an experiment bootstrap cannot bind an existing session",
+            )
         logger.debug(f"Session for channel_id {channel_id} already exists, skipping creation")
         return
 
@@ -421,6 +541,12 @@ async def ensure_user_runtime_exists(
         # the session while we waited.
         existing_runtime = await session_manager.get_session(channel_id)
         if existing_runtime:
+            if experiment_bootstrap is not None:
+                refuse_registered_token_reissue(existing_runtime)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="an experiment bootstrap cannot bind an existing session",
+                )
             logger.debug(
                 f"Session for channel_id {channel_id} created concurrently, skipping creation"
             )
@@ -439,6 +565,7 @@ async def ensure_user_runtime_exists(
                 stream_format=stream_format,
                 http_bearer_token=http_bearer_token,
                 run_startup=run_startup,
+                experiment_bootstrap=experiment_bootstrap,
             )
 
 
@@ -449,6 +576,7 @@ class _RestoredCheckpoint:
     session_incarnation: str
     runtime_fields: dict = field(default_factory=dict)
     startup: dict = field(default_factory=dict)
+    active_claim: Optional[dict[str, Any]] = None
     applied: bool = False
 
 
@@ -458,6 +586,9 @@ def _restore_from_checkpoint(
     workflow_path: str,
     app_workflow: fastworkflow.Workflow,
     launch_context: Optional[dict],
+    active_claim: Optional[dict[str, Any]],
+    claim_store: Optional[ObservabilityStore],
+    allow_registered_restore: bool,
 ) -> _RestoredCheckpoint:
     """Apply this channel's checkpoint, or start from launch configuration.
 
@@ -484,7 +615,63 @@ def _restore_from_checkpoint(
         record = None
 
     if record is None:
-        return _RestoredCheckpoint(session_incarnation=fresh_incarnation)
+        return _RestoredCheckpoint(
+            session_incarnation=fresh_incarnation,
+            active_claim=active_claim,
+        )
+
+    restored_claim = (record.runtime or {}).get("experiment_claim")
+    if active_claim is None and restored_claim is not None:
+        if not allow_registered_restore:
+            _assert_restored_claim_matches(
+                restored_claim,
+                None,
+                source="checkpoint",
+            )
+        if claim_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "registered checkpoint restore requires the active "
+                    "experiment claim store"
+                ),
+            )
+        if restored_claim.get("server_incarnation") != SERVER_INCARNATION:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "checkpoint experiment claim belongs to a different "
+                    "server incarnation"
+                ),
+            )
+        restored_conversation_id = (record.runtime or {}).get(
+            "active_conversation_id"
+        )
+        if not restored_conversation_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="registered checkpoint has no claimed conversation",
+            )
+        active_claim = {
+            **restored_claim,
+            "channel_id": channel_id,
+            "conversation_id": int(restored_conversation_id),
+        }
+        try:
+            claim_store.validate_attempt_claim(active_claim)
+        except AttemptClaimError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="checkpoint experiment claim is no longer current",
+            ) from exc
+    else:
+        # Validate identity before checkpoint.restore can quarantine malformed
+        # registered state and silently continue as an ordinary session.
+        _assert_restored_claim_matches(
+            restored_claim,
+            active_claim,
+            source="checkpoint",
+        )
 
     try:
         runtime_fields = checkpoint.restore(
@@ -502,11 +689,17 @@ def _restore_from_checkpoint(
         store.quarantine(record.identity, QuarantineReason.UNREADABLE_RECORD)
         return _RestoredCheckpoint(session_incarnation=fresh_incarnation)
 
+    _assert_restored_claim_matches(
+        runtime_fields.get("experiment_claim"),
+        active_claim,
+        source="checkpoint",
+    )
     logger.info(f"Restored checkpoint for channel_id {channel_id}")
     return _RestoredCheckpoint(
         session_incarnation=record.identity.session_incarnation,
         runtime_fields=runtime_fields,
         startup=dict(record.startup or {}),
+        active_claim=active_claim,
         applied=True,
     )
 
@@ -574,11 +767,21 @@ async def _create_user_runtime(
     stream_format: str,
     http_bearer_token: Optional[str],
     run_startup: bool,
+    experiment_bootstrap: Optional[ExperimentBootstrapRequest],
 ) -> None:
     """Build and register a fresh Topology-B runtime (caller holds creation lock)."""
     context = _merge_workflow_context(context, http_bearer_token)
     logger.info(f"Creating new Topology-B session for channel_id: {channel_id}")
 
+    claim: Optional[dict[str, Any]] = None
+    trace_sink = get_observability_sink(workflow_path)
+    if experiment_bootstrap is not None:
+        claim, trace_sink = _claim_registered_attempt(
+            workflow_path, channel_id, experiment_bootstrap
+        )
+
+    # The claim transaction above reserves the labelled conversation before
+    # this constructor can allocate any session work.
     ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
     # Identity plumbing [R1]: the embedder binds channel identity before any
     # turn so spans/turn records are attributable (conversation ids are minted
@@ -593,9 +796,10 @@ async def _create_user_runtime(
     # Observability sink [R4]: run_fastapi_mcp is a fastworkflow entry point,
     # so the SQLite sink defaults ON (FW_OBSERVABILITY=0 disables). One sink
     # (one writer thread) per workflow DB, shared across channels.
-    from fastworkflow.observability_store import get_observability_sink
-    if (trace_sink := get_observability_sink(workflow_path)) is not None:
+    if trace_sink is not None:
         ctx.set_trace_sink(trace_sink)
+    if claim is not None:
+        ctx.bind_experiment_claim(claim, trace_sink.store)
     trace_queue: Queue = Queue()
     ctx.set_transport_queues(command_trace_queue=trace_queue)
 
@@ -607,8 +811,18 @@ async def _create_user_runtime(
     ctx.bind_app_workflow(app_workflow)
 
     restored = _restore_from_checkpoint(
-        session_manager, channel_id, workflow_path, app_workflow, context
+        session_manager,
+        channel_id,
+        workflow_path,
+        app_workflow,
+        context,
+        claim,
+        trace_sink.store if trace_sink is not None else None,
+        http_bearer_token is not None,
     )
+    claim = restored.active_claim
+    if claim is not None:
+        ctx.bind_experiment_claim(claim, trace_sink.store)
 
     conv_id_to_restore = _restore_conversation_memory(
         ctx, trace_sink, channel_id
@@ -637,6 +851,22 @@ async def _create_user_runtime(
         )
 
     if pending := session_manager.session_state_store.load(channel_id):
+        pending_claim = (
+            {
+                "experiment_id": pending.get("experiment_id"),
+                "task_id": pending.get("task_id"),
+                "attempt": pending.get("attempt"),
+                "epoch": pending.get("claim_epoch"),
+                "server_incarnation": pending.get("server_incarnation"),
+            }
+            if pending.get("experiment_id") is not None
+            else None
+        )
+        _assert_restored_claim_matches(
+            pending_claim,
+            claim,
+            source="pending session state",
+        )
         try:
             ctx.apply_serialized_state(pending)
         except IncompatibleSessionState as exc:
@@ -649,6 +879,10 @@ async def _create_user_runtime(
                 f"{exc}. The suspended turn is lost; the session starts clean."
             )
         else:
+            if claim is not None:
+                # apply_serialized_state restores fencing values but cannot
+                # restore the live store object used by admission checks.
+                ctx.bind_experiment_claim(claim, trace_sink.store)
             logger.info(
                 f"Restored pending suspended session for channel_id {channel_id}"
             )
@@ -656,11 +890,29 @@ async def _create_user_runtime(
     # A checkpointed active conversation wins over the one memory was restored
     # from (ruling I7); otherwise the restore's choice — including its
     # step-back — is the active conversation.
-    active_conversation_id = (
-        restored.runtime_fields.get("active_conversation_id")
-        if restored.applied
-        else conv_id_to_restore
-    )
+    if claim is not None:
+        restored_conversation_id = restored.runtime_fields.get(
+            "active_conversation_id"
+        )
+        if (
+            restored.applied
+            and restored_conversation_id is not None
+            and int(restored_conversation_id) != int(claim["conversation_id"])
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "checkpoint conversation does not match the active "
+                    "experiment claim"
+                ),
+            )
+        active_conversation_id = int(claim["conversation_id"])
+    else:
+        active_conversation_id = (
+            restored.runtime_fields.get("active_conversation_id")
+            if restored.applied
+            else conv_id_to_restore
+        )
     # [R1] conversation-id reservation moves ahead of the turn: a fresh session
     # mints its first conversation id NOW, so the very first turn's records are
     # conversation-attributed. Restored sessions keep their restored id.
