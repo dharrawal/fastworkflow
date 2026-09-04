@@ -72,6 +72,41 @@ class MissingExperimentLifecycleFeature(RuntimeError):
     """The target store was not installed for driver-neutral lifecycle writes."""
 
 
+def experiment_store_readiness(db_path: str) -> dict[str, str]:
+    """Describe an installed experiment store for an explicit controller handshake."""
+    if not db_path or not os.path.isfile(db_path):
+        raise MissingExperimentLifecycleFeature(
+            f"{db_path!r} does not exist; the server must install the feature "
+            "before readiness"
+        )
+    store = observability_store.ObservabilityStore(db_path, migrate=False)
+    if (
+        not store.has_feature(
+            observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1
+        )
+        or not store.has_feature(
+            observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1
+        )
+        or not store.experiment_declaration_schema_ready()
+    ):
+        raise MissingExperimentLifecycleFeature(
+            f"{db_path!r} does not advertise "
+            f"{observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1!r}"
+        )
+    store_id = store.store_identity()
+    regime = store.capture_regime()
+    if store_id is None or regime is None:
+        raise MissingExperimentLifecycleFeature(
+            f"{db_path!r} has no installed store identity or capture regime"
+        )
+    return {
+        "store_id": store_id,
+        "resolved_path": os.path.realpath(db_path),
+        "capture_profile": regime[0],
+        "capture_policy_version": regime[1],
+    }
+
+
 @dataclass(frozen=True)
 class ExperimentTask:
     """One task in a task set.
@@ -180,6 +215,7 @@ class ExperimentController:
     def __init__(
         self,
         db_path: str,
+        expected_store_identity: str,
         *,
         migrate: bool = False,
         external: bool = True,
@@ -188,6 +224,10 @@ class ExperimentController:
     ) -> None:
         if not db_path:
             raise ValueError("db_path is required")
+        if not expected_store_identity:
+            raise ValueError("expected_store_identity is required")
+        if external and migrate:
+            raise ValueError("external controllers must open with migrate=False")
         if external and not os.path.isfile(db_path):
             raise MissingExperimentLifecycleFeature(
                 f"{db_path!r} does not exist; the server must install the "
@@ -200,12 +240,21 @@ class ExperimentController:
         )
         if not self.store.has_feature(
             observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1
-        ):
+        ) or not self.store.has_feature(
+            observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1
+        ) or not self.store.experiment_declaration_schema_ready():
             raise MissingExperimentLifecycleFeature(
-                f"{db_path!r} does not advertise "
-                f"{observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1!r}; "
+                f"{db_path!r} does not advertise the required experiment "
+                "lifecycle and declaration features; "
                 "the server must install the feature before readiness"
             )
+        actual_store_identity = self.store.store_identity()
+        if actual_store_identity != expected_store_identity:
+            raise observability_store.StoreIdentityMismatch(
+                f"expected store {expected_store_identity!r}, opened "
+                f"{actual_store_identity!r} at {os.path.realpath(db_path)!r}"
+            )
+        self.store_identity = actual_store_identity
         target_regime = self.store.capture_regime()
         if target_regime is None:
             raise MissingExperimentLifecycleFeature(
@@ -231,6 +280,8 @@ class ExperimentController:
         *,
         declared_tasks: int,
         declared_attempts: int,
+        declarations: Iterable[tuple[str, int, str]],
+        required_evidence_segments: int = 0,
         hypothesis: Optional[str] = None,
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
@@ -241,6 +292,7 @@ class ExperimentController:
             label,
             declared_tasks=declared_tasks,
             declared_attempts=declared_attempts,
+            required_evidence_segments=required_evidence_segments,
             hypothesis=hypothesis,
             arm=arm,
             baseline_experiment_id=baseline_experiment_id,
@@ -248,6 +300,7 @@ class ExperimentController:
             capture_profile=self.capture_profile,
             capture_policy_version=self.capture_policy_version,
         )
+        self.store.declare_experiment_attempts(experiment_id, declarations)
 
     def start_attempt(
         self,
@@ -258,6 +311,7 @@ class ExperimentController:
         *,
         conversation_id: Optional[int] = None,
         source_attempt_key: Optional[dict[str, Any]] = None,
+        source_key: Optional[str] = None,
     ) -> None:
         self.store.start_attempt(
             experiment_id,
@@ -266,6 +320,7 @@ class ExperimentController:
             channel_id,
             conversation_id=conversation_id,
             source_attempt_key=source_attempt_key,
+            source_key=source_key or channel_id,
         )
 
     def restart_attempt(
@@ -409,8 +464,19 @@ class ExperimentHarness:
         self.defeat_caches = defeat_caches
         self.install_memory_policy = install_memory_policy
         self._db_path = state_paths.observability_db(workflow_folderpath)
+        bootstrap_store = observability_store.ObservabilityStore(
+            self._db_path, migrate=True
+        )
+        store_identity = bootstrap_store.store_identity()
+        if store_identity is None:
+            raise MissingExperimentLifecycleFeature(
+                f"{self._db_path!r} has no installed store identity"
+            )
         self._controller = ExperimentController(
-            self._db_path, migrate=True, external=False
+            self._db_path,
+            store_identity,
+            migrate=False,
+            external=False,
         )
         self._store = self._controller.store
         self._lock = threading.Lock()
@@ -558,11 +624,18 @@ class ExperimentHarness:
                 "key every score groups by"
             )
 
+        declarations = [
+            (task.task_id, n, channel_for(self.experiment_id, task.task_id, n))
+            for task in task_list
+            for n in range(1, attempts + 1)
+        ]
         self._controller.create_experiment(
             self.experiment_id,
             self.label,
             declared_tasks=len(task_list),
             declared_attempts=attempts,
+            declarations=declarations,
+            required_evidence_segments=1,
             hypothesis=self.hypothesis,
             arm=self.arm,
             baseline_experiment_id=self.baseline_experiment_id,
@@ -720,7 +793,11 @@ class ExperimentHarness:
             task=task, attempt=attempt, channel_id=channel_id, conversation_id=None
         )
         self._controller.start_attempt(
-            self.experiment_id, task.task_id, attempt, channel_id
+            self.experiment_id,
+            task.task_id,
+            attempt,
+            channel_id,
+            source_key=channel_id,
         )
         ctx: Optional[WorkflowExecutionContext] = None
         try:

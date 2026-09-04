@@ -87,9 +87,11 @@ _pruning_suppression_depth = 0
 FEATURE_DISTILLATION_V1 = "distillation_v1"
 FEATURE_EXPERIMENTS_V1 = "experiments_v1"
 FEATURE_EXPERIMENT_LIFECYCLE_V1 = "experiment_lifecycle_v1"
+FEATURE_EXPERIMENT_DECLARATIONS_V1 = "experiment_declarations_v1"
 
 CAPTURE_POLICY_VERSION = "1"
 CAPTURE_REGIME_DIAGNOSTIC = "observability_capture_regime"
+STORE_IDENTITY_DIAGNOSTIC = "observability_store_identity"
 
 
 @dataclass(frozen=True)
@@ -215,6 +217,18 @@ class ExperimentIsClosed(ValueError):
 
 class AttemptValueConflict(ValueError):
     """A terminal attempt value was rewritten to a different value."""
+
+
+class ExperimentDeclarationConflict(ValueError):
+    """An immutable exact-attempt declaration was changed."""
+
+
+class UndeclaredExperimentAttempt(ValueError):
+    """An attempt identity was not part of the immutable declaration."""
+
+
+class StoreIdentityMismatch(ValueError):
+    """A controller opened a different durable observability store."""
 
 
 class CaptureRegimeChanged(ValueError):
@@ -539,6 +553,7 @@ _SCHEMA_STATEMENTS = [
         invalid_detail TEXT,
         declared_tasks INTEGER NOT NULL,
         declared_attempts INTEGER NOT NULL,
+        required_evidence_segments INTEGER NOT NULL DEFAULT 0,
         workflow_name TEXT,
         capture_profile TEXT NOT NULL,
         capture_policy_version TEXT NOT NULL,
@@ -560,7 +575,15 @@ _SCHEMA_STATEMENTS = [
         finished_at TEXT,
         detail_json TEXT,
         source_attempt_json TEXT,
+        source_key TEXT,
         PRIMARY KEY (experiment_id, task_id, attempt))""",
+    """CREATE TABLE IF NOT EXISTS experiment_attempt_declarations (
+        experiment_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        native_attempt INTEGER NOT NULL,
+        source_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (experiment_id, task_id, native_attempt))""",
     """CREATE TABLE IF NOT EXISTS experiment_evidence_runs (
         experiment_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -580,6 +603,7 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_experiments_baseline ON experiments(baseline_experiment_id) WHERE baseline_experiment_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_experiment_attempts_channel ON experiment_attempts(channel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_experiment_declarations_experiment ON experiment_attempt_declarations(experiment_id)",
 ]
 
 
@@ -680,12 +704,27 @@ class ObservabilityStore:
                 ("execution_status", "TEXT"),
                 ("execution_finished_at", "TEXT"),
                 ("source_attempt_json", "TEXT"),
+                ("source_key", "TEXT"),
             ):
                 if attempt_cols and column not in attempt_cols:
                     conn.execute(
                         f"ALTER TABLE experiment_attempts ADD COLUMN "
                         f"{column} {declaration}"
                     )
+            experiment_cols = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(experiments)"
+                ).fetchall()
+            }
+            if (
+                experiment_cols
+                and "required_evidence_segments" not in experiment_cols
+            ):
+                conn.execute(
+                    "ALTER TABLE experiments ADD COLUMN "
+                    "required_evidence_segments INTEGER NOT NULL DEFAULT 0"
+                )
             if attempt_cols and "execution_finished_at" not in attempt_cols:
                 # The old compatibility operation wrote execution and outcome
                 # together. Preserve that meaning when opening a pre-split DB.
@@ -711,7 +750,21 @@ class ObservabilityStore:
             )
             self._merge_schema_features(
                 conn,
-                [FEATURE_EXPERIMENTS_V1, FEATURE_EXPERIMENT_LIFECYCLE_V1],
+                [
+                    FEATURE_EXPERIMENTS_V1,
+                    FEATURE_EXPERIMENT_LIFECYCLE_V1,
+                    FEATURE_EXPERIMENT_DECLARATIONS_V1,
+                ],
+            )
+            conn.execute(
+                """INSERT INTO diagnostics (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO NOTHING""",
+                (
+                    STORE_IDENTITY_DIAGNOSTIC,
+                    str(uuid.uuid4()),
+                    _utcnow_iso(),
+                ),
             )
             conn.execute(
                 """INSERT INTO diagnostics (key, value, updated_at)
@@ -812,6 +865,41 @@ class ObservabilityStore:
     def has_feature(self, name: str) -> bool:
         return name in self._features
 
+    def experiment_declaration_schema_ready(self) -> bool:
+        """Whether the advertised exact-plan schema is structurally complete."""
+        if not self.has_feature(FEATURE_EXPERIMENT_DECLARATIONS_V1):
+            return False
+        try:
+            with self._connect() as conn:
+                declaration_cols = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(experiment_attempt_declarations)"
+                    ).fetchall()
+                }
+                experiment_cols = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(experiments)"
+                    ).fetchall()
+                }
+                attempt_cols = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(experiment_attempts)"
+                    ).fetchall()
+                }
+            return {
+                "experiment_id",
+                "task_id",
+                "native_attempt",
+                "source_key",
+            } <= declaration_cols and {
+                "required_evidence_segments"
+            } <= experiment_cols and {"source_key"} <= attempt_cols
+        except sqlite3.Error:
+            return False
+
     def capture_regime(self) -> Optional[tuple[str, str]]:
         """Return the regime installed by the process that owns this store."""
         try:
@@ -828,6 +916,20 @@ class ObservabilityStore:
                 str(value["capture_policy_version"]),
             )
         except (KeyError, TypeError, ValueError, sqlite3.Error):
+            return None
+
+    def store_identity(self) -> Optional[str]:
+        """Return the durable identity minted when this store was installed."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT value FROM diagnostics WHERE key=?",
+                    (STORE_IDENTITY_DIAGNOSTIC,),
+                ).fetchone()
+            if row is None or not str(row["value"]).strip():
+                return None
+            return str(row["value"])
+        except sqlite3.Error:
             return None
 
     # -- identity [R1] ---------------------------------------------------
@@ -1662,6 +1764,7 @@ class ObservabilityStore:
         *,
         declared_tasks: int,
         declared_attempts: int,
+        required_evidence_segments: int = 0,
         hypothesis: Optional[str] = None,
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
@@ -1686,12 +1789,15 @@ class ObservabilityStore:
             raise ValueError("experiment_id and label are required")
         declared_tasks = int(declared_tasks)
         declared_attempts = int(declared_attempts)
+        required_evidence_segments = int(required_evidence_segments)
         if declared_tasks <= 0 or declared_attempts <= 0:
             raise ValueError(
                 "declared_tasks and declared_attempts must both be positive: "
                 "they are the denominator, and a score over an undeclared "
                 "denominator is computed over whatever survived"
             )
+        if required_evidence_segments < 0:
+            raise ValueError("required_evidence_segments cannot be negative")
         capture_profile = capture_profile or _env("FW_OBS_CAPTURE_PROFILE", "debug")
         capture_policy_version = capture_policy_version or "1"
         with self._connect() as conn:
@@ -1722,10 +1828,11 @@ class ObservabilityStore:
                    (experiment_id, label, hypothesis, notes, arm,
                     baseline_experiment_id, status, invalid_reason,
                     invalid_detail, declared_tasks, declared_attempts,
-                    workflow_name, capture_profile, capture_policy_version,
+                    required_evidence_segments, workflow_name, capture_profile,
+                    capture_policy_version,
                     created_at, completed_at)
                    VALUES (?, ?, ?, NULL, ?, ?, 'running', NULL, NULL,
-                           ?, ?, ?, ?, ?, ?, NULL)
+                           ?, ?, ?, ?, ?, ?, ?, NULL)
                    ON CONFLICT(experiment_id) DO UPDATE SET
                      label=excluded.label,
                      arm=excluded.arm,
@@ -1741,6 +1848,10 @@ class ObservabilityStore:
                        THEN excluded.declared_tasks ELSE experiments.declared_tasks END,
                      declared_attempts=CASE WHEN experiments.status='running'
                        THEN excluded.declared_attempts ELSE experiments.declared_attempts END,
+                     required_evidence_segments=CASE
+                       WHEN experiments.status='running'
+                       THEN excluded.required_evidence_segments
+                       ELSE experiments.required_evidence_segments END,
                      workflow_name=excluded.workflow_name""",
                 (
                     experiment_id,
@@ -1750,11 +1861,108 @@ class ObservabilityStore:
                     baseline_experiment_id,
                     declared_tasks,
                     declared_attempts,
+                    required_evidence_segments,
                     self._scrub(workflow_name),
                     capture_profile,
                     capture_policy_version,
                     _utcnow_iso(),
                 ),
+            )
+            conn.commit()
+
+    def declare_experiment_attempts(
+        self,
+        experiment_id: str,
+        declarations: Iterable[tuple[str, int, str]],
+    ) -> None:
+        """Persist one immutable, exact attempt plan before execution starts."""
+        normalized = {
+            (self._scrub(task_id), int(native_attempt), self._scrub(source_key))
+            for task_id, native_attempt, source_key in declarations
+        }
+        if not normalized:
+            raise ValueError("an experiment attempt declaration cannot be empty")
+        if any(
+            not task_id or native_attempt <= 0 or not source_key
+            for task_id, native_attempt, source_key in normalized
+        ):
+            raise ValueError(
+                "each declaration requires task_id, positive native_attempt, "
+                "and source_key"
+            )
+        attempt_identities = {
+            (task_id, native_attempt)
+            for task_id, native_attempt, _ in normalized
+        }
+        if len(attempt_identities) != len(normalized):
+            raise ValueError(
+                "each task_id/native_attempt pair must have exactly one source_key"
+            )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            experiment = conn.execute(
+                """SELECT status, declared_tasks, declared_attempts
+                     FROM experiments WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if experiment is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            if experiment["status"] != "running":
+                conn.rollback()
+                raise ExperimentIsClosed(experiment_id, experiment["status"])
+            if conn.execute(
+                "SELECT 1 FROM experiment_attempts WHERE experiment_id=? LIMIT 1",
+                (experiment_id,),
+            ).fetchone():
+                conn.rollback()
+                raise ExperimentDeclarationConflict(
+                    f"experiment {experiment_id!r} has already started"
+                )
+            expected_rows = (
+                int(experiment["declared_tasks"])
+                * int(experiment["declared_attempts"])
+            )
+            task_counts: dict[str, int] = {}
+            for task_id, _, _ in normalized:
+                task_counts[task_id] = task_counts.get(task_id, 0) + 1
+            if (
+                len(normalized) != expected_rows
+                or len(task_counts) != int(experiment["declared_tasks"])
+                or set(task_counts.values())
+                != {int(experiment["declared_attempts"])}
+            ):
+                conn.rollback()
+                raise ValueError(
+                    "exact declarations do not match the declared task/attempt "
+                    "display summaries"
+                )
+            stored = {
+                (row["task_id"], int(row["native_attempt"]), row["source_key"])
+                for row in conn.execute(
+                    """SELECT task_id, native_attempt, source_key
+                         FROM experiment_attempt_declarations
+                        WHERE experiment_id=?""",
+                    (experiment_id,),
+                ).fetchall()
+            }
+            if stored:
+                conn.rollback()
+                if stored == normalized:
+                    return
+                raise ExperimentDeclarationConflict(
+                    f"experiment {experiment_id!r} already has a different "
+                    "immutable attempt declaration"
+                )
+            now = _utcnow_iso()
+            conn.executemany(
+                """INSERT INTO experiment_attempt_declarations
+                   (experiment_id, task_id, native_attempt, source_key, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [
+                    (experiment_id, task_id, native_attempt, source_key, now)
+                    for task_id, native_attempt, source_key in sorted(normalized)
+                ],
             )
             conn.commit()
 
@@ -1876,6 +2084,7 @@ class ObservabilityStore:
         channel_id: str,
         conversation_id: Optional[int] = None,
         source_attempt_key: Optional[dict[str, Any]] = None,
+        source_key: Optional[str] = None,
     ) -> None:
         """Open an attempt row before its first turn.
 
@@ -1889,6 +2098,8 @@ class ObservabilityStore:
         attempt = int(attempt)
         if attempt <= 0:
             raise ValueError("attempt must be a positive integer")
+        scrubbed_task_id = self._scrub(task_id)
+        scrubbed_source_key = self._scrub(source_key)
         source_attempt_json = (
             None
             if source_attempt_key is None
@@ -1921,15 +2132,39 @@ class ObservabilityStore:
                 # `resume()`. Enforced here, where the `[XR12]` invariants live.
                 conn.rollback()
                 raise ExperimentIsClosed(experiment_id, row["status"])
+            has_declaration = conn.execute(
+                """SELECT 1 FROM experiment_attempt_declarations
+                    WHERE experiment_id=? LIMIT 1""",
+                (experiment_id,),
+            ).fetchone()
+            if has_declaration is not None:
+                declared = conn.execute(
+                    """SELECT 1 FROM experiment_attempt_declarations
+                        WHERE experiment_id=? AND task_id=?
+                          AND native_attempt=? AND source_key=?""",
+                    (
+                        experiment_id,
+                        scrubbed_task_id,
+                        attempt,
+                        scrubbed_source_key,
+                    ),
+                ).fetchone()
+                if declared is None:
+                    conn.rollback()
+                    raise UndeclaredExperimentAttempt(
+                        f"attempt {experiment_id}/{task_id}/{attempt} with "
+                        f"source_key {source_key!r} was not declared"
+                    )
             existing = conn.execute(
-                """SELECT channel_id, source_attempt_json
+                """SELECT channel_id, source_attempt_json, source_key
                      FROM experiment_attempts
                     WHERE experiment_id=? AND task_id=? AND attempt=?""",
-                (experiment_id, self._scrub(task_id), attempt),
+                (experiment_id, scrubbed_task_id, attempt),
             ).fetchone()
             if existing is not None and (
                 existing["channel_id"] != self._scrub(channel_id)
                 or existing["source_attempt_json"] != source_attempt_json
+                or existing["source_key"] != scrubbed_source_key
             ):
                 conn.rollback()
                 raise AttemptValueConflict(
@@ -1941,21 +2176,22 @@ class ObservabilityStore:
                    (experiment_id, task_id, attempt, channel_id, conversation_id,
                     outcome, outcome_source, reward, restarts, started_at,
                     execution_status, execution_finished_at, finished_at,
-                    detail_json, source_attempt_json)
+                    detail_json, source_attempt_json, source_key)
                    VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?,
-                           NULL, NULL, NULL, NULL, ?)
+                           NULL, NULL, NULL, NULL, ?, ?)
                    ON CONFLICT(experiment_id, task_id, attempt) DO UPDATE SET
                      channel_id=excluded.channel_id,
                      conversation_id=COALESCE(excluded.conversation_id,
                                               experiment_attempts.conversation_id)""",
                 (
                     experiment_id,
-                    self._scrub(task_id),
+                    scrubbed_task_id,
                     attempt,
                     self._scrub(channel_id),
                     conversation_id,
                     _utcnow_iso(),
                     source_attempt_json,
+                    scrubbed_source_key,
                 ),
             )
             conn.commit()
@@ -2292,7 +2528,8 @@ class ObservabilityStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                """SELECT status, declared_tasks, declared_attempts
+                """SELECT status, declared_tasks, declared_attempts,
+                          required_evidence_segments
                      FROM experiments WHERE experiment_id=?""",
                 (experiment_id,),
             ).fetchone()
@@ -2341,12 +2578,50 @@ class ObservabilityStore:
                 evaluated = int(counts["evaluated"] or 0)
                 incomplete = int(counts["incomplete"] or 0)
                 declared_tasks = int(row["declared_tasks"])
+                declarations = conn.execute(
+                    """SELECT task_id, native_attempt, source_key
+                         FROM experiment_attempt_declarations
+                        WHERE experiment_id=?""",
+                    (experiment_id,),
+                ).fetchall()
+                declaration_set = {
+                    (
+                        declaration["task_id"],
+                        int(declaration["native_attempt"]),
+                        declaration["source_key"],
+                    )
+                    for declaration in declarations
+                }
+                attempt_set = {
+                    (
+                        attempt_row["task_id"],
+                        int(attempt_row["attempt"]),
+                        attempt_row["source_key"],
+                    )
+                    for attempt_row in conn.execute(
+                        """SELECT task_id, attempt, source_key
+                             FROM experiment_attempts
+                            WHERE experiment_id=?""",
+                        (experiment_id,),
+                    ).fetchall()
+                }
                 bad_segments = conn.execute(
                     """SELECT COUNT(*) FROM experiment_evidence_runs
                         WHERE experiment_id=? AND valid=0""",
                     (experiment_id,),
                 ).fetchone()[0]
-                if (
+                evidence_segments = conn.execute(
+                    """SELECT COUNT(*) FROM experiment_evidence_runs
+                        WHERE experiment_id=?""",
+                    (experiment_id,),
+                ).fetchone()[0]
+                if declaration_set and attempt_set != declaration_set:
+                    reason = "attempt_shortfall"
+                    detail = (
+                        "recorded attempt identities do not exactly match the "
+                        f"{len(declaration_set)} immutable declarations"
+                    )
+                elif (
                     executed != expected
                     or rows_total != expected
                     or tasks_total != declared_tasks
@@ -2366,6 +2641,12 @@ class ObservabilityStore:
                 elif bad_segments:
                     reason = "evidence_run_invalid"
                     detail = f"{bad_segments} evidence segment(s) reported invalid"
+                elif evidence_segments < int(row["required_evidence_segments"]):
+                    reason = "evidence_run_invalid"
+                    detail = (
+                        f"{evidence_segments} evidence segment(s) recorded; "
+                        f"{int(row['required_evidence_segments'])} required"
+                    )
                 elif evaluated != expected:
                     status = "awaiting_evaluation"
                 elif external_capture:
@@ -2521,6 +2802,22 @@ class ObservabilityStore:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def experiment_attempt_declarations(
+        self, experiment_id: str
+    ) -> list[dict[str, Any]]:
+        """Return the immutable exact plan in deterministic order."""
+        if not self.experiment_declaration_schema_ready():
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT task_id, native_attempt, source_key, created_at
+                     FROM experiment_attempt_declarations
+                    WHERE experiment_id=?
+                    ORDER BY task_id, native_attempt, source_key""",
+                (experiment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def experiment_tasks(self, experiment_id: str) -> list[dict[str, Any]]:
         """One row per task: its attempts' outcomes, and whether all passed."""
@@ -2961,6 +3258,7 @@ class ObservabilityStore:
             for table in (
                 "experiment_evidence_runs",
                 "experiment_attempts",
+                "experiment_attempt_declarations",
                 "experiments",
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
