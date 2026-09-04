@@ -12,6 +12,7 @@ from fastworkflow import observability_store as obs
 from fastworkflow.experiment import (
     ExperimentController,
     MissingExperimentLifecycleFeature,
+    experiment_store_readiness,
 )
 
 
@@ -24,7 +25,10 @@ def db_path(tmp_path, monkeypatch) -> str:
 
 
 def _controller(db_path: str, *, external: bool = False) -> ExperimentController:
-    return ExperimentController(db_path, migrate=False, external=external)
+    identity = experiment_store_readiness(db_path)["store_id"]
+    return ExperimentController(
+        db_path, identity, migrate=False, external=external
+    )
 
 
 def _create(
@@ -33,12 +37,19 @@ def _create(
     *,
     tasks: int = 1,
     attempts: int = 1,
+    task_ids=None,
 ) -> None:
+    task_ids = task_ids or [f"t{index}" for index in range(tasks)]
     controller.create_experiment(
         experiment_id,
         "label",
         declared_tasks=tasks,
         declared_attempts=attempts,
+        declarations=[
+            (task_id, attempt, f"channel:{task_id}:{attempt}")
+            for task_id in task_ids
+            for attempt in range(1, attempts + 1)
+        ],
         hypothesis="immutable hypothesis",
     )
 
@@ -68,6 +79,7 @@ def test_external_controller_refuses_capture_regime_mismatch(db_path):
     with pytest.raises(obs.CaptureRegimeChanged):
         ExperimentController(
             db_path,
+            experiment_store_readiness(db_path)["store_id"],
             migrate=False,
             external=True,
             capture_profile="debug",
@@ -86,7 +98,12 @@ def test_external_controller_has_no_sink_writer_or_pruning_side_effect(
     monkeypatch.setattr(obs, "get_observability_sink", forbidden)
     monkeypatch.setattr(obs.SQLiteTraceSink, "__init__", forbidden)
     monkeypatch.setattr(obs.ObservabilityStore, "prune", forbidden)
-    controller = ExperimentController(db_path, migrate=False, external=True)
+    controller = ExperimentController(
+        db_path,
+        experiment_store_readiness(db_path)["store_id"],
+        migrate=False,
+        external=True,
+    )
 
     assert controller.store.db_path == db_path
     assert {thread.ident for thread in threading.enumerate()} == before
@@ -113,7 +130,9 @@ def test_external_controller_never_migrates_and_refuses_missing_feature(
 
     monkeypatch.setattr(obs.ObservabilityStore, "_ensure_schema", forbidden)
     with pytest.raises(MissingExperimentLifecycleFeature):
-        ExperimentController(path, migrate=False, external=True)
+        ExperimentController(
+            path, "missing-store-identity", migrate=False, external=True
+        )
 
 
 def test_compatible_finish_attempt_runs_running_to_complete(db_path):
@@ -179,7 +198,7 @@ def test_invalid_is_terminal(db_path):
 
 def test_restart_only_accepts_execution_open_attempts(db_path):
     controller = _controller(db_path)
-    _create(controller, tasks=2)
+    _create(controller, tasks=2, task_ids=["open", "closed"])
     controller.start_attempt("exp-1", "open", 1, "channel:open:1")
     controller.start_attempt("exp-1", "closed", 1, "channel:closed:1")
     controller.terminalize_attempt(
@@ -264,13 +283,19 @@ def test_declared_denominator_is_still_enforced(db_path):
     )
 
 
-def test_markerless_ready_schema_is_detected_from_lifecycle_columns(db_path):
+def test_markerless_ready_schema_is_refused_for_external_open(db_path):
+    identity = obs.ObservabilityStore(
+        db_path, migrate=False
+    ).store_identity()
     conn = sqlite3.connect(db_path)
     conn.execute("DELETE FROM diagnostics WHERE key='schema_features'")
     conn.commit()
     conn.close()
 
-    controller = ExperimentController(db_path, migrate=False, external=True)
-    assert controller.store.has_feature(
-        obs.FEATURE_EXPERIMENT_LIFECYCLE_V1
-    )
+    with pytest.raises(MissingExperimentLifecycleFeature):
+        ExperimentController(
+            db_path,
+            identity,
+            migrate=False,
+            external=True,
+        )
