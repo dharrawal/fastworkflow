@@ -149,6 +149,11 @@ class Span:
     end_ns: Optional[int] = None
     status: str = STATUS_OPEN
     attributes: dict[str, Any] = field(default_factory=dict)
+    experiment_id: Optional[str] = None
+    task_id: Optional[str] = None
+    attempt: Optional[int] = None
+    claim_epoch: Optional[int] = None
+    server_incarnation: Optional[str] = None
 
 
 # ----------------------------------------------------------------------
@@ -275,6 +280,10 @@ def get_channel_id(host: Any) -> Optional[str]:
     return _resolve(host, "observability_channel_id")
 
 
+def get_experiment_claim(host: Any) -> dict[str, Any]:
+    return _resolve(host, "observability_experiment_claim") or {}
+
+
 def _get_stack(host: Any) -> Optional[list]:
     return _resolve(host, "trace_span_stack")
 
@@ -337,6 +346,7 @@ def start_span(
             elif name != SPAN_TURN:
                 parent_span_id = root_span_id(turn_key)
 
+        claim = get_experiment_claim(host)
         span = Span(
             span_id=span_id or uuid.uuid4().hex,
             trace_id=turn_key,
@@ -349,6 +359,11 @@ def start_span(
             start_ns=time.time_ns(),
             status=STATUS_OPEN,
             attributes=_capped(attributes),
+            experiment_id=claim.get("experiment_id"),
+            task_id=claim.get("task_id"),
+            attempt=claim.get("attempt"),
+            claim_epoch=claim.get("epoch"),
+            server_incarnation=claim.get("server_incarnation"),
         )
 
         if use_stack and stack is not None:

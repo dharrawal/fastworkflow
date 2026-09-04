@@ -34,6 +34,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 import queue
@@ -88,6 +89,7 @@ FEATURE_DISTILLATION_V1 = "distillation_v1"
 FEATURE_EXPERIMENTS_V1 = "experiments_v1"
 FEATURE_EXPERIMENT_LIFECYCLE_V1 = "experiment_lifecycle_v1"
 FEATURE_EXPERIMENT_DECLARATIONS_V1 = "experiment_declarations_v1"
+FEATURE_EXPERIMENT_CLAIMS_V1 = "experiment_claims_v1"
 
 CAPTURE_POLICY_VERSION = "1"
 CAPTURE_REGIME_DIAGNOSTIC = "observability_capture_regime"
@@ -225,6 +227,14 @@ class ExperimentDeclarationConflict(ValueError):
 
 class UndeclaredExperimentAttempt(ValueError):
     """An attempt identity was not part of the immutable declaration."""
+
+
+class AttemptClaimError(ValueError):
+    """An attempt bootstrap or fencing claim was refused."""
+
+
+class StaleExperimentClaim(AttemptClaimError):
+    """A runtime or queued record carries an obsolete attempt epoch."""
 
 
 class StoreIdentityMismatch(ValueError):
@@ -433,6 +443,11 @@ def serialize_turn_result(turn_result: Any) -> tuple[dict[str, Any], list[dict[s
                     "sha256": sha256,
                     "inline_value": value_json.encode("utf-8"),
                     "error": None,
+                    "experiment_id": turn_result.experiment_id,
+                    "task_id": turn_result.task_id,
+                    "attempt": turn_result.attempt,
+                    "claim_epoch": turn_result.claim_epoch,
+                    "server_incarnation": turn_result.server_incarnation,
                 }
             )
             # Envelope shape per final spec [A10] / this design [R10].
@@ -483,6 +498,8 @@ def serialize_turn_result(turn_result: Any) -> tuple[dict[str, Any], list[dict[s
         "attempt": (
             None if turn_result.attempt is None else int(turn_result.attempt)
         ),
+        "claim_epoch": turn_result.claim_epoch,
+        "server_incarnation": turn_result.server_incarnation,
         "record_version": 1,
         "record_json": json.dumps(record, ensure_ascii=False),
     }
@@ -518,6 +535,7 @@ _SCHEMA_STATEMENTS = [
         started_at TEXT, completed_at TEXT, suspended_ms INTEGER,
         continuation_of TEXT, record_version INTEGER NOT NULL,
         experiment_id TEXT, task_id TEXT, attempt INTEGER,
+        claim_epoch INTEGER, server_incarnation TEXT,
         record_json TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS feedback (
         turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL,
@@ -529,13 +547,17 @@ _SCHEMA_STATEMENTS = [
         channel_id TEXT,
         command_name TEXT, context TEXT,
         start_ns INTEGER NOT NULL, end_ns INTEGER,
-        status TEXT NOT NULL, attributes TEXT NOT NULL)""",
+        status TEXT NOT NULL, attributes TEXT NOT NULL,
+        experiment_id TEXT, task_id TEXT, attempt INTEGER,
+        claim_epoch INTEGER, server_incarnation TEXT)""",
     """CREATE TABLE IF NOT EXISTS artifacts (
         artifact_id TEXT PRIMARY KEY, turn_key TEXT NOT NULL,
         channel_id TEXT,
         span_id TEXT, key TEXT NOT NULL, content_type TEXT,
         size_bytes INTEGER, sha256 TEXT,
-        inline_value BLOB, error TEXT)""",
+        inline_value BLOB, error TEXT,
+        experiment_id TEXT, task_id TEXT, attempt INTEGER,
+        claim_epoch INTEGER, server_incarnation TEXT)""",
     """CREATE TABLE IF NOT EXISTS train_runs (
         run_id TEXT PRIMARY KEY, workflow_fingerprint TEXT, started_at TEXT,
         completed_at TEXT, metrics_json TEXT NOT NULL)""",
@@ -584,6 +606,24 @@ _SCHEMA_STATEMENTS = [
         source_key TEXT NOT NULL,
         created_at TEXT NOT NULL,
         PRIMARY KEY (experiment_id, task_id, native_attempt))""",
+    """CREATE TABLE IF NOT EXISTS experiment_attempt_claims (
+        registration_id TEXT PRIMARY KEY,
+        experiment_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        native_attempt INTEGER NOT NULL,
+        source_key TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        secret_hash TEXT,
+        expires_at REAL NOT NULL,
+        state TEXT NOT NULL,
+        epoch INTEGER NOT NULL DEFAULT 0,
+        server_incarnation TEXT,
+        lease_expires_at REAL,
+        conversation_id INTEGER,
+        recovery_json TEXT,
+        created_at TEXT NOT NULL,
+        claimed_at TEXT,
+        UNIQUE (experiment_id, task_id, native_attempt))""",
     """CREATE TABLE IF NOT EXISTS experiment_evidence_runs (
         experiment_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -604,6 +644,7 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_experiment_attempts_channel ON experiment_attempts(channel_id)",
     "CREATE INDEX IF NOT EXISTS idx_experiment_declarations_experiment ON experiment_attempt_declarations(experiment_id)",
+    "CREATE INDEX IF NOT EXISTS idx_experiment_claims_channel ON experiment_attempt_claims(channel_id, state)",
 ]
 
 
@@ -683,6 +724,31 @@ class ObservabilityStore:
                         conn.execute(
                             f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
                         )
+            for table in ("turns", "spans", "artifacts"):
+                cols = {
+                    row[1]
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if not cols:
+                    continue
+                for column, declaration in (
+                    ("claim_epoch", "INTEGER"),
+                    ("server_incarnation", "TEXT"),
+                ):
+                    if column not in cols:
+                        conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                        )
+                if table in {"spans", "artifacts"}:
+                    for column, declaration in (
+                        ("experiment_id", "TEXT"),
+                        ("task_id", "TEXT"),
+                        ("attempt", "INTEGER"),
+                    ):
+                        if column not in cols:
+                            conn.execute(
+                                f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                            )
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
             # Pre-release column migration (schema v1 was never shipped, but
@@ -754,6 +820,7 @@ class ObservabilityStore:
                     FEATURE_EXPERIMENTS_V1,
                     FEATURE_EXPERIMENT_LIFECYCLE_V1,
                     FEATURE_EXPERIMENT_DECLARATIONS_V1,
+                    FEATURE_EXPERIMENT_CLAIMS_V1,
                 ],
             )
             conn.execute(
@@ -900,6 +967,35 @@ class ObservabilityStore:
         except sqlite3.Error:
             return False
 
+    def experiment_claim_schema_ready(self) -> bool:
+        """Whether one-use bootstrap and epoch fencing are installed."""
+        if not self.has_feature(FEATURE_EXPERIMENT_CLAIMS_V1):
+            return False
+        try:
+            with self._connect() as conn:
+                columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(experiment_attempt_claims)"
+                    ).fetchall()
+                }
+            return {
+                "registration_id",
+                "experiment_id",
+                "task_id",
+                "native_attempt",
+                "source_key",
+                "channel_id",
+                "secret_hash",
+                "expires_at",
+                "state",
+                "epoch",
+                "server_incarnation",
+                "conversation_id",
+            } <= columns
+        except sqlite3.Error:
+            return False
+
     def capture_regime(self) -> Optional[tuple[str, str]]:
         """Return the regime installed by the process that owns this store."""
         try:
@@ -965,46 +1061,62 @@ class ObservabilityStore:
             timeout=float(_env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", 5))
         ) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            counter = conn.execute(
-                "SELECT next_id FROM conversation_counters WHERE channel_id=?",
-                (channel_id,),
-            ).fetchone()
-            max_row = conn.execute(
-                "SELECT COALESCE(MAX(conversation_id), 0) FROM conversations WHERE channel_id=?",
-                (channel_id,),
-            ).fetchone()
-            floor = max(int(max_row[0]), int(legacy_floor or 0))
-            next_id = int(counter["next_id"]) if counter is not None else 1
-            new_id = max(next_id, floor + 1)
-            conn.execute(
-                """INSERT INTO conversation_counters (channel_id, next_id) VALUES (?, ?)
-                   ON CONFLICT(channel_id) DO UPDATE SET
-                     next_id=MAX(conversation_counters.next_id, excluded.next_id)""",
-                (channel_id, new_id + 1),
-            )
-            now = _utcnow_iso()
-            # The experiment labels ride the mint because this is where the
-            # conversation row is created, and an attempt IS a conversation
-            # (`[XR4]`). Scrub-only, on the same terms as the turn path, so the
-            # two copies stay byte-identical and joinable (`[XR7]`).
-            redactor = self._store_redactor()
-            conn.execute(
-                """INSERT INTO conversations
-                   (channel_id, conversation_id, topic, summary, status,
-                    next_ordinal, started_at, last_turn_at, updated_at,
-                    experiment_id, task_id, attempt)
-                   VALUES (?, ?, NULL, NULL, 'open', 1, ?, NULL, ?, ?, ?, ?)""",
-                (
-                    channel_id,
-                    new_id,
-                    now,
-                    now,
-                    experiment_id,
-                    redactor.redact(task_id),
-                    None if attempt is None else int(attempt),
-                ),
+            new_id = self._mint_conversation_id_in_txn(
+                conn,
+                channel_id,
+                legacy_floor=legacy_floor,
+                experiment_id=experiment_id,
+                task_id=task_id,
+                attempt=attempt,
             )
             conn.commit()
+        return new_id
+
+    def _mint_conversation_id_in_txn(
+        self,
+        conn: sqlite3.Connection,
+        channel_id: str,
+        legacy_floor: int = 0,
+        *,
+        experiment_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        attempt: Optional[int] = None,
+    ) -> int:
+        """Reserve a conversation using the caller's existing write transaction."""
+        counter = conn.execute(
+            "SELECT next_id FROM conversation_counters WHERE channel_id=?",
+            (channel_id,),
+        ).fetchone()
+        max_row = conn.execute(
+            "SELECT COALESCE(MAX(conversation_id), 0) FROM conversations WHERE channel_id=?",
+            (channel_id,),
+        ).fetchone()
+        floor = max(int(max_row[0]), int(legacy_floor or 0))
+        next_id = int(counter["next_id"]) if counter is not None else 1
+        new_id = max(next_id, floor + 1)
+        conn.execute(
+            """INSERT INTO conversation_counters (channel_id, next_id) VALUES (?, ?)
+               ON CONFLICT(channel_id) DO UPDATE SET
+                 next_id=MAX(conversation_counters.next_id, excluded.next_id)""",
+            (channel_id, new_id + 1),
+        )
+        now = _utcnow_iso()
+        conn.execute(
+            """INSERT INTO conversations
+               (channel_id, conversation_id, topic, summary, status,
+                next_ordinal, started_at, last_turn_at, updated_at,
+                experiment_id, task_id, attempt)
+               VALUES (?, ?, NULL, NULL, 'open', 1, ?, NULL, ?, ?, ?, ?)""",
+            (
+                channel_id,
+                new_id,
+                now,
+                now,
+                experiment_id,
+                self._store_redactor().redact(task_id),
+                None if attempt is None else int(attempt),
+            ),
+        )
         return new_id
 
     def record_conversation_label(
@@ -1114,15 +1226,33 @@ class ObservabilityStore:
 
     def upsert_span_rows(self, conn: sqlite3.Connection, spans: list[tracing.Span], redactor: Redactor) -> None:
         for span in spans:
+            claim = {
+                "experiment_id": span.experiment_id,
+                "task_id": span.task_id,
+                "attempt": span.attempt,
+                "epoch": span.claim_epoch,
+                "server_incarnation": span.server_incarnation,
+            }
+            if span.experiment_id and self._reject_stale_claim_in_txn(
+                conn, claim, "span"
+            ):
+                continue
             attributes = redactor.redact(
                 json.dumps(_sanitize_json_value(span.attributes), ensure_ascii=False)
             )
             conn.execute(
                 """INSERT INTO spans
                    (span_id, trace_id, parent_span_id, name, kind, channel_id,
-                    command_name, context, start_ns, end_ns, status, attributes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    command_name, context, start_ns, end_ns, status, attributes,
+                    experiment_id, task_id, attempt, claim_epoch, server_incarnation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(span_id) DO UPDATE SET
+                     claim_epoch=CASE
+                       WHEN excluded.claim_epoch > COALESCE(spans.claim_epoch, -1)
+                       THEN excluded.claim_epoch ELSE spans.claim_epoch END,
+                     server_incarnation=CASE
+                       WHEN excluded.claim_epoch >= COALESCE(spans.claim_epoch, -1)
+                       THEN excluded.server_incarnation ELSE spans.server_incarnation END,
                      end_ns=COALESCE(excluded.end_ns, spans.end_ns),
                      status=CASE WHEN excluded.end_ns IS NOT NULL OR spans.end_ns IS NULL
                                  THEN excluded.status ELSE spans.status END,
@@ -1143,6 +1273,11 @@ class ObservabilityStore:
                     span.end_ns,
                     span.status,
                     attributes,
+                    span.experiment_id,
+                    span.task_id,
+                    span.attempt,
+                    span.claim_epoch,
+                    span.server_incarnation,
                 ),
             )
 
@@ -1161,6 +1296,17 @@ class ObservabilityStore:
         refused (counted by the caller).
         """
         turn_row = dict(turn_row)
+        claim = {
+            "experiment_id": turn_row.get("experiment_id"),
+            "task_id": turn_row.get("task_id"),
+            "attempt": turn_row.get("attempt"),
+            "epoch": turn_row.get("claim_epoch"),
+            "server_incarnation": turn_row.get("server_incarnation"),
+        }
+        if turn_row.get("experiment_id") and self._reject_stale_claim_in_txn(
+            conn, claim, "turn"
+        ):
+            return False
         # failure_reason is included because it can embed exception/provider
         # text (e.g. a LiteLLM AuthenticationError body) — the [R20] scenario.
         # task_id is SCRUB-ONLY and not policed (`[XR6]`/`[XR7]`): policing it
@@ -1251,6 +1397,17 @@ class ObservabilityStore:
             )
 
         for artifact in artifact_rows:
+            artifact_claim = {
+                "experiment_id": artifact.get("experiment_id"),
+                "task_id": artifact.get("task_id"),
+                "attempt": artifact.get("attempt"),
+                "epoch": artifact.get("claim_epoch"),
+                "server_incarnation": artifact.get("server_incarnation"),
+            }
+            if artifact.get("experiment_id") and self._reject_stale_claim_in_txn(
+                conn, artifact_claim, "artifact"
+            ):
+                continue
             inline_value = artifact.get("inline_value")
             if isinstance(inline_value, (bytes, bytearray)):
                 redacted = redactor.redact(
@@ -1260,8 +1417,9 @@ class ObservabilityStore:
             conn.execute(
                 """INSERT INTO artifacts
                    (artifact_id, turn_key, channel_id, span_id, key, content_type,
-                    size_bytes, sha256, inline_value, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    size_bytes, sha256, inline_value, error, experiment_id,
+                    task_id, attempt, claim_epoch, server_incarnation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(artifact_id) DO NOTHING""",
                 (
                     artifact["artifact_id"],
@@ -1274,6 +1432,11 @@ class ObservabilityStore:
                     artifact.get("sha256"),
                     inline_value,
                     artifact.get("error"),
+                    artifact.get("experiment_id"),
+                    artifact.get("task_id"),
+                    artifact.get("attempt"),
+                    artifact.get("claim_epoch"),
+                    artifact.get("server_incarnation"),
                 ),
             )
         return True
@@ -1750,6 +1913,7 @@ class ObservabilityStore:
             "turns_erased",
             "never_completed",
             "operator",
+            "stale_claim_records",
         }
     )
 
@@ -1966,6 +2130,353 @@ class ObservabilityStore:
             )
             conn.commit()
 
+    def register_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        native_attempt: int,
+        source_key: str,
+        channel_id: str,
+        *,
+        ttl_seconds: float = 300.0,
+        recovery: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Issue a one-use bootstrap. Only its SHA-256 digest is persisted.
+
+        Replacing a claimed registration requires both an expired lease and
+        affirmative recovery evidence. Expiry alone is only a candidate signal:
+        it does not prove the previous process stopped producing side effects.
+        """
+        if not all((experiment_id, task_id, source_key, channel_id)):
+            raise ValueError("attempt identity and channel_id are required")
+        native_attempt = int(native_attempt)
+        ttl_seconds = float(ttl_seconds)
+        if native_attempt <= 0 or ttl_seconds <= 0:
+            raise ValueError("native_attempt and ttl_seconds must be positive")
+        secret = uuid.uuid4().hex + uuid.uuid4().hex
+        registration_id = f"reg-{uuid.uuid4().hex}"
+        secret_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+        now = time.time()
+        task_id = self._scrub(task_id)
+        source_key = self._scrub(source_key)
+        channel_id = self._scrub(channel_id)
+        recovery_json = (
+            None
+            if recovery is None
+            else self._scrub(
+                json.dumps(_sanitize_json_value(recovery), sort_keys=True)
+            )
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            declared = conn.execute(
+                """SELECT 1 FROM experiment_attempt_declarations
+                    WHERE experiment_id=? AND task_id=?
+                      AND native_attempt=? AND source_key=?""",
+                (experiment_id, task_id, native_attempt, source_key),
+            ).fetchone()
+            if declared is None:
+                conn.rollback()
+                raise UndeclaredExperimentAttempt(
+                    f"attempt {experiment_id}/{task_id}/{native_attempt} with "
+                    f"source_key {source_key!r} was not declared"
+                )
+            existing = conn.execute(
+                """SELECT state, expires_at, lease_expires_at
+                     FROM experiment_attempt_claims
+                    WHERE experiment_id=? AND task_id=? AND native_attempt=?""",
+                (experiment_id, task_id, native_attempt),
+            ).fetchone()
+            if existing is not None and existing["state"] == "claimed":
+                lease_expired = (
+                    existing["lease_expires_at"] is not None
+                    and float(existing["lease_expires_at"]) <= now
+                )
+                process_dead = bool((recovery or {}).get("owned_process_dead"))
+                explicit_fence = bool((recovery or {}).get("explicit_fence"))
+                reconciled = bool((recovery or {}).get("reconciled"))
+                if not lease_expired or not (
+                    process_dead or (explicit_fence and reconciled)
+                ):
+                    conn.rollback()
+                    raise AttemptClaimError(
+                        "replacement bootstrap requires an expired lease plus "
+                        "proof the owned process is dead, or an explicit fence "
+                        "with reconciliation"
+                    )
+            elif (
+                existing is not None
+                and existing["state"] == "pending"
+                and float(existing["expires_at"]) > now
+            ):
+                conn.rollback()
+                raise AttemptClaimError("an unexpired bootstrap is already pending")
+            if existing is None:
+                conn.execute(
+                    """INSERT INTO experiment_attempt_claims
+                       (registration_id, experiment_id, task_id, native_attempt,
+                        source_key, channel_id, secret_hash, expires_at, state,
+                        epoch, recovery_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)""",
+                    (
+                        registration_id,
+                        experiment_id,
+                        task_id,
+                        native_attempt,
+                        source_key,
+                        channel_id,
+                        secret_hash,
+                        now + ttl_seconds,
+                        recovery_json,
+                        _utcnow_iso(),
+                    ),
+                )
+            else:
+                conn.execute(
+                    """UPDATE experiment_attempt_claims
+                          SET registration_id=?, source_key=?, channel_id=?,
+                              secret_hash=?, expires_at=?, state='pending',
+                              server_incarnation=NULL, lease_expires_at=NULL,
+                              conversation_id=NULL, recovery_json=?,
+                              created_at=?, claimed_at=NULL
+                        WHERE experiment_id=? AND task_id=? AND native_attempt=?""",
+                    (
+                        registration_id,
+                        source_key,
+                        channel_id,
+                        secret_hash,
+                        now + ttl_seconds,
+                        recovery_json,
+                        _utcnow_iso(),
+                        experiment_id,
+                        task_id,
+                        native_attempt,
+                    ),
+                )
+            conn.commit()
+        return {
+            "registration_id": registration_id,
+            "secret": secret,
+            "channel_id": channel_id,
+            "expires_at": now + ttl_seconds,
+        }
+
+    def claim_attempt(
+        self,
+        bootstrap: dict[str, Any],
+        *,
+        channel_id: str,
+        server_incarnation: str,
+        lease_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        """Consume a bootstrap and reserve its labelled conversation atomically."""
+        registration_id = str(bootstrap.get("registration_id") or "")
+        secret = str(bootstrap.get("secret") or "")
+        if not registration_id or not secret or not channel_id or not server_incarnation:
+            raise AttemptClaimError(
+                "registration_id, secret, channel_id and server_incarnation are required"
+            )
+        now = time.time()
+        incoming_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM experiment_attempt_claims
+                    WHERE registration_id=?""",
+                (registration_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise AttemptClaimError("unknown attempt registration")
+            if row["state"] != "pending" or row["secret_hash"] is None:
+                conn.rollback()
+                raise AttemptClaimError("attempt bootstrap was already consumed")
+            if float(row["expires_at"]) <= now:
+                conn.rollback()
+                raise AttemptClaimError("attempt bootstrap expired")
+            if row["channel_id"] != self._scrub(channel_id):
+                conn.rollback()
+                raise AttemptClaimError("attempt bootstrap channel mismatch")
+            if not hmac.compare_digest(row["secret_hash"], incoming_hash):
+                conn.rollback()
+                raise AttemptClaimError("attempt bootstrap secret mismatch")
+            declared = conn.execute(
+                """SELECT 1 FROM experiment_attempt_declarations
+                    WHERE experiment_id=? AND task_id=?
+                      AND native_attempt=? AND source_key=?""",
+                (
+                    row["experiment_id"],
+                    row["task_id"],
+                    row["native_attempt"],
+                    row["source_key"],
+                ),
+            ).fetchone()
+            if declared is None:
+                conn.rollback()
+                raise UndeclaredExperimentAttempt("attempt declaration no longer matches")
+            epoch = int(row["epoch"]) + 1
+            reserved = conn.execute(
+                """SELECT conversation_id FROM conversations
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (
+                    row["experiment_id"],
+                    row["task_id"],
+                    row["native_attempt"],
+                ),
+            ).fetchone()
+            conversation_id = (
+                int(reserved["conversation_id"])
+                if reserved is not None
+                else self._mint_conversation_id_in_txn(
+                    conn,
+                    row["channel_id"],
+                    experiment_id=row["experiment_id"],
+                    task_id=row["task_id"],
+                    attempt=int(row["native_attempt"]),
+                )
+            )
+            experiment = conn.execute(
+                "SELECT status FROM experiments WHERE experiment_id=?",
+                (row["experiment_id"],),
+            ).fetchone()
+            if experiment is None or experiment["status"] != "running":
+                conn.rollback()
+                if experiment is None:
+                    raise ExperimentNotFound(row["experiment_id"])
+                raise ExperimentIsClosed(
+                    row["experiment_id"], experiment["status"]
+                )
+            conn.execute(
+                """INSERT INTO experiment_attempts
+                   (experiment_id, task_id, attempt, channel_id, conversation_id,
+                    outcome, outcome_source, reward, restarts, started_at,
+                    execution_status, execution_finished_at, finished_at,
+                    detail_json, source_attempt_json, source_key)
+                   VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?,
+                           NULL, NULL, NULL, NULL, NULL, ?)
+                   ON CONFLICT(experiment_id, task_id, attempt) DO UPDATE SET
+                     channel_id=excluded.channel_id,
+                     conversation_id=excluded.conversation_id,
+                     source_key=excluded.source_key""",
+                (
+                    row["experiment_id"],
+                    row["task_id"],
+                    row["native_attempt"],
+                    row["channel_id"],
+                    conversation_id,
+                    _utcnow_iso(),
+                    row["source_key"],
+                ),
+            )
+            updated = conn.execute(
+                """UPDATE experiment_attempt_claims
+                      SET state='claimed', epoch=?, server_incarnation=?,
+                          lease_expires_at=?, conversation_id=?,
+                          secret_hash=NULL, claimed_at=?
+                    WHERE registration_id=? AND state='pending'
+                      AND secret_hash=?""",
+                (
+                    epoch,
+                    server_incarnation,
+                    now + float(lease_seconds),
+                    conversation_id,
+                    _utcnow_iso(),
+                    registration_id,
+                    row["secret_hash"],
+                ),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                raise AttemptClaimError("attempt claim lost its compare-and-swap")
+            conn.commit()
+        return {
+            "registration_id": registration_id,
+            "experiment_id": row["experiment_id"],
+            "task_id": row["task_id"],
+            "attempt": int(row["native_attempt"]),
+            "source_key": row["source_key"],
+            "channel_id": row["channel_id"],
+            "conversation_id": conversation_id,
+            "epoch": epoch,
+            "server_incarnation": server_incarnation,
+        }
+
+    def validate_attempt_claim(self, claim: dict[str, Any]) -> None:
+        """Fail if a live caller no longer owns the registered attempt."""
+        with self._connect() as conn:
+            if not self._claim_is_current_in_txn(conn, claim):
+                raise StaleExperimentClaim(
+                    f"attempt claim epoch {claim.get('epoch')!r} is stale"
+                )
+
+    @staticmethod
+    def _claim_is_current_in_txn(
+        conn: sqlite3.Connection, claim: dict[str, Any]
+    ) -> bool:
+        if not claim or claim.get("experiment_id") is None:
+            return True
+        # Internal/in-process experiment producers remain compatible. A
+        # registered external record always carries both fields.
+        if claim.get("epoch") is None and claim.get("server_incarnation") is None:
+            registered = conn.execute(
+                """SELECT 1 FROM experiment_attempt_claims
+                    WHERE experiment_id=? LIMIT 1""",
+                (claim.get("experiment_id"),),
+            ).fetchone()
+            return registered is None
+        if claim.get("epoch") is None or claim.get("server_incarnation") is None:
+            return False
+        row = conn.execute(
+            """SELECT epoch, server_incarnation, state
+                 FROM experiment_attempt_claims
+                WHERE experiment_id=? AND task_id=? AND native_attempt=?""",
+            (
+                claim.get("experiment_id"),
+                claim.get("task_id"),
+                claim.get("attempt"),
+            ),
+        ).fetchone()
+        return bool(
+            row is not None
+            and row["state"] == "claimed"
+            and int(row["epoch"]) == int(claim.get("epoch") or -1)
+            and row["server_incarnation"] == claim.get("server_incarnation")
+        )
+
+    def _reject_stale_claim_in_txn(
+        self, conn: sqlite3.Connection, claim: dict[str, Any], record_kind: str
+    ) -> bool:
+        if self._claim_is_current_in_txn(conn, claim):
+            return False
+        row = conn.execute(
+            "SELECT value FROM diagnostics WHERE key='stale_claim_records'"
+        ).fetchone()
+        try:
+            previous = json.loads(row["value"]) if row is not None else {}
+        except (TypeError, ValueError):
+            previous = {}
+        count = int(previous.get("count") or 0) + 1
+        self.set_diagnostic(
+            conn,
+            "stale_claim_records",
+            {
+                "count": count,
+                "invalidating": True,
+                "last_record_kind": record_kind,
+                "experiment_id": claim.get("experiment_id"),
+                "epoch": claim.get("epoch"),
+            },
+        )
+        experiment_id = claim.get("experiment_id")
+        if experiment_id:
+            self.invalidate_experiments_in_txn(
+                conn,
+                [experiment_id],
+                "stale_claim_records",
+                f"rejected stale {record_kind} from epoch {claim.get('epoch')}",
+            )
+        return True
+
     def set_experiment_hypothesis(self, experiment_id: str, hypothesis: str) -> None:
         """Write-once (`[XR12]`), enforced here and nowhere else.
 
@@ -2026,6 +2537,8 @@ class ObservabilityStore:
         seq: int,
         evidence_run_id: str,
         record: dict[str, Any],
+        *,
+        claim: Optional[dict[str, Any]] = None,
     ) -> None:
         """Record one `evidence_run()` segment (`[XR1]`).
 
@@ -2041,6 +2554,13 @@ class ObservabilityStore:
         payload = json.dumps(_sanitize_json_value(record), ensure_ascii=False)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if claim and self._reject_stale_claim_in_txn(
+                conn, claim, "derived_record"
+            ):
+                conn.commit()
+                raise StaleExperimentClaim(
+                    f"attempt claim epoch {claim.get('epoch')!r} is stale"
+                )
             if conn.execute(
                 "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
             ).fetchone() is None:
@@ -3381,6 +3901,11 @@ class SQLiteTraceSink:
                 end_ns=span.end_ns,
                 status=span.status,
                 attributes=dict(span.attributes),
+                experiment_id=span.experiment_id,
+                task_id=span.task_id,
+                attempt=span.attempt,
+                claim_epoch=span.claim_epoch,
+                server_incarnation=span.server_incarnation,
             )
             self._span_queue.put_nowait(("span", snapshot))
         except queue.Full:

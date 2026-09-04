@@ -1047,6 +1047,19 @@ class ChannelRuntime:
         return sink.store if isinstance(sink, SQLiteTraceSink) else None
 
 
+def refuse_registered_token_reissue(runtime: ChannelRuntime) -> None:
+    """Keep unauthenticated initialize retries compatible only for ordinary channels."""
+    if runtime.execution_context.observability_experiment_claim:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "registered experiment channels cannot reissue tokens from "
+                "channel knowledge; present a valid credential or a new "
+                "one-use bootstrap"
+            ),
+        )
+
+
 class ChannelSessionManager:
     """
     Process-local cache of live WorkflowExecutionContext instances.

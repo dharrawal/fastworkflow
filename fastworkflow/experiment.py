@@ -88,10 +88,14 @@ def experiment_store_readiness(db_path: str) -> dict[str, str]:
             observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1
         )
         or not store.experiment_declaration_schema_ready()
+        or not store.has_feature(
+            observability_store.FEATURE_EXPERIMENT_CLAIMS_V1
+        )
+        or not store.experiment_claim_schema_ready()
     ):
         raise MissingExperimentLifecycleFeature(
             f"{db_path!r} does not advertise "
-            f"{observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1!r}"
+            f"{observability_store.FEATURE_EXPERIMENT_CLAIMS_V1!r}"
         )
     store_id = store.store_identity()
     regime = store.capture_regime()
@@ -154,6 +158,38 @@ class AttemptRun:
             return False
         last = self.turn_outputs[-1]
         return getattr(getattr(last, "status", None), "value", None) == "awaiting_user"
+
+
+@dataclass(frozen=True)
+class AttemptBootstrap:
+    registration_id: str
+    secret: str
+    channel_id: str
+    expires_at: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "registration_id": self.registration_id,
+            "secret": self.secret,
+            "channel_id": self.channel_id,
+            "expires_at": self.expires_at,
+        }
+
+
+@dataclass(frozen=True)
+class AttemptClaim:
+    registration_id: str
+    experiment_id: str
+    task_id: str
+    attempt: int
+    source_key: str
+    channel_id: str
+    conversation_id: int
+    epoch: int
+    server_incarnation: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
 
 
 # A grader receives a finished AttemptRun and returns
@@ -242,7 +278,9 @@ class ExperimentController:
             observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1
         ) or not self.store.has_feature(
             observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1
-        ) or not self.store.experiment_declaration_schema_ready():
+        ) or not self.store.experiment_declaration_schema_ready() or not (
+            self.store.experiment_claim_schema_ready()
+        ):
             raise MissingExperimentLifecycleFeature(
                 f"{db_path!r} does not advertise the required experiment "
                 "lifecycle and declaration features; "
@@ -272,6 +310,51 @@ class ExperimentController:
                 f"{incoming[0]}/{incoming[1]}",
             )
         self.capture_profile, self.capture_policy_version = target_regime
+
+    def register_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        source_key: str,
+        channel_id: str,
+        *,
+        ttl_seconds: float = 300.0,
+        recovery: Optional[dict[str, Any]] = None,
+    ) -> AttemptBootstrap:
+        return AttemptBootstrap(
+            **self.store.register_attempt(
+                experiment_id,
+                task_id,
+                attempt,
+                source_key,
+                channel_id,
+                ttl_seconds=ttl_seconds,
+                recovery=recovery,
+            )
+        )
+
+    def claim_attempt(
+        self,
+        bootstrap: AttemptBootstrap,
+        *,
+        server_incarnation: str,
+        lease_seconds: float = 300.0,
+    ) -> AttemptClaim:
+        return AttemptClaim(
+            **self.store.claim_attempt(
+                bootstrap.as_dict(),
+                channel_id=bootstrap.channel_id,
+                server_incarnation=server_incarnation,
+                lease_seconds=lease_seconds,
+            )
+        )
+
+    def bind_claim(
+        self, ctx: WorkflowExecutionContext, claim: AttemptClaim
+    ) -> None:
+        """Bind the store-validated bootstrap result before constructing work."""
+        ctx.bind_experiment_claim(claim.as_dict(), self.store)
 
     def create_experiment(
         self,
@@ -403,9 +486,15 @@ class ExperimentController:
         seq: int,
         evidence_run_id: str,
         record: dict[str, Any],
+        *,
+        claim: Optional[AttemptClaim] = None,
     ) -> None:
         self.store.record_evidence_segment(
-            experiment_id, seq, evidence_run_id, record
+            experiment_id,
+            seq,
+            evidence_run_id,
+            record,
+            claim=claim.as_dict() if claim else None,
         )
 
     def complete_experiment(self, experiment_id: str) -> str:

@@ -103,7 +103,7 @@ from fastworkflow.state_serialization import (
 from fastworkflow.storage_keys import encode_path_component
 from fastworkflow.utils.logging import logger
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 RECORD_TYPE = "channel_checkpoint"
 MANIFEST_RECORD_TYPE = "channel_checkpoint_manifest"

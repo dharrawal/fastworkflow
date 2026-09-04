@@ -30,6 +30,11 @@ class CommandExecutor(CommandExecutorInterface):
         chat_session: 'fastworkflow.ChatSession',
         command: str,
     ) -> fastworkflow.CommandOutput:
+        claim_check = getattr(
+            chat_session, "assert_experiment_claim_current", None
+        )
+        if claim_check is not None:
+            claim_check()
         if not command:
             return CommandOutput(
                 command_response=

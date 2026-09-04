@@ -83,7 +83,8 @@ from .utils import (
     GenerateMCPTokenRequest,
     run_process_message_with_trace_stream,
     get_session_from_jwt,
-    ensure_user_runtime_exists
+    ensure_user_runtime_exists,
+    refuse_registered_token_reissue,
 )
 from .turns import (
     TurnRegistry,
@@ -1260,6 +1261,7 @@ async def initialize(
         # Check if user already has an active session
         async with session_manager.leased_session(channel_id) as existing_runtime:
             if existing_runtime:
+                refuse_registered_token_reissue(existing_runtime)
                 logger.info(f"Session for channel_id {channel_id} already exists, generating new tokens")
                 if startup_turn_key := (
                     existing_runtime.startup_turn_key

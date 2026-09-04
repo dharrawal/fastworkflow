@@ -277,3 +277,5 @@ class TurnResult(BaseModel):
     experiment_id: Optional[str] = None
     task_id: Optional[str] = None
     attempt: Optional[int] = None
+    claim_epoch: Optional[int] = None
+    server_incarnation: Optional[str] = None

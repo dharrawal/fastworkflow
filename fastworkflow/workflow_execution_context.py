@@ -170,6 +170,9 @@ class WorkflowExecutionContext:
         self._experiment_id: Optional[str] = None
         self._task_id: Optional[str] = None
         self._attempt: Optional[int] = None
+        self._claim_epoch: Optional[int] = None
+        self._server_incarnation: Optional[str] = None
+        self._experiment_claim_store: Any = None
         self._trace_span_stack: list[tracing.Span] = []
         self._turn_root_span: Optional[tracing.Span] = None
 
@@ -271,6 +274,51 @@ class WorkflowExecutionContext:
             self._conversation_id = conversation_id
         if embedder_owns_conversations is not None:
             self._embedder_owns_conversations = embedder_owns_conversations
+
+    def bind_experiment_claim(self, claim: dict[str, Any], store: Any) -> None:
+        """Bind only a store-issued claim, never caller-supplied raw labels."""
+        store.validate_attempt_claim(claim)
+        self._validate_experiment_labels(
+            claim.get("experiment_id"), claim.get("task_id"), claim.get("attempt")
+        )
+        if not claim.get("epoch") or not claim.get("server_incarnation"):
+            raise ValueError("an experiment claim needs epoch and server_incarnation")
+        self._experiment_id = claim["experiment_id"]
+        self._task_id = claim["task_id"]
+        self._attempt = int(claim["attempt"])
+        self._claim_epoch = int(claim["epoch"])
+        self._server_incarnation = claim["server_incarnation"]
+        self._experiment_claim_store = store
+        self._channel_id = claim["channel_id"]
+        self._conversation_id = int(claim["conversation_id"])
+
+    @property
+    def observability_experiment_claim(self) -> dict[str, Any]:
+        if self._experiment_id is None:
+            return {}
+        return {
+            "experiment_id": self._experiment_id,
+            "task_id": self._task_id,
+            "attempt": self._attempt,
+            "epoch": self._claim_epoch,
+            "server_incarnation": self._server_incarnation,
+        }
+
+    def assert_experiment_claim_current(self) -> None:
+        """Fence turn admission and each registered command dispatch."""
+        if self._experiment_id is None:
+            return
+        # The in-process ExperimentHarness predates registered external
+        # channels and remains compatible. A registered binding always carries
+        # both fields and can never degrade to this legacy/internal path.
+        if self._claim_epoch is None and self._server_incarnation is None:
+            return
+        if self._claim_epoch is None or self._server_incarnation is None:
+            raise RuntimeError("experiment claim fencing metadata is incomplete")
+        if self._experiment_claim_store is not None:
+            self._experiment_claim_store.validate_attempt_claim(
+                self.observability_experiment_claim
+            )
 
     def _bind_experiment_labels(
         self,
@@ -407,6 +455,7 @@ class WorkflowExecutionContext:
         Never called while awaiting_user — a message during suspension is the
         resume answer and continues the same logical turn [A30.2].
         """
+        self.assert_experiment_claim_current()
         self._ensure_observability_conversation()
         self._turn_outputs = []
         self._turn_key = mint_turn_key()
@@ -553,6 +602,11 @@ class WorkflowExecutionContext:
             channel_id=self._channel_id,
             command_name="ask_user",
             start_ns=tracing.datetime_to_ns(entry.started_at) or 0,
+            experiment_id=self._experiment_id,
+            task_id=self._task_id,
+            attempt=self._attempt,
+            claim_epoch=self._claim_epoch,
+            server_incarnation=self._server_incarnation,
         )
         tracing.end_span(
             self,
@@ -850,6 +904,8 @@ class WorkflowExecutionContext:
             "experiment_id": self._experiment_id,
             "task_id": self._task_id,
             "attempt": self._attempt,
+            "claim_epoch": self._claim_epoch,
+            "server_incarnation": self._server_incarnation,
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -875,6 +931,8 @@ class WorkflowExecutionContext:
             self._validate_experiment_labels(
                 state.get("experiment_id"), state.get("task_id"), state.get("attempt")
             )
+            if bool(state.get("claim_epoch")) != bool(state.get("server_incarnation")):
+                raise IncompatibleSessionState(found)
 
         self._awaiting_user = bool(state.get("awaiting_user"))
         self._suspended_user_message = state.get("suspended_user_message")
@@ -896,6 +954,9 @@ class WorkflowExecutionContext:
                 state.get("task_id"),
                 state.get("attempt"),
             )
+            if state.get("claim_epoch") is not None:
+                self._claim_epoch = int(state["claim_epoch"])
+                self._server_incarnation = state["server_incarnation"]
 
         if turns := state.get("conversation_history_turns") or []:
             from fastworkflow.conversation_history_io import restore_history_from_turns
@@ -1169,6 +1230,7 @@ class WorkflowExecutionContext:
     @dspy_logger.observe_dspy_calls
     def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
         """Shared message dispatch for _execute_message()/process_turn()."""
+        self.assert_experiment_claim_current()
         if self._app_workflow is None:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before executing a message"
@@ -1250,6 +1312,8 @@ class WorkflowExecutionContext:
             experiment_id=self._experiment_id,
             task_id=self._task_id,
             attempt=self._attempt,
+            claim_epoch=self._claim_epoch,
+            server_incarnation=self._server_incarnation,
             user_message=self._turn_user_message,
             refined_user_message=self._turn_refined_message,
             entry_workflow_name=self._turn_entry_workflow_name,
@@ -1370,6 +1434,11 @@ class WorkflowExecutionContext:
                     "conversation_id": self._conversation_id,
                     "user_message": tracing.cap_attr_value(self._turn_user_message),
                 },
+                experiment_id=self._experiment_id,
+                task_id=self._task_id,
+                attempt=self._attempt,
+                claim_epoch=self._claim_epoch,
+                server_incarnation=self._server_incarnation,
             )
             self._turn_root_span = root
 
@@ -1440,6 +1509,7 @@ class WorkflowExecutionContext:
         self._build_turn_result(command_output)
 
     def process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
+        self.assert_experiment_claim_current()
         if self._app_workflow is None:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before process_action()"

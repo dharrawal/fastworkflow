@@ -31,7 +31,9 @@ PENDING_STATE_KEY = "pending"
 # pre-3.0 pending blob is both at an abandoned path and, by policy, refused
 # rather than migrated. The bump makes the refusal explicit even if an old blob
 # is somehow presented to a 3.0 build.
-SCHEMA_VERSION = 3
+# 4: registered experiment claims persist their epoch and server incarnation.
+# A pre-fence suspended blob cannot safely resume a registered attempt.
+SCHEMA_VERSION = 4
 
 
 class IncompatibleSessionState(Exception):
