@@ -1157,9 +1157,11 @@ class TestHarness:
         harness._prepare_process()
         harness._run_attempt(tasks[0], 1, lambda run: ("pass", "g", 1.0, None))
         harness._run_attempt(tasks[1], 1, lambda run: ("pass", "g", 1.0, None))
-        # t1 crashed after writing a turn but before its verdict landed.
+        # t1 crashed after writing a turn but before execution terminality or
+        # its verdict landed.
         store._update_experiment(
-            "UPDATE experiment_attempts SET finished_at=NULL, outcome=NULL "
+            "UPDATE experiment_attempts SET execution_status=NULL, "
+            "execution_finished_at=NULL, finished_at=NULL, outcome=NULL "
             "WHERE experiment_id=? AND task_id='t1'",
             (harness.experiment_id,),
             harness.experiment_id,
