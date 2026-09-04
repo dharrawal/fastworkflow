@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import sqlite3
-import threading
 import time
 from types import SimpleNamespace
 
@@ -107,6 +107,20 @@ def _turn_result(claim, *, artifact=None, status=TurnStatus.COMPLETED):
     )
 
 
+def _race_claim_process(db_path, bootstrap, incarnation, barrier, outcomes):
+    store = obs.ObservabilityStore(db_path, migrate=False)
+    barrier.wait()
+    try:
+        claim = store.claim_attempt(
+            bootstrap,
+            channel_id=bootstrap["channel_id"],
+            server_incarnation=incarnation,
+        )
+        outcomes.put(("claimed", claim["server_incarnation"]))
+    except obs.AttemptClaimError as exc:
+        outcomes.put(("refused", type(exc).__name__))
+
+
 def test_secret_has_entropy_is_hashed_and_expires(controller):
     bootstrap = _register(controller)
     assert len(bytes.fromhex(bootstrap.secret)) == 32
@@ -156,33 +170,30 @@ def test_secret_replay_guess_and_channel_mismatch_are_refused(controller):
 
 def test_two_process_stores_race_one_claim_exactly_one_wins(controller):
     bootstrap = _register(controller)
-    barrier = threading.Barrier(2)
-    outcomes = []
-
-    def race(incarnation):
-        store = obs.ObservabilityStore(controller.db_path, migrate=False)
-        barrier.wait()
-        try:
-            outcomes.append(
-                store.claim_attempt(
-                    bootstrap.as_dict(),
-                    channel_id=bootstrap.channel_id,
-                    server_incarnation=incarnation,
-                )
-            )
-        except obs.AttemptClaimError as exc:
-            outcomes.append(exc)
-
-    threads = [
-        threading.Thread(target=race, args=(f"server-{index}",))
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    outcomes = context.Queue()
+    processes = [
+        context.Process(
+            target=_race_claim_process,
+            args=(
+                controller.db_path,
+                bootstrap.as_dict(),
+                f"server-{index}",
+                barrier,
+                outcomes,
+            ),
+        )
         for index in range(2)
     ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert sum(isinstance(value, dict) for value in outcomes) == 1
-    assert sum(isinstance(value, obs.AttemptClaimError) for value in outcomes) == 1
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+        assert process.exitcode == 0
+    results = [outcomes.get(timeout=2) for _ in processes]
+    assert [result[0] for result in results].count("claimed") == 1
+    assert [result[0] for result in results].count("refused") == 1
 
 
 def test_claim_atomically_reserves_labelled_conversation_before_binding(controller):
