@@ -92,6 +92,10 @@ def experiment_store_readiness(db_path: str) -> dict[str, str]:
             observability_store.FEATURE_EXPERIMENT_CLAIMS_V1
         )
         or not store.experiment_claim_schema_ready()
+        or not store.has_feature(
+            observability_store.FEATURE_EXPERIMENT_SEALING_V1
+        )
+        or not store.experiment_sealing_schema_ready()
     ):
         raise MissingExperimentLifecycleFeature(
             f"{db_path!r} does not advertise "
@@ -274,12 +278,16 @@ class ExperimentController:
         self.store = observability_store.ObservabilityStore(
             db_path, migrate=migrate
         )
-        if not self.store.has_feature(
-            observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1
-        ) or not self.store.has_feature(
-            observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1
-        ) or not self.store.experiment_declaration_schema_ready() or not (
-            self.store.experiment_claim_schema_ready()
+        if (
+            not self.store.has_feature(
+                observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1
+            )
+            or not self.store.has_feature(
+                observability_store.FEATURE_EXPERIMENT_DECLARATIONS_V1
+            )
+            or not self.store.experiment_declaration_schema_ready()
+            or not self.store.experiment_claim_schema_ready()
+            or not self.store.experiment_sealing_schema_ready()
         ):
             raise MissingExperimentLifecycleFeature(
                 f"{db_path!r} does not advertise the required experiment "
@@ -310,6 +318,32 @@ class ExperimentController:
                 f"{incoming[0]}/{incoming[1]}",
             )
         self.capture_profile, self.capture_policy_version = target_regime
+
+    def _require_writer_drained(self) -> None:
+        if not self.external:
+            return
+        if observability_store.sink_for_db_path(self.db_path) is not None:
+            raise observability_store.WriterStillOpen(
+                f"external evidence for {self.db_path!r} cannot be certified "
+                "while its writer is open; call drain_before_certify() after "
+                "stopping the owned server"
+            )
+
+    def drain_before_certify(self, *, timeout: float = 10.0) -> dict[str, Any]:
+        """Drain a detectable owned writer and return final persisted health."""
+        sink = observability_store.sink_for_db_path(self.db_path)
+        if sink is not None:
+            sink.close(timeout=timeout)
+            if sink._writer.is_alive():
+                raise observability_store.WriterStillOpen(
+                    f"writer for {self.db_path!r} did not stop within {timeout}s"
+                )
+        health = self.store.writer_health()
+        if health is None:
+            raise RuntimeError(
+                f"{self.db_path!r} has no final persisted writer health"
+            )
+        return health
 
     def register_attempt(
         self,
@@ -489,6 +523,7 @@ class ExperimentController:
         *,
         claim: Optional[AttemptClaim] = None,
     ) -> None:
+        self._require_writer_drained()
         self.store.record_evidence_segment(
             experiment_id,
             seq,
@@ -499,8 +534,32 @@ class ExperimentController:
 
     def complete_experiment(self, experiment_id: str) -> str:
         if self.external:
+            self._require_writer_drained()
             return self.store.complete_external_capture(experiment_id)
         return self.store.complete_experiment(experiment_id)
+
+    def seal_workspace_evidence(
+        self, experiment_id: str, destination: str
+    ) -> dict[str, Any]:
+        """Archive captured data, then attach its digest as the sole handle."""
+        self._require_writer_drained()
+        experiment = self.store.get_experiment(experiment_id)
+        if experiment is None:
+            raise observability_store.ExperimentNotFound(experiment_id)
+        if experiment["status"] != "capture_complete":
+            raise ValueError(
+                f"experiment {experiment_id!r} is {experiment['status']!r}; "
+                "workspace evidence can only seal capture_complete data"
+            )
+        archive = self.store.archive_to(destination)
+        status = self.store.record_workspace_archive(
+            experiment_id,
+            sha256=archive["sha256"],
+            store_identity=archive["store_identity"],
+        )
+        archive["experiment_id"] = experiment_id
+        archive["experiment_status"] = status
+        return archive
 
     def invalidate_experiment(
         self,

@@ -90,6 +90,7 @@ FEATURE_EXPERIMENTS_V1 = "experiments_v1"
 FEATURE_EXPERIMENT_LIFECYCLE_V1 = "experiment_lifecycle_v1"
 FEATURE_EXPERIMENT_DECLARATIONS_V1 = "experiment_declarations_v1"
 FEATURE_EXPERIMENT_CLAIMS_V1 = "experiment_claims_v1"
+FEATURE_EXPERIMENT_SEALING_V1 = "experiment_sealing_v1"
 
 CAPTURE_POLICY_VERSION = "1"
 CAPTURE_REGIME_DIAGNOSTIC = "observability_capture_regime"
@@ -239,6 +240,14 @@ class StaleExperimentClaim(AttemptClaimError):
 
 class StoreIdentityMismatch(ValueError):
     """A controller opened a different durable observability store."""
+
+
+class SourceChangedDuringArchive(RuntimeError):
+    """The live source changed while its evidence snapshot was being made."""
+
+
+class WriterStillOpen(RuntimeError):
+    """A seal was attempted while this process still owned a live writer."""
 
 
 class CaptureRegimeChanged(ValueError):
@@ -576,6 +585,9 @@ _SCHEMA_STATEMENTS = [
         declared_tasks INTEGER NOT NULL,
         declared_attempts INTEGER NOT NULL,
         required_evidence_segments INTEGER NOT NULL DEFAULT 0,
+        workspace_archive_sha256 TEXT,
+        workspace_store_identity TEXT,
+        evidence_sealed_at TEXT,
         workflow_name TEXT,
         capture_profile TEXT NOT NULL,
         capture_policy_version TEXT NOT NULL,
@@ -791,6 +803,16 @@ class ObservabilityStore:
                     "ALTER TABLE experiments ADD COLUMN "
                     "required_evidence_segments INTEGER NOT NULL DEFAULT 0"
                 )
+            for column, declaration in (
+                ("workspace_archive_sha256", "TEXT"),
+                ("workspace_store_identity", "TEXT"),
+                ("evidence_sealed_at", "TEXT"),
+            ):
+                if experiment_cols and column not in experiment_cols:
+                    conn.execute(
+                        f"ALTER TABLE experiments ADD COLUMN "
+                        f"{column} {declaration}"
+                    )
             if attempt_cols and "execution_finished_at" not in attempt_cols:
                 # The old compatibility operation wrote execution and outcome
                 # together. Preserve that meaning when opening a pre-split DB.
@@ -821,6 +843,7 @@ class ObservabilityStore:
                     FEATURE_EXPERIMENT_LIFECYCLE_V1,
                     FEATURE_EXPERIMENT_DECLARATIONS_V1,
                     FEATURE_EXPERIMENT_CLAIMS_V1,
+                    FEATURE_EXPERIMENT_SEALING_V1,
                 ],
             )
             conn.execute(
@@ -992,6 +1015,26 @@ class ObservabilityStore:
                 "epoch",
                 "server_incarnation",
                 "conversation_id",
+            } <= columns
+        except sqlite3.Error:
+            return False
+
+    def experiment_sealing_schema_ready(self) -> bool:
+        """Whether external captures can record their immutable archive handle."""
+        if not self.has_feature(FEATURE_EXPERIMENT_SEALING_V1):
+            return False
+        try:
+            with self._connect() as conn:
+                columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(experiments)"
+                    ).fetchall()
+                }
+            return {
+                "workspace_archive_sha256",
+                "workspace_store_identity",
+                "evidence_sealed_at",
             } <= columns
         except sqlite3.Error:
             return False
@@ -2561,11 +2604,16 @@ class ObservabilityStore:
                 raise StaleExperimentClaim(
                     f"attempt claim epoch {claim.get('epoch')!r} is stale"
                 )
-            if conn.execute(
-                "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
-            ).fetchone() is None:
+            experiment = conn.execute(
+                "SELECT status FROM experiments WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+            if experiment is None:
                 conn.rollback()
                 raise ExperimentNotFound(experiment_id)
+            if experiment["status"] in {"complete", "capture_complete", "invalid"}:
+                conn.rollback()
+                raise ExperimentIsClosed(experiment_id, experiment["status"])
             conn.execute(
                 """INSERT INTO experiment_evidence_runs
                    (experiment_id, seq, evidence_run_id, valid, started_at,
@@ -2595,6 +2643,73 @@ class ObservabilityStore:
                 ),
             )
             conn.commit()
+
+    def record_workspace_archive(
+        self,
+        experiment_id: str,
+        *,
+        sha256: str,
+        store_identity: str,
+    ) -> str:
+        """Attach the sole sealed-evidence handle and promote a captured run.
+
+        The archive is created first. This write intentionally happens only
+        afterwards, so the helper can prove that snapshotting did not modify
+        the source DB or its committed WAL.
+        """
+        if not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
+            raise ValueError("sha256 must be a lowercase 64-character digest")
+        if not store_identity:
+            raise ValueError("store_identity is required")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT status, workspace_archive_sha256,
+                          workspace_store_identity
+                     FROM experiments WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            if row["status"] == "invalid":
+                conn.rollback()
+                raise ExperimentIsClosed(experiment_id, "invalid")
+            if row["status"] not in {"capture_complete", "complete"}:
+                conn.rollback()
+                raise ValueError(
+                    f"experiment {experiment_id!r} is {row['status']!r}; "
+                    "only capture_complete evidence can be sealed"
+                )
+            stored_handle = (
+                row["workspace_archive_sha256"],
+                row["workspace_store_identity"],
+            )
+            incoming_handle = (sha256, store_identity)
+            if stored_handle != (None, None) and stored_handle != incoming_handle:
+                conn.rollback()
+                raise AttemptValueConflict(
+                    f"experiment {experiment_id!r} already names a different "
+                    "sealed workspace archive"
+                )
+            if store_identity != self.store_identity():
+                conn.rollback()
+                raise StoreIdentityMismatch(
+                    f"archive store {store_identity!r} does not match source "
+                    f"store {self.store_identity()!r}"
+                )
+            status = "complete" if row["status"] == "capture_complete" else row["status"]
+            conn.execute(
+                """UPDATE experiments
+                      SET workspace_archive_sha256=?,
+                          workspace_store_identity=?,
+                          evidence_sealed_at=COALESCE(evidence_sealed_at, ?),
+                          status=?
+                    WHERE experiment_id=?""",
+                (sha256, store_identity, _utcnow_iso(), status, experiment_id),
+            )
+            conn.commit()
+        return str(status)
 
     def start_attempt(
         self,
@@ -3136,22 +3251,33 @@ class ObservabilityStore:
                     (experiment_id,),
                 ).fetchone()[0]
                 if declaration_set and attempt_set != declaration_set:
-                    reason = "attempt_shortfall"
-                    detail = (
-                        "recorded attempt identities do not exactly match the "
-                        f"{len(declaration_set)} immutable declarations"
-                    )
+                    if external_capture and attempt_set < declaration_set:
+                        status = "running"
+                    else:
+                        reason = "attempt_shortfall"
+                        detail = (
+                            "recorded attempt identities do not exactly match the "
+                            f"{len(declaration_set)} immutable declarations"
+                        )
                 elif (
                     executed != expected
                     or rows_total != expected
                     or tasks_total != declared_tasks
                 ):
-                    reason = "attempt_shortfall"
-                    detail = (
-                        f"{executed} finished and {rows_total} recorded of "
-                        f"{expected} declared attempts across {tasks_total} of "
-                        f"{declared_tasks} declared tasks; {incomplete} incomplete"
-                    )
+                    if (
+                        external_capture
+                        and executed <= expected
+                        and rows_total <= expected
+                        and tasks_total <= declared_tasks
+                    ):
+                        status = "running"
+                    else:
+                        reason = "attempt_shortfall"
+                        detail = (
+                            f"{executed} finished and {rows_total} recorded of "
+                            f"{expected} declared attempts across {tasks_total} of "
+                            f"{declared_tasks} declared tasks; {incomplete} incomplete"
+                        )
                 elif incomplete:
                     reason = "attempt_shortfall"
                     detail = (
@@ -3162,11 +3288,14 @@ class ObservabilityStore:
                     reason = "evidence_run_invalid"
                     detail = f"{bad_segments} evidence segment(s) reported invalid"
                 elif evidence_segments < int(row["required_evidence_segments"]):
-                    reason = "evidence_run_invalid"
-                    detail = (
-                        f"{evidence_segments} evidence segment(s) recorded; "
-                        f"{int(row['required_evidence_segments'])} required"
-                    )
+                    if external_capture:
+                        status = "running"
+                    else:
+                        reason = "evidence_run_invalid"
+                        detail = (
+                            f"{evidence_segments} evidence segment(s) recorded; "
+                            f"{int(row['required_evidence_segments'])} required"
+                        )
                 elif evaluated != expected:
                     status = "awaiting_evaluation"
                 elif external_capture:
@@ -3396,6 +3525,12 @@ class ObservabilityStore:
             "pass_at_1": None,
             "pass_at_k": None,
             "reportable": False,
+            "workspace_archive_sha256": experiment.get(
+                "workspace_archive_sha256"
+            ),
+            "workspace_store_identity": experiment.get(
+                "workspace_store_identity"
+            ),
         }
         if experiment["status"] != "complete":
             result["reason_not_reportable"] = (
@@ -3589,29 +3724,119 @@ class ObservabilityStore:
                 pass
         return total
 
+    @staticmethod
+    def _file_digest(path: str) -> Optional[dict[str, Any]]:
+        try:
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            stat = os.stat(path)
+            return {
+                "size_bytes": stat.st_size,
+                "sha256": digest.hexdigest(),
+            }
+        except FileNotFoundError:
+            return None
+
     def archive_to(self, destination: str) -> dict[str, Any]:
-        """Create a consistent, read-only SQLite archive with a digest."""
+        """Seal a source-read-only snapshot, including committed WAL content.
+
+        The source is opened with ``mode=ro`` and never through ``_connect``,
+        whose journal-mode pragma is intentionally write-capable. SQLite's
+        backup API reads one consistent transaction including committed WAL.
+        Only that copied database is vacuumed into the final destination.
+        """
         target = Path(destination)
         if target.exists():
             raise FileExistsError(
                 f"refusing to overwrite an existing evidence archive: {target}"
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute("VACUUM INTO ?", (str(target),))
-        digest = hashlib.sha256()
-        with open(target, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        size_bytes = target.stat().st_size
-        target.chmod(0o444)
-        return {
-            "path": str(target),
-            "size_bytes": size_bytes,
-            "sha256": digest.hexdigest(),
-            "schema_version": SCHEMA_VERSION,
-            "read_only": True,
+        source = os.path.abspath(self.db_path)
+        live_sink = sink_for_db_path(source)
+        if live_sink is not None and not live_sink._closed:
+            raise WriterStillOpen(
+                f"refusing to seal {source!r} while its writer is open"
+            )
+        source_paths = (source, f"{source}-wal")
+        before = {path: self._file_digest(path) for path in source_paths}
+        confirmed_before = {
+            path: self._file_digest(path) for path in source_paths
         }
+        if before != confirmed_before:
+            raise SourceChangedDuringArchive(
+                "source DB/WAL bytes changed before the snapshot could start"
+            )
+        before = confirmed_before
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.snapshot")
+        compacted = target.with_name(f".{target.name}.{uuid.uuid4().hex}.compact")
+        try:
+            source_uri = Path(source).as_uri() + "?mode=ro"
+            with sqlite3.connect(source_uri, uri=True) as source_conn:
+                with sqlite3.connect(str(temporary)) as snapshot_conn:
+                    source_conn.backup(snapshot_conn)
+            after_backup = {
+                path: self._file_digest(path) for path in source_paths
+            }
+            if before != after_backup:
+                raise SourceChangedDuringArchive(
+                    "source DB/WAL bytes changed while taking the snapshot"
+                )
+            with sqlite3.connect(str(temporary)) as snapshot_conn:
+                snapshot_conn.execute("VACUUM INTO ?", (str(compacted),))
+            os.replace(compacted, target)
+            after_compaction = {
+                path: self._file_digest(path) for path in source_paths
+            }
+            if before != after_compaction:
+                raise SourceChangedDuringArchive(
+                    "source DB/WAL bytes changed while compacting the destination"
+                )
+            for sidecar in (f"{target}-wal", f"{target}-shm"):
+                if os.path.exists(sidecar):
+                    raise RuntimeError(
+                        f"sealed archive unexpectedly has sidecar {sidecar!r}"
+                    )
+            archive_digest = self._file_digest(str(target))
+            if archive_digest is None:
+                raise RuntimeError("archive disappeared before verification")
+            archive_uri = target.resolve().as_uri() + "?mode=ro"
+            with sqlite3.connect(archive_uri, uri=True) as archive_conn:
+                identity_row = archive_conn.execute(
+                    "SELECT value FROM diagnostics WHERE key=?",
+                    (STORE_IDENTITY_DIAGNOSTIC,),
+                ).fetchone()
+                integrity = archive_conn.execute(
+                    "PRAGMA integrity_check"
+                ).fetchone()[0]
+            if integrity != "ok":
+                raise RuntimeError(f"archive integrity check failed: {integrity}")
+            if identity_row is None or not identity_row[0]:
+                raise RuntimeError("archive has no durable store identity")
+            target.chmod(0o444)
+            return {
+                "path": str(target),
+                "size_bytes": archive_digest["size_bytes"],
+                "sha256": archive_digest["sha256"],
+                "store_identity": str(identity_row[0]),
+                "schema_version": SCHEMA_VERSION,
+                "read_only": True,
+                "sealed": True,
+                "source_bytes_verified_unchanged": True,
+                "sidecar_free": True,
+            }
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                target.unlink()
+            raise
+        finally:
+            for scratch in (temporary, compacted):
+                with contextlib.suppress(FileNotFoundError):
+                    scratch.unlink()
+                for suffix in ("-wal", "-shm"):
+                    with contextlib.suppress(FileNotFoundError):
+                        Path(f"{scratch}{suffix}").unlink()
 
     def prune(
         self,
@@ -4426,6 +4651,23 @@ def existing_observability_sink(
     db_path = state_paths.observability_db(workflow_path)
     with _sinks_lock:
         sink = _sinks.get(db_path)
+        if sink is None or sink._closed or _sink_is_stale(sink, db_path):
+            return None
+        return sink
+
+
+def sink_for_db_path(db_path: str) -> Optional[SQLiteTraceSink]:
+    """Return this process's live writer for an exact DB path, if one exists."""
+    resolved = os.path.realpath(db_path)
+    with _sinks_lock:
+        sink = next(
+            (
+                candidate
+                for path, candidate in _sinks.items()
+                if os.path.realpath(path) == resolved
+            ),
+            None,
+        )
         if sink is None or sink._closed or _sink_is_stale(sink, db_path):
             return None
         return sink
