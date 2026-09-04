@@ -86,6 +86,10 @@ _pruning_suppression_depth = 0
 # these markers to avoid querying tables/columns that older snapshots lack.
 FEATURE_DISTILLATION_V1 = "distillation_v1"
 FEATURE_EXPERIMENTS_V1 = "experiments_v1"
+FEATURE_EXPERIMENT_LIFECYCLE_V1 = "experiment_lifecycle_v1"
+
+CAPTURE_POLICY_VERSION = "1"
+CAPTURE_REGIME_DIAGNOSTIC = "observability_capture_regime"
 
 
 @dataclass(frozen=True)
@@ -207,6 +211,10 @@ class ExperimentIsClosed(ValueError):
             "attempts are closed. Start a new experiment rather than rewriting "
             "the record a score was reported from."
         )
+
+
+class AttemptValueConflict(ValueError):
+    """A terminal attempt value was rewritten to a different value."""
 
 
 class CaptureRegimeChanged(ValueError):
@@ -547,8 +555,11 @@ _SCHEMA_STATEMENTS = [
         reward REAL,
         restarts INTEGER NOT NULL DEFAULT 0,
         started_at TEXT NOT NULL,
+        execution_status TEXT,
+        execution_finished_at TEXT,
         finished_at TEXT,
         detail_json TEXT,
+        source_attempt_json TEXT,
         PRIMARY KEY (experiment_id, task_id, attempt))""",
     """CREATE TABLE IF NOT EXISTS experiment_evidence_runs (
         experiment_id TEXT NOT NULL,
@@ -659,6 +670,33 @@ class ObservabilityStore:
             }
             if "updated_at" not in existing_cols:
                 conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
+            attempt_cols = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(experiment_attempts)"
+                ).fetchall()
+            }
+            for column, declaration in (
+                ("execution_status", "TEXT"),
+                ("execution_finished_at", "TEXT"),
+                ("source_attempt_json", "TEXT"),
+            ):
+                if attempt_cols and column not in attempt_cols:
+                    conn.execute(
+                        f"ALTER TABLE experiment_attempts ADD COLUMN "
+                        f"{column} {declaration}"
+                    )
+            if attempt_cols and "execution_finished_at" not in attempt_cols:
+                # The old compatibility operation wrote execution and outcome
+                # together. Preserve that meaning when opening a pre-split DB.
+                conn.execute(
+                    """UPDATE experiment_attempts
+                          SET execution_status=CASE
+                                  WHEN finished_at IS NULL THEN NULL
+                                  ELSE 'completed' END,
+                              execution_finished_at=finished_at
+                        WHERE execution_finished_at IS NULL"""
+                )
             if found < SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             # Write probe: every statement above is a no-op on an existing
@@ -671,7 +709,28 @@ class ObservabilityStore:
                      value=excluded.value, updated_at=excluded.updated_at""",
                 ("schema_opened", json.dumps({"schema_version": SCHEMA_VERSION}), _utcnow_iso()),
             )
-            self._merge_schema_features(conn, [FEATURE_EXPERIMENTS_V1])
+            self._merge_schema_features(
+                conn,
+                [FEATURE_EXPERIMENTS_V1, FEATURE_EXPERIMENT_LIFECYCLE_V1],
+            )
+            conn.execute(
+                """INSERT INTO diagnostics (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value, updated_at=excluded.updated_at""",
+                (
+                    CAPTURE_REGIME_DIAGNOSTIC,
+                    json.dumps(
+                        {
+                            "capture_profile": _env(
+                                CAPTURE_PROFILE_VAR, "debug"
+                            ),
+                            "capture_policy_version": CAPTURE_POLICY_VERSION,
+                        }
+                    ),
+                    _utcnow_iso(),
+                ),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -725,6 +784,18 @@ class ObservabilityStore:
             }
             if "experiment_id" in turn_cols:
                 detected.add(FEATURE_EXPERIMENTS_V1)
+            attempt_cols = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(experiment_attempts)"
+                ).fetchall()
+            }
+            if {
+                "execution_status",
+                "execution_finished_at",
+                "source_attempt_json",
+            } <= attempt_cols:
+                detected.add(FEATURE_EXPERIMENT_LIFECYCLE_V1)
             span_cols = {
                 row[1] for row in conn.execute("PRAGMA table_info(spans)").fetchall()
             }
@@ -740,6 +811,24 @@ class ObservabilityStore:
 
     def has_feature(self, name: str) -> bool:
         return name in self._features
+
+    def capture_regime(self) -> Optional[tuple[str, str]]:
+        """Return the regime installed by the process that owns this store."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT value FROM diagnostics WHERE key=?",
+                    (CAPTURE_REGIME_DIAGNOSTIC,),
+                ).fetchone()
+            if row is None:
+                return None
+            value = json.loads(row["value"])
+            return (
+                str(value["capture_profile"]),
+                str(value["capture_policy_version"]),
+            )
+        except (KeyError, TypeError, ValueError, sqlite3.Error):
+            return None
 
     # -- identity [R1] ---------------------------------------------------
 
@@ -1539,7 +1628,18 @@ class ObservabilityStore:
     # passed to `policy.apply` is inert, and the one genuinely scrub-only column
     # in this file, `spans.channel_id`, deliberately has none either.
 
-    _EXPERIMENT_STATUSES = frozenset({"running", "complete", "invalid"})
+    _EXPERIMENT_STATUSES = frozenset(
+        {
+            "running",
+            "capture_complete",
+            "awaiting_evaluation",
+            "complete",
+            "invalid",
+        }
+    )
+    _EXECUTION_STATUSES = frozenset(
+        {"completed", "failed", "cancelled", "abandoned"}
+    )
     _ATTEMPT_OUTCOMES = frozenset({"pass", "fail", "error", "incomplete"})
     _INVALID_REASONS = frozenset(
         {
@@ -1775,19 +1875,34 @@ class ObservabilityStore:
         attempt: int,
         channel_id: str,
         conversation_id: Optional[int] = None,
+        source_attempt_key: Optional[dict[str, Any]] = None,
     ) -> None:
         """Open an attempt row before its first turn.
 
-        The row's existence is not the completion marker -- `finished_at` is
-        (`[XR13]`). An attempt that crashed halfway has rows and an open marker,
-        which is what makes it visible to the resume selector and fatal to a
-        `complete` verdict.
+        The row's existence is not the execution completion marker --
+        `execution_finished_at` is (`[XR13]`). An attempt that crashed halfway
+        has rows and an open marker, which is what makes it visible to the
+        resume selector and fatal to a `complete` verdict.
         """
         if not task_id:
             raise ValueError("task_id is required")
         attempt = int(attempt)
         if attempt <= 0:
             raise ValueError("attempt must be a positive integer")
+        source_attempt_json = (
+            None
+            if source_attempt_key is None
+            else self._scrub(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "value": _sanitize_json_value(source_attempt_key),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -1806,12 +1921,29 @@ class ObservabilityStore:
                 # `resume()`. Enforced here, where the `[XR12]` invariants live.
                 conn.rollback()
                 raise ExperimentIsClosed(experiment_id, row["status"])
+            existing = conn.execute(
+                """SELECT channel_id, source_attempt_json
+                     FROM experiment_attempts
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (experiment_id, self._scrub(task_id), attempt),
+            ).fetchone()
+            if existing is not None and (
+                existing["channel_id"] != self._scrub(channel_id)
+                or existing["source_attempt_json"] != source_attempt_json
+            ):
+                conn.rollback()
+                raise AttemptValueConflict(
+                    f"attempt {experiment_id}/{task_id}/{attempt} was already "
+                    "started with different identity metadata"
+                )
             conn.execute(
                 """INSERT INTO experiment_attempts
                    (experiment_id, task_id, attempt, channel_id, conversation_id,
                     outcome, outcome_source, reward, restarts, started_at,
-                    finished_at, detail_json)
-                   VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?, NULL, NULL)
+                    execution_status, execution_finished_at, finished_at,
+                    detail_json, source_attempt_json)
+                   VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?,
+                           NULL, NULL, NULL, NULL, ?)
                    ON CONFLICT(experiment_id, task_id, attempt) DO UPDATE SET
                      channel_id=excluded.channel_id,
                      conversation_id=COALESCE(excluded.conversation_id,
@@ -1823,6 +1955,170 @@ class ObservabilityStore:
                     self._scrub(channel_id),
                     conversation_id,
                     _utcnow_iso(),
+                    source_attempt_json,
+                ),
+            )
+            conn.commit()
+
+    def terminalize_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        *,
+        execution_status: str,
+        conversation_id: Optional[int] = None,
+    ) -> None:
+        """Record execution terminality independently from evaluation."""
+        if execution_status not in self._EXECUTION_STATUSES:
+            raise ValueError(
+                f"execution_status {execution_status!r} is not one of "
+                f"{sorted(self._EXECUTION_STATUSES)}"
+            )
+        task_id = self._scrub(task_id)
+        attempt = int(attempt)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT a.execution_status, a.conversation_id,
+                          e.status AS experiment_status
+                     FROM experiment_attempts a
+                     JOIN experiments e ON e.experiment_id=a.experiment_id
+                    WHERE a.experiment_id=? AND a.task_id=? AND a.attempt=?""",
+                (experiment_id, task_id, attempt),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            if row["execution_status"] is not None:
+                same_conversation = (
+                    conversation_id is None
+                    or row["conversation_id"] is None
+                    or int(row["conversation_id"]) == int(conversation_id)
+                )
+                if row["execution_status"] == execution_status and same_conversation:
+                    conn.rollback()
+                    return
+                conn.rollback()
+                raise AttemptValueConflict(
+                    f"attempt {experiment_id}/{task_id}/{attempt} already has "
+                    f"execution terminal value {row['execution_status']!r}"
+                )
+            if row["experiment_status"] != "running":
+                conn.rollback()
+                raise ExperimentIsClosed(
+                    experiment_id, row["experiment_status"]
+                )
+            conn.execute(
+                """UPDATE experiment_attempts
+                      SET execution_status=?, execution_finished_at=?,
+                          conversation_id=COALESCE(?, conversation_id)
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (
+                    execution_status,
+                    _utcnow_iso(),
+                    conversation_id,
+                    experiment_id,
+                    task_id,
+                    attempt,
+                ),
+            )
+            conn.commit()
+
+    def record_attempt_outcome(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        *,
+        outcome: str,
+        outcome_source: str,
+        reward: Optional[float] = None,
+        detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Record a grade after execution, idempotently and write-once."""
+        if outcome not in self._ATTEMPT_OUTCOMES:
+            raise ValueError(
+                f"outcome {outcome!r} is not one of {sorted(self._ATTEMPT_OUTCOMES)}"
+            )
+        if not outcome_source:
+            raise ValueError(
+                "outcome_source is required: an unattributed verdict cannot be "
+                "told apart from a fallback"
+            )
+        task_id = self._scrub(task_id)
+        source = self._scrub(outcome_source)
+        reward_value = None if reward is None else float(reward)
+        detail_json = (
+            None
+            if detail is None
+            else self._scrub(
+                json.dumps(
+                    _sanitize_json_value(detail),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        )
+        attempt = int(attempt)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT a.execution_finished_at, a.outcome, a.outcome_source,
+                          a.reward, a.detail_json,
+                          e.status AS experiment_status
+                     FROM experiment_attempts a
+                     JOIN experiments e ON e.experiment_id=a.experiment_id
+                    WHERE a.experiment_id=? AND a.task_id=? AND a.attempt=?""",
+                (experiment_id, task_id, attempt),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            if row["execution_finished_at"] is None:
+                conn.rollback()
+                raise ValueError(
+                    f"attempt {experiment_id}/{task_id}/{attempt} execution "
+                    "is still open"
+                )
+            incoming = (outcome, source, reward_value, detail_json)
+            stored = (
+                row["outcome"],
+                row["outcome_source"],
+                row["reward"],
+                row["detail_json"],
+            )
+            if row["outcome"] is not None:
+                if stored == incoming:
+                    conn.rollback()
+                    return
+                conn.rollback()
+                raise AttemptValueConflict(
+                    f"attempt {experiment_id}/{task_id}/{attempt} already has "
+                    f"outcome {row['outcome']!r}; conflicting grades are refused"
+                )
+            if row["experiment_status"] not in {
+                "running",
+                "awaiting_evaluation",
+            }:
+                conn.rollback()
+                raise ExperimentIsClosed(
+                    experiment_id, row["experiment_status"]
+                )
+            conn.execute(
+                """UPDATE experiment_attempts
+                      SET outcome=?, outcome_source=?, reward=?, finished_at=?,
+                          detail_json=?
+                    WHERE experiment_id=? AND task_id=? AND attempt=?""",
+                (
+                    outcome,
+                    source,
+                    reward_value,
+                    _utcnow_iso(),
+                    detail_json,
+                    experiment_id,
+                    task_id,
+                    attempt,
                 ),
             )
             conn.commit()
@@ -1847,37 +2143,21 @@ class ObservabilityStore:
         turn-status fallback. Recording the source is what keeps a fallback from
         masquerading as a measurement.
         """
-        if outcome not in self._ATTEMPT_OUTCOMES:
-            raise ValueError(
-                f"outcome {outcome!r} is not one of {sorted(self._ATTEMPT_OUTCOMES)}"
-            )
-        if not outcome_source:
-            raise ValueError(
-                "outcome_source is required: an unattributed verdict cannot be "
-                "told apart from a fallback"
-            )
-        self._update_experiment(
-            """UPDATE experiment_attempts
-                  SET outcome=?, outcome_source=?, reward=?, finished_at=?,
-                      detail_json=?,
-                      conversation_id=COALESCE(?, conversation_id)
-                WHERE experiment_id=? AND task_id=? AND attempt=?""",
-            (
-                outcome,
-                self._scrub(outcome_source),
-                None if reward is None else float(reward),
-                _utcnow_iso(),
-                None
-                if detail is None
-                else self._scrub(
-                    json.dumps(_sanitize_json_value(detail), ensure_ascii=False)
-                ),
-                conversation_id,
-                experiment_id,
-                self._scrub(task_id),
-                int(attempt),
-            ),
+        self.terminalize_attempt(
             experiment_id,
+            task_id,
+            attempt,
+            execution_status="completed",
+            conversation_id=conversation_id,
+        )
+        self.record_attempt_outcome(
+            experiment_id,
+            task_id,
+            attempt,
+            outcome=outcome,
+            outcome_source=outcome_source,
+            reward=reward,
+            detail=detail,
         )
 
     def restart_attempt(self, experiment_id: str, task_id: str, attempt: int) -> int:
@@ -1898,13 +2178,19 @@ class ObservabilityStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                """SELECT 1 FROM experiment_attempts
+                """SELECT execution_finished_at FROM experiment_attempts
                     WHERE experiment_id=? AND task_id=? AND attempt=?""",
                 (experiment_id, task_id, attempt),
             ).fetchone()
             if row is None:
                 conn.rollback()
                 raise ExperimentNotFound(experiment_id)
+            if row["execution_finished_at"] is not None:
+                conn.rollback()
+                raise AttemptValueConflict(
+                    f"attempt {experiment_id}/{task_id}/{attempt} execution is "
+                    "terminal and cannot be restarted"
+                )
             turn_keys = [
                 r[0]
                 for r in conn.execute(
@@ -1938,7 +2224,9 @@ class ObservabilityStore:
             conn.execute(
                 """UPDATE experiment_attempts
                       SET restarts=restarts+1, outcome=NULL, outcome_source=NULL,
-                          reward=NULL, finished_at=NULL, detail_json=NULL,
+                          reward=NULL, execution_status=NULL,
+                          execution_finished_at=NULL, finished_at=NULL,
+                          detail_json=NULL,
                           conversation_id=NULL, started_at=?
                     WHERE experiment_id=? AND task_id=? AND attempt=?""",
                 (_utcnow_iso(), experiment_id, task_id, attempt),
@@ -1952,6 +2240,31 @@ class ObservabilityStore:
         *,
         force_invalid: Optional[str] = None,
         detail: Optional[str] = None,
+    ) -> str:
+        """Close an in-process experiment or defer it pending evaluation."""
+        return self._complete_experiment(
+            experiment_id,
+            force_invalid=force_invalid,
+            detail=detail,
+            external_capture=False,
+        )
+
+    def complete_external_capture(self, experiment_id: str) -> str:
+        """Close external execution without making its live store reportable."""
+        return self._complete_experiment(
+            experiment_id,
+            force_invalid=None,
+            detail=None,
+            external_capture=True,
+        )
+
+    def _complete_experiment(
+        self,
+        experiment_id: str,
+        *,
+        force_invalid: Optional[str],
+        detail: Optional[str],
+        external_capture: bool,
     ) -> str:
         """Close an experiment. The STORE decides `complete` (`[XR14]`).
 
@@ -1989,8 +2302,15 @@ class ObservabilityStore:
             if row["status"] == "invalid":
                 conn.rollback()
                 return "invalid"
+            if (
+                row["status"] in {"complete", "capture_complete"}
+                and force_invalid is None
+            ):
+                conn.rollback()
+                return str(row["status"])
 
             reason: Optional[str] = force_invalid
+            status: Optional[str] = None
             if reason is None:
                 expected = int(row["declared_tasks"]) * int(row["declared_attempts"])
                 # The SHAPE must match the declaration, not merely the count.
@@ -2006,8 +2326,10 @@ class ObservabilityStore:
                     """SELECT
                          COUNT(*) AS rows_total,
                          COUNT(DISTINCT task_id) AS tasks_total,
+                         SUM(CASE WHEN execution_finished_at IS NOT NULL
+                                  THEN 1 ELSE 0 END) AS executed,
                          SUM(CASE WHEN finished_at IS NOT NULL AND outcome IS NOT NULL
-                                  THEN 1 ELSE 0 END) AS finished,
+                                  THEN 1 ELSE 0 END) AS evaluated,
                          SUM(CASE WHEN outcome='incomplete' THEN 1 ELSE 0 END)
                               AS incomplete
                        FROM experiment_attempts WHERE experiment_id=?""",
@@ -2015,7 +2337,8 @@ class ObservabilityStore:
                 ).fetchone()
                 rows_total = int(counts["rows_total"] or 0)
                 tasks_total = int(counts["tasks_total"] or 0)
-                finished = int(counts["finished"] or 0)
+                executed = int(counts["executed"] or 0)
+                evaluated = int(counts["evaluated"] or 0)
                 incomplete = int(counts["incomplete"] or 0)
                 declared_tasks = int(row["declared_tasks"])
                 bad_segments = conn.execute(
@@ -2024,22 +2347,36 @@ class ObservabilityStore:
                     (experiment_id,),
                 ).fetchone()[0]
                 if (
-                    finished != expected
+                    executed != expected
                     or rows_total != expected
                     or tasks_total != declared_tasks
-                    or incomplete
                 ):
                     reason = "attempt_shortfall"
                     detail = (
-                        f"{finished} finished and {rows_total} recorded of "
+                        f"{executed} finished and {rows_total} recorded of "
                         f"{expected} declared attempts across {tasks_total} of "
                         f"{declared_tasks} declared tasks; {incomplete} incomplete"
+                    )
+                elif incomplete:
+                    reason = "attempt_shortfall"
+                    detail = (
+                        f"{evaluated} evaluated of {expected} declared attempts; "
+                        f"{incomplete} incomplete"
                     )
                 elif bad_segments:
                     reason = "evidence_run_invalid"
                     detail = f"{bad_segments} evidence segment(s) reported invalid"
+                elif evaluated != expected:
+                    status = "awaiting_evaluation"
+                elif external_capture:
+                    status = "capture_complete"
+                else:
+                    status = "complete"
 
-            status = "invalid" if reason is not None else "complete"
+            if reason is not None:
+                status = "invalid"
+            elif status is None:
+                status = "complete"
             detail_text = self._scrub(detail) if reason is not None else None
             cursor = conn.execute(
                 """UPDATE experiments
@@ -2051,7 +2388,7 @@ class ObservabilityStore:
                     WHERE experiment_id=? AND status <> 'invalid'""",
                 (
                     status,
-                    _utcnow_iso(),
+                    None if status == "awaiting_evaluation" else _utcnow_iso(),
                     reason,
                     # Bound to None on the `complete` branch: `invalid_detail`
                     # is the explanation of an invalid verdict, and a detail

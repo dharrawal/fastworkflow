@@ -68,6 +68,10 @@ class ExperimentAborted(RuntimeError):
     """
 
 
+class MissingExperimentLifecycleFeature(RuntimeError):
+    """The target store was not installed for driver-neutral lifecycle writes."""
+
+
 @dataclass(frozen=True)
 class ExperimentTask:
     """One task in a task set.
@@ -166,6 +170,205 @@ def channel_for(experiment_id: str, task_id: str, attempt: int) -> str:
     return f"exp:{experiment_id}:{task_id}:{attempt}"
 
 
+class ExperimentController:
+    """Synchronous metadata-only experiment lifecycle controller.
+
+    External controllers open an already-installed store with ``migrate=False``.
+    Construction never acquires a trace sink, starts a writer, or prunes.
+    """
+
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        migrate: bool = False,
+        external: bool = True,
+        capture_profile: Optional[str] = None,
+        capture_policy_version: Optional[str] = None,
+    ) -> None:
+        if not db_path:
+            raise ValueError("db_path is required")
+        if external and not os.path.isfile(db_path):
+            raise MissingExperimentLifecycleFeature(
+                f"{db_path!r} does not exist; the server must install the "
+                "feature before readiness"
+            )
+        self.db_path = db_path
+        self.external = bool(external)
+        self.store = observability_store.ObservabilityStore(
+            db_path, migrate=migrate
+        )
+        if not self.store.has_feature(
+            observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1
+        ):
+            raise MissingExperimentLifecycleFeature(
+                f"{db_path!r} does not advertise "
+                f"{observability_store.FEATURE_EXPERIMENT_LIFECYCLE_V1!r}; "
+                "the server must install the feature before readiness"
+            )
+        target_regime = self.store.capture_regime()
+        if target_regime is None:
+            raise MissingExperimentLifecycleFeature(
+                f"{db_path!r} has no installed capture regime"
+            )
+        target_profile, target_policy_version = target_regime
+        incoming = (
+            capture_profile or target_profile,
+            capture_policy_version or target_policy_version,
+        )
+        if incoming != target_regime:
+            raise observability_store.CaptureRegimeChanged(
+                "<target-store>",
+                f"{target_profile}/{target_policy_version}",
+                f"{incoming[0]}/{incoming[1]}",
+            )
+        self.capture_profile, self.capture_policy_version = target_regime
+
+    def create_experiment(
+        self,
+        experiment_id: str,
+        label: str,
+        *,
+        declared_tasks: int,
+        declared_attempts: int,
+        hypothesis: Optional[str] = None,
+        arm: Optional[str] = None,
+        baseline_experiment_id: Optional[str] = None,
+        workflow_name: Optional[str] = None,
+    ) -> None:
+        self.store.create_experiment(
+            experiment_id,
+            label,
+            declared_tasks=declared_tasks,
+            declared_attempts=declared_attempts,
+            hypothesis=hypothesis,
+            arm=arm,
+            baseline_experiment_id=baseline_experiment_id,
+            workflow_name=workflow_name,
+            capture_profile=self.capture_profile,
+            capture_policy_version=self.capture_policy_version,
+        )
+
+    def start_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        channel_id: str,
+        *,
+        conversation_id: Optional[int] = None,
+        source_attempt_key: Optional[dict[str, Any]] = None,
+    ) -> None:
+        self.store.start_attempt(
+            experiment_id,
+            task_id,
+            attempt,
+            channel_id,
+            conversation_id=conversation_id,
+            source_attempt_key=source_attempt_key,
+        )
+
+    def restart_attempt(
+        self, experiment_id: str, task_id: str, attempt: int
+    ) -> int:
+        return self.store.restart_attempt(experiment_id, task_id, attempt)
+
+    def terminalize_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        *,
+        execution_status: str,
+        conversation_id: Optional[int] = None,
+    ) -> None:
+        self.store.terminalize_attempt(
+            experiment_id,
+            task_id,
+            attempt,
+            execution_status=execution_status,
+            conversation_id=conversation_id,
+        )
+
+    def record_outcome(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        *,
+        outcome: str,
+        outcome_source: str,
+        reward: Optional[float] = None,
+        detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        self.store.record_attempt_outcome(
+            experiment_id,
+            task_id,
+            attempt,
+            outcome=outcome,
+            outcome_source=outcome_source,
+            reward=reward,
+            detail=detail,
+        )
+
+    def finish_attempt(
+        self,
+        experiment_id: str,
+        task_id: str,
+        attempt: int,
+        *,
+        outcome: str,
+        outcome_source: str,
+        reward: Optional[float] = None,
+        detail: Optional[dict[str, Any]] = None,
+        conversation_id: Optional[int] = None,
+        execution_status: str = "completed",
+    ) -> None:
+        """Compatibility operation for drivers with an immediate grader."""
+        self.terminalize_attempt(
+            experiment_id,
+            task_id,
+            attempt,
+            execution_status=execution_status,
+            conversation_id=conversation_id,
+        )
+        self.record_outcome(
+            experiment_id,
+            task_id,
+            attempt,
+            outcome=outcome,
+            outcome_source=outcome_source,
+            reward=reward,
+            detail=detail,
+        )
+
+    def record_evidence_segment(
+        self,
+        experiment_id: str,
+        seq: int,
+        evidence_run_id: str,
+        record: dict[str, Any],
+    ) -> None:
+        self.store.record_evidence_segment(
+            experiment_id, seq, evidence_run_id, record
+        )
+
+    def complete_experiment(self, experiment_id: str) -> str:
+        if self.external:
+            return self.store.complete_external_capture(experiment_id)
+        return self.store.complete_experiment(experiment_id)
+
+    def invalidate_experiment(
+        self,
+        experiment_id: str,
+        reason: str,
+        detail: Optional[str] = None,
+    ) -> str:
+        return self.store.complete_experiment(
+            experiment_id, force_invalid=reason, detail=detail
+        )
+
+
 class ExperimentHarness:
     """Runs a task set as one experiment.
 
@@ -206,7 +409,10 @@ class ExperimentHarness:
         self.defeat_caches = defeat_caches
         self.install_memory_policy = install_memory_policy
         self._db_path = state_paths.observability_db(workflow_folderpath)
-        self._store = observability_store.ObservabilityStore(self._db_path)
+        self._controller = ExperimentController(
+            self._db_path, migrate=True, external=False
+        )
+        self._store = self._controller.store
         self._lock = threading.Lock()
         self._sink: Optional[observability_store.SQLiteTraceSink] = None
 
@@ -352,7 +558,7 @@ class ExperimentHarness:
                 "key every score groups by"
             )
 
-        self._store.create_experiment(
+        self._controller.create_experiment(
             self.experiment_id,
             self.label,
             declared_tasks=len(task_list),
@@ -375,9 +581,10 @@ class ExperimentHarness:
     ) -> dict[str, Any]:
         """Re-run the attempts of a crashed run that never finished.
 
-        Selects on `finished_at IS NULL` — the completion marker — not on "has
-        no terminal turn". An attempt that crashed after turn 3 of 10 has turns
-        and would be skipped by the second test while remaining unfinished.
+        Selects on `execution_finished_at IS NULL` — the execution completion
+        marker — not on "has no terminal turn". An attempt that crashed after
+        turn 3 of 10 has turns and would be skipped by the second test while
+        remaining unfinished.
 
         Each selected attempt is cleared by `restart_attempt`, which deletes its
         conversations and turns in one transaction and bumps `restarts`. That
@@ -397,7 +604,7 @@ class ExperimentHarness:
         pending = [
             row
             for row in self._store.experiment_attempt_rows(self.experiment_id)
-            if row["finished_at"] is None
+            if row["execution_finished_at"] is None
         ]
         declared = int(experiment["declared_attempts"])
         started = {
@@ -414,7 +621,7 @@ class ExperimentHarness:
                     "resumed and the experiment cannot become complete"
                 )
                 continue
-            self._store.restart_attempt(
+            self._controller.restart_attempt(
                 self.experiment_id, row["task_id"], row["attempt"]
             )
             pairs.append((task, int(row["attempt"])))
@@ -476,7 +683,7 @@ class ExperimentHarness:
             "attempts_run": len(runs),
             "aborted": None if body_error is None else repr(body_error),
         }
-        self._store.record_evidence_segment(
+        self._controller.record_evidence_segment(
             self.experiment_id, seq, evidence.run_id, record
         )
         if body_error is not None:
@@ -486,7 +693,7 @@ class ExperimentHarness:
                 f"experiment {self.experiment_id} aborted: {body_error!r}"
             ) from body_error
 
-        status = self._store.complete_experiment(self.experiment_id)
+        status = self._controller.complete_experiment(self.experiment_id)
         return {
             "experiment_id": self.experiment_id,
             "status": status,
@@ -512,7 +719,7 @@ class ExperimentHarness:
         run = AttemptRun(
             task=task, attempt=attempt, channel_id=channel_id, conversation_id=None
         )
-        self._store.start_attempt(
+        self._controller.start_attempt(
             self.experiment_id, task.task_id, attempt, channel_id
         )
         ctx: Optional[WorkflowExecutionContext] = None
@@ -577,7 +784,7 @@ class ExperimentHarness:
             outcome, source, reward = "incomplete", "grader_error", None
             detail = {"grader_error": repr(exc)}
         with self._lock:
-            self._store.finish_attempt(
+            self._controller.finish_attempt(
                 self.experiment_id,
                 task.task_id,
                 attempt,
@@ -586,5 +793,6 @@ class ExperimentHarness:
                 reward=reward,
                 detail=detail,
                 conversation_id=run.conversation_id,
+                execution_status="failed" if run.error is not None else "completed",
             )
         return run
