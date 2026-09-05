@@ -546,6 +546,40 @@ class ReviewSidecar:
             raise ReviewNotFoundError(f"unknown assignment_id {assignment_id!r}")
         return dict(json.loads(row["rubric_json"]))
 
+    def assignment_progress(
+        self, assignment_id: str, capability: str
+    ) -> dict[str, Any]:
+        """Return one rater's assignment and latest answers for resume."""
+        assignment_id = _required_text(assignment_id, "assignment_id")
+        with self._connect() as conn:
+            slot = self._slot_for_capability(conn, capability, "rater")
+            if not hmac.compare_digest(
+                str(slot["assignment_id"]).encode("utf-8"),
+                assignment_id.encode("utf-8"),
+            ):
+                raise ReviewAuthorizationError(
+                    "capability is not authorized for this assignment"
+                )
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT * FROM current_review_answers
+                       WHERE assignment_id=? AND rater_slot_id=?
+                       ORDER BY row_id, question_id""",
+                    (assignment_id, slot["rater_slot_id"]),
+                ).fetchall()
+            ]
+        assignment = self.get_assignment(assignment_id)
+        for row in rows:
+            row["answer"] = json.loads(row.pop("answer_json"))
+        return {
+            "assignment": assignment,
+            "rater_slot_id": str(slot["rater_slot_id"]),
+            "current_answers": rows,
+            "answered_count": len(rows),
+            "total_answers": len(assignment["rows"]) * len(assignment["questions"]),
+        }
+
     def export_assignment(self, assignment_id: str) -> dict[str, Any]:
         """Return latest rater answers and explicit unanswered coordinates."""
         assignment = self.get_assignment(assignment_id)

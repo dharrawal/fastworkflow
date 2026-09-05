@@ -103,6 +103,7 @@ def _request(
     body: dict | None = None,
     *,
     token: str | None | object = ...,
+    capability: str | None = None,
 ) -> tuple[int, dict]:
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = urllib.request.Request(
@@ -114,6 +115,8 @@ def _request(
     presented_token = server.token if token is ... else token
     if isinstance(presented_token, str):
         request.add_header("Authorization", f"Bearer {presented_token}")
+    if capability is not None:
+        request.add_header("X-Review-Capability", capability)
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, json.loads(response.read() or b"{}")
@@ -211,6 +214,63 @@ def test_two_assignments_over_same_workspace_coexist(tmp_path):
         first_created["rater_capabilities"]["rater-a"]
         != second_created["rater_capabilities"]["rater-a"]
     )
+
+
+def test_capability_captures_and_progress_resumes_latest_revision(tmp_path):
+    manifest, _archive = _workspace(tmp_path)
+    assignment = _assignment("assignment/resume")
+    encoded_id = urllib.parse.quote(assignment["id"], safe="")
+
+    with _serve(manifest) as server:
+        created = _request(
+            server, "POST", "/api/review/assignments", assignment
+        )[1]
+        capability = created["rater_capabilities"]["rater-a"]
+        answer_path = f"/api/review/assignments/{encoded_id}/answers"
+
+        status, response = _request(
+            server,
+            "POST",
+            answer_path,
+            {"row_id": "row-1", "question_id": "verdict", "answer": "pass"},
+        )
+        assert status == 403
+        assert "capability" in response["error"]
+
+        status, response = _request(
+            server,
+            "GET",
+            f"/api/review/assignments/{encoded_id}/progress",
+        )
+        assert status == 403
+        assert "capability" in response["error"]
+
+        for expected_revision, answer in enumerate(("pass", "fail"), start=1):
+            status, response = _request(
+                server,
+                "POST",
+                answer_path,
+                {
+                    "row_id": "row-1",
+                    "question_id": "verdict",
+                    "answer": answer,
+                },
+                capability=capability,
+            )
+            assert status == 200
+            assert response["answer"]["revision"] == expected_revision
+
+        status, response = _request(
+            server,
+            "GET",
+            f"/api/review/assignments/{encoded_id}/progress",
+            capability=capability,
+        )
+        assert status == 200
+        progress = response["progress"]
+        assert progress["rater_slot_id"] == "rater-a"
+        assert progress["current_answers"][0]["answer"] == "fail"
+        assert progress["current_answers"][0]["revision"] == 2
 
 
 def test_invalid_assignment_reports_reason_and_workspace_is_required(tmp_path):

@@ -671,6 +671,21 @@ def test_spa_pins_store_aware_workspace_navigation():
     assert b'document.getElementById("advPanel").style.display = "none"' in page
 
 
+def test_spa_review_pane_reuses_scoped_trace_viewer_and_capability():
+    page = run_chatbot_server.load_index_html()
+
+    assert b'id="reviewPane"' in page
+    assert b"function loadReviewAssignment()" in page
+    assert b"function navigateReviewRow(offset)" in page
+    assert b'"X-Review-Capability": review.capability' in page
+    assert b"/api/review/assignments/" in page
+    assert b"/progress" in page
+    assert b"/answers" in page
+    assert b"selectWorkspaceTurn(ref.store_id, ref.logical_turn_key)" in page
+    assert b"renderDetail(turn, results[1].spans || [])" in page
+    assert b"pane.dataset.blinded" in page
+
+
 def test_token_gated_browser_selection_loads_workspace(tmp_path):
     archive = _seed_archive(
         tmp_path,

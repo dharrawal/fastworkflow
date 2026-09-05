@@ -108,6 +108,29 @@ def test_capability_derives_slot_and_separates_adjudicator_role(tmp_path):
     assert captured["adjudicator_slot_id"] == "adjudicator"
 
 
+def test_assignment_progress_returns_only_capability_latest_answers(tmp_path):
+    sidecar = _sidecar(tmp_path)
+    created = sidecar.create_assignment(_assignment())
+    first_token = created["rater_capabilities"]["rater-a"]
+    second_token = created["rater_capabilities"]["rater-b"]
+
+    sidecar.capture_answer(first_token, "row-1", "verdict", "left")
+    sidecar.capture_answer(first_token, "row-1", "verdict", "right")
+    sidecar.capture_answer(second_token, "row-1", "verdict", "left")
+
+    progress = sidecar.assignment_progress("assignment-1", first_token)
+
+    assert progress["assignment"]["blinded"] is True
+    assert progress["rater_slot_id"] == "rater-a"
+    assert progress["answered_count"] == 1
+    assert progress["total_answers"] == 3
+    assert progress["current_answers"][0]["answer"] == "right"
+    assert progress["current_answers"][0]["revision"] == 2
+    assert {
+        answer["rater_slot_id"] for answer in progress["current_answers"]
+    } == {"rater-a"}
+
+
 def test_assignment_validation_reports_reasons_and_refuses_bad_answers(tmp_path):
     invalid = _assignment()
     invalid["rows"] = [{"id": "row-1", "turn_ref": {"store_id": "store-a"}}]

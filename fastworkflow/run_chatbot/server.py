@@ -62,6 +62,7 @@ from fastworkflow.observability_workspace import (
     load_observability_workspace,
 )
 from fastworkflow.review_sidecar import (
+    ReviewAuthorizationError,
     ReviewNotFoundError,
     ReviewSidecar,
     ReviewValidationError,
@@ -894,6 +895,10 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             presented.encode("utf-8"), self.chatbot.token.encode("utf-8")
         )
 
+    def _review_capability(self) -> str:
+        """Return the separately presented rater capability."""
+        return (self.headers.get("X-Review-Capability") or "").strip()
+
     # -- routing ---------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802
@@ -995,7 +1000,11 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         try:
             split = urlsplit(self.path)
-            if split.path not in {
+            review_answer_path = (
+                split.path.startswith("/api/review/assignments/")
+                and split.path.endswith("/answers")
+            )
+            if not review_answer_path and split.path not in {
                 "/api/select_workflow",
                 "/api/select_workspace",
                 "/api/configure_env",
@@ -1017,6 +1026,45 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, TypeError):
                 self._error(400, "invalid JSON body")
+                return
+            if review_answer_path:
+                if not isinstance(body, dict):
+                    self._error(400, "body must be a JSON object")
+                    return
+                if self.chatbot.workspace is None:
+                    self._error(
+                        409,
+                        "review answers require an active observability workspace",
+                    )
+                    return
+                encoded_id = split.path[
+                    len("/api/review/assignments/") : -len("/answers")
+                ].rstrip("/")
+                if not encoded_id:
+                    self._error(404, "not found")
+                    return
+                assignment_id = unquote(encoded_id)
+                capability = self._review_capability()
+                try:
+                    sidecar = self.chatbot.open_review_sidecar()
+                    # Authorize the path before appending an immutable revision.
+                    sidecar.assignment_progress(assignment_id, capability)
+                    captured = sidecar.capture_answer(
+                        capability,
+                        str(body.get("row_id") or ""),
+                        str(body.get("question_id") or ""),
+                        body.get("answer"),
+                    )
+                except ReviewAuthorizationError as exc:
+                    self._error(403, str(exc))
+                    return
+                except ReviewValidationError as exc:
+                    self._error(400, str(exc))
+                    return
+                except ReviewNotFoundError as exc:
+                    self._error(404, str(exc.args[0] if exc.args else exc))
+                    return
+                self._send_json({"answer": captured})
                 return
             if split.path == "/api/review/assignments":
                 if self.chatbot.workspace is None:
@@ -1349,8 +1397,11 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             return
         encoded_id = path[len("/api/review/assignments/") :]
         export = encoded_id.endswith("/export")
+        progress = encoded_id.endswith("/progress")
         if export:
             encoded_id = encoded_id[: -len("/export")]
+        elif progress:
+            encoded_id = encoded_id[: -len("/progress")]
         if not encoded_id:
             self._error(404, "not found")
             return
@@ -1359,15 +1410,27 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             sidecar = self.chatbot.open_review_sidecar()
             if export:
                 assignment = sidecar.export_assignment(assignment_id)
+            elif progress:
+                assignment = sidecar.assignment_progress(
+                    assignment_id, self._review_capability()
+                )
             else:
                 assignment = sidecar.get_assignment(assignment_id)
+        except ReviewAuthorizationError as exc:
+            self._error(403, str(exc))
+            return
         except ReviewValidationError as exc:
             self._error(400, str(exc))
             return
         except ReviewNotFoundError:
             self._error(404, "review assignment not found")
             return
-        self._send_json({"export" if export else "assignment": assignment})
+        if export:
+            self._send_json({"export": assignment})
+        elif progress:
+            self._send_json({"progress": assignment})
+        else:
+            self._send_json({"assignment": assignment})
 
     def _handle_workspace(self, path: str, q: Any) -> None:
         """Read-only HTTP projection of a validated multi-store workspace."""
