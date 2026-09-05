@@ -681,6 +681,9 @@ def test_spa_review_pane_reuses_scoped_trace_viewer_and_capability():
     assert b"/api/review/assignments/" in page
     assert b"/progress" in page
     assert b"/answers" in page
+    assert b'encodeURIComponent(row.id)' in page
+    assert b'reviewApi(reviewBase + "/turn", "GET")' in page
+    assert b'reviewApi(reviewBase + "/trace", "GET")' in page
     assert b"selectWorkspaceTurn(ref.store_id, ref.logical_turn_key)" in page
     assert b"renderDetail(turn, results[1].spans || [])" in page
     assert b"pane.dataset.blinded" in page

@@ -1787,12 +1787,25 @@ function selectWorkspaceTurn(storeId, logicalTurnKey) {
     location.hash = "store=" + encodeURIComponent(storeId)
       + "&turn=" + encodeURIComponent(logicalTurnKey);
   }
-  Promise.all([
-    api("/api/workspace/turn/" + encodeURIComponent(storeId)
-      + "/" + encodeURIComponent(logicalTurnKey)),
-    api("/api/workspace/trace/" + encodeURIComponent(storeId)
-      + "/" + encodeURIComponent(logicalTurnKey))
-  ]).then(function (results) {
+  var requests;
+  if (review.progress) {
+    var row = review.progress.assignment.rows[review.rowIndex];
+    var reviewBase = "/api/review/assignments/"
+      + encodeURIComponent(review.assignmentId) + "/rows/"
+      + encodeURIComponent(row.id);
+    requests = [
+      reviewApi(reviewBase + "/turn", "GET"),
+      reviewApi(reviewBase + "/trace", "GET")
+    ];
+  } else {
+    requests = [
+      api("/api/workspace/turn/" + encodeURIComponent(storeId)
+        + "/" + encodeURIComponent(logicalTurnKey)),
+      api("/api/workspace/trace/" + encodeURIComponent(storeId)
+        + "/" + encodeURIComponent(logicalTurnKey))
+    ];
+  }
+  Promise.all(requests).then(function (results) {
     if (nav !== workspaceNav || state.storeId !== storeId) { return; }
     var turn = results[0].turn;
     turn.turn_key = turn.logical_turn_key || turn.turn_key;
@@ -1824,6 +1837,9 @@ function selectTurn(turnKey) {
 }
 
 function statusBadge(turn) {
+  if (review.progress && review.progress.assignment.blinded) {
+    return el("span", "badge", "blinded review trace");
+  }
   if (turn.status === "awaiting_user") { return el("span", "badge progress", "awaiting_user — in progress"); }
   if (turn.status === "completed" && turn.success) { return el("span", "badge ok", "completed · success"); }
   return el("span", "badge " + (turn.success ? "ok" : "fail"),

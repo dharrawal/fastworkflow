@@ -22,7 +22,7 @@ def _assignment(assignment_id: str, prompt: str = "Choose an outcome.") -> dict:
     return {
         "id": assignment_id,
         "rater_slots": ["rater-a", "rater-b"],
-        "adjudicator_slots": [],
+        "adjudicator_slots": ["adjudicator"],
         "blinded": True,
         "rows": [
             {
@@ -141,6 +141,7 @@ def test_post_ingests_assignment_and_token_gated_get_returns_it(tmp_path):
         assert status == 201
         assert created["assignment_id"] == assignment["id"]
         assert set(created["rater_capabilities"]) == {"rater-a", "rater-b"}
+        assert set(created["adjudicator_capabilities"]) == {"adjudicator"}
 
         status, response = _request(
             server,
@@ -176,6 +177,22 @@ def test_post_ingests_assignment_and_token_gated_get_returns_it(tmp_path):
 
         status, response = _request(
             server, "GET", f"/api/review/assignments/{encoded_id}/export"
+        )
+        assert status == 403
+
+        status, response = _request(
+            server,
+            "GET",
+            f"/api/review/assignments/{encoded_id}/export",
+            capability=created["rater_capabilities"]["rater-a"],
+        )
+        assert status == 403
+
+        status, response = _request(
+            server,
+            "GET",
+            f"/api/review/assignments/{encoded_id}/export",
+            capability=created["adjudicator_capabilities"]["adjudicator"],
         )
         assert status == 200
         assert response["export"]["assignment_id"] == assignment["id"]

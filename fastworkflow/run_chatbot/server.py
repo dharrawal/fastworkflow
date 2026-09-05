@@ -66,6 +66,8 @@ from fastworkflow.review_sidecar import (
     ReviewNotFoundError,
     ReviewSidecar,
     ReviewValidationError,
+    project_review_trace,
+    project_review_turn,
 )
 from fastworkflow.run_chatbot import launcher
 
@@ -1396,6 +1398,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._error(404, "no observability workspace is loaded")
             return
         encoded_id = path[len("/api/review/assignments/") :]
+        if "/rows/" in encoded_id:
+            self._handle_review_evidence(encoded_id)
+            return
         export = encoded_id.endswith("/export")
         progress = encoded_id.endswith("/progress")
         if export:
@@ -1409,6 +1414,11 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         try:
             sidecar = self.chatbot.open_review_sidecar()
             if export:
+                sidecar.authorize_capability(
+                    assignment_id,
+                    self._review_capability(),
+                    "adjudicator",
+                )
                 assignment = sidecar.export_assignment(assignment_id)
             elif progress:
                 assignment = sidecar.assignment_progress(
@@ -1431,6 +1441,77 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"progress": assignment})
         else:
             self._send_json({"assignment": assignment})
+
+    def _handle_review_evidence(self, encoded_path: str) -> None:
+        """Return the capability-gated evidence projection for one assigned row."""
+        workspace = self.chatbot.workspace
+        if workspace is None:
+            self._error(404, "no observability workspace is loaded")
+            return
+        encoded_id, separator, rest = encoded_path.partition("/rows/")
+        encoded_row_id, operation_separator, operation = rest.partition("/")
+        if (
+            not separator
+            or not operation_separator
+            or not encoded_id
+            or not encoded_row_id
+            or operation not in {"turn", "trace"}
+        ):
+            self._error(404, "not found")
+            return
+        assignment_id = unquote(encoded_id)
+        row_id = unquote(encoded_row_id)
+        try:
+            progress = self.chatbot.open_review_sidecar().assignment_progress(
+                assignment_id, self._review_capability()
+            )
+            row = next(
+                (
+                    candidate
+                    for candidate in progress["assignment"]["rows"]
+                    if candidate["id"] == row_id
+                ),
+                None,
+            )
+            if row is None:
+                self._error(404, "review row not found")
+                return
+            turn_ref = row["turn_ref"]
+            store_id = turn_ref.get("store_id")
+            logical_turn_key = turn_ref.get("logical_turn_key")
+            if not store_id or not logical_turn_key:
+                self._error(400, "review row does not contain a scoped workspace turn")
+                return
+            blinded = bool(progress["assignment"]["blinded"])
+            if operation == "turn":
+                turn = workspace.turn(store_id, logical_turn_key)
+                if turn is None:
+                    self._error(404, "turn not found in the named store")
+                    return
+                self._send_json(
+                    {"turn": project_review_turn(turn, blinded=blinded)}
+                )
+            else:
+                self._send_json(
+                    {
+                        "spans": project_review_trace(
+                            workspace.trace(store_id, logical_turn_key),
+                            blinded=blinded,
+                        )
+                    }
+                )
+        except ReviewAuthorizationError as exc:
+            self._error(403, str(exc))
+        except ReviewValidationError as exc:
+            self._error(400, str(exc))
+        except ReviewNotFoundError:
+            self._error(404, "review assignment not found")
+        except UnknownWorkspaceStore as exc:
+            self._error(404, str(exc.args[0] if exc.args else exc))
+        except WorkspaceIntegrityError as exc:
+            self._error(409, str(exc))
+        except WorkspaceBusyError as exc:
+            self._error(503, str(exc))
 
     def _handle_workspace(self, path: str, q: Any) -> None:
         """Read-only HTTP projection of a validated multi-store workspace."""

@@ -20,6 +20,113 @@ from typing import Any, Optional
 REVIEW_DATABASE_NAME = "observability-reviews.sqlite3"
 REVIEW_SCHEMA = "fastworkflow-observability-review/1"
 _QUESTION_TYPES = frozenset({"single-select", "multi-select", "bounded-note"})
+_BLINDED_VERDICT_KEYS = frozenset(
+    {
+        "accuracy",
+        "answer",
+        "correct",
+        "default_answer",
+        "evaluation_result",
+        "evaluation_results",
+        "expected_answer",
+        "final_answer",
+        "machine_verdict",
+        "is_correct",
+        "outcome",
+        "outcome_source",
+        "pass",
+        "passed",
+        "fail",
+        "failed",
+        "predicate_result",
+        "predicate_results",
+        "predicate_verdict",
+        "reward",
+        "score",
+        "success",
+        "system_answer",
+        "verdict",
+    }
+)
+_BLINDED_VERDICT_COMPACT_KEYS = frozenset(
+    "".join(character for character in value if character.isalnum())
+    for value in _BLINDED_VERDICT_KEYS
+)
+
+
+def _is_blinded_verdict_key(key: Any) -> bool:
+    normalized = str(key).strip().lower().replace("-", "_")
+    compact = "".join(character for character in normalized if character.isalnum())
+    if compact in _BLINDED_VERDICT_COMPACT_KEYS:
+        return True
+    if "outcome" in compact or "verdict" in compact:
+        return True
+    if "answer" in compact and any(
+        marker in compact
+        for marker in ("default", "expected", "final", "rater", "system")
+    ):
+        return True
+    if "predicate" in compact and any(
+        marker in compact
+        for marker in (
+            "fail",
+            "outcome",
+            "pass",
+            "result",
+            "score",
+            "success",
+            "verdict",
+        )
+    ):
+        return True
+    return "rater" in compact and any(
+        marker in compact for marker in ("answer", "response", "verdict")
+    )
+
+
+def _strip_blinded_verdicts(value: Any, *, strip_status: bool) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_blinded_verdicts(item, strip_status=strip_status)
+            for key, item in value.items()
+            if not _is_blinded_verdict_key(key)
+            and not (strip_status and str(key).strip().lower() == "status")
+        }
+    if isinstance(value, list):
+        return [
+            _strip_blinded_verdicts(item, strip_status=strip_status) for item in value
+        ]
+    return value
+
+
+def project_review_turn(turn: dict[str, Any], *, blinded: bool) -> dict[str, Any]:
+    """Project one review turn without exposing system-derived verdicts."""
+    projected = dict(turn)
+    if not blinded:
+        return projected
+    projected.pop("status", None)
+    projected.pop("success", None)
+    projected.pop("answer", None)
+    if "record" in projected:
+        projected["record"] = _strip_blinded_verdicts(
+            projected["record"], strip_status=True
+        )
+    return projected
+
+
+def project_review_trace(
+    spans: list[dict[str, Any]], *, blinded: bool
+) -> list[dict[str, Any]]:
+    """Keep trace structure and failures while suppressing verdict attributes."""
+    projected = [dict(span) for span in spans]
+    if not blinded:
+        return projected
+    for span in projected:
+        if "attributes" in span:
+            span["attributes"] = _strip_blinded_verdicts(
+                span["attributes"], strip_status=False
+            )
+    return projected
 
 
 class ReviewValidationError(ValueError):
@@ -660,6 +767,24 @@ class ReviewSidecar:
                 f"capability is not authorized for role {role!r}"
             )
         return row
+
+    def authorize_capability(
+        self, assignment_id: str, capability: str, role: str
+    ) -> str:
+        """Authorize an explicit assignment role and return its slot id."""
+        assignment_id = _required_text(assignment_id, "assignment_id")
+        if role not in {"rater", "adjudicator"}:
+            raise ReviewAuthorizationError(f"unsupported review role {role!r}")
+        with self._connect() as conn:
+            slot = self._slot_for_capability(conn, capability, role)
+        if not hmac.compare_digest(
+            str(slot["assignment_id"]).encode("utf-8"),
+            assignment_id.encode("utf-8"),
+        ):
+            raise ReviewAuthorizationError(
+                "capability is not authorized for this assignment"
+            )
+        return str(slot["rater_slot_id"])
 
     @staticmethod
     def _question(
