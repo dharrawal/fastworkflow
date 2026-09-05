@@ -546,6 +546,66 @@ class ReviewSidecar:
             raise ReviewNotFoundError(f"unknown assignment_id {assignment_id!r}")
         return dict(json.loads(row["rubric_json"]))
 
+    def export_assignment(self, assignment_id: str) -> dict[str, Any]:
+        """Return latest rater answers and explicit unanswered coordinates."""
+        assignment = self.get_assignment(assignment_id)
+        latest = self.current_answers(assignment["id"])
+        answers_by_coordinate = {
+            (
+                answer["row_id"],
+                answer["rater_slot_id"],
+                answer["question_id"],
+            ): answer
+            for answer in latest
+        }
+        unanswered: list[dict[str, str]] = []
+        rows = []
+        for row in assignment["rows"]:
+            rater_answers = []
+            for rater_slot_id in assignment["rater_slots"]:
+                answers = []
+                for question in assignment["questions"]:
+                    question_id = question["id"]
+                    answer = answers_by_coordinate.get(
+                        (row["id"], rater_slot_id, question_id)
+                    )
+                    if answer is None:
+                        unanswered.append(
+                            {
+                                "row_id": row["id"],
+                                "rater_slot_id": rater_slot_id,
+                                "question_id": question_id,
+                            }
+                        )
+                        continue
+                    answers.append(
+                        {
+                            "question_id": question_id,
+                            "revision": answer["revision"],
+                            "answer": answer["answer"],
+                        }
+                    )
+                rater_answers.append(
+                    {
+                        "rater_slot_id": rater_slot_id,
+                        "answers": answers,
+                    }
+                )
+            rows.append(
+                {
+                    "id": row["id"],
+                    "turn_ref": row["turn_ref"],
+                    "rater_answers": rater_answers,
+                }
+            )
+        return {
+            "assignment_id": assignment["id"],
+            "rater_slots": assignment["rater_slots"],
+            "questions": assignment["questions"],
+            "rows": rows,
+            "unanswered": unanswered,
+        }
+
     def _slot_for_capability(
         self, conn: sqlite3.Connection, capability: str, role: str
     ) -> sqlite3.Row:

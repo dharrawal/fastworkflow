@@ -1343,26 +1343,31 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._error(404, "not found")
 
     def _handle_review_assignment(self, path: str) -> None:
-        """Return a workspace-scoped assignment without its capabilities."""
+        """Return a workspace-scoped assignment or its answer export."""
         if self.chatbot.workspace is None:
             self._error(404, "no observability workspace is loaded")
             return
         encoded_id = path[len("/api/review/assignments/") :]
+        export = encoded_id.endswith("/export")
+        if export:
+            encoded_id = encoded_id[: -len("/export")]
         if not encoded_id:
             self._error(404, "not found")
             return
         assignment_id = unquote(encoded_id)
         try:
-            assignment = self.chatbot.open_review_sidecar().get_assignment(
-                assignment_id
-            )
+            sidecar = self.chatbot.open_review_sidecar()
+            if export:
+                assignment = sidecar.export_assignment(assignment_id)
+            else:
+                assignment = sidecar.get_assignment(assignment_id)
         except ReviewValidationError as exc:
             self._error(400, str(exc))
             return
         except ReviewNotFoundError:
             self._error(404, "review assignment not found")
             return
-        self._send_json({"assignment": assignment})
+        self._send_json({"export" if export else "assignment": assignment})
 
     def _handle_workspace(self, path: str, q: Any) -> None:
         """Read-only HTTP projection of a validated multi-store workspace."""

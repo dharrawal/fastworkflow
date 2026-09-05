@@ -157,6 +157,33 @@ def test_post_ingests_assignment_and_token_gated_get_returns_it(tmp_path):
         )
         assert "rater_capabilities" not in response["assignment"]
 
+        server.open_review_sidecar().capture_answer(
+            created["rater_capabilities"]["rater-a"],
+            "row-1",
+            "verdict",
+            "pass",
+        )
+        status, response = _request(
+            server,
+            "GET",
+            f"/api/review/assignments/{encoded_id}/export",
+            token=None,
+        )
+        assert status == 401
+
+        status, response = _request(
+            server, "GET", f"/api/review/assignments/{encoded_id}/export"
+        )
+        assert status == 200
+        assert response["export"]["assignment_id"] == assignment["id"]
+        assert response["export"]["rows"][0]["turn_ref"] == {
+            "store_id": "store-a",
+            "logical_turn_key": "turn-1",
+        }
+        assert response["export"]["rows"][0]["rater_answers"][0]["answers"] == [
+            {"question_id": "verdict", "revision": 1, "answer": "pass"}
+        ]
+
 
 def test_two_assignments_over_same_workspace_coexist(tmp_path):
     manifest, _archive = _workspace(tmp_path)
