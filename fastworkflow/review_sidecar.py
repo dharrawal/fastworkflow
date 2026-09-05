@@ -688,9 +688,10 @@ class ReviewSidecar:
         }
 
     def export_assignment(self, assignment_id: str) -> dict[str, Any]:
-        """Return latest rater answers and explicit unanswered coordinates."""
+        """Return the assignment, latest answers, and all immutable revisions."""
         assignment = self.get_assignment(assignment_id)
         latest = self.current_answers(assignment["id"])
+        latest_adjudications = self.current_adjudications(assignment["id"])
         answers_by_coordinate = {
             (
                 answer["row_id"],
@@ -698,6 +699,14 @@ class ReviewSidecar:
                 answer["question_id"],
             ): answer
             for answer in latest
+        }
+        adjudications_by_coordinate = {
+            (
+                answer["row_id"],
+                answer["adjudicator_slot_id"],
+                answer["question_id"],
+            ): answer
+            for answer in latest_adjudications
         }
         unanswered: list[dict[str, str]] = []
         rows = []
@@ -732,19 +741,46 @@ class ReviewSidecar:
                         "answers": answers,
                     }
                 )
+            adjudicator_answers = []
+            for adjudicator_slot_id in assignment["adjudicator_slots"]:
+                answers = []
+                for question in assignment["questions"]:
+                    question_id = question["id"]
+                    answer = adjudications_by_coordinate.get(
+                        (row["id"], adjudicator_slot_id, question_id)
+                    )
+                    if answer is not None:
+                        answers.append(
+                            {
+                                "question_id": question_id,
+                                "revision": answer["revision"],
+                                "answer": answer["answer"],
+                            }
+                        )
+                adjudicator_answers.append(
+                    {
+                        "adjudicator_slot_id": adjudicator_slot_id,
+                        "answers": answers,
+                    }
+                )
             rows.append(
                 {
                     "id": row["id"],
                     "turn_ref": row["turn_ref"],
                     "rater_answers": rater_answers,
+                    "adjudicator_answers": adjudicator_answers,
                 }
             )
         return {
             "assignment_id": assignment["id"],
             "rater_slots": assignment["rater_slots"],
+            "adjudicator_slots": assignment["adjudicator_slots"],
+            "blinded": assignment["blinded"],
             "questions": assignment["questions"],
             "rows": rows,
             "unanswered": unanswered,
+            "answer_revisions": self.answer_revisions(assignment["id"]),
+            "adjudication_revisions": self.adjudication_revisions(assignment["id"]),
         }
 
     def _slot_for_capability(
@@ -959,6 +995,36 @@ class ReviewSidecar:
             query += " AND row_id=?"
             params.append(row_id)
         query += " ORDER BY row_id, rater_slot_id, question_id, revision"
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+        for row in rows:
+            row["answer"] = json.loads(row.pop("answer_json"))
+        return rows
+
+    def current_adjudications(
+        self, assignment_id: str, *, row_id: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM current_review_adjudications WHERE assignment_id=?"
+        params: list[Any] = [assignment_id]
+        if row_id is not None:
+            query += " AND row_id=?"
+            params.append(row_id)
+        query += " ORDER BY row_id, adjudicator_slot_id, question_id"
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+        for row in rows:
+            row["answer"] = json.loads(row.pop("answer_json"))
+        return rows
+
+    def adjudication_revisions(
+        self, assignment_id: str, *, row_id: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM review_adjudications WHERE assignment_id=?"
+        params: list[Any] = [assignment_id]
+        if row_id is not None:
+            query += " AND row_id=?"
+            params.append(row_id)
+        query += " ORDER BY row_id, adjudicator_slot_id, question_id, revision"
         with self._connect() as conn:
             rows = [dict(row) for row in conn.execute(query, params).fetchall()]
         for row in rows:

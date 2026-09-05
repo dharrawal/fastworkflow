@@ -1,0 +1,65 @@
+{
+  "schema": "ido-rating-v1",
+  "assignment_id": "assignment-ido",
+  "blinded": true,
+  "rater_slots": ["alice", "bob"],
+  "adjudicator_slots": ["carol"],
+  "questions": [
+    {"id": "primary", "prompt": "Primary rating", "type": "single-select", "vocabulary": ["acceptable", "needs-revision"]},
+    {"id": "contributing_causes", "prompt": "Contributing causes", "type": "multi-select", "vocabulary": ["logic", "evidence"]},
+    {"id": "coverage", "prompt": "Coverage", "type": "multi-select", "vocabulary": ["all", "partial"]},
+    {"id": "declines", "prompt": "Declines", "type": "multi-select", "vocabulary": ["none", "unsupported"]},
+    {"id": "note", "prompt": "Note", "type": "bounded-note", "max_length": 200}
+  ],
+  "rows": [
+    {
+      "row_id": "row-1",
+      "turn_ref": {"store_id": "sealed-a", "logical_turn_key": "turn-1"},
+      "ratings": [
+        {
+          "rater": "alice",
+          "primary": [
+            {"revision": 1, "answer": "needs-revision", "created_at": "2026-09-04T01:01:00+00:00"},
+            {"revision": 2, "answer": "acceptable", "created_at": "2026-09-04T01:02:00+00:00"}
+          ],
+          "contributing_causes": [
+            {"revision": 1, "answer": ["logic"], "created_at": "2026-09-04T01:00:00+00:00"}
+          ],
+          "coverage": [],
+          "declines": [],
+          "note": []
+        },
+        {
+          "rater": "bob",
+          "primary": [],
+          "contributing_causes": [],
+          "coverage": [
+            {"revision": 1, "answer": ["partial"], "created_at": "2026-09-04T01:03:00+00:00"}
+          ],
+          "declines": [
+            {"revision": 1, "answer": ["unsupported"], "created_at": "2026-09-04T01:04:00+00:00"}
+          ],
+          "note": [
+            {"revision": 1, "answer": "Needs source detail.", "created_at": "2026-09-04T01:05:00+00:00"}
+          ]
+        }
+      ],
+      "adjudications": [
+        {
+          "adjudicator": "carol",
+          "provenance": {"rater_slots": ["alice", "bob"]},
+          "primary": [
+            {"revision": 1, "answer": "needs-revision", "created_at": "2026-09-04T01:06:00+00:00"}
+          ],
+          "contributing_causes": [],
+          "coverage": [],
+          "declines": [],
+          "note": []
+        }
+      ]
+    }
+  ],
+  "unanswered": [
+    {"row_id": "row-1", "rater_slot_id": "alice", "question_id": "coverage"}
+  ]
+}

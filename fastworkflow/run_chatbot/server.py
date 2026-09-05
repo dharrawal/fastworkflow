@@ -1006,14 +1006,23 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 split.path.startswith("/api/review/assignments/")
                 and split.path.endswith("/answers")
             )
-            if not review_answer_path and split.path not in {
+            review_adjudication_path = (
+                split.path.startswith("/api/review/assignments/")
+                and split.path.endswith("/adjudications")
+            )
+            if (
+                not review_answer_path
+                and not review_adjudication_path
+                and split.path
+                not in {
                 "/api/select_workflow",
                 "/api/select_workspace",
                 "/api/configure_env",
                 "/api/clear_conversations",
                 "/api/review/assignments",
                 "/api/train",
-            }:
+                }
+            ):
                 self._refuse_write()
                 return
             query = parse_qs(split.query)
@@ -1029,7 +1038,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 self._error(400, "invalid JSON body")
                 return
-            if review_answer_path:
+            if review_answer_path or review_adjudication_path:
                 if not isinstance(body, dict):
                     self._error(400, "body must be a JSON object")
                     return
@@ -1039,8 +1048,11 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                         "review answers require an active observability workspace",
                     )
                     return
+                suffix = (
+                    "/answers" if review_answer_path else "/adjudications"
+                )
                 encoded_id = split.path[
-                    len("/api/review/assignments/") : -len("/answers")
+                    len("/api/review/assignments/") : -len(suffix)
                 ].rstrip("/")
                 if not encoded_id:
                     self._error(404, "not found")
@@ -1050,8 +1062,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 try:
                     sidecar = self.chatbot.open_review_sidecar()
                     # Authorize the path before appending an immutable revision.
-                    sidecar.assignment_progress(assignment_id, capability)
-                    captured = sidecar.capture_answer(
+                    role = "rater" if review_answer_path else "adjudicator"
+                    sidecar.authorize_capability(assignment_id, capability, role)
+                    capture = (
+                        sidecar.capture_answer
+                        if review_answer_path
+                        else sidecar.capture_adjudication
+                    )
+                    captured = capture(
                         capability,
                         str(body.get("row_id") or ""),
                         str(body.get("question_id") or ""),
@@ -1066,7 +1084,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 except ReviewNotFoundError as exc:
                     self._error(404, str(exc.args[0] if exc.args else exc))
                     return
-                self._send_json({"answer": captured})
+                key = "answer" if review_answer_path else "adjudication"
+                self._send_json({key: captured})
                 return
             if split.path == "/api/review/assignments":
                 if self.chatbot.workspace is None:

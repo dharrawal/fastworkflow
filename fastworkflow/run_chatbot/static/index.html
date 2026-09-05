@@ -1543,8 +1543,10 @@ function renderReviewPane() {
   var assignment = review.progress.assignment;
   var row = assignment.rows[review.rowIndex];
   var head = el("div", "reviewHead");
-  head.appendChild(el("h2", null, "Review · " + assignment.id));
-  head.appendChild(el("div", "sub", "Rubric row " + row.id));
+  head.appendChild(el("h2", null, "Formal review · " + assignment.id));
+  head.appendChild(el("div", "sub",
+    "Independent human rating · separate from developer/agent feedback · rubric row "
+    + row.id));
   var progress = el("div", "sub");
   progress.id = "reviewProgress";
   head.appendChild(progress);
