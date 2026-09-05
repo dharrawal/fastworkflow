@@ -61,6 +61,11 @@ from fastworkflow.observability_workspace import (
     WorkspaceIntegrityError,
     load_observability_workspace,
 )
+from fastworkflow.review_sidecar import (
+    ReviewNotFoundError,
+    ReviewSidecar,
+    ReviewValidationError,
+)
 from fastworkflow.run_chatbot import launcher
 
 logger = logging.getLogger(__name__)
@@ -436,6 +441,8 @@ class ChatbotServer:
         self.workspace_manifest_path = (
             str(self.workspace.manifest_path) if self.workspace is not None else ""
         )
+        self._review_sidecar: Optional[ReviewSidecar] = None
+        self._review_sidecar_lock = threading.Lock()
         # Auto-spawn posture for the workflow's FastAPI server; see
         # run_chatbot_main. no_server=True keeps the chatbot debug-only.
         self.spawn_options = dict(spawn_options or {"no_server": True})
@@ -505,6 +512,19 @@ class ChatbotServer:
             raise  # a newer-schema DB is a real error, surfaced per-request
         except Exception:
             return None
+
+    def open_review_sidecar(self) -> ReviewSidecar:
+        """Return the manifest-bound review store for the active workspace."""
+        if self.workspace is None or not self.workspace_manifest_path:
+            raise ReviewValidationError(
+                "review assignments require an active observability workspace"
+            )
+        with self._review_sidecar_lock:
+            if self._review_sidecar is None:
+                self._review_sidecar = ReviewSidecar.from_workspace_manifest(
+                    self.workspace_manifest_path
+                )
+            return self._review_sidecar
 
     @property
     def url(self) -> str:
@@ -580,6 +600,7 @@ class ChatbotServer:
             self.db_path = ""
             self.workspace = workspace
             self.workspace_manifest_path = str(workspace.manifest_path)
+            self._review_sidecar = None
             return self.session_payload()
 
     def activate_workflow(self, workflow_path: str) -> dict[str, Any]:
@@ -979,6 +1000,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 "/api/select_workspace",
                 "/api/configure_env",
                 "/api/clear_conversations",
+                "/api/review/assignments",
                 "/api/train",
             }:
                 self._refuse_write()
@@ -995,6 +1017,23 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, TypeError):
                 self._error(400, "invalid JSON body")
+                return
+            if split.path == "/api/review/assignments":
+                if self.chatbot.workspace is None:
+                    self._error(
+                        409,
+                        "review assignments require an active observability workspace",
+                    )
+                    return
+                try:
+                    created = self.chatbot.open_review_sidecar().create_assignment(body)
+                except ReviewValidationError as exc:
+                    self._error(400, str(exc))
+                    return
+                except sqlite3.IntegrityError:
+                    self._error(409, "an assignment with this id already exists")
+                    return
+                self._send_json(created, status=201)
                 return
             if self.chatbot.workspace is not None:
                 self._error(
@@ -1147,7 +1186,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         store = self.chatbot.open_store()
         q = lambda name: query.get(name, [None])[0]  # noqa: E731
 
-        if path == "/api/workspace" or path.startswith("/api/workspace/"):
+        if path.startswith("/api/review/assignments/"):
+            self._handle_review_assignment(path)
+        elif path == "/api/workspace" or path.startswith("/api/workspace/"):
             self._handle_workspace(path, q)
         elif self.chatbot.workspace is not None and path in {
             "/api/turns",
@@ -1300,6 +1341,28 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
         else:
             self._error(404, "not found")
+
+    def _handle_review_assignment(self, path: str) -> None:
+        """Return a workspace-scoped assignment without its capabilities."""
+        if self.chatbot.workspace is None:
+            self._error(404, "no observability workspace is loaded")
+            return
+        encoded_id = path[len("/api/review/assignments/") :]
+        if not encoded_id:
+            self._error(404, "not found")
+            return
+        assignment_id = unquote(encoded_id)
+        try:
+            assignment = self.chatbot.open_review_sidecar().get_assignment(
+                assignment_id
+            )
+        except ReviewValidationError as exc:
+            self._error(400, str(exc))
+            return
+        except ReviewNotFoundError:
+            self._error(404, "review assignment not found")
+            return
+        self._send_json({"assignment": assignment})
 
     def _handle_workspace(self, path: str, q: Any) -> None:
         """Read-only HTTP projection of a validated multi-store workspace."""

@@ -533,6 +533,19 @@ class ReviewSidecar:
             },
         }
 
+    def get_assignment(self, assignment_id: str) -> dict[str, Any]:
+        """Return a persisted assignment without reissuing its capabilities."""
+        assignment_id = _required_text(assignment_id, "assignment_id")
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT rubric_json FROM review_assignments
+                   WHERE assignment_id=?""",
+                (assignment_id,),
+            ).fetchone()
+        if row is None:
+            raise ReviewNotFoundError(f"unknown assignment_id {assignment_id!r}")
+        return dict(json.loads(row["rubric_json"]))
+
     def _slot_for_capability(
         self, conn: sqlite3.Connection, capability: str, role: str
     ) -> sqlite3.Row:
