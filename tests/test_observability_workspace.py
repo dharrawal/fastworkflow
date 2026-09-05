@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import sqlite3
 import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -376,7 +378,24 @@ def _get(server, path):
         return exc.code, json.loads(exc.read())
 
 
-def test_server_workspace_routes_are_scoped_and_legacy_api_stays_compatible(
+def _write(server, method, path, body):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.port}{path}",
+        method=method,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {server.token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
+
+
+def test_server_workspace_routes_are_scoped_and_refuse_legacy_turn_search(
     tmp_path,
 ):
     archive = _seed_archive(
@@ -437,9 +456,9 @@ def test_server_workspace_routes_are_scoped_and_legacy_api_stays_compatible(
         )
         assert _get(server, "/api/workspace/turn/turn")[0] == 400
         assert _get(server, "/api/workspace/turn/missing/turn")[0] == 404
-        # The current one-store routes keep their existing live/default shape.
-        assert _get(server, "/api/turn/turn")[1]["turn"]["turn_key"] == "turn"
-        assert len(_get(server, "/api/experiments")[1]["experiments"]) == 1
+        # Workspace mode never falls back to an unscoped one-store search.
+        assert _get(server, "/api/turn/turn")[0] == 400
+        assert _get(server, "/api/experiments")[0] == 400
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -459,3 +478,252 @@ def test_manifest_load_does_not_write_digest_into_archive(tmp_path):
 
     assert Path(archive["path"]).read_bytes() == before
     assert os.stat(archive["path"]).st_mode & 0o222 == 0
+
+
+def test_workspace_server_opens_same_turn_key_only_in_named_store(tmp_path):
+    first = _seed_archive(
+        tmp_path,
+        "first",
+        experiment_id="first-local",
+        task_id="task-first",
+        turn_key="shared",
+    )
+    second = _seed_archive(
+        tmp_path,
+        "second",
+        experiment_id="second-local",
+        task_id="task-second",
+        turn_key="shared",
+    )
+    manifest = _manifest(
+        tmp_path,
+        [_store_decl(first, "first"), _store_decl(second, "second")],
+    )
+    server = run_chatbot_server.ChatbotServer(
+        port=0, workspace_manifest_path=str(manifest)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        first_turn = _get(server, "/api/workspace/turn/first/shared")[1]["turn"]
+        second_turn = _get(server, "/api/workspace/turn/second/shared")[1]["turn"]
+        assert first_turn["task_id"] == "task-first"
+        assert second_turn["task_id"] == "task-second"
+        assert _get(server, "/api/turn/shared")[0] == 400
+        assert _get(server, "/api/turns")[0] == 400
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_workspace_browsing_keeps_sealed_archives_byte_identical(tmp_path):
+    archive = _seed_archive(
+        tmp_path,
+        "sealed",
+        experiment_id="local",
+        task_id="task",
+        turn_key="turn",
+    )
+    manifest = _manifest(
+        tmp_path,
+        [_store_decl(archive, "sealed")],
+        experiments=[
+            {
+                "experiment_id": "logical",
+                "segments": [
+                    {
+                        "store_id": "sealed",
+                        "local_experiment_id": "local",
+                    }
+                ],
+            }
+        ],
+    )
+    before = Path(archive["path"]).read_bytes()
+    server = run_chatbot_server.ChatbotServer(
+        port=0, workspace_manifest_path=str(manifest)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for path in (
+            "/api/workspace",
+            "/api/workspace/stores",
+            "/api/workspace/experiments",
+            "/api/workspace/experiment/logical/attempts",
+            "/api/workspace/turn/sealed/turn",
+            "/api/workspace/trace/sealed/turn",
+        ):
+            assert _get(server, path)[0] == 200
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+    assert Path(archive["path"]).read_bytes() == before
+    assert not Path(f"{archive['path']}-wal").exists()
+    assert not Path(f"{archive['path']}-shm").exists()
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("POST", "/api/select_workflow", {"path": "/tmp"}),
+        ("POST", "/api/configure_env", {"create_from_templates": True}),
+        ("POST", "/api/train", {"path": "/tmp"}),
+        (
+            "POST",
+            "/api/clear_conversations",
+            {"confirm": "clear all conversations"},
+        ),
+        ("PATCH", "/api/experiment/local", {"notes": "must not write"}),
+    ],
+)
+def test_workspace_mode_rejects_live_and_destructive_actions(
+    tmp_path, method, path, body
+):
+    archive = _seed_archive(
+        tmp_path,
+        "sealed",
+        experiment_id="local",
+        task_id="task",
+        turn_key="turn",
+    )
+    manifest = _manifest(tmp_path, [_store_decl(archive, "sealed")])
+    before = Path(archive["path"]).read_bytes()
+    server = run_chatbot_server.ChatbotServer(
+        port=0, workspace_manifest_path=str(manifest)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, response = _write(server, method, path, body)
+        assert status == 403
+        assert "read-only" in response["error"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+    assert Path(archive["path"]).read_bytes() == before
+
+
+def test_token_gated_structured_trace_link_redirects_to_scoped_spa_hash(tmp_path):
+    archive = _seed_archive(
+        tmp_path,
+        "sealed",
+        experiment_id="local",
+        task_id="task",
+        turn_key="turn",
+    )
+    manifest = _manifest(tmp_path, [_store_decl(archive, "sealed")])
+    server = run_chatbot_server.ChatbotServer(
+        port=0, workspace_manifest_path=str(manifest)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+    try:
+        unscoped = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/trace/turn",
+            headers={"Authorization": f"Bearer {server.token}"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as unscoped_error:
+            opener.open(unscoped, timeout=10)
+        assert unscoped_error.value.code == 400
+
+        scoped = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/trace"
+            "?store_id=sealed&logical_turn_key=turn",
+            headers={"Authorization": f"Bearer {server.token}"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as redirect:
+            opener.open(scoped, timeout=10)
+        assert redirect.value.code == 303
+        location = redirect.value.headers["Location"]
+        assert location.endswith("#store=sealed&turn=turn")
+
+        missing_token = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/trace"
+            "?store_id=sealed&logical_turn_key=turn"
+        )
+        with pytest.raises(urllib.error.HTTPError) as unauthorized:
+            opener.open(missing_token, timeout=10)
+        assert unauthorized.value.code == 401
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_spa_pins_store_aware_workspace_navigation():
+    page = run_chatbot_server.load_index_html()
+    assert b'location.hash = "store="' in page
+    assert b'"store=" + encodeURIComponent(storeId)' in page
+    assert b"/api/workspace/turn/" in page
+    assert b"/api/workspace/trace/" in page
+    assert b"Unscoped turn links are refused in workspace mode" in page
+    assert b"native capture" in page
+    assert b"projected history" in page
+    assert b"pending evaluation" in page
+    assert b'document.getElementById("modeTest").style.display = "none"' in page
+    assert b'document.getElementById("clearConvsBtn").style.display = "none"' in page
+    assert b'document.getElementById("advPanel").style.display = "none"' in page
+
+
+def test_token_gated_browser_selection_loads_workspace(tmp_path):
+    archive = _seed_archive(
+        tmp_path,
+        "sealed",
+        experiment_id="local",
+        task_id="task",
+        turn_key="turn",
+    )
+    manifest = _manifest(tmp_path, [_store_decl(archive, "sealed")])
+    server = run_chatbot_server.ChatbotServer(port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, response = _write(
+            server, "POST", "/api/select_workspace", {"path": str(manifest)}
+        )
+        assert status == 200
+        assert response["session"]["workspace_mode"] is True
+        assert response["session"]["read_only"] is True
+        assert response["session"]["workspace"]["workspace_id"] == "workspace-1"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_run_chatbot_main_forwards_explicit_workspace_manifest(
+    tmp_path, monkeypatch, capsys
+):
+    archive = _seed_archive(
+        tmp_path,
+        "sealed",
+        experiment_id="local",
+        task_id="task",
+        turn_key="turn",
+    )
+    manifest = _manifest(tmp_path, [_store_decl(archive, "sealed")])
+    monkeypatch.setattr(
+        run_chatbot_server.ChatbotServer, "serve_forever", lambda self: None
+    )
+    monkeypatch.setattr(
+        run_chatbot_server.ChatbotServer,
+        "shutdown",
+        lambda self: self.httpd.server_close(),
+    )
+    monkeypatch.setattr(signal, "signal", lambda *_args: None)
+    result = run_chatbot_server.run_chatbot_main(
+        SimpleNamespace(
+            workspace_manifest=str(manifest),
+            server_port=None,
+            expect_encrypted_jwt=False,
+        )
+    )
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "read-only workspace: Historical runs" in output
+    assert "pick a workflow in the browser" not in output

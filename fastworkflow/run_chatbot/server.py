@@ -41,7 +41,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from fastworkflow import state_paths
 from fastworkflow.observability_store import (
@@ -57,6 +57,7 @@ from fastworkflow.observability_workspace import (
     UnknownLogicalExperiment,
     UnknownWorkspaceStore,
     WorkspaceBusyError,
+    WorkspaceError,
     WorkspaceIntegrityError,
     load_observability_workspace,
 )
@@ -303,6 +304,7 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
     if not os.path.isdir(base):
         return {"error": f"not a directory: {base}"}
     entries = []
+    workspace_manifests = []
     try:
         names = sorted(os.listdir(base))
     except OSError as exc:
@@ -312,6 +314,8 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
             continue
         full = os.path.join(base, name)
         if not os.path.isdir(full):
+            if name.lower().endswith(".json"):
+                workspace_manifests.append({"name": name, "path": full})
             continue
         is_workflow = _looks_like_workflow(full)
         entry = {
@@ -330,6 +334,7 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
         "dir": base,
         "parent": parent if parent != base else None,
         "entries": entries,
+        "workspace_manifests": workspace_manifests,
     }
 
 
@@ -428,6 +433,9 @@ class ChatbotServer:
             if workspace_manifest_path
             else None
         )
+        self.workspace_manifest_path = (
+            str(self.workspace.manifest_path) if self.workspace is not None else ""
+        )
         # Auto-spawn posture for the workflow's FastAPI server; see
         # run_chatbot_main. no_server=True keeps the chatbot debug-only.
         self.spawn_options = dict(spawn_options or {"no_server": True})
@@ -514,7 +522,7 @@ class ChatbotServer:
         expose_url = running or bool(
             self.spawn_options.get("no_server") and self.server_url
         )
-        return {
+        payload = {
             "workflow_path": self.workflow_path,
             "workflow_name": (
                 os.path.basename(os.path.abspath(self.workflow_path))
@@ -542,6 +550,37 @@ class ChatbotServer:
             ),
             "spawn_error": self.spawn_error,
         }
+        if self.workspace is not None:
+            payload.update(
+                {
+                    "workspace_mode": True,
+                    "workspace": self.workspace.summary(),
+                    "workflow_path": "",
+                    "workflow_name": "",
+                    "db_path": "",
+                    "server_url": None,
+                    "server_running": False,
+                    "env_setup_required": False,
+                    "read_only": True,
+                }
+            )
+        else:
+            payload.update({"workspace_mode": False, "read_only": False})
+        return payload
+
+    def activate_workspace(self, manifest_path: str) -> dict[str, Any]:
+        """Load a manifest selected through the token-gated browser picker."""
+        with self._activate_lock:
+            workspace = load_observability_workspace(manifest_path)
+            if self.server_proc is not None and self.server_proc.poll() is None:
+                launcher.terminate_server(self.server_proc)
+            self.server_proc = None
+            self.server_url = None
+            self.workflow_path = ""
+            self.db_path = ""
+            self.workspace = workspace
+            self.workspace_manifest_path = str(workspace.manifest_path)
+            return self.session_payload()
 
     def activate_workflow(self, workflow_path: str) -> dict[str, Any]:
         """Point the chatbot at a workflow and (unless disabled) make sure its
@@ -873,10 +912,56 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 {"Content-Security-Policy": self.chatbot.page_csp},
             )
             return
+        if path == "/trace" or path.startswith("/trace/"):
+            self._handle_trace_navigation(path, query)
+            return
         if path.startswith("/api/"):
             self._handle_api(path, query)
             return
         self._error(404, "not found")
+
+    def _handle_trace_navigation(
+        self, path: str, query: dict[str, list[str]]
+    ) -> None:
+        """Convert a durable scoped turn reference into SPA hash navigation."""
+        if self.chatbot.workspace is None:
+            self._error(404, "no observability workspace is loaded")
+            return
+        if path != "/trace":
+            self._error(
+                400,
+                "unscoped /trace/<key> links are refused; provide store_id and "
+                "logical_turn_key to /trace",
+            )
+            return
+        store_id = (query.get("store_id") or [""])[0]
+        logical_turn_key = (query.get("logical_turn_key") or [""])[0]
+        if not store_id or not logical_turn_key:
+            self._error(
+                400,
+                "trace navigation requires store_id and logical_turn_key",
+            )
+            return
+        try:
+            if self.chatbot.workspace.turn(store_id, logical_turn_key) is None:
+                self._error(404, "turn not found in the named store")
+                return
+        except UnknownWorkspaceStore as exc:
+            self._error(404, str(exc.args[0] if exc.args else exc))
+            return
+        fragment = (
+            "store="
+            + quote(store_id, safe="")
+            + "&turn="
+            + quote(logical_turn_key, safe="")
+        )
+        location = "/?token=" + quote(self.chatbot.token, safe="") + "#" + fragment
+        self._send(
+            303,
+            b"",
+            "text/plain; charset=utf-8",
+            {"Location": location},
+        )
 
     # Writes: ordinary observability browsing stays read-only. The explicit
     # control-plane POSTs (select workflow, configure env, train, clear
@@ -891,6 +976,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             split = urlsplit(self.path)
             if split.path not in {
                 "/api/select_workflow",
+                "/api/select_workspace",
                 "/api/configure_env",
                 "/api/clear_conversations",
                 "/api/train",
@@ -909,6 +995,25 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, TypeError):
                 self._error(400, "invalid JSON body")
+                return
+            if self.chatbot.workspace is not None:
+                self._error(
+                    403,
+                    "workspace mode is read-only; live and destructive actions "
+                    "are disabled",
+                )
+                return
+            if split.path == "/api/select_workspace":
+                path = str(body.get("path") or "").strip()
+                if not path or not os.path.isfile(path):
+                    self._error(400, f"not a file: {path!r}")
+                    return
+                try:
+                    session = self.chatbot.activate_workspace(path)
+                except (OSError, ValueError, WorkspaceError) as exc:
+                    self._error(400, str(exc))
+                    return
+                self._send_json({"session": session})
                 return
             if split.path == "/api/select_workflow":
                 path = str(body.get("path") or "").strip()
@@ -1019,6 +1124,12 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 self._error(400, "body must be a JSON object")
                 return
+            if self.chatbot.workspace is not None:
+                self._error(
+                    403,
+                    "workspace mode is read-only; experiment notes cannot be changed",
+                )
+                return
             self._handle_experiment_patch(split.path, body)
         except BrokenPipeError:
             pass
@@ -1038,6 +1149,23 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/workspace" or path.startswith("/api/workspace/"):
             self._handle_workspace(path, q)
+        elif self.chatbot.workspace is not None and path in {
+            "/api/turns",
+            "/api/experiments",
+        }:
+            self._error(
+                400,
+                "workspace reads must be scoped by store_id; unscoped search is refused",
+            )
+        elif self.chatbot.workspace is not None and (
+            path.startswith("/api/turn/")
+            or path.startswith("/api/spans/")
+            or path.startswith("/api/experiment/")
+        ):
+            self._error(
+                400,
+                "workspace reads must use the store-aware /api/workspace routes",
+            )
         elif path == "/api/meta":
             self._send_json(
                 {
@@ -1586,17 +1714,34 @@ def run_chatbot_main(args) -> int:
     install them, then starts the FastAPI server unless ``--server-port``
     named an existing server.
     """
+    workspace_manifest_path = getattr(args, "workspace_manifest", None)
     spawn_options = spawn_options_from_cli_args(args)
+    if workspace_manifest_path:
+        # Workspace inspection never starts or connects to a live workflow server.
+        spawn_options = {"no_server": True}
     try:
-        server = ChatbotServer(port=0, spawn_options=spawn_options)
-    except OSError as exc:
-        print(f"Error: cannot bind 127.0.0.1 to a free port ({exc}).")
+        server = ChatbotServer(
+            port=0,
+            spawn_options=spawn_options,
+            workspace_manifest_path=workspace_manifest_path,
+        )
+    except (OSError, WorkspaceError, ValueError) as exc:
+        print(f"Error: cannot start the chatbot ({exc}).")
         return 1
 
     # -- banner ---------------------------------------------------------
     print("fastWorkflow Chatbot")
-    print("  pick a workflow in the browser (bundled examples")
-    print("  and local folders are listed; you can browse anywhere).")
+    if server.workspace is not None:
+        print(
+            "  read-only workspace: "
+            + server.workspace.label
+            + " ("
+            + str(server.workspace.manifest_path)
+            + ")"
+        )
+    else:
+        print("  pick a workflow in the browser (bundled examples")
+        print("  and local folders are listed; you can browse anywhere).")
     print(f"\n  Open in your browser:\n\n    {server.url}\n")
     print("Press Ctrl+C to stop.", flush=True)
     _open_in_browser(server.url)

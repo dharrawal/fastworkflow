@@ -637,6 +637,7 @@ class TestRunChatbotCliSurface:
     def test_run_chatbot_takes_no_workflow_or_env_paths(self):
         args = self._parser().parse_args(["run_chatbot"])
         assert args.command == "run_chatbot"
+        assert args.workspace_manifest is None
         assert not hasattr(args, "workflow_path")
         assert not hasattr(args, "env_file_path")
         assert not hasattr(args, "passwords_file_path")
@@ -644,6 +645,13 @@ class TestRunChatbotCliSurface:
         assert not hasattr(args, "no_browser")
         assert not hasattr(args, "no_server")
         assert args.server_port is None
+
+    def test_workspace_manifest_is_an_explicit_read_only_entry(self):
+        args = self._parser().parse_args(
+            ["run_chatbot", "--workspace-manifest", "/tmp/workspace.json"]
+        )
+        assert args.workspace_manifest == "/tmp/workspace.json"
+        assert not hasattr(args, "workflow_path")
 
     def test_server_port_implies_no_spawn(self):
         from fastworkflow.run_chatbot import server as run_chatbot_server
