@@ -52,6 +52,14 @@ from fastworkflow.observability_store import (
     ObservabilityStore,
     ReadOnlyObservabilityStore,
 )
+from fastworkflow.observability_workspace import (
+    ObservabilityWorkspace,
+    UnknownLogicalExperiment,
+    UnknownWorkspaceStore,
+    WorkspaceBusyError,
+    WorkspaceIntegrityError,
+    load_observability_workspace,
+)
 from fastworkflow.run_chatbot import launcher
 
 logger = logging.getLogger(__name__)
@@ -69,7 +77,9 @@ _HTMLISH_TYPES = ("text/html", "application/xhtml+xml", "image/svg+xml")
 
 def load_index_html() -> bytes:
     """The single self-contained SPA page, shipped as package data [R23]."""
-    resource = importlib.resources.files("fastworkflow.run_chatbot") / "static" / "index.html"
+    resource = (
+        importlib.resources.files("fastworkflow.run_chatbot") / "static" / "index.html"
+    )
     return resource.read_bytes()
 
 
@@ -113,7 +123,9 @@ def _cme_context_names() -> set[str]:
     try:
         import fastworkflow
 
-        internal = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+        internal = fastworkflow.get_internal_workflow_path(
+            "command_metadata_extraction"
+        )
     except Exception:
         _CME_CONTEXT_NAMES = names
         return names
@@ -161,9 +173,7 @@ def _workflow_is_trained(path: str) -> bool:
         return False
     contexts_to_check = (set(contexts) - _cme_context_names()) | {"*"}
     for context_name in contexts_to_check:
-        folder = (
-            _GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
-        )
+        folder = _GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
         threshold_path = os.path.join(command_info_root, folder, "threshold.json")
         if not os.path.isfile(threshold_path):
             return False
@@ -277,9 +287,7 @@ def list_workflow_candidates() -> list[dict[str, Any]]:
     # (the library package has _commands/ plus examples/) is a folder, not a
     # leaf the developer would pick.
     for path in list(seen):
-        if any(
-            other != path and other.startswith(path + os.sep) for other in seen
-        ):
+        if any(other != path and other.startswith(path + os.sep) for other in seen):
             seen.pop(path, None)
     candidates = list(seen.values())
     candidates.sort(
@@ -363,7 +371,9 @@ def _autodetect_env_files(workflow_path: str) -> tuple[str, str]:
                 return candidate
         return ""
 
-    return first_existing("fastworkflow.env"), first_existing("fastworkflow.passwords.env")
+    return first_existing("fastworkflow.env"), first_existing(
+        "fastworkflow.passwords.env"
+    )
 
 
 def _env_template_text(filename: str) -> str:
@@ -409,9 +419,15 @@ class ChatbotServer:
         port: int = 0,
         token: Optional[str] = None,
         spawn_options: Optional[dict] = None,
+        workspace_manifest_path: Optional[str] = None,
     ) -> None:
         self.db_path = db_path or ""
         self.workflow_path = workflow_path
+        self.workspace: Optional[ObservabilityWorkspace] = (
+            load_observability_workspace(workspace_manifest_path)
+            if workspace_manifest_path
+            else None
+        )
         # Auto-spawn posture for the workflow's FastAPI server; see
         # run_chatbot_main. no_server=True keeps the chatbot debug-only.
         self.spawn_options = dict(spawn_options or {"no_server": True})
@@ -520,7 +536,9 @@ class ChatbotServer:
             "channel_id": self.channel_id,
             "user_id": self.user_id,
             "jwt_mode": (
-                "signed" if self.spawn_options.get("expect_encrypted_jwt") else "unsigned"
+                "signed"
+                if self.spawn_options.get("expect_encrypted_jwt")
+                else "unsigned"
             ),
             "spawn_error": self.spawn_error,
         }
@@ -664,9 +682,7 @@ class ChatbotServer:
         )
         if create_from_templates:
             if not os.path.isfile(env_target):
-                _write_env_file(
-                    env_target, _env_template_text("fastworkflow.env")
-                )
+                _write_env_file(env_target, _env_template_text("fastworkflow.env"))
             if not os.path.isfile(passwords_target):
                 _write_env_file(
                     passwords_target,
@@ -796,7 +812,11 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         origin = (self.headers.get("Origin") or "").strip().lower()
         if origin:
             scheme, sep, authority = origin.partition("://")
-            if scheme != "http" or not sep or not self._is_loopback_authority(authority):
+            if (
+                scheme != "http"
+                or not sep
+                or not self._is_loopback_authority(authority)
+            ):
                 logger.warning(
                     f"Chatbot refused a request with non-loopback Origin {origin!r} [R18]"
                 )
@@ -807,7 +827,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         presented = ""
         auth = self.headers.get("Authorization") or ""
         if auth.startswith("Bearer "):
-            presented = auth[len("Bearer "):].strip()
+            presented = auth[len("Bearer ") :].strip()
         elif query.get("token"):
             presented = query["token"][0]
         return hmac.compare_digest(
@@ -938,10 +958,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     lowered = reason.lower()
                     status = (
                         409
-                        if (
-                            "already running" in lowered
-                            or "in progress" in lowered
-                        )
+                        if ("already running" in lowered or "in progress" in lowered)
                         else 400
                     )
                     self._error(status, reason)
@@ -1019,7 +1036,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         store = self.chatbot.open_store()
         q = lambda name: query.get(name, [None])[0]  # noqa: E731
 
-        if path == "/api/meta":
+        if path == "/api/workspace" or path.startswith("/api/workspace/"):
+            self._handle_workspace(path, q)
+        elif path == "/api/meta":
             self._send_json(
                 {
                     "workflow_path": self.chatbot.workflow_path,
@@ -1045,9 +1064,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     {"writer_health": None, "db_size_bytes": 0, "db_available": False}
                 )
             elif path in ("/api/channels", "/api/conversations", "/api/turns"):
-                self._send_json(
-                    {"channels": [], "conversations": [], "turns": []}
-                )
+                self._send_json({"channels": [], "conversations": [], "turns": []})
             elif path == "/api/experiments":
                 # An empty state, not "observability DB not found": a cold start
                 # has no experiments, which is a fact about the DB rather than
@@ -1102,7 +1119,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 }
             )
         elif path.startswith("/api/turn/"):
-            turn_key = path[len("/api/turn/"):]
+            turn_key = path[len("/api/turn/") :]
             turn = store.get_turn(turn_key)
             if turn is None:
                 self._error(404, "turn not found")
@@ -1113,7 +1130,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 turn["record"] = None
             self._send_json({"turn": turn})
         elif path.startswith("/api/spans/"):
-            trace_id = path[len("/api/spans/"):]
+            trace_id = path[len("/api/spans/") :]
             spans = store.get_spans(trace_id)
             for span in spans:
                 try:
@@ -1124,7 +1141,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/experiments" or path.startswith("/api/experiment/"):
             self._handle_experiments(store, path, q)
         elif path.startswith("/api/artifact/"):
-            self._serve_artifact(store, path[len("/api/artifact/"):])
+            self._serve_artifact(store, path[len("/api/artifact/") :])
         elif path == "/api/health":
             self._send_json(
                 {
@@ -1135,6 +1152,98 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
         else:
             self._error(404, "not found")
+
+    def _handle_workspace(self, path: str, q: Any) -> None:
+        """Read-only HTTP projection of a validated multi-store workspace."""
+        workspace = self.chatbot.workspace
+        if workspace is None:
+            self._error(404, "no observability workspace is loaded")
+            return
+        try:
+            if path in {"/api/workspace", "/api/workspace/summary"}:
+                self._send_json({"workspace": workspace.summary()})
+                return
+            if path == "/api/workspace/stores":
+                self._send_json({"stores": workspace.stores()})
+                return
+            if path == "/api/workspace/experiments":
+                self._send_json({"experiments": workspace.experiments()})
+                return
+            if path == "/api/workspace/projected_attempts":
+                attempt = None
+                if q("attempt") is not None:
+                    try:
+                        attempt = int(q("attempt"))
+                    except ValueError:
+                        self._error(400, "attempt must be an integer")
+                        return
+                self._send_json(
+                    {
+                        "projected_attempts": workspace.projected_attempts(
+                            experiment_id=q("experiment"),
+                            task_id=q("task"),
+                            attempt=attempt,
+                        )
+                    }
+                )
+                return
+            experiment_prefix = "/api/workspace/experiment/"
+            if path.startswith(experiment_prefix):
+                rest = path[len(experiment_prefix) :]
+                encoded_id, separator, operation = rest.partition("/")
+                experiment_id = unquote(encoded_id)
+                if not separator or operation not in {
+                    "segments",
+                    "tasks",
+                    "attempts",
+                }:
+                    self._error(404, "not found")
+                    return
+                if operation == "segments":
+                    self._send_json({"segments": workspace.segments(experiment_id)})
+                elif operation == "tasks":
+                    self._send_json({"tasks": workspace.tasks(experiment_id)})
+                else:
+                    self._send_json(
+                        {
+                            "attempts": workspace.attempts(
+                                experiment_id, task_id=q("task")
+                            )
+                        }
+                    )
+                return
+            for noun in ("turn", "trace", "spans"):
+                prefix = f"/api/workspace/{noun}/"
+                if not path.startswith(prefix):
+                    continue
+                rest = path[len(prefix) :]
+                encoded_store, separator, encoded_key = rest.partition("/")
+                if not separator or not encoded_store or not encoded_key:
+                    self._error(
+                        400,
+                        f"{noun} reads require both store_id and logical_turn_key",
+                    )
+                    return
+                store_id = unquote(encoded_store)
+                logical_turn_key = unquote(encoded_key)
+                if noun == "turn":
+                    turn = workspace.turn(store_id, logical_turn_key)
+                    if turn is None:
+                        self._error(404, "turn not found in the named store")
+                        return
+                    self._send_json({"turn": turn})
+                else:
+                    self._send_json(
+                        {"spans": workspace.trace(store_id, logical_turn_key)}
+                    )
+                return
+            self._error(404, "not found")
+        except (UnknownWorkspaceStore, UnknownLogicalExperiment) as exc:
+            self._error(404, str(exc.args[0] if exc.args else exc))
+        except WorkspaceIntegrityError as exc:
+            self._error(409, str(exc))
+        except WorkspaceBusyError as exc:
+            self._error(503, str(exc))
 
     def _handle_experiments(
         self,
@@ -1170,7 +1279,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        rest = path[len("/api/experiment/"):]
+        rest = path[len("/api/experiment/") :]
         # Split first, THEN decode: decoding first would let a %2F inside an id
         # invent a sub-path segment. The SPA sends encodeURIComponent(id) and
         # create_experiment accepts any caller-supplied id, so an id containing
@@ -1250,7 +1359,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         write-once by design, and the first person to hit a 500 here would file
         it as a bug rather than read it as a contract.
         """
-        rest = path[len("/api/experiment/"):]
+        rest = path[len("/api/experiment/") :]
         # partition, not split-and-discard: the GET side validates its sub-path
         # and 404s on an unknown one, and a write route that silently accepted
         # /api/experiment/<id>/anything would make every GET sub-path an
@@ -1273,7 +1382,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if "notes" not in body:
-            self._error(400, "nothing to patch: send {\"notes\": \"...\"}")
+            self._error(400, 'nothing to patch: send {"notes": "..."}')
             return
         notes = body.get("notes")
         if notes is not None and not isinstance(notes, str):
@@ -1297,7 +1406,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"experiment": store.get_experiment(experiment_id)})
 
-    def _serve_artifact(self, store: ReadOnlyObservabilityStore, artifact_id: str) -> None:
+    def _serve_artifact(
+        self, store: ReadOnlyObservabilityStore, artifact_id: str
+    ) -> None:
         """Offloaded artifact content, with its stored content-type.
 
         HTML-ish content is only ever *rendered* inside a sandboxed iframe by
@@ -1421,9 +1532,7 @@ def run_forget_channel(
     return deleted
 
 
-def run_clear_conversations(
-    db_path: str, workflow_path: str = ""
-) -> dict[str, int]:
+def run_clear_conversations(db_path: str, workflow_path: str = "") -> dict[str, int]:
     """Erase all conversation/turn observability for one workflow."""
     deleted = ObservabilityStore(db_path).clear_conversations()
     if workflow_path:
@@ -1481,9 +1590,7 @@ def run_chatbot_main(args) -> int:
     try:
         server = ChatbotServer(port=0, spawn_options=spawn_options)
     except OSError as exc:
-        print(
-            f"Error: cannot bind 127.0.0.1 to a free port ({exc})."
-        )
+        print(f"Error: cannot bind 127.0.0.1 to a free port ({exc}).")
         return 1
 
     # -- banner ---------------------------------------------------------
