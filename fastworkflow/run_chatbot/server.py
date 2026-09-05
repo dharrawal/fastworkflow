@@ -1161,6 +1161,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             path.startswith("/api/turn/")
             or path.startswith("/api/spans/")
             or path.startswith("/api/experiment/")
+            or path == "/api/feedback"
+            or path.startswith("/api/feedback/")
         ):
             self._error(
                 400,
@@ -1193,6 +1195,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 )
             elif path in ("/api/channels", "/api/conversations", "/api/turns"):
                 self._send_json({"channels": [], "conversations": [], "turns": []})
+            elif path == "/api/feedback":
+                self._send_json({"feedback": []})
             elif path == "/api/experiments":
                 # An empty state, not "observability DB not found": a cold start
                 # has no experiments, which is a fact about the DB rather than
@@ -1257,6 +1261,22 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             except (ValueError, KeyError):
                 turn["record"] = None
             self._send_json({"turn": turn})
+        elif path == "/api/feedback":
+            self._send_json(
+                {
+                    "feedback": store.list_feedback(
+                        channel_id=q("channel"),
+                        limit=self._int(q("limit"), 100),
+                    )
+                }
+            )
+        elif path.startswith("/api/feedback/"):
+            turn_key = unquote(path[len("/api/feedback/") :])
+            feedback = store.get_feedback(turn_key)
+            if feedback is None:
+                self._error(404, "feedback not found")
+                return
+            self._send_json({"feedback": feedback})
         elif path.startswith("/api/spans/"):
             trace_id = path[len("/api/spans/") :]
             spans = store.get_spans(trace_id)

@@ -1730,6 +1730,40 @@ class ObservabilityStore:
             )
             conn.commit()
 
+    def get_feedback(self, turn_key: str) -> Optional[dict[str, Any]]:
+        """Return the stored agent-memory feedback for one turn, unchanged.
+
+        This deliberately queries ``feedback`` directly. Feedback remains
+        readable when its turn has no conversation summary and is therefore
+        excluded from the conversation-memory window.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT turn_key, feedback_json, updated_at "
+                "FROM feedback WHERE turn_key=?",
+                (turn_key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_feedback(
+        self, channel_id: Optional[str] = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """List stored agent-memory feedback without interpreting verdicts."""
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        query = (
+            "SELECT f.turn_key, f.feedback_json, f.updated_at, t.channel_id "
+            "FROM feedback f LEFT JOIN turns t ON t.turn_key=f.turn_key"
+        )
+        params: list[Any] = []
+        if channel_id is not None:
+            query += " WHERE t.channel_id=?"
+            params.append(channel_id)
+        query += " ORDER BY f.updated_at DESC, f.turn_key DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
     def record_train_run(
         self,
         run_id: str,
