@@ -528,6 +528,7 @@ button.newConv:hover { filter: brightness(1.1); }
       <input type="text" id="fCommand" placeholder="command filter">
       <input type="text" id="fContext" placeholder="context filter">
       <button id="experimentsBtn">Experiments</button>
+      <button id="benchmarksBtn">Benchmarks</button>
     </div>
     <div id="convList"></div>
   </div>
@@ -660,6 +661,23 @@ function apiPatch(path, body) {
     });
   });
 }
+function apiPut(path, body) {
+  return fetch(path, {
+    method: "PUT",
+    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    return r.json().then(function (data) {
+      if (!r.ok) { throw new Error(data && data.error ? data.error : ("API " + path + " -> " + r.status)); }
+      return data;
+    });
+  });
+}
+function parseAnalysisJson(raw) {
+  if (raw === null || raw === undefined || raw === "") { return null; }
+  if (typeof raw === "object") { return raw; }
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
 function apiAllowing409(path) {
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
     .then(function (r) {
@@ -689,7 +707,9 @@ var state = {
   turn: null,               // the loaded turn record for the open drill-down
   path: [],                 // node path from the turn down to the open level
   experimentId: null,
-  experimentTask: null
+  experimentTask: null,
+  benchmarkId: null,
+  benchmarkVersion: null
 };
 var session = null;          // /api/session payload: workflow + server + identity
 var workspaceNav = 0;        // prevents a previous store fetch repainting a new one
@@ -1044,6 +1064,9 @@ function showExperiments() {
       var declared = row.declared_tasks + "×" + row.declared_attempts;
       var sub = declared + " declared, " + row.attempts_finished + " finished"
         + (row.invalid_reason ? "  — " + row.invalid_reason : "")
+        + (row.benchmark_id
+            ? "  · " + row.benchmark_id + "@" + (row.benchmark_version || "?")
+            : "")
         + "  · " + (row.created_at || "");
       item.appendChild(el("div", "sub", sub));
       item.addEventListener("click", function () { showExperiment(row.experiment_id); });
@@ -1122,6 +1145,41 @@ function showExperiment(experimentId) {
     saveRow.appendChild(saveMsg);
     card.appendChild(saveRow);
 
+    card.appendChild(el("h2", null, "Analysis"));
+    card.appendChild(el("div", "expReadonly",
+      "Opaque structured observations — not a verdict, score, or hypothesis. "
+      + "Distinct from Notes."));
+    var analysisArea = el("textarea", "expNotes");
+    var parsedAnalysis = parseAnalysisJson(exp.analysis_json);
+    analysisArea.value = parsedAnalysis
+      ? JSON.stringify(parsedAnalysis, null, 2)
+      : "{\n  \n}";
+    card.appendChild(analysisArea);
+    var analysisRow = el("div", "diffToolbar");
+    var saveAnalysis = el("button", null, "Save analysis");
+    var analysisMsg = el("span", "sub", "");
+    saveAnalysis.addEventListener("click", function () {
+      analysisMsg.textContent = "saving…";
+      var payload;
+      try {
+        payload = JSON.parse(analysisArea.value);
+      } catch (parseErr) {
+        analysisMsg.textContent = "invalid JSON: " + parseErr.message;
+        return;
+      }
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        analysisMsg.textContent = "analysis must be a JSON object";
+        return;
+      }
+      apiPut("/api/experiment/" + encodeURIComponent(experimentId) + "/analysis",
+               payload).then(function () {
+        analysisMsg.textContent = "saved";
+      }).catch(function (e) { analysisMsg.textContent = e.message; });
+    });
+    analysisRow.appendChild(saveAnalysis);
+    analysisRow.appendChild(analysisMsg);
+    card.appendChild(analysisRow);
+
     card.appendChild(el("h2", null, "Result"));
     var kv = el("dl", "kv");
     function pair(k, v) {
@@ -1139,6 +1197,10 @@ function showExperiment(experimentId) {
     pair("baseline", exp.baseline_experiment_id);
     pair("capture profile", exp.capture_profile);
     pair("workflow", exp.workflow_name);
+    if (exp.benchmark_id) {
+      pair("benchmark", exp.benchmark_id + "@" + (exp.benchmark_version || "?"));
+      pair("benchmark digest", exp.benchmark_digest_sha256);
+    }
     pair("created", exp.created_at);
     card.appendChild(kv);
     if (!score.reportable && score.reason_not_reportable) {
@@ -1347,6 +1409,239 @@ function openExperimentAttempt(experimentId, taskId, attempt) {
 }
 
 document.getElementById("experimentsBtn").addEventListener("click", showExperiments);
+
+var benchNav = 0;
+function benchNavToken() { return ++benchNav; }
+function benchNavStale(token) { return token !== benchNav; }
+
+function showBenchmarks() {
+  var nav = benchNavToken();
+  state.benchmarkId = null;
+  state.benchmarkVersion = null;
+  var d = document.getElementById("detail");
+  clear(d);
+  d.appendChild(el("div", "empty", "loading benchmarks…"));
+  api("/api/benchmarks").then(function (data) {
+    if (benchNavStale(nav)) { return; }
+    clear(d);
+    var card = el("div", "card");
+    expCrumbs(card, [{ label: "Benchmarks" }]);
+    card.appendChild(el("h2", null, "Benchmarks"));
+    card.appendChild(el("div", "sub",
+      "Versioned task corpora under this workflow's benchmarks/ folder. "
+      + "Browse tasks and payloads as opaque JSON — not a task player."));
+    var rows = data.benchmarks || [];
+    if (!rows.length) {
+      card.appendChild(el("div", "empty", "no benchmarks yet"));
+      d.appendChild(card);
+      return;
+    }
+    rows.forEach(function (row) {
+      var item = el("div", "listItem");
+      var title = el("div", "title", row.benchmark_id);
+      item.appendChild(title);
+      var versions = row.versions || [];
+      item.appendChild(el("div", "sub",
+        versions.length + (versions.length === 1 ? " version" : " versions")
+        + (versions.length ? ": " + versions.join(", ") : "")));
+      item.addEventListener("click", function () {
+        showBenchmark(row.benchmark_id);
+      });
+      card.appendChild(item);
+    });
+    d.appendChild(card);
+  }).catch(function (e) {
+    if (benchNavStale(nav)) { return; }
+    clear(d);
+    d.appendChild(el("div", "empty", "No benchmarks available: " + e.message));
+  });
+}
+
+function showBenchmark(benchmarkId) {
+  var nav = benchNavToken();
+  state.benchmarkId = benchmarkId;
+  state.benchmarkVersion = null;
+  var d = document.getElementById("detail");
+  clear(d);
+  d.appendChild(el("div", "empty", "loading benchmark…"));
+  Promise.all([
+    api("/api/benchmarks/" + encodeURIComponent(benchmarkId)),
+    api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis")
+  ]).then(function (results) {
+    if (benchNavStale(nav)) { return; }
+    var data = results[0];
+    var analysisData = results[1];
+    clear(d);
+    var card = el("div", "card");
+    expCrumbs(card, [
+      { label: "Benchmarks", onClick: showBenchmarks },
+      { label: benchmarkId }
+    ]);
+    card.appendChild(el("h2", null, benchmarkId));
+    var versions = data.versions || [];
+    if (!versions.length) {
+      card.appendChild(el("div", "empty", "no versions recorded"));
+    } else {
+      card.appendChild(el("h2", null, "Versions"));
+      versions.forEach(function (version) {
+        var item = el("div", "listItem");
+        item.appendChild(el("div", "title", version));
+        item.addEventListener("click", function () {
+          showBenchmarkVersion(benchmarkId, version);
+        });
+        card.appendChild(item);
+      });
+    }
+    card.appendChild(el("h2", null, "Analysis"));
+    card.appendChild(el("div", "sub",
+      "Mutable post-hoc observations in analysis.json — excluded from version digests."));
+    var analysisArea = el("textarea", "expNotes");
+    var benchAnalysis = analysisData.analysis;
+    analysisArea.value = benchAnalysis
+      ? JSON.stringify(benchAnalysis, null, 2)
+      : "{\n  \n}";
+    card.appendChild(analysisArea);
+    if (!session || !session.read_only) {
+      var analysisRow = el("div", "diffToolbar");
+      var saveAnalysis = el("button", null, "Save analysis");
+      var analysisMsg = el("span", "sub", "");
+      saveAnalysis.addEventListener("click", function () {
+        analysisMsg.textContent = "saving…";
+        var payload;
+        try {
+          payload = JSON.parse(analysisArea.value);
+        } catch (parseErr) {
+          analysisMsg.textContent = "invalid JSON: " + parseErr.message;
+          return;
+        }
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          analysisMsg.textContent = "analysis must be a JSON object";
+          return;
+        }
+        apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis",
+                 payload).then(function (saved) {
+          if (benchNavStale(nav)) { return; }
+          if (saved.analysis) {
+            analysisArea.value = JSON.stringify(saved.analysis, null, 2);
+          }
+          analysisMsg.textContent = "saved";
+        }).catch(function (e) { analysisMsg.textContent = e.message; });
+      });
+      analysisRow.appendChild(saveAnalysis);
+      analysisRow.appendChild(analysisMsg);
+      card.appendChild(analysisRow);
+      var newBtn = el("button", null, "New version…");
+      newBtn.addEventListener("click", function () {
+        showNewBenchmarkVersion(benchmarkId);
+      });
+      card.appendChild(newBtn);
+    }
+    d.appendChild(card);
+  }).catch(function (e) {
+    if (benchNavStale(nav)) { return; }
+    clear(d);
+    d.appendChild(el("div", "empty", "Could not load benchmark: " + e.message));
+  });
+}
+
+function showBenchmarkVersion(benchmarkId, version) {
+  var nav = benchNavToken();
+  state.benchmarkId = benchmarkId;
+  state.benchmarkVersion = version;
+  var d = document.getElementById("detail");
+  clear(d);
+  d.appendChild(el("div", "empty", "loading version…"));
+  api("/api/benchmarks/" + encodeURIComponent(benchmarkId)
+      + "/versions/" + encodeURIComponent(version)).then(function (data) {
+    if (benchNavStale(nav)) { return; }
+    var manifest = data.version || {};
+    clear(d);
+    var card = el("div", "card");
+    expCrumbs(card, [
+      { label: "Benchmarks", onClick: showBenchmarks },
+      { label: benchmarkId, onClick: function () { showBenchmark(benchmarkId); } },
+      { label: version }
+    ]);
+    card.appendChild(el("h2", null, benchmarkId + " · " + version));
+    card.appendChild(el("div", "sub", manifest.description || ""));
+    if (manifest.digest_sha256) {
+      card.appendChild(el("div", "sub", "digest " + manifest.digest_sha256));
+    }
+    card.appendChild(el("h2", null, "Tasks"));
+    (manifest.tasks || []).forEach(function (task) {
+      var item = el("div", "listItem");
+      item.appendChild(el("div", "title", task.task_id));
+      item.appendChild(el("div", "sub", task.description || ""));
+      var pre = el("pre", "json");
+      pre.textContent = JSON.stringify(task.payload || {}, null, 2);
+      item.appendChild(pre);
+      card.appendChild(item);
+    });
+    if (!(manifest.tasks || []).length) {
+      card.appendChild(el("div", "empty", "no tasks in this version"));
+    }
+    d.appendChild(card);
+  }).catch(function (e) {
+    if (benchNavStale(nav)) { return; }
+    clear(d);
+    d.appendChild(el("div", "empty", "Could not load version: " + e.message));
+  });
+}
+
+function showNewBenchmarkVersion(benchmarkId) {
+  var nav = benchNavToken();
+  state.benchmarkId = benchmarkId;
+  state.benchmarkVersion = null;
+  var d = document.getElementById("detail");
+  clear(d);
+  var card = el("div", "card");
+  expCrumbs(card, [
+    { label: "Benchmarks", onClick: showBenchmarks },
+    { label: benchmarkId, onClick: function () { showBenchmark(benchmarkId); } },
+    { label: "New version" }
+  ]);
+  card.appendChild(el("h2", null, "New version"));
+  card.appendChild(el("div", "sub",
+    "Paste a benchmark spec JSON object. Version files are immutable once written."));
+  var area = el("textarea", "expNotes");
+  area.value = JSON.stringify({
+    benchmark_id: benchmarkId,
+    version: "v2",
+    description: "what this corpus claims to test",
+    tasks: [{
+      task_id: "case-01",
+      description: "human/agent one-liner",
+      payload: {}
+    }]
+  }, null, 2);
+  card.appendChild(area);
+  var saveRow = el("div", "diffToolbar");
+  var save = el("button", "primary", "Write version");
+  var saveMsg = el("span", "sub", "");
+  save.addEventListener("click", function () {
+    saveMsg.textContent = "writing…";
+    var spec;
+    try {
+      spec = JSON.parse(area.value);
+    } catch (parseErr) {
+      saveMsg.textContent = "invalid JSON: " + parseErr.message;
+      return;
+    }
+    apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/versions", spec)
+      .then(function (data) {
+        if (benchNavStale(nav)) { return; }
+        var written = data.version || {};
+        showBenchmarkVersion(benchmarkId, written.version || spec.version);
+      })
+      .catch(function (e) { saveMsg.textContent = e.message; });
+  });
+  saveRow.appendChild(save);
+  saveRow.appendChild(saveMsg);
+  card.appendChild(saveRow);
+  d.appendChild(card);
+}
+
+document.getElementById("benchmarksBtn").addEventListener("click", showBenchmarks);
 
 /* -- capability-gated formal review ----------------------------------- */
 function reviewAnswerMap(progress) {

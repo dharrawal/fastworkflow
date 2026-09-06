@@ -199,20 +199,23 @@ class TestAdditiveSchema:
         assert {"experiment_id", "task_id", "attempt"} <= conv_cols
         assert {"idx_turns_experiment", "idx_conv_experiment_attempt"} <= indexes
 
-    def test_schema_version_is_not_bumped(self, db_path):
+    def test_schema_version_is_two_for_benchmark_pin_columns(self, db_path):
+        """fix-42b added create-time-only experiment columns and bumped v1->v2."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 1
+        assert obs.SCHEMA_VERSION == 2
 
-    def test_an_existing_db_migrates_with_no_backfill(self, db_path):
-        """`[XR5]`: pre-experiment rows survive with NULL labels.
+    def test_a_pre_v2_db_fails_fast_instead_of_migrating(self, db_path):
+        """No legacy support: a populated v1 store is refused on open with a
+        reason a human can act on, and is left untouched (not migrated).
 
-        Built with the pre-`fix-bn1` CREATE TABLE statements, so this exercises
-        the guarded ALTER arm rather than the fresh-DB arm.
+        Built with the pre-`fix-bn1` CREATE TABLE statements at user_version 1.
+        The guarded ALTER entries that landed before fix-42b remain in the open
+        path, but a v1 store never reaches them.
         """
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -252,14 +255,27 @@ class TestAdditiveSchema:
         conn.commit()
         conn.close()
 
-        store = obs.ObservabilityStore(db_path)  # must not raise
-        assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1)
-        assert store.has_feature(obs.FEATURE_DISTILLATION_V1)
+        with pytest.raises(obs.IncompatibleObservabilityDB) as excinfo:
+            obs.ObservabilityStore(db_path)
+        message = str(excinfo.value)
+        assert "schema v1" in message
+        assert "v2" in message
+        assert "does not migrate" in message
 
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         try:
-            row = dict(conn.execute("SELECT * FROM turns WHERE turn_key='legacy'").fetchone())
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            turn_cols = {r[1] for r in conn.execute("PRAGMA table_info(turns)")}
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            row = dict(
+                conn.execute("SELECT * FROM turns WHERE turn_key='legacy'").fetchone()
+            )
             features = set(
                 json.loads(
                     conn.execute(
@@ -269,11 +285,11 @@ class TestAdditiveSchema:
             )
         finally:
             conn.close()
-        assert row["experiment_id"] is None
-        assert row["task_id"] is None
-        assert row["attempt"] is None
-        # Merged, not overwritten: another build's marker is not ours to drop.
-        assert {"distillation_v1", "experiments_v1"} <= features
+        # Untouched: no columns added, no tables created, no markers merged.
+        assert "experiment_id" not in turn_cols
+        assert "experiments" not in tables
+        assert row["user_message"] == "hi"
+        assert features == {"distillation_v1"}
 
     def test_features_are_detected_from_the_columns_when_the_marker_is_missing(
         self, db_path

@@ -48,6 +48,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 import fastworkflow
 from fastworkflow import evidence_run as evidence_run_module
 from fastworkflow import observability_store, state_paths
+from fastworkflow.benchmark_catalog import load_version
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -70,6 +71,27 @@ class ExperimentAborted(RuntimeError):
 
 class MissingExperimentLifecycleFeature(RuntimeError):
     """The target store was not installed for driver-neutral lifecycle writes."""
+
+
+class BenchmarkPinDigestMismatch(ValueError):
+    """A supplied benchmark digest does not match the workflow catalog file."""
+
+    def __init__(
+        self,
+        benchmark_id: str,
+        benchmark_version: str,
+        expected_digest: str,
+        supplied_digest: str,
+    ) -> None:
+        self.benchmark_id = benchmark_id
+        self.benchmark_version = benchmark_version
+        self.expected_digest = expected_digest
+        self.supplied_digest = supplied_digest
+        super().__init__(
+            f"benchmark pin digest for {benchmark_id}/{benchmark_version} "
+            f"does not match the workflow catalog: expected "
+            f"{expected_digest}, got {supplied_digest}"
+        )
 
 
 def experiment_store_readiness(db_path: str) -> dict[str, str]:
@@ -403,7 +425,27 @@ class ExperimentController:
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
         workflow_name: Optional[str] = None,
+        benchmark_id: Optional[str] = None,
+        benchmark_version: Optional[str] = None,
+        benchmark_digest_sha256: Optional[str] = None,
+        workflow_folderpath: Optional[str] = None,
     ) -> None:
+        if (
+            benchmark_id is not None
+            and benchmark_version is not None
+            and benchmark_digest_sha256 is not None
+            and workflow_folderpath is not None
+        ):
+            loaded = load_version(
+                workflow_folderpath, benchmark_id, benchmark_version
+            )
+            if loaded["digest_sha256"] != benchmark_digest_sha256:
+                raise BenchmarkPinDigestMismatch(
+                    benchmark_id,
+                    benchmark_version,
+                    loaded["digest_sha256"],
+                    benchmark_digest_sha256,
+                )
         self.store.create_experiment(
             experiment_id,
             label,
@@ -414,6 +456,9 @@ class ExperimentController:
             arm=arm,
             baseline_experiment_id=baseline_experiment_id,
             workflow_name=workflow_name,
+            benchmark_id=benchmark_id,
+            benchmark_version=benchmark_version,
+            benchmark_digest_sha256=benchmark_digest_sha256,
             capture_profile=self.capture_profile,
             capture_policy_version=self.capture_policy_version,
         )
@@ -594,6 +639,9 @@ class ExperimentHarness:
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
         experiment_id: Optional[str] = None,
+        benchmark_id: Optional[str] = None,
+        benchmark_version: Optional[str] = None,
+        benchmark_digest_sha256: Optional[str] = None,
         run_as_agent: bool = True,
         max_workers: int = 4,
         archive_dir: Optional[str] = None,
@@ -605,6 +653,9 @@ class ExperimentHarness:
         self.hypothesis = hypothesis
         self.arm = arm
         self.baseline_experiment_id = baseline_experiment_id
+        self.benchmark_id = benchmark_id
+        self.benchmark_version = benchmark_version
+        self.benchmark_digest_sha256 = benchmark_digest_sha256
         self.experiment_id = experiment_id or f"exp-{uuid.uuid4().hex}"
         self.run_as_agent = run_as_agent
         self.max_workers = max(1, int(max_workers))
@@ -790,6 +841,10 @@ class ExperimentHarness:
             workflow_name=os.path.basename(
                 self.workflow_folderpath.rstrip("/\\")
             ),
+            benchmark_id=self.benchmark_id,
+            benchmark_version=self.benchmark_version,
+            benchmark_digest_sha256=self.benchmark_digest_sha256,
+            workflow_folderpath=self.workflow_folderpath,
         )
         pairs = [(task, n) for task in task_list for n in range(1, attempts + 1)]
         return self._execute(pairs, grader, seq=1)

@@ -44,6 +44,16 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from fastworkflow import state_paths
+from fastworkflow.benchmark_catalog import (
+    BenchmarkAlreadyExistsError,
+    BenchmarkManifestError,
+    list_benchmarks,
+    list_versions,
+    load_analysis,
+    load_version,
+    write_analysis,
+    write_version,
+)
 from fastworkflow.observability_store import (
     FEATURE_EXPERIMENTS_V1,
     ExperimentNotFound,
@@ -1010,9 +1020,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 split.path.startswith("/api/review/assignments/")
                 and split.path.endswith("/adjudications")
             )
+            benchmark_post_path = split.path == "/api/benchmarks" or (
+                split.path.startswith("/api/benchmarks/")
+                and split.path.endswith("/versions")
+            )
             if (
                 not review_answer_path
                 and not review_adjudication_path
+                and not benchmark_post_path
                 and split.path
                 not in {
                 "/api/select_workflow",
@@ -1103,6 +1118,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     self._error(409, "an assignment with this id already exists")
                     return
                 self._send_json(created, status=201)
+                return
+            if benchmark_post_path:
+                self._handle_benchmark_post(split.path, body)
                 return
             if self.chatbot.workspace is not None:
                 self._error(
@@ -1200,7 +1218,49 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    do_PUT = _refuse_write  # noqa: N815
+    def do_PUT(self) -> None:  # noqa: N802
+        """Admitted PUTs: benchmark and experiment opaque analysis JSON."""
+        try:
+            split = urlsplit(self.path)
+            benchmark_analysis_path = (
+                split.path.startswith("/api/benchmarks/")
+                and split.path.endswith("/analysis")
+            )
+            experiment_analysis_path = (
+                split.path.startswith("/api/experiment/")
+                and split.path.endswith("/analysis")
+            )
+            if not benchmark_analysis_path and not experiment_analysis_path:
+                self._refuse_write()
+                return
+            query = parse_qs(split.query)
+            if not self._host_origin_allowed():
+                self._error(403, "forbidden: host/origin not allowed")
+                return
+            if not self._token_valid(query):
+                self._error(401, "unauthorized: missing or invalid token")
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, TypeError):
+                self._error(400, "invalid JSON body")
+                return
+            if not isinstance(body, dict):
+                self._error(400, "body must be a JSON object")
+                return
+            if benchmark_analysis_path:
+                self._handle_benchmark_analysis_put(split.path, body)
+                return
+            self._handle_experiment_analysis_put(split.path, body)
+        except BrokenPipeError:
+            pass
+        except Exception as exc:
+            try:
+                self._error(500, f"internal error: {type(exc).__name__}")
+            except Exception:
+                pass
+
     do_DELETE = _refuse_write  # noqa: N815
 
     def do_PATCH(self) -> None:  # noqa: N802
@@ -1298,6 +1358,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"workflows": list_workflow_candidates()})
         elif path == "/api/browse":
             self._send_json(browse_directories(q("dir") or ""))
+        elif path == "/api/benchmarks" or path.startswith("/api/benchmarks/"):
+            self._handle_benchmarks(path)
         elif store is None:
             if path == "/api/health":
                 self._send_json(
@@ -1624,6 +1686,189 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         except WorkspaceBusyError as exc:
             self._error(503, str(exc))
 
+    def _benchmark_workflow_path(self, *, write: bool = False) -> Optional[str]:
+        """Live workflow folder for versioned benchmark corpus files."""
+        if self.chatbot.workspace is not None:
+            if write:
+                self._error(
+                    403,
+                    "workspace mode is read-only; benchmark corpus files cannot be changed",
+                )
+            else:
+                self._error(
+                    409,
+                    "benchmarks are available in live workflow mode only",
+                )
+            return None
+        workflow_path = (self.chatbot.workflow_path or "").strip()
+        if not workflow_path:
+            self._error(
+                409,
+                "select a workflow before using benchmarks",
+            )
+            return None
+        return workflow_path
+
+    def _handle_benchmarks(self, path: str) -> None:
+        """Read workflow-local benchmark catalogs from ``<workflow>/benchmarks/``."""
+        workflow_path = self._benchmark_workflow_path(write=False)
+        if workflow_path is None:
+            return
+        if path == "/api/benchmarks":
+            payload = []
+            for benchmark_id in list_benchmarks(workflow_path):
+                payload.append(
+                    {
+                        "benchmark_id": benchmark_id,
+                        "versions": list_versions(workflow_path, benchmark_id),
+                    }
+                )
+            self._send_json({"benchmarks": payload})
+            return
+
+        rest = path[len("/api/benchmarks/") :]
+        benchmark_id, _, tail = rest.partition("/")
+        benchmark_id = unquote(benchmark_id)
+        if not benchmark_id:
+            self._error(404, "not found")
+            return
+        if tail == "":
+            self._send_json(
+                {
+                    "benchmark_id": benchmark_id,
+                    "versions": list_versions(workflow_path, benchmark_id),
+                }
+            )
+            return
+        if tail == "analysis":
+            try:
+                analysis = load_analysis(workflow_path, benchmark_id)
+            except BenchmarkManifestError as exc:
+                self._error(400, str(exc))
+                return
+            self._send_json({"benchmark_id": benchmark_id, "analysis": analysis})
+            return
+        version_prefix, _, version = tail.partition("/")
+        if version_prefix != "versions" or not version:
+            self._error(404, "not found")
+            return
+        version = unquote(version)
+        try:
+            manifest = load_version(workflow_path, benchmark_id, version)
+        except BenchmarkManifestError as exc:
+            self._error(404, str(exc))
+            return
+        self._send_json({"version": manifest})
+
+    def _handle_benchmark_post(self, path: str, body: Any) -> None:
+        """Create one immutable benchmark version file under the workflow folder."""
+        workflow_path = self._benchmark_workflow_path(write=True)
+        if workflow_path is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "body must be a JSON object")
+            return
+        spec = dict(body)
+        if path.startswith("/api/benchmarks/") and path.endswith("/versions"):
+            encoded_id = path[len("/api/benchmarks/") : -len("/versions")].rstrip("/")
+            url_benchmark_id = unquote(encoded_id)
+            if not url_benchmark_id:
+                self._error(404, "not found")
+                return
+            body_benchmark_id = spec.get("benchmark_id")
+            if body_benchmark_id is not None and body_benchmark_id != url_benchmark_id:
+                self._error(
+                    400,
+                    "benchmark_id in body does not match the URL path",
+                )
+                return
+            spec.setdefault("benchmark_id", url_benchmark_id)
+        try:
+            written = write_version(workflow_path, spec)
+        except BenchmarkAlreadyExistsError as exc:
+            self._error(409, str(exc))
+            return
+        except BenchmarkManifestError as exc:
+            self._error(400, str(exc))
+            return
+        self._send_json({"version": written}, status=201)
+
+    @staticmethod
+    def _analysis_payload_from_body(body: dict[str, Any]) -> Any:
+        """Accept a bare object or ``{"analysis": ...}`` wrapper."""
+        if "analysis" in body:
+            if set(body) - {"analysis"}:
+                raise ValueError(
+                    "unexpected fields: this route updates analysis only"
+                )
+            return body["analysis"]
+        return body
+
+    def _handle_benchmark_analysis_put(self, path: str, body: dict[str, Any]) -> None:
+        """``PUT /api/benchmarks/<id>/analysis`` — mutable sibling analysis file."""
+        workflow_path = self._benchmark_workflow_path(write=True)
+        if workflow_path is None:
+            return
+        encoded_id = path[len("/api/benchmarks/") : -len("/analysis")].rstrip("/")
+        benchmark_id = unquote(encoded_id)
+        if not benchmark_id:
+            self._error(404, "not found")
+            return
+        try:
+            payload = self._analysis_payload_from_body(body)
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+        if not isinstance(payload, dict):
+            self._error(400, "analysis must be a JSON object")
+            return
+        try:
+            written = write_analysis(workflow_path, benchmark_id, payload)
+        except BenchmarkManifestError as exc:
+            self._error(400, str(exc))
+            return
+        self._send_json({"benchmark_id": benchmark_id, "analysis": written})
+
+    def _handle_experiment_analysis_put(self, path: str, body: dict[str, Any]) -> None:
+        """``PUT /api/experiment/<id>/analysis`` — opaque JSON, not notes."""
+        if self.chatbot.workspace is not None:
+            self._error(
+                403,
+                "workspace mode is read-only; experiment analysis cannot be changed",
+            )
+            return
+        encoded_id = path[len("/api/experiment/") : -len("/analysis")].rstrip("/")
+        experiment_id = unquote(encoded_id)
+        if not experiment_id:
+            self._error(404, "not found")
+            return
+        store = self.chatbot.open_store()
+        if store is None or not store.has_feature(FEATURE_EXPERIMENTS_V1):
+            self._error(404, "this database predates experiment recording")
+            return
+        try:
+            analysis = self._analysis_payload_from_body(body)
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+        if analysis is not None and not isinstance(analysis, dict):
+            self._error(400, "analysis must be a JSON object")
+            return
+        try:
+            ObservabilityStore.open_for_annotation(
+                self.chatbot.db_path
+            ).update_experiment_analysis(experiment_id, analysis)
+        except ExperimentNotFound:
+            self._error(404, "experiment not found")
+            return
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+        except (OSError, sqlite3.Error) as exc:
+            self._error(500, f"could not update analysis: {type(exc).__name__}")
+            return
+        self._send_json({"experiment": store.get_experiment(experiment_id)})
+
     def _handle_experiments(
         self,
         store: ReadOnlyObservabilityStore,
@@ -1758,6 +2003,12 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 "hypothesis is write-once and is fixed at experiment creation: "
                 "a prediction that can be revised after seeing the outcome is "
                 "not a pre-registration. Record the revision in notes instead.",
+            )
+            return
+        if "analysis" in body:
+            self._error(
+                400,
+                "analysis is updated via PUT /api/experiment/<id>/analysis",
             )
             return
         if "notes" not in body:

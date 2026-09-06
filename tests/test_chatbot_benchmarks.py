@@ -1,0 +1,403 @@
+"""HTTP tests for chatbot benchmark catalog routes (`fix-42b.3`)."""
+
+from __future__ import annotations
+
+import json
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from fastworkflow import observability_store as obs
+from fastworkflow import state_paths
+from fastworkflow.benchmark_catalog import (
+    SCHEMA,
+    benchmarks_root,
+    load_version,
+    write_version,
+)
+from fastworkflow.run_chatbot import server as run_chatbot_server
+from tests.test_observability_workspace import _manifest, _seed_archive, _store_decl
+
+
+def _sample_spec(
+    *,
+    benchmark_id: str = "smoke",
+    version: str = "v1",
+    task_id: str = "case-01",
+) -> dict:
+    return {
+        "benchmark_id": benchmark_id,
+        "version": version,
+        "description": "what this corpus claims to test",
+        "tasks": [
+            {
+                "task_id": task_id,
+                "description": "human/agent one-liner",
+                "payload": {"nested": {"keep": "keys"}},
+            }
+        ],
+    }
+
+
+def _request(server, path, method="GET", body=None, token=...):
+    if token is ...:
+        token = server.token
+    url = f"http://127.0.0.1:{server.port}{path}"
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, method=method, data=data)
+    if token is not None:
+        req.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as err:
+        raw = err.read()
+        try:
+            return err.code, json.loads(raw or b"{}")
+        except ValueError:
+            return err.code, {"raw": raw}
+
+
+@pytest.fixture
+def workflow_dir(tmp_path) -> Path:
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+    (workflow / "_commands").mkdir()
+    write_version(workflow, _sample_spec())
+    return workflow
+
+
+@pytest.fixture
+def live_server(workflow_dir):
+    srv = run_chatbot_server.ChatbotServer(
+        db_path="",
+        workflow_path=str(workflow_dir),
+        port=0,
+        spawn_options={"no_server": True},
+    )
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield srv
+    srv.shutdown()
+    thread.join(timeout=5)
+
+
+@pytest.fixture
+def experiment_server(workflow_dir, tmp_path, monkeypatch):
+    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+    db_path = state_paths.observability_db(str(workflow_dir))
+    store = obs.ObservabilityStore(db_path)
+    store.create_experiment(
+        "exp-1",
+        "label-exp-1",
+        declared_tasks=1,
+        declared_attempts=1,
+    )
+    store.update_experiment_notes("exp-1", "original notes")
+    srv = run_chatbot_server.ChatbotServer(
+        db_path=db_path,
+        workflow_path=str(workflow_dir),
+        port=0,
+        spawn_options={"no_server": True},
+    )
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield srv, store
+    srv.shutdown()
+    thread.join(timeout=5)
+
+
+@pytest.fixture
+def workspace_server(tmp_path, monkeypatch):
+    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+    workflow = tmp_path / "workflow"
+    workflow.mkdir()
+    (workflow / "_commands").mkdir()
+    write_version(workflow, _sample_spec())
+    before = json.loads(
+        (benchmarks_root(workflow) / "smoke" / "v1.json").read_text(encoding="utf-8")
+    )
+
+    archive = _seed_archive(
+        tmp_path,
+        "sealed",
+        experiment_id="local",
+        task_id="task",
+        turn_key="turn",
+    )
+    manifest = _manifest(tmp_path, [_store_decl(archive, "sealed")])
+
+    srv = run_chatbot_server.ChatbotServer(
+        port=0,
+        workspace_manifest_path=str(manifest),
+    )
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield srv, workflow, before
+    srv.shutdown()
+    thread.join(timeout=5)
+
+
+class TestBenchmarkReadApi:
+    def test_list_benchmarks(self, live_server):
+        status, data = _request(live_server, "/api/benchmarks")
+        assert status == 200
+        assert data["benchmarks"] == [
+            {"benchmark_id": "smoke", "versions": ["v1"]}
+        ]
+
+    def test_benchmark_detail_and_version(self, live_server):
+        status, data = _request(live_server, "/api/benchmarks/smoke")
+        assert status == 200
+        assert data == {"benchmark_id": "smoke", "versions": ["v1"]}
+
+        status, data = _request(live_server, "/api/benchmarks/smoke/versions/v1")
+        assert status == 200
+        version = data["version"]
+        assert version["schema"] == SCHEMA
+        assert version["benchmark_id"] == "smoke"
+        assert version["version"] == "v1"
+        assert version["tasks"][0]["task_id"] == "case-01"
+        assert version["tasks"][0]["payload"] == {"nested": {"keep": "keys"}}
+        assert len(version["digest_sha256"]) == 64
+
+    def test_missing_version_is_404(self, live_server):
+        status, data = _request(live_server, "/api/benchmarks/smoke/versions/v9")
+        assert status == 404
+        assert "not found" in data["error"]
+
+
+class TestBenchmarkWriteApi:
+    def test_post_version_round_trip(self, live_server, workflow_dir):
+        spec = _sample_spec(version="v2", task_id="case-02")
+        status, data = _request(
+            live_server,
+            "/api/benchmarks/smoke/versions",
+            method="POST",
+            body=spec,
+        )
+        assert status == 201
+        assert data["version"]["version"] == "v2"
+        assert data["version"]["digest_sha256"]
+
+        status, listed = _request(live_server, "/api/benchmarks/smoke")
+        assert status == 200
+        assert listed["versions"] == ["v1", "v2"]
+
+        on_disk = json.loads(
+            (benchmarks_root(workflow_dir) / "smoke" / "v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert on_disk["version"] == "v2"
+        assert on_disk["tasks"][0]["task_id"] == "case-02"
+
+    def test_post_root_creates_first_version_for_new_benchmark(
+        self, live_server, workflow_dir
+    ):
+        spec = _sample_spec(benchmark_id="alpha", version="v1", task_id="alpha-01")
+        status, data = _request(
+            live_server,
+            "/api/benchmarks",
+            method="POST",
+            body=spec,
+        )
+        assert status == 201
+        assert data["version"]["benchmark_id"] == "alpha"
+
+        status, listed = _request(live_server, "/api/benchmarks")
+        assert status == 200
+        assert {row["benchmark_id"] for row in listed["benchmarks"]} == {
+            "alpha",
+            "smoke",
+        }
+        assert (benchmarks_root(workflow_dir) / "alpha" / "v1.json").is_file()
+
+    def test_duplicate_version_is_409(self, live_server):
+        spec = _sample_spec(version="v1")
+        status, data = _request(
+            live_server,
+            "/api/benchmarks/smoke/versions",
+            method="POST",
+            body=spec,
+        )
+        assert status == 409
+        assert "immutable" in data["error"]
+
+
+class TestWorkspaceModeBenchmarkWrites:
+    def test_post_refused_in_workspace_mode(self, workspace_server):
+        server, workflow, before = workspace_server
+        status, data = _request(
+            server,
+            "/api/benchmarks/smoke/versions",
+            method="POST",
+            body=_sample_spec(version="v2"),
+        )
+        assert status == 403
+        assert "read-only" in data["error"]
+        after = json.loads(
+            (benchmarks_root(workflow) / "smoke" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert after == before
+
+    def test_get_refused_in_workspace_mode(self, workspace_server):
+        server, _workflow, _before = workspace_server
+        status, data = _request(server, "/api/benchmarks")
+        assert status == 409
+        assert "live workflow mode" in data["error"]
+
+
+class TestBenchmarkAnalysisApi:
+    def test_put_get_analysis_round_trip(self, live_server, workflow_dir):
+        payload = {"findings": ["latency on case-01"], "nested": {"a": 1}}
+        status, data = _request(
+            live_server,
+            "/api/benchmarks/smoke/analysis",
+            method="PUT",
+            body=payload,
+        )
+        assert status == 200
+        assert data["analysis"] == payload
+
+        status, data = _request(live_server, "/api/benchmarks/smoke/analysis")
+        assert status == 200
+        assert data["analysis"] == payload
+        on_disk = json.loads(
+            (benchmarks_root(workflow_dir) / "smoke" / "analysis.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert on_disk == payload
+
+    def test_version_digest_unchanged_after_analysis_put(self, live_server, workflow_dir):
+        before = load_version(workflow_dir, "smoke", "v1")
+        version_path = benchmarks_root(workflow_dir) / "smoke" / "v1.json"
+        version_bytes_before = version_path.read_bytes()
+
+        status, _ = _request(
+            live_server,
+            "/api/benchmarks/smoke/analysis",
+            method="PUT",
+            body={"notes": "post-hoc"},
+        )
+        assert status == 200
+
+        after = load_version(workflow_dir, "smoke", "v1")
+        assert after["digest_sha256"] == before["digest_sha256"]
+        assert version_path.read_bytes() == version_bytes_before
+
+    def test_get_analysis_null_when_missing(self, live_server):
+        status, data = _request(live_server, "/api/benchmarks/smoke/analysis")
+        assert status == 200
+        assert data["analysis"] is None
+
+    def test_put_analysis_refused_in_workspace_mode(self, workspace_server):
+        server, workflow, before = workspace_server
+        status, data = _request(
+            server,
+            "/api/benchmarks/smoke/analysis",
+            method="PUT",
+            body={"x": 1},
+        )
+        assert status == 403
+        assert "read-only" in data["error"]
+        assert not (benchmarks_root(workflow) / "smoke" / "analysis.json").exists()
+        after = json.loads(
+            (benchmarks_root(workflow) / "smoke" / "v1.json").read_text(encoding="utf-8")
+        )
+        assert after == before
+
+    def test_non_object_analysis_refused(self, live_server):
+        status, data = _request(
+            live_server,
+            "/api/benchmarks/smoke/analysis",
+            method="PUT",
+            body=["not", "an", "object"],
+        )
+        assert status == 400
+        assert "JSON object" in data["error"]
+
+
+class TestExperimentAnalysisApi:
+    def test_put_get_analysis_leaves_notes_unchanged(self, experiment_server):
+        server, store = experiment_server
+        payload = {"findings": ["no regressions"]}
+        status, data = _request(
+            server,
+            "/api/experiment/exp-1/analysis",
+            method="PUT",
+            body=payload,
+        )
+        assert status == 200
+        assert json.loads(data["experiment"]["analysis_json"]) == payload
+        assert data["experiment"]["notes"] == "original notes"
+
+        experiment = store.get_experiment("exp-1")
+        assert experiment["notes"] == "original notes"
+        assert json.loads(experiment["analysis_json"]) == payload
+
+    def test_wrapped_analysis_body(self, experiment_server):
+        server, store = experiment_server
+        status, data = _request(
+            server,
+            "/api/experiment/exp-1/analysis",
+            method="PUT",
+            body={"analysis": {"wrapped": True}},
+        )
+        assert status == 200
+        assert json.loads(data["experiment"]["analysis_json"]) == {"wrapped": True}
+        assert store.get_experiment("exp-1")["notes"] == "original notes"
+
+    def test_put_analysis_refused_in_workspace_mode(self, workspace_server):
+        server, _workflow, _before = workspace_server
+        status, data = _request(
+            server,
+            "/api/experiment/local/analysis",
+            method="PUT",
+            body={"x": 1},
+        )
+        assert status == 403
+        assert "read-only" in data["error"]
+
+    def test_non_object_analysis_refused(self, experiment_server):
+        server, _store = experiment_server
+        status, data = _request(
+            server,
+            "/api/experiment/exp-1/analysis",
+            method="PUT",
+            body=["not", "an", "object"],
+        )
+        assert status == 400
+        assert "JSON object" in data["error"]
+
+    def test_patch_notes_does_not_accept_analysis(self, experiment_server):
+        server, store = experiment_server
+        status, data = _request(
+            server,
+            "/api/experiment/exp-1",
+            method="PATCH",
+            body={"notes": "updated", "analysis": {"ignored": True}},
+        )
+        assert status == 400
+        assert "PUT" in data["error"]
+        assert store.get_experiment("exp-1")["notes"] == "original notes"
+
+
+class TestSpaSurface:
+    def test_benchmark_browser_ships(self):
+        page = run_chatbot_server.load_index_html()
+        assert b"benchmarksBtn" in page
+        assert b"showBenchmarks" in page
+        assert b"showBenchmarkVersion" in page
+        assert b"/api/benchmarks" in page
+        assert b"/analysis" in page
+        assert b"Save analysis" in page
+        assert b"not a verdict" in page
+        assert b"benchmark digest" in page
+        assert b"innerHTML" not in page

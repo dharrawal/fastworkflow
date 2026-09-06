@@ -52,7 +52,10 @@ import fastworkflow
 from fastworkflow import state_paths, tracing
 from fastworkflow.utils.logging import logger
 
-SCHEMA_VERSION = 1
+# v2 (fix-42b): experiments.benchmark_id / benchmark_version /
+# benchmark_digest_sha256 / analysis_json live in the CREATE TABLE literal
+# only. Stores created before them are refused on open, not migrated.
+SCHEMA_VERSION = 2
 CAPTURE_PROFILE_VAR = "FW_OBS_CAPTURE_PROFILE"
 
 TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned"})
@@ -276,6 +279,29 @@ class HypothesisIsWriteOnce(ValueError):
         super().__init__(
             f"experiment {experiment_id!r} already has a hypothesis; it is "
             "write-once by design. Record the revision in `notes` instead."
+        )
+
+
+class PartialBenchmarkPin(ValueError):
+    """A benchmark pin requires id, version, and digest together."""
+
+    def __init__(self, experiment_id: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(
+            f"experiment {experiment_id!r} benchmark pin requires "
+            "benchmark_id, benchmark_version, and benchmark_digest_sha256 "
+            "together; partial pins are refused"
+        )
+
+
+class BenchmarkPinIsWriteOnce(ValueError):
+    """A stored benchmark pin was rewritten to a different value."""
+
+    def __init__(self, experiment_id: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(
+            f"experiment {experiment_id!r} already has a benchmark pin; it is "
+            "write-once by design"
         )
 
 
@@ -577,6 +603,7 @@ _SCHEMA_STATEMENTS = [
         label TEXT NOT NULL,
         hypothesis TEXT,
         notes TEXT,
+        analysis_json TEXT,
         arm TEXT,
         baseline_experiment_id TEXT,
         status TEXT NOT NULL,
@@ -588,6 +615,9 @@ _SCHEMA_STATEMENTS = [
         workspace_archive_sha256 TEXT,
         workspace_store_identity TEXT,
         evidence_sealed_at TEXT,
+        benchmark_id TEXT,
+        benchmark_version TEXT,
+        benchmark_digest_sha256 TEXT,
         workflow_name TEXT,
         capture_profile TEXT NOT NULL,
         capture_policy_version TEXT NOT NULL,
@@ -717,6 +747,24 @@ class ObservabilityStore:
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
+            if found < SCHEMA_VERSION:
+                # A populated store from an older build is refused, not
+                # migrated: the v2 experiment columns exist only in the CREATE
+                # TABLE literal. A fresh file (no tables yet) proceeds.
+                has_tables = (
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+                    ).fetchone()
+                    is not None
+                )
+                if has_tables:
+                    raise IncompatibleObservabilityDB(
+                        f"{self.db_path} has schema v{found}; this build requires "
+                        f"v{SCHEMA_VERSION} and does not migrate older stores "
+                        "(experiments.benchmark_id, benchmark_version, "
+                        "benchmark_digest_sha256 and analysis_json are "
+                        "create-time columns). Start a fresh observability DB."
+                    )
             # Existing databases need the experiment labels before the indexes
             # below are created. Each column is guarded separately so a
             # partially interrupted migration self-heals.
@@ -1998,6 +2046,48 @@ class ObservabilityStore:
         """Credential-scrub one experiment-surface value. Falsy passes through."""
         return self._store_redactor().redact(value)
 
+    @staticmethod
+    def _normalize_benchmark_pin(
+        benchmark_id: Optional[str],
+        benchmark_version: Optional[str],
+        benchmark_digest_sha256: Optional[str],
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Return a scrubbed all-or-none benchmark pin triple."""
+
+        def _clean(value: Optional[str]) -> Optional[str]:
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text or None
+
+        normalized = (
+            _clean(benchmark_id),
+            _clean(benchmark_version),
+            _clean(benchmark_digest_sha256),
+        )
+        provided = [field is not None for field in normalized]
+        if any(provided) and not all(provided):
+            raise ValueError(
+                "benchmark_id, benchmark_version, and benchmark_digest_sha256 "
+                "must all be provided together"
+            )
+        return normalized
+
+    @staticmethod
+    def _experiment_benchmark_pin(
+        experiment: dict[str, Any],
+    ) -> Optional[tuple[str, str, str]]:
+        """Return the stored benchmark pin, or None when the row is unpinned."""
+
+        pin = (
+            experiment.get("benchmark_id"),
+            experiment.get("benchmark_version"),
+            experiment.get("benchmark_digest_sha256"),
+        )
+        if all(field is None for field in pin):
+            return None
+        return pin  # type: ignore[return-value]
+
     def create_experiment(
         self,
         experiment_id: str,
@@ -2012,6 +2102,9 @@ class ObservabilityStore:
         workflow_name: Optional[str] = None,
         capture_profile: Optional[str] = None,
         capture_policy_version: Optional[str] = None,
+        benchmark_id: Optional[str] = None,
+        benchmark_version: Optional[str] = None,
+        benchmark_digest_sha256: Optional[str] = None,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
 
@@ -2039,6 +2132,18 @@ class ObservabilityStore:
             )
         if required_evidence_segments < 0:
             raise ValueError("required_evidence_segments cannot be negative")
+        try:
+            benchmark_id, benchmark_version, benchmark_digest_sha256 = (
+                self._normalize_benchmark_pin(
+                    benchmark_id, benchmark_version, benchmark_digest_sha256
+                )
+            )
+        except ValueError as exc:
+            raise PartialBenchmarkPin(experiment_id) from exc
+        if benchmark_id is not None:
+            benchmark_id = self._scrub(benchmark_id)
+            benchmark_version = self._scrub(benchmark_version)
+            benchmark_digest_sha256 = self._scrub(benchmark_digest_sha256)
         capture_profile = capture_profile or _env("FW_OBS_CAPTURE_PROFILE", "debug")
         capture_policy_version = capture_policy_version or "1"
         with self._connect() as conn:
@@ -2049,7 +2154,9 @@ class ObservabilityStore:
             # second half was captured under another policy would compare as if
             # both halves matched -- and the column would say so.
             existing = conn.execute(
-                """SELECT capture_profile, capture_policy_version, status
+                """SELECT capture_profile, capture_policy_version, status,
+                          benchmark_id, benchmark_version,
+                          benchmark_digest_sha256
                      FROM experiments WHERE experiment_id=?""",
                 (experiment_id,),
             ).fetchone()
@@ -2064,16 +2171,32 @@ class ObservabilityStore:
                     f"{existing['capture_policy_version']}",
                     f"{capture_profile}/{capture_policy_version}",
                 )
+            if existing is not None and benchmark_id is not None:
+                stored_pin = (
+                    existing["benchmark_id"],
+                    existing["benchmark_version"],
+                    existing["benchmark_digest_sha256"],
+                )
+                incoming_pin = (
+                    benchmark_id,
+                    benchmark_version,
+                    benchmark_digest_sha256,
+                )
+                if all(field is not None for field in stored_pin):
+                    if stored_pin != incoming_pin:
+                        conn.rollback()
+                        raise BenchmarkPinIsWriteOnce(experiment_id)
             conn.execute(
                 """INSERT INTO experiments
                    (experiment_id, label, hypothesis, notes, arm,
                     baseline_experiment_id, status, invalid_reason,
                     invalid_detail, declared_tasks, declared_attempts,
-                    required_evidence_segments, workflow_name, capture_profile,
+                    required_evidence_segments, benchmark_id, benchmark_version,
+                    benchmark_digest_sha256, workflow_name, capture_profile,
                     capture_policy_version,
                     created_at, completed_at)
                    VALUES (?, ?, ?, NULL, ?, ?, 'running', NULL, NULL,
-                           ?, ?, ?, ?, ?, ?, ?, NULL)
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                    ON CONFLICT(experiment_id) DO UPDATE SET
                      label=excluded.label,
                      arm=excluded.arm,
@@ -2093,6 +2216,16 @@ class ObservabilityStore:
                        WHEN experiments.status='running'
                        THEN excluded.required_evidence_segments
                        ELSE experiments.required_evidence_segments END,
+                     -- Write-once pin: a stored pin wins (the guard above has
+                     -- already rejected a differing incoming one); an unpinned
+                     -- row takes the incoming pin instead of dropping it.
+                     benchmark_id=COALESCE(experiments.benchmark_id,
+                                           excluded.benchmark_id),
+                     benchmark_version=COALESCE(experiments.benchmark_version,
+                                                excluded.benchmark_version),
+                     benchmark_digest_sha256=COALESCE(
+                       experiments.benchmark_digest_sha256,
+                       excluded.benchmark_digest_sha256),
                      workflow_name=excluded.workflow_name""",
                 (
                     experiment_id,
@@ -2103,6 +2236,9 @@ class ObservabilityStore:
                     declared_tasks,
                     declared_attempts,
                     required_evidence_segments,
+                    benchmark_id,
+                    benchmark_version,
+                    benchmark_digest_sha256,
                     self._scrub(workflow_name),
                     capture_profile,
                     capture_policy_version,
@@ -2587,6 +2723,30 @@ class ObservabilityStore:
         self._update_experiment(
             "UPDATE experiments SET notes=? WHERE experiment_id=?",
             (self._scrub(notes), experiment_id),
+            experiment_id,
+        )
+
+    def update_experiment_analysis(
+        self, experiment_id: str, analysis: Optional[dict[str, Any]]
+    ) -> None:
+        """Freely editable opaque JSON, distinct from `notes` and `hypothesis`."""
+        if analysis is not None and not isinstance(analysis, dict):
+            raise ValueError("analysis must be a JSON object or None")
+        if analysis is None:
+            stored: Optional[str] = None
+        else:
+            stored = (
+                json.dumps(
+                    _sanitize_json_value(analysis),
+                    sort_keys=True,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        self._update_experiment(
+            "UPDATE experiments SET analysis_json=? WHERE experiment_id=?",
+            (stored, experiment_id),
             experiment_id,
         )
 
@@ -3454,6 +3614,7 @@ class ObservabilityStore:
             "SELECT e.experiment_id, e.label, e.status, e.arm, "
             "e.baseline_experiment_id, e.declared_tasks, e.declared_attempts, "
             "e.invalid_reason, e.workflow_name, e.capture_profile, "
+            "e.benchmark_id, e.benchmark_version, e.benchmark_digest_sha256, "
             "e.created_at, e.completed_at, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
             "  WHERE a.experiment_id=e.experiment_id) AS attempts_started, "
@@ -3642,6 +3803,30 @@ class ObservabilityStore:
                 f"{baseline['capture_policy_version']}; the two arms are not "
                 "measuring the same columns"
             )
+        treatment_pin = self._experiment_benchmark_pin(treatment)
+        baseline_pin = self._experiment_benchmark_pin(baseline)
+        if treatment_pin is not None or baseline_pin is not None:
+            if treatment_pin != baseline_pin:
+                if treatment_pin is None:
+                    problems.append(
+                        "benchmark pins differ: treatment is unpinned but "
+                        f"baseline is pinned to "
+                        f"{baseline_pin[0]}/{baseline_pin[1]}"
+                    )
+                elif baseline_pin is None:
+                    problems.append(
+                        "benchmark pins differ: baseline is unpinned but "
+                        f"treatment is pinned to "
+                        f"{treatment_pin[0]}/{treatment_pin[1]}"
+                    )
+                else:
+                    problems.append(
+                        "benchmark pins differ: treatment "
+                        f"{treatment_pin[0]}/{treatment_pin[1]}/"
+                        f"{treatment_pin[2]} vs baseline "
+                        f"{baseline_pin[0]}/{baseline_pin[1]}/"
+                        f"{baseline_pin[2]}"
+                    )
         t_tasks = {t["task_id"]: t for t in self.experiment_tasks(experiment_id)}
         b_tasks = {
             t["task_id"]: t for t in self.experiment_tasks(baseline_experiment_id)

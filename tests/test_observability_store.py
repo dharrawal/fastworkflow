@@ -114,7 +114,10 @@ class TestSchema:
         store = obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert (
+                conn.execute("PRAGMA user_version").fetchone()[0]
+                == obs.SCHEMA_VERSION
+            )
             # 2 = INCREMENTAL [R12], set at creation before any table
             assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
             tables = {
