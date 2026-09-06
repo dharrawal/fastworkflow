@@ -58,7 +58,24 @@ class CommandMetadataAPI:
         cme_command_names = cme_crd.get_command_names('IntentDetection')
         subject_command_names = subject_crd.get_command_names(active_context_name)
 
-        candidate_commands = set(cme_command_names) | set(subject_command_names)
+        # The workflow's context-free commands. `RoutingDefinition.contexts` is
+        # built from `CommandContextModel.commands()`, which resolves `base`
+        # inheritance and nothing else, so a command filed under `*` appears
+        # only under `*`. It is nevertheless callable from every context
+        # (`CommandCapabilityIndex.build` grafts it at `global` precedence), and
+        # a listing that says "commands available in the current context" while
+        # omitting a command the caller can call from here is simply wrong —
+        # which is how `open_directory` came to be tried, and refused, from
+        # `Organization` in the EXP-028 Gate 4 v4 traces.
+        global_command_names: set[str] = set()
+        if active_context_name != "*":
+            with contextlib.suppress(Exception):
+                global_command_names = set(
+                    subject_crd.context_model.global_command_names()
+                )
+        candidate_commands = (
+            set(cme_command_names) | set(subject_command_names) | global_command_names
+        )
 
         commands = []
         for fq_cmd in candidate_commands:
@@ -75,13 +92,19 @@ class CommandMetadataAPI:
 
             cmd_name = fq_cmd.split("/")[-1]
             signature_info = CommandMetadataAPI._extract_signature_info(fq_cmd, subject_crd, cme_crd)
-            
+
             commands.append({
                 "qualified_name": fq_cmd,
                 "name": cmd_name,
+                # Provenance, not decoration: a renderer that wants to say
+                # "callable from anywhere" once, instead of repeating six
+                # navigation commands inside every context's section, needs to
+                # know which these are. Consumers that whitelist their display
+                # keys (`get_command_display_text_for_command`) ignore it.
+                "is_global": fq_cmd in global_command_names,
                 **signature_info
             })
-        
+
         # This part is simplified as context info is now built outside
         return {"commands": sorted(commands, key=lambda x: x["name"])}
 
@@ -640,6 +663,14 @@ class CommandMetadataAPI:
         try:
             crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
             already_listed = set(crd.contexts.get(active_context_name, ()))
+            # The context-free commands are in `base_text` above, because they
+            # are callable from the active context. Adding them here stops the
+            # loop below from re-listing them under a "not callable until then"
+            # heading for `*` — a heading that was already false before
+            # ido-mn1.6.12 (nothing navigates INTO `*`; `reset_context` returns
+            # there) and is now false twice over.
+            with contextlib.suppress(Exception):
+                already_listed |= set(crd.context_model.global_command_names())
 
             # Occupancy filter (arch §11.2, FW-REQ-004). A base or mixin context
             # is a command-surface contribution, not a place: nothing navigates

@@ -45,6 +45,7 @@ def _write_skill(
     goal: str | None = None,
     slots: tuple[dict[str, object], ...] = (),
     uses: tuple[str, ...] = (),
+    presents: tuple[str, ...] = (),
     body: str = "1. `known`\n",
 ) -> Path:
     directory = workflow / "_skills" / (directory_name or name)
@@ -71,9 +72,18 @@ def _write_skill(
         lines.append(f"    description: {slot.get('description', 'A test slot')}")
         if slot.get("list"):
             lines.append("    list: true")
+        if slot.get("binding_kind"):
+            lines.append(f"    binding_kind: {slot['binding_kind']}")
+        if slot.get("normalizer"):
+            lines.append(f"    normalizer: {slot['normalizer']}")
+        if slot.get("resolver"):
+            lines.append(f"    resolver: {slot['resolver']}")
     if uses:
         lines.append("uses:")
         lines.extend(f"  - {target}" for target in uses)
+    if presents:
+        lines.append("presents:")
+        lines.extend(f"  - {command}" for command in presents)
     lines.extend(["---", "", f"# {name}", "", body.rstrip(), ""])
     path = directory / "SKILL.md"
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -300,6 +310,104 @@ def test_required_slot_must_declare_on_repeat(tmp_path):
 
     assert excinfo.value.path == str(path)
     assert excinfo.value.rule == "required-slot-needs-on-repeat"
+
+
+def test_normalized_enum_slot_requires_a_registered_versioned_normalizer(tmp_path):
+    path = _write_skill(
+        tmp_path,
+        "inspect",
+        slots=(
+            {
+                "name": "entity_type",
+                "binding_kind": "normalized_enum",
+                "normalizer": "unknown@1",
+            },
+        ),
+    )
+
+    with pytest.raises(SkillCatalogError) as excinfo:
+        load_skill_catalog(str(tmp_path), _manifest())
+
+    assert excinfo.value.path == str(path)
+    assert excinfo.value.rule == "slot-normalizer-known"
+
+
+def test_registered_normalizer_is_exposed_on_the_selector_card(tmp_path):
+    _write_skill(
+        tmp_path,
+        "inspect",
+        slots=(
+            {
+                "name": "entity_type",
+                "binding_kind": "normalized_enum",
+                "normalizer": "entity-type@1",
+            },
+        ),
+    )
+
+    card = load_skill_catalog(str(tmp_path), _manifest()).cards()[0].as_dict()
+
+    assert card["slots"][0]["binding_kind"] == "normalized_enum"
+    assert card["slots"][0]["normalizer"] == "entity-type@1"
+
+
+def test_candidate_resolver_must_be_registered_and_versioned(tmp_path):
+    path = _write_skill(
+        tmp_path,
+        "investigate",
+        slots=(
+            {
+                "name": "rule_query",
+                "resolver": "unknown@1",
+            },
+        ),
+    )
+
+    with pytest.raises(SkillCatalogError) as excinfo:
+        load_skill_catalog(str(tmp_path), _manifest())
+
+    assert excinfo.value.path == str(path)
+    assert excinfo.value.rule == "slot-resolver-known"
+
+
+def test_registered_candidate_resolver_is_exposed_on_selector_card(tmp_path):
+    _write_skill(
+        tmp_path,
+        "investigate",
+        slots=(
+            {
+                "name": "rule_query",
+                "resolver": "control-alias@1",
+            },
+        ),
+    )
+
+    card = load_skill_catalog(str(tmp_path), _manifest()).cards()[0].as_dict()
+
+    assert card["slots"][0]["binding_kind"] == "exact_text"
+    assert card["slots"][0]["resolver"] == "control-alias@1"
+
+
+def test_candidate_resolver_and_presents_schema_are_unioned(tmp_path):
+    _write_skill(
+        tmp_path,
+        "investigate",
+        slots=(
+            {
+                "name": "rule_query",
+                "resolver": "control-alias@1",
+            },
+        ),
+        presents=("known",),
+    )
+
+    skill = load_skill_catalog(str(tmp_path), _manifest())["investigate"]
+    card = skill.card().as_dict()
+
+    assert skill.presents == ("known",)
+    assert card["slots"][0]["binding_kind"] == "exact_text"
+    assert card["slots"][0]["resolver"] == "control-alias@1"
+    assert "presents" not in card
 
 
 def test_for_each_may_only_iterate_a_list_slot(tmp_path):
@@ -538,6 +646,7 @@ def test_cards_expose_required_and_list_slot_shape():
             "description": "The leavers the request names",
             "required": True,
             "list": True,
+            "binding_kind": "exact_text",
         }
     ]
 
@@ -673,7 +782,9 @@ def test_real_ido_catalogue_loads_read_only():
         "cross-system-privilege-audit",
         "department-quarterly-review",
         "department-roster-walk",
+        "entity-portrait-review",
         "explain-finding",
+        "finding-explanation",
         "inspect-entity",
         "leaver-batch",
         "leaver-offboarding-sweep",
@@ -688,7 +799,7 @@ def test_real_ido_catalogue_loads_read_only():
     }
     assert {level: len(names) for level, names in by_level.items()} == {
         "composite": 4,
-        "task": 8,
+        "task": 10,
         "atomic": 2,
     }
     rank = {"composite": 0, "task": 1, "atomic": 2}

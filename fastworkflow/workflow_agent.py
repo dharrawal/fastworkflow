@@ -3,21 +3,26 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import contextlib
+import hashlib
 import importlib
 import json
 import os
+import re
 import time
 import traceback
+from collections import Counter
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Union
 
 import dspy
+from dspy.utils.exceptions import AdapterParseError, LMError
 from pydantic import BaseModel, ConfigDict
 from pydantic import Field as PydanticField
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow import result_handles, tracing
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
@@ -27,11 +32,16 @@ from fastworkflow.worker_health import unwrap_request
 from fastworkflow.runtime_config import DEFAULT_REACT_MAX_ITERATIONS
 from fastworkflow.plan import (
     Invocation,
+    InvocationEvidence,
+    PlanConfigurationError,
     PlanMode,
+    SourceSpan,
     _validate_invocation,
+    expand,
     plan_mode_from_env,
     require_catalog,
 )
+from fastworkflow.plan_execution import alias_resolution_feedback
 from fastworkflow.policy_decision import (
     ContractFacts,
     NO_OP_TABLE,
@@ -63,13 +73,28 @@ class InvocationOrigin(str, Enum):
     AGENT = "agent"
 
 
+# ido-mn1.6.4: the one place the agent signature's field descriptions live, so
+# the `execution_insights` clone below cannot drift from the module-level
+# signature. Drift here would be arm-dependent behaviour, since only some runs
+# supply insights.
+USER_QUERY_DESC = "The natural language user query."
+FINAL_ANSWER_DESC = (
+    "Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully "
+    "addressed. Write it once, drawing on the observations in the trajectory; do not replay the trajectory "
+    "step by step and do not draft it in a reasoning field first."
+)
+
+
 class WorkflowAgentSignature(dspy.Signature):
     """
     Carefully review the user request, then execute the next steps using available tools for building the final answer.
     Every user intent must be fully addressed before returning the final answer.
+    Reasoning fields (next_thought, reasoning) are working notes, not deliverables: state what you have and cite the
+    observation indices and handles (uids) that carry it, and never render the report, tables, or full listings inside
+    them. The report is written exactly once, in `final_answer`.
     """
-    user_query = dspy.InputField(desc="The natural language user query.")
-    final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
+    user_query = dspy.InputField(desc=USER_QUERY_DESC)
+    final_answer = dspy.OutputField(desc=FINAL_ANSWER_DESC)
 
 def _append_action_record(chat_session_obj, record: dict) -> None:
     """Append to session-scoped action log (WEC or ChatSession delegating to core).
@@ -130,16 +155,248 @@ def _complete_ask_user_entry(chat_session_obj, answer: str) -> None:
         core.complete_ask_user_entry(answer)
 
 
+#: The agent-facing command listing is METADATA, not domain data: within one
+#: turn it changes only when the context changes, and in the Gate 4 v4 traces it
+#: cost 299k characters over 78 `what_can_i_do` tool calls (~3.8k per call) on
+#: top of being injected into `available_commands` at the start of every leaf.
+#: Measured on the 19 ido contexts, the bulk of `get_command_display_text` is the
+#: `outputs:` block (33.5% of the Account listing) and, in workflows that declare
+#: them, `examples:` (13.2% of the todo_list fixture) — neither of which the
+#: agent needs to CALL a command. Output fields are described by the response the
+#: agent then reads (`result_handles.as_observation`), and the tool docstrings
+#: said outright that the example values are fake. What a caller does need is the
+#: command name, the PARAMETER NAMES (the `execute_workflow_query` grammar is
+#: `command_name <param_name>value</param_name>`, and the old renderer printed
+#: the parameter's *description* in place of its name), whether each is required,
+#: and the docstring — which in ido carries the sequencing guidance the skills
+#: depend on ("Do not stop at show_risk_score"), so it is kept whole up to a
+#: generous bound rather than cut to its first sentence.
+#: This is the AGENT-facing rendering only. `CommandMetadataAPI` is untouched, so
+#: the CME `what_can_i_do` COMMAND, the MCP tool descriptions, the skill
+#: catalogue and the plan compiler all read exactly what they read before.
+MAX_COMMAND_DOC_CHARS = 600
+MAX_COMMAND_PARAM_DESC_CHARS = 90
+
+
+def _collapse_to_one_line(text: Any, limit: int) -> str:
+    """One whitespace-collapsed line, truncated on a sentence boundary if possible."""
+    collapsed = " ".join(str(text or "").split()).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    cut = collapsed[:limit]
+    sentence_end = cut.rfind(". ")
+    if sentence_end >= limit // 2:
+        return cut[: sentence_end + 1]
+    return f"{cut.rstrip()}..."
+
+
+def _compact_param_type(raw_type: Any) -> tuple[str, bool]:
+    """(simplified type, is_optional) for one input field."""
+    simplified = CommandMetadataAPI._simplify_type_str(str(raw_type or "")).strip()
+    simplified = simplified.replace("typing.", "")
+    optional = False
+    if simplified.startswith("Optional[") and simplified.endswith("]"):
+        optional = True
+        simplified = simplified[len("Optional[") : -1]
+    return (simplified or "str"), optional
+
+
+def _compact_command_listing(
+    subject_workflow_path: str,
+    cme_workflow_path: str,
+    active_context_name: str,
+) -> str:
+    """One line per command: `- name(param: type, other?: type) - docstring [hints]`.
+
+    Falls back to `CommandMetadataAPI.get_command_display_text` if the structured
+    metadata cannot be read, so a metadata failure degrades to the old listing
+    rather than to an empty menu.
+    """
+    try:
+        meta = CommandMetadataAPI.get_enhanced_command_info(
+            subject_workflow_path=subject_workflow_path,
+            cme_workflow_path=cme_workflow_path,
+            active_context_name=active_context_name,
+        )
+    except Exception:
+        logger.warning("compact command listing failed; using full listing", exc_info=True)
+        return CommandMetadataAPI.get_command_display_text(
+            subject_workflow_path=subject_workflow_path,
+            cme_workflow_path=cme_workflow_path,
+            active_context_name=active_context_name,
+        )
+
+    display_name = "global" if active_context_name == "*" else active_context_name
+    header = f"Commands available in the current context ({display_name}):"
+    lines: list[str] = [header]
+    # The context-free commands are callable from here too, but they are not
+    # ABOUT here: interleaving a workflow's navigation verbs alphabetically with
+    # the commands specific to the context the agent is standing in hides the
+    # ones that are the reason it is standing there. They go once, under their
+    # own line, at the end.
+    global_lines: list[str] = []
+    for cmd in sorted(meta.get("commands", []) or [], key=lambda c: c.get("name", "")):
+        name = cmd.get("name", "")
+        if not name:
+            continue
+        target = global_lines if cmd.get("is_global") else lines
+        params: list[str] = []
+        hints: list[str] = []
+        for inp in cmd.get("inputs") or []:
+            param_name = inp.get("name", "")
+            if not param_name:
+                continue
+            type_str, optional = _compact_param_type(inp.get("type"))
+            if inp.get("default") is not None:
+                optional = True
+            params.append(f"{param_name}{'?' if optional else ''}: {type_str}")
+            # `available_from` is the parameter hint three ido skill bodies tell
+            # the agent to walk (skill_catalog.FRAMEWORK_VOCABULARY), so it is
+            # carried through rather than compacted away.
+            if available_from := inp.get("available_from"):
+                rendered = (
+                    ", ".join(str(v) for v in available_from)
+                    if isinstance(available_from, (list, tuple))
+                    else str(available_from)
+                )
+                rendered = rendered.strip("[]").replace("'", "")
+                hints.append(f"{param_name} from {rendered}")
+            if description := inp.get("description"):
+                hints.append(
+                    f"{param_name}="
+                    f"{_collapse_to_one_line(description, MAX_COMMAND_PARAM_DESC_CHARS)}"
+                )
+        signature = f"{name}({', '.join(params)})" if params else name
+        doc = _collapse_to_one_line(cmd.get("doc_string", ""), MAX_COMMAND_DOC_CHARS)
+        # A docstring that only restates the command name carries nothing.
+        line = f"- {signature}"
+        if doc and doc.lower() != name.replace("_", " ").lower():
+            line += f" - {doc}"
+        if hints:
+            line += f" [{'; '.join(hints)}]"
+        target.append(line)
+
+    if global_lines:
+        lines.append("Also callable from any context:")
+        lines.extend(global_lines)
+
+    return "\n".join(lines)
+
+
 def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Returns a list of available commands, including their names and parameters.
     """
     current_workflow = chat_session_obj.get_active_workflow()
-    return CommandMetadataAPI.get_command_display_text(
+    return _compact_command_listing(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
         active_context_name=current_workflow.current_command_context_name,
     )
+
+def _command_listing_memo(host) -> dict | None:
+    """The per-turn `what_can_i_do` memo on the trace host, or None.
+
+    Duck-typed exactly like `_append_action_record`: production passes the
+    WorkflowExecutionContext, a ChatSession delegates to its `_core`, and a
+    caller that has neither (the MCP server used by tests, distillation before a
+    turn exists) simply gets no memo and therefore always the full listing.
+    """
+    getter = getattr(host, "command_listing_memo", None)
+    if not callable(getter):
+        core = getattr(host, "_core", None)
+        getter = getattr(core, "command_listing_memo", None)
+    if not callable(getter):
+        return None
+    try:
+        memo = getter()
+    except Exception:  # a memo is an optimisation; never fail the tool for it
+        return None
+    return memo if isinstance(memo, dict) else None
+
+
+def _active_agent(host):
+    """The running ReAct agent on *host*, public property first."""
+    agent = getattr(host, "workflow_tool_agent", None)
+    if agent is None:
+        agent = getattr(host, "_workflow_tool_agent", None)
+    return agent
+
+
+def _what_can_i_do_tool_observation(chat_session_obj) -> str:
+    """The `what_can_i_do` TOOL's observation: the listing, or a reference to it.
+
+    The listing is already in the agent's `available_commands` system prelude at
+    the start of every leaf, and `_refresh_agent_available_commands` keeps that
+    prelude current on every context switch — so a tool call that re-renders an
+    unchanged listing buys the trajectory nothing. In the Gate 4 v4 traces 24 of
+    the 78 `what_can_i_do` calls (91,262 of 299,411 characters) repeated a
+    listing already produced in the SAME turn; none repeated one inside the same
+    agent run, which is why the memo is keyed on the turn and not on the
+    trajectory alone.
+
+    Key: (turn key, context name, command-set fingerprint). The turn key is
+    minted once per logical turn and is deliberately kept across suspension, so
+    a resumed turn reuses its memo and a new turn can never see the old one.
+    With no turn key (a directly constructed agent, distillation outside a turn)
+    nothing is memoised and the full listing is returned every time.
+
+    Only this tool consults the memo. `intent_misunderstood` exists precisely
+    because the agent used a wrong command name, and the `available_commands`
+    injection is the prelude the reference points AT; both keep the full text.
+    """
+    listing = _what_can_i_do(chat_session_obj=chat_session_obj)
+
+    memo = _command_listing_memo(chat_session_obj)
+    if memo is None:
+        return listing
+    turn_key = tracing.get_turn_key(chat_session_obj)
+    if not turn_key:
+        return listing
+
+    context_name = "*"
+    with contextlib.suppress(Exception):
+        context_name = (
+            chat_session_obj.get_active_workflow().current_command_context_name
+        )
+    fingerprint = hashlib.sha256(listing.encode("utf-8")).hexdigest()[:16]
+    key = (turn_key, context_name, fingerprint)
+
+    # The current run's trajectory, held by reference: comparing it with `is`
+    # tells us whether the earlier listing is one the agent can still SEE (same
+    # ReAct run) or was shown in an earlier plan leaf, whose trajectory this run
+    # does not carry. Holding the reference also keeps `is` honest.
+    agent = _active_agent(chat_session_obj)
+    trajectory = getattr(agent, "current_trajectory", None)
+    if not isinstance(trajectory, dict):
+        trajectory = None
+
+    if (previous := memo.get(key)) is not None:
+        if trajectory is not None and previous.get("trajectory") is trajectory:
+            source = f"observation {previous['observation_index']}"
+        else:
+            source = "the available_commands listing you were given"
+        return (
+            f"Command listing unchanged since {source} in this turn "
+            f"(context: {context_name}). Use execute_workflow_query with a "
+            f"command name from that listing, formatted as: "
+            f"command_name <param_name>value</param_name>"
+        )
+
+    # The observation this call is about to produce has index == the number of
+    # observations already in the trajectory (react.py writes observation_{idx}
+    # only after the tool returns).
+    observation_index = None
+    if trajectory is not None:
+        observation_index = sum(
+            1 for name in trajectory if name.startswith("observation_")
+        )
+    memo[key] = {
+        "trajectory": trajectory,
+        "observation_index": observation_index,
+    }
+    return listing
+
 
 def _refresh_agent_available_commands(host) -> None:
     """Re-scope the active ReAct agent's ``available_commands`` to the CURRENT context.
@@ -172,7 +429,9 @@ def _refresh_agent_available_commands(host) -> None:
     if current_workflow is None:
         return
 
-    inputs["available_commands"] = CommandMetadataAPI.get_command_display_text(
+    # Same rendering as `_what_can_i_do`: the prelude must not change format
+    # halfway through a turn just because the context changed.
+    inputs["available_commands"] = _compact_command_listing(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path(
             "command_metadata_extraction"
@@ -210,7 +469,7 @@ def _resolve_or_escalate(result, chat_session_obj: fastworkflow.ChatSession, res
 def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Executes the command and returns either a response, or a clarification request.
-    Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
+    The available commands, their parameter names and their descriptions are already listed for you in available_commands; the "what_can_i_do" tool re-lists them for the CURRENT context. A parameter written as name?: type is optional.
     Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
     Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
     """
@@ -386,6 +645,17 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         response_text = command_output.command_response.response
     else:
         response_text = "Command executed successfully but produced no output."
+    leaf_scope = getattr(chat_session_obj, "_turn_leaf_scope", None)
+    resolver_feedback = (
+        alias_resolution_feedback(leaf_scope, command_output)
+        if leaf_scope is not None
+        else ""
+    )
+    agent_response_text = (
+        f"{response_text}\n\n{resolver_feedback}"
+        if resolver_feedback
+        else response_text
+    )
 
     tracing.end_span(
         chat_session_obj,
@@ -435,12 +705,12 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # initialized together in WorkflowExecutionContext._initialize_agent_functionality.
     if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
         return _resolve_intent_ambiguity(
-            chat_session_obj, cme_workflow, command, response_text
+            chat_session_obj, cme_workflow, command, agent_response_text
         )
     # Handle intent misunderstanding clarification state with specialized agent
     if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION:
         return _resolve_intent_misunderstanding(
-            chat_session_obj, command, response_text
+            chat_session_obj, command, agent_response_text
         )
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
@@ -451,7 +721,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         planning_insights = getattr(chat_session_obj, '_planning_insights', None)
         planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
         return build_query_with_next_steps(
-            f'{response_text}\n{abort_confirmation}',
+            f'{agent_response_text}\n{abort_confirmation}',
             chat_session_obj, with_agent_inputs_and_trajectory=True,
             planning_insights=planning_insights, planner_lm=planner_lm,
             trace_trigger="parameter_extraction_error",
@@ -463,7 +733,32 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     if CONTEXT_KEY_INVOCATION_ORIGIN in workflow.context:
         del workflow.context[CONTEXT_KEY_INVOCATION_ORIGIN]
 
-    return response_text
+    # Observation compaction (ido-mn1.6.1), and the ONLY place it applies.
+    # Everything above this line has already consumed the full `response_text`:
+    # the fw.agent.tool_call span, the trace queue, the action log, and — via
+    # `_append_turn_output` — the turn record's `command_outputs`. So the full
+    # payload is in evidence four ways over, and what changes here is exactly
+    # one thing: the string that becomes the ReAct trajectory's observation and
+    # is therefore re-sent as prompt context on every following step.
+    #
+    # `compact_observation_for` returns None for a command that did not opt in,
+    # and this function then returns the same object it always returned.
+    if (
+        compact := result_handles.compact_observation_for(
+            chat_session_obj, command_output
+        )
+    ) is not None:
+        # Resolver feedback is control provenance for the next agent decision,
+        # while the unmodified full response above remains the trace/action/turn
+        # evidence. Compaction therefore replaces only the domain payload and
+        # appends the deterministic feedback to the compact observation.
+        return (
+            f"{compact}\n\n{resolver_feedback}"
+            if resolver_feedback
+            else compact
+        )
+
+    return agent_response_text
 
 
 # TODO Rename this here and in `_execute_workflow_query`
@@ -646,8 +941,8 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession,
 
         class AgentSignature(dspy.Signature):
             __doc__ = enhanced_docstring
-            user_query = dspy.InputField(desc="The natural language user query.")
-            final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
+            user_query = dspy.InputField(desc=USER_QUERY_DESC)
+            final_answer = dspy.OutputField(desc=FINAL_ANSWER_DESC)
     else:
         AgentSignature = WorkflowAgentSignature
 
@@ -655,7 +950,8 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession,
         """
         Returns a list of available commands, including their names and parameters
         """
-        return _what_can_i_do(chat_session_obj=chat_session_obj)
+        # Repeat calls in the same turn get a reference, not a second copy.
+        return _what_can_i_do_tool_observation(chat_session_obj)
 
     def intent_misunderstood() -> str:
         """
@@ -668,7 +964,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession,
         """
         Takes just a single argument called 'command'.
         Executes the command and returns either a response, or a clarification request.
-        Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
+        The available commands, their parameter names and their descriptions are already listed for you in available_commands; the "what_can_i_do" tool re-lists them for the CURRENT context. A parameter written as name?: type is optional.
         Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
         Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
         """
@@ -947,45 +1243,96 @@ def build_query_with_next_steps(user_query: str,
 # ----------------------------------------------------------------------
 
 
-class SelectedInvocation(BaseModel):
-    """One invocation the selector chose, as a typed output element.
+class SelectedSlotBinding(BaseModel):
+    """One selector-supplied slot value and its verbatim source phrase.
 
-    `slots` is `{slot: value}` where a value is the utterance's own words, or a
-    list of them for a slot the skill declares `list: true`. Typed rather than
-    free text because FW-REQ-010 clause 1's whole point is that a goal is never
-    recovered by parsing a sentence: `build_query_with_next_steps` asked its
-    model for "a numbered list of short sentences separated by line breaks" and
-    then destroyed the line breaks with `.split()`, and what reached the
-    executor could not have been parsed back into a plan by anything.
+    The model identifies text; deterministic code computes offsets. Gate 3 v3
+    showed why that separation is load-bearing: 87/110 validation failures were
+    arithmetic disagreements between otherwise useful values and model-counted
+    character offsets. ``source_text`` remains independently validated against
+    the utterance and against the card's binding kind, so deriving offsets does
+    not weaken provenance.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    skill_name: str = PydanticField(description="Exactly one skill name from the catalogue")
-    slots: dict[str, Union[str, list[str]]] = PydanticField(
-        default_factory=dict,
-        description="Slot values copied verbatim from the utterance",
+    slot_name: str = PydanticField(description="Exactly one slot name from the task card")
+    value: str = PydanticField(
+        min_length=1,
+        description=(
+            "The exact source text for exact_text slots, or the canonical "
+            "normalized value for normalized_enum slots"
+        ),
+    )
+    source_text: str = PydanticField(
+        min_length=1,
+        description=(
+            "A verbatim, case-sensitive substring copied from the operator request"
+        ),
+    )
+
+
+class SelectedInvocation(BaseModel):
+    """One canonical operator-task invocation chosen by the selector.
+
+    List slots repeat ``SelectedSlotBinding`` once per source value, in source
+    order. Scalar slots appear at most once. A list of typed bindings avoids
+    open-ended JSON mappings and keeps the provider-facing schema explicit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str = PydanticField(
+        description="Exactly one level=task skill name from the catalogue"
+    )
+    bindings: list[SelectedSlotBinding] = PydanticField(
+        default_factory=list,
+        description=(
+            "Operator-supplied task slots. Repeat a list slot once per value; "
+            "omit captured_handle and skill_literal slots."
+        ),
+    )
+    coverage: list[str] = PydanticField(
+        default_factory=list,
+        description=(
+            "Verbatim complete task segments covered by this invocation when "
+            "a segment has no bound slot text to prove its coverage"
+        ),
     )
 
 
 class SkillSelectionSignature(dspy.Signature):
-    """Choose which skills this request composes, and over which subjects.
+    """Select every canonical operator task explicitly requested.
 
-    Return an ORDERED list of skill invocations. Every value you put in a slot
-    is copied VERBATIM from the request - the operator's own words for the
-    person, the application, the right. Never invent a value, never normalise a
-    name, and never substitute an identifier the request did not contain: a slot
-    you cannot fill from the request is a slot you leave out.
+    The catalogue contains level=task cards only. Return only those exact task
+    names. Never return a composite orchestration skill, an atomic
+    implementation skill, a command, or an invented task. Internal details
+    described by a task card are part of that task, not extra selections.
 
-    SEVERAL INVOCATIONS OF ONE SKILL IS THE NORMAL CASE, NOT AN EDGE. "Devon
-    Morrison, Sean Lyons and Jennifer Sellers are all leaving" is THREE
-    invocations of the leaver skill with three different subjects - not one
-    invocation covering all three, and not one invocation of the first of them.
-    A request that names several subjects is a request for one invocation per
-    subject, in the order it named them.
+    Be exhaustive at the operator-task level. Treat each independent requested
+    outcome as one invocation and preserve request order. Several subjects for
+    a scalar slot require several task invocations. Several values belong in
+    one invocation only when the card declares that slot as a list. Do not
+    collapse distinct tasks, omit a later clause, or duplicate an invocation.
 
-    Choose a skill on its description. If the request composes several different
-    skills, return them all, in the order the work has to happen.
+    Bind only values the operator actually wrote. For every binding,
+    ``source_text`` must be copied verbatim and case-sensitively from the
+    request. For ``exact_text``, ``value`` must equal ``source_text`` exactly.
+    For ``normalized_enum``, ``value`` is the card's canonical value and
+    ``source_text`` is the exact noun that normalizes to it. Never count
+    character offsets. Preserve complete multiword names, including connector
+    words, punctuation, underscores, and trailing numbers. Never substitute a
+    backend identifier that is absent from the request. Omit captured_handle
+    and skill_literal slots; deterministic execution supplies them.
+
+    On a retry, correct the stated validation defect and re-check the entire
+    request for complete, non-duplicated task coverage. Return only the
+    structured ``invocations`` field. For requests separated by ``then``, a
+    semicolon, or a line break, every material segment must be represented.
+    A bound slot inside a segment proves that scope. If a represented segment
+    has no bound slot, copy that complete segment verbatim into the invocation's
+    ``coverage`` list. Never use coverage to claim a segment assigned to a
+    different task.
     """
 
     utterance: str = dspy.InputField(desc="The operator's request, verbatim")
@@ -993,8 +1340,16 @@ class SkillSelectionSignature(dspy.Signature):
         desc="The available skills as JSON: name, description, level, and the "
              "slots each one takes. Bodies are deliberately not shown."
     )
+    validation_feedback: str = dspy.InputField(
+        desc="Empty on first attempt. On retry, contains bounded actionable "
+        "validation feedback without raw output or authored decomposition."
+    )
     invocations: list[SelectedInvocation] = dspy.OutputField(
-        desc="Ordered skill invocations, as JSON. One object per invocation."
+        desc=(
+            "Ordered canonical operator-task invocations. Each item has an exact "
+            "task-card skill_name and a bindings list of slot_name, value, and "
+            "verbatim source_text."
+        )
     )
 
 
@@ -1004,14 +1359,240 @@ class SkillSelection(list):
     A list subclass rather than a `(model, invocations)` tuple so that callers
     can treat the result as the list it is, and `PlanRecord.selection_model` can
     still record what chose - which is not decoration: the selector is the ONE
-    model call in the whole mechanism, and a plan record that cannot say which
-    model made it cannot be compared across arms (FW-REQ-006 clause 9).
+    model phase in the whole mechanism, with one call per application attempt
+    and at most one explicit validation retry. A plan record that cannot say
+    which model made it cannot be compared across arms (FW-REQ-006 clause 9).
     """
 
-    def __init__(self, invocations=(), *, selection_model=None, raw=None):
+    def __init__(
+        self,
+        invocations=(),
+        *,
+        selection_model=None,
+        raw=None,
+        validation_retry_used: bool = False,
+        validation_errors=(),
+        application_attempt_count: int = 0,
+        provider_call_count: int = 0,
+        provider_response_count: int = 0,
+        adapter_identity: str | None = None,
+        attempts=(),
+        coverage_segments=(),
+    ):
         super().__init__(invocations)
         self.selection_model = selection_model
         self.raw = raw
+        self.validation_retry_used = validation_retry_used
+        self.validation_errors = tuple(validation_errors)
+        self.application_attempt_count = application_attempt_count
+        self.provider_call_count = provider_call_count
+        self.provider_response_count = provider_response_count
+        self.adapter_identity = adapter_identity
+        self.attempts = tuple(attempts)
+        self.coverage_segments = tuple(coverage_segments)
+
+
+def _selected_invocation(
+    selected: SelectedInvocation,
+    skill: Any,
+    utterance: str,
+) -> Invocation:
+    values: dict[str, Union[str, list[str]]] = {}
+    provenance: dict[str, InvocationEvidence] = {}
+    source_spans: dict[str, list[SourceSpan]] = {}
+    source_cursors: dict[str, int] = {}
+    for binding in selected.bindings:
+        slot_name = binding.slot_name.strip()
+        slot = skill.slot(slot_name)
+        if slot is None:
+            raise PlanConfigurationError(
+                f"selection of '{skill.name}' binds undeclared slot '{slot_name}'"
+            )
+        if slot.binding_kind not in ("exact_text", "normalized_enum"):
+            raise PlanConfigurationError(
+                f"selection of '{skill.name}' cannot bind slot '{slot_name}' "
+                f"with runtime-only binding_kind {slot.binding_kind!r}"
+            )
+        if not slot.list and slot_name in values:
+            raise PlanConfigurationError(
+                f"selection of '{skill.name}' repeats scalar slot '{slot_name}'"
+            )
+
+        source_text = binding.source_text
+        start = utterance.find(source_text, source_cursors.get(slot_name, 0))
+        if start < 0:
+            raise PlanConfigurationError(
+                f"selection of '{skill.name}' slot '{slot_name}' source_text "
+                "is not copied verbatim from the utterance"
+            )
+        end = start + len(source_text)
+        source_cursors[slot_name] = end
+        source_spans.setdefault(slot_name, []).append(
+            SourceSpan(start=start, end=end, text=source_text)
+        )
+
+        if slot.list:
+            existing = values.setdefault(slot_name, [])
+            if not isinstance(existing, list):
+                raise PlanConfigurationError(
+                    f"selection of '{skill.name}' slot '{slot_name}' has "
+                    "inconsistent scalar/list shape"
+                )
+            existing.append(binding.value)
+        else:
+            values[slot_name] = binding.value
+
+    for slot_name, spans in source_spans.items():
+        slot = skill.slot(slot_name)
+        if slot is None:
+            raise PlanConfigurationError(
+                f"selection of '{skill.name}' binds undeclared slot '{slot_name}'"
+            )
+        provenance[slot_name] = InvocationEvidence(
+            kind=slot.binding_kind,
+            source_spans=tuple(spans),
+            normalizer=slot.normalizer,
+        )
+
+    invocation = Invocation(
+        skill_name=skill.name,
+        slots=values,
+        provenance=provenance,
+    )
+    _validate_invocation(skill, invocation, utterance)
+    return invocation
+
+
+_TASK_SEGMENT_BOUNDARY = re.compile(
+    r";|\n+|(?<![A-Za-z0-9_])then(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def _material_task_segments(
+    utterance: str,
+) -> tuple[tuple[int, int, str], ...]:
+    """Split only explicit task-sequencing boundaries, preserving source text."""
+    boundaries = tuple(_TASK_SEGMENT_BOUNDARY.finditer(utterance))
+    if not boundaries:
+        return ()
+    segments: list[tuple[int, int, str]] = []
+    start = 0
+    for boundary in (*boundaries, None):
+        raw_end = boundary.start() if boundary is not None else len(utterance)
+        segment_start = start
+        segment_end = raw_end
+        while segment_start < segment_end and utterance[segment_start].isspace():
+            segment_start += 1
+        while segment_end > segment_start and utterance[segment_end - 1].isspace():
+            segment_end -= 1
+        text = utterance[segment_start:segment_end]
+        if any(character.isalnum() for character in text):
+            segments.append((segment_start, segment_end, text))
+        if boundary is not None:
+            start = boundary.end()
+    return tuple(segments) if len(segments) > 1 else ()
+
+
+def _validate_selection_task_coverage(
+    utterance: str,
+    selected: list[SelectedInvocation],
+    invocations: list[Invocation],
+) -> tuple[tuple[int, int], ...]:
+    """Require every explicitly sequenced request segment to have one anchor."""
+    segments = _material_task_segments(utterance)
+    if not segments:
+        return ()
+    covered = [False] * len(segments)
+
+    for invocation in invocations:
+        for evidence in invocation.provenance.values():
+            for span in evidence.source_spans:
+                for index, (start, end, _text) in enumerate(segments):
+                    if start <= span.start and span.end <= end:
+                        covered[index] = True
+
+    segment_texts = {
+        text: index for index, (_start, _end, text) in enumerate(segments)
+    }
+    for item in selected:
+        for claim in item.coverage:
+            index = segment_texts.get(claim)
+            if index is None:
+                raise PlanConfigurationError(
+                    "task coverage claim is not one complete verbatim request "
+                    "segment separated by then, semicolon, or line break"
+                )
+            covered[index] = True
+
+    missing = tuple(
+        (start, end)
+        for is_covered, (start, end, _text) in zip(covered, segments)
+        if not is_covered
+    )
+    if missing:
+        ranges = ", ".join(f"[{start}, {end})" for start, end in missing)
+        raise PlanConfigurationError(
+            "task-first selection leaves explicitly sequenced request segment "
+            f"coverage unproven at {ranges}"
+        )
+    return tuple((start, end) for start, end, _text in segments)
+
+
+def _selection_validation_error(exc: Exception) -> str:
+    if isinstance(exc, AdapterParseError):
+        return (
+            "AdapterParseError: response was not the required JSON object with "
+            "exactly one 'invocations' field matching the selector schema"
+        )
+    detail = " ".join(str(exc).split())
+    return f"{type(exc).__name__}: {detail[:1600]}"
+
+
+def _selection_retry_feedback(exc: Exception) -> str:
+    if isinstance(exc, AdapterParseError):
+        defect = (
+            "The response was not a complete selector JSON object with the "
+            "required invocations field. Do not include prose or reasoning."
+        )
+    else:
+        defect = " ".join(str(exc).split())[:1200]
+    return (
+        "The previous response failed deterministic validation. "
+        f"Defect: {defect} "
+        "Return only the corrected invocations JSON. Use level=task cards only; "
+        "copy source_text directly instead of calculating offsets; preserve full "
+        "slot text; include each independently requested operator task exactly "
+        "once; use verbatim coverage entries only for complete sequenced request "
+        "segments that have no bound slot anchor; and do not expose internal "
+        "composite or atomic work."
+    )
+
+
+def _annotate_selection_failure(
+    exc: Exception,
+    *,
+    adapter: Any,
+    attempts: list[dict[str, Any]],
+    validation_errors: list[str],
+) -> None:
+    try:
+        setattr(exc, "selection_attempt_count", len(attempts))
+        setattr(
+            exc,
+            "selection_provider_call_count",
+            int(getattr(adapter, "provider_call_count", 0)),
+        )
+        setattr(
+            exc,
+            "selection_provider_response_count",
+            int(getattr(adapter, "provider_response_count", 0)),
+        )
+        setattr(exc, "selection_adapter_identity", getattr(adapter, "identity", None))
+        setattr(exc, "selection_attempts", tuple(attempts))
+        setattr(exc, "selection_validation_errors", tuple(validation_errors))
+    except Exception:
+        pass
 
 
 def select_skills(
@@ -1019,7 +1600,7 @@ def select_skills(
     catalog: SkillCatalog,
     lm: Any = None,
 ) -> list[Invocation]:
-    """The one model call: which skills, over which subjects (decision 2).
+    """The one model phase: which tasks, over which subjects (decision 2).
 
     Inputs are the utterance and the catalogue of **cards** - name, description,
     level, slot names and slot descriptions. No bodies, no command map
@@ -1031,47 +1612,226 @@ def select_skills(
     ReAct self-tool as the recursive plan executor" by name - so this function
     is the boundary, and `plan.py` does not import `dspy` at all.
     """
-    cards = catalog.cards() if catalog is not None else ()
+    cards = (
+        tuple(card for card in catalog.cards() if card.level == "task")
+        if catalog is not None
+        else ()
+    )
     if not cards:
+        if catalog is not None and len(catalog):
+            raise PlanConfigurationError(
+                "manifest-enabled skill catalogue exposes no level=task cards"
+            )
         return SkillSelection((), selection_model=None)
 
     if lm is None:
-        lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-
-    with dspy.context(lm=lm):
-        prediction = dspy.ChainOfThought(SkillSelectionSignature)(
-            utterance=utterance,
-            catalogue=json.dumps([card.as_dict() for card in cards]),
+        lm = dspy_utils.get_lm(
+            "LLM_PLANNER",
+            "LITELLM_API_KEY_PLANNER",
+            num_retries=0,
         )
 
-    raw_invocations = getattr(prediction, "invocations", None)
-    if raw_invocations is None:
-        raw_invocations = []
-    if not isinstance(raw_invocations, list):
-        raise ValueError(
-            "skill selection must return a JSON list of invocation objects"
-        )
+    selector = dspy.Predict(SkillSelectionSignature)
+    adapter = dspy_utils.SingleCallJSONAdapter()
+    validation_feedback = ""
+    last_error: Exception | None = None
+    validation_errors: list[str] = []
+    attempt_records: list[dict[str, Any]] = []
 
-    invocations: list[Invocation] = []
-    for raw_selected in raw_invocations:
-        # Parsed strictly, and never from prose. A malformed element raises
-        # rather than being repaired: repairing it is the moment a
-        # plan starts being reconstructed by guessing at a sentence.
-        selected = SelectedInvocation.model_validate(raw_selected)
-        invocation = Invocation(
-            skill_name=selected.skill_name.strip(),
-            slots=dict(selected.slots),
+    for attempt in range(2):
+        prediction = None
+        calls_before = int(getattr(adapter, "provider_call_count", 0))
+        provider_responses_before = int(
+            getattr(adapter, "provider_response_count", 0)
         )
-        skill = catalog.get(invocation.skill_name)
-        if skill is not None:
-            _validate_invocation(skill, invocation, utterance)
-        invocations.append(invocation)
+        responses_before = len(getattr(adapter, "raw_responses", ()))
+        try:
+            with dspy.context(lm=lm, adapter=adapter):
+                prediction = selector(
+                    utterance=utterance,
+                    catalogue=json.dumps([card.as_dict() for card in cards]),
+                    validation_feedback=validation_feedback,
+                )
 
-    return SkillSelection(
-        invocations,
-        selection_model=getattr(lm, "model", None),
-        raw=getattr(prediction, "invocations", None),
+            raw_invocations = getattr(prediction, "invocations", None)
+            if raw_invocations is None:
+                raw_invocations = []
+            if not isinstance(raw_invocations, list):
+                raise ValueError(
+                    "skill selection must return a JSON list of invocation objects"
+                )
+
+            selected_invocations: list[SelectedInvocation] = []
+            invocations: list[Invocation] = []
+            for raw_selected in raw_invocations:
+                selected = SelectedInvocation.model_validate(raw_selected)
+                selected_invocations.append(selected)
+                selected_skill_name = selected.skill_name.strip()
+                skill = catalog.get(selected_skill_name)
+                if skill is None:
+                    raise PlanConfigurationError(
+                        f"selection names unknown skill '{selected_skill_name}'"
+                    )
+                if skill.level != "task":
+                    raise PlanConfigurationError(
+                        "task-first public selection must name a task skill; "
+                        f"'{selected_skill_name}' has level '{skill.level}'"
+                    )
+                invocation = _selected_invocation(selected, skill, utterance)
+                invocations.append(invocation)
+
+            if not invocations:
+                raise PlanConfigurationError(
+                    "task-first selection returned no operator-task invocation"
+                )
+
+            duplicate_invocations = sorted(
+                key
+                for key, count in Counter(
+                    (
+                        invocation.skill_name,
+                        json.dumps(
+                            invocation.slots,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
+                    for invocation in invocations
+                ).items()
+                if count > 1
+            )
+            if duplicate_invocations:
+                raise PlanConfigurationError(
+                    "task-first selection repeats canonical invocation(s): "
+                    + ", ".join(
+                        f"{skill_name} {slots}"
+                        for skill_name, slots in duplicate_invocations
+                    )
+                )
+
+            coverage_segments = _validate_selection_task_coverage(
+                utterance,
+                selected_invocations,
+                invocations,
+            )
+
+            # The retry boundary includes deterministic compilation. Otherwise
+            # a response can satisfy each invocation schema separately and
+            # still fail on public coverage, overlap, DAG, binding, or
+            # executable-goal invariants after the only correction chance has
+            # already passed.
+            expand(
+                catalog,
+                invocations,
+                utterance,
+                mode=PlanMode.ENFORCE,
+                selection_model=getattr(lm, "model", None),
+            )
+
+            attempt_records.append(
+                {
+                    "application_attempt": attempt + 1,
+                    "provider_calls": (
+                        int(getattr(adapter, "provider_call_count", 0))
+                        - calls_before
+                    ),
+                    "provider_responses": (
+                        int(getattr(adapter, "provider_response_count", 0))
+                        - provider_responses_before
+                    ),
+                    "raw_response": (
+                        adapter.raw_responses[-1]
+                        if len(adapter.raw_responses) > responses_before
+                        else None
+                    ),
+                    "parsed_invocations": raw_invocations,
+                    "validation_error": None,
+                }
+            )
+            return SkillSelection(
+                invocations,
+                selection_model=getattr(lm, "model", None),
+                raw=raw_invocations,
+                validation_retry_used=(attempt == 1),
+                validation_errors=validation_errors,
+                application_attempt_count=attempt + 1,
+                provider_call_count=int(
+                    getattr(adapter, "provider_call_count", 0)
+                ),
+                provider_response_count=int(
+                    getattr(adapter, "provider_response_count", 0)
+                ),
+                adapter_identity=getattr(adapter, "identity", None),
+                attempts=attempt_records,
+                coverage_segments=coverage_segments,
+            )
+        except Exception as exc:
+            # A provider/auth/transport failure produced no structured
+            # selection to correct. The ADR's one retry is error-guided
+            # RESPONSE validation, not a second provider dispatch hidden
+            # inside the selector.
+            raw_provider_response = (
+                adapter.raw_responses[-1]
+                if len(adapter.raw_responses) > responses_before
+                else getattr(exc, "lm_response", None)
+            )
+            attempt_records.append(
+                {
+                    "application_attempt": attempt + 1,
+                    "provider_calls": (
+                        int(getattr(adapter, "provider_call_count", 0))
+                        - calls_before
+                    ),
+                    "provider_responses": (
+                        int(getattr(adapter, "provider_response_count", 0))
+                        - provider_responses_before
+                    ),
+                    "raw_response": raw_provider_response,
+                    "parsed_invocations": (
+                        getattr(prediction, "invocations", None)
+                        if prediction is not None
+                        else None
+                    ),
+                    "validation_error": (
+                        None
+                        if isinstance(exc, LMError)
+                        else _selection_validation_error(exc)
+                    ),
+                }
+            )
+            if isinstance(exc, LMError):
+                _annotate_selection_failure(
+                    exc,
+                    adapter=adapter,
+                    attempts=attempt_records,
+                    validation_errors=validation_errors,
+                )
+                raise
+            last_error = exc
+            validation_errors.append(_selection_validation_error(exc))
+            if attempt == 1:
+                break
+            validation_feedback = _selection_retry_feedback(exc)
+
+    if last_error is not None:
+        _annotate_selection_failure(
+            last_error,
+            adapter=adapter,
+            attempts=attempt_records,
+            validation_errors=validation_errors,
+        )
+    if isinstance(last_error, PlanConfigurationError):
+        raise last_error
+    failure = ValueError(
+        f"skill selection failed after one retry: {last_error}"
     )
+    _annotate_selection_failure(
+        failure,
+        adapter=adapter,
+        attempts=attempt_records,
+        validation_errors=validation_errors,
+    )
+    raise failure from last_error
 
 
 def _plan_decomposition_point(

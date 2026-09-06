@@ -11,11 +11,12 @@ prose. Nothing there could be.
 
 **No model call occurs anywhere in this module, and that is a stop condition
 rather than a preference.** P-01, FW-REQ-012, and §14.1's rejection of "a ReAct
-self-tool as the recursive plan executor" all say the same thing: one model call
-selects (`workflow_agent.select_skills`), and nothing below it is a model call.
-The assertion is structural — `tests/test_plan.py` parses this file and fails on
-an `import dspy` — because a test that only exercises the happy path cannot see
-a model call added to a branch it does not reach.
+self-tool as the recursive plan executor" all say the same thing: one model
+phase selects (`workflow_agent.select_skills`), with one provider call per
+application attempt and at most one validation-guided retry, and nothing below
+it is a model call. The assertion is structural — `tests/test_plan.py` parses
+this file and fails on an `import dspy` — because a test that only exercises the
+happy path cannot see a model call added to a branch it does not reach.
 
 **Two structures, and they are not the same structure** (§4.13, P-03).
 
@@ -38,14 +39,23 @@ holds is a question asked independently, by something else.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 import uuid
+from collections import Counter
+from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
+from types import SimpleNamespace
 from typing import Any, Iterable, Literal, Mapping, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from fastworkflow.binding_normalizers import normalize_binding_value
 from fastworkflow.skill_catalog import MAX_DEPTH, Skill, SkillCatalog, Step
+from fastworkflow.typed_failure import TypedFailure
 
 #: The flag, read exactly the way `FW_ASK_POLICY` is (EXP-028 decision 6).
 PLAN_MODE_ENV_VAR = "FW_PLAN_DECOMPOSITION"
@@ -104,23 +114,40 @@ NodeLevel = Literal["task", "composite", "atomic", "commands"]
 LEAF_LEVELS: frozenset[str] = frozenset({"atomic", "commands"})
 
 #: Binding precedence (decision 2), recorded per binding with its source:
-#: the explicit utterance; a handle captured by an already-executed leaf; the
-#: skill's `on_repeat` rule; otherwise `needs-user`.
+#: the explicit utterance; a handle captured by an already-executed leaf;
+#: otherwise `needs-user`.
+#:
+#: Historical pre-Gate wording retained for context: "the explicit utterance;
+#: a handle captured by an already-executed leaf; the skill's `on_repeat` rule;
+#: otherwise `needs-user`." Gate 2 proved that treating `on_repeat` as a value
+#: fabricates data; it is now retained separately as policy.
 #:
 #: `skill` is the fifth and is not a precedence tier: it is a value the skill
 #: body itself supplies (`inspect-entity entity_type=identity`), which is not
 #: sourced at bind time at all. Recording it as `utterance` would be a false
-#: provenance claim in a record whose whole purpose is provenance, and dropping
-#: it would leave `inspect-entity`'s required `entity_type` unbound so the
-#: binder would reach for `on_repeat` — a `browse_catalog` fallback — when the
-#: body already said `identity`.
-BindingSource = Literal["utterance", "captured", "on_repeat", "needs-user", "skill"]
+#: provenance claim in a record whose whole purpose is provenance.
+#: The earlier implementation continued: "dropping it would leave
+#: `inspect-entity`'s required `entity_type` unbound so the binder would reach
+#: for `on_repeat` — a `browse_catalog` fallback — when the body already said
+#: `identity`." The literal still binds; only the fallback-as-value claim was
+#: removed.
+BindingSource = Literal["utterance", "captured", "needs-user", "skill"]
+BindingKind = Literal[
+    "exact_text", "normalized_enum", "captured_handle", "skill_literal"
+]
 
 #: Public/private projection (FW-REQ-010B). Every task- and composite-level node
 #: is public, its projection being its rendered `goal` with slots substituted.
 #: Every atomic node, every navigation and handle-binding node, is private.
 Visibility = Literal["public", "private"]
 PlanRecordMode = Literal["off", "shadow", "enforce"]
+EdgeProvenance = Literal[
+    "data",
+    "explicit-order",
+    "composite",
+    "stable-tiebreak",
+    "composite-pack",
+]
 
 
 class _PlanModel(BaseModel):
@@ -136,6 +163,135 @@ class _PlanModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
+class PlanEdge(_PlanModel):
+    """One execution-DAG edge and why it exists."""
+
+    from_goal_id: str
+    to_goal_id: str
+    provenance: EdgeProvenance
+
+
+class CompositeGroup(_PlanModel):
+    """Private orchestration synthesized over existing public task nodes.
+
+    A group is not a selected skill invocation and is never part of the public
+    projection. Its members are the exact task nodes already compiled from the
+    selector's task-first output. ``member_goal_ids`` is in the composite
+    expansion order, which Arm C may schedule; Arm B ignores it.
+    """
+
+    group_id: str
+    composite_skill: str
+    parent_group_id: Optional[str] = None
+    depth: int = Field(default=1, ge=1)
+    member_goal_ids: tuple[str, ...]
+    member_task_keys: tuple[str, ...]
+    shared_bindings: dict[str, Union[str, tuple[str, ...]]] = Field(
+        default_factory=dict
+    )
+    orchestration_edges: tuple[PlanEdge, ...] = ()
+    signature_sha256: str
+
+    @model_validator(mode="after")
+    def _members_align(self) -> "CompositeGroup":
+        if not self.member_goal_ids:
+            raise ValueError("a composite group requires at least one member")
+        if len(self.member_goal_ids) != len(self.member_task_keys):
+            raise ValueError(
+                "composite group member ids and task keys must have equal length"
+            )
+        if len(self.member_goal_ids) != len(set(self.member_goal_ids)):
+            raise ValueError("a composite group cannot repeat a member")
+        return self
+
+
+class CompositePackingMetrics(_PlanModel):
+    """Deterministic compiler counters for private composite packing."""
+
+    candidate_count: int = Field(default=0, ge=0)
+    selected_root_group_count: int = Field(default=0, ge=0)
+    selected_recursive_group_count: int = Field(default=0, ge=0)
+    packed_task_count: int = Field(default=0, ge=0)
+    unpacked_task_count: int = Field(default=0, ge=0)
+    orchestration_edge_count: int = Field(default=0, ge=0)
+    shared_binding_count: int = Field(default=0, ge=0)
+    packing_sha256: str = ""
+
+
+class PlanExecutionMetadata(_PlanModel):
+    """Observable private scheduling/accounting produced by one B/C execution."""
+
+    arm: Literal["b", "c"]
+    packing_applied: bool
+    scheduled_leaf_goal_ids: tuple[str, ...] = ()
+    scheduled_task_goal_ids: tuple[str, ...] = ()
+    schedule_sha256: str
+    composite_group_ids: tuple[str, ...] = ()
+    composite_groups_applied: int = Field(default=0, ge=0)
+    grouped_task_count: int = Field(default=0, ge=0)
+    grouped_leaf_count: int = Field(default=0, ge=0)
+    shared_binding_count: int = Field(default=0, ge=0)
+    context_reuse_count: int = Field(default=0, ge=0)
+    executed_leaf_goal_ids: tuple[str, ...] = ()
+    public_task_keys: tuple[str, ...] = ()
+    # Composition truncation is orthogonal to leaf command execution: a leaf
+    # can carry durable command evidence and still have an answer the provider
+    # stopped at its completion limit. Persist both the affected goals and
+    # their typed reasons so a resumed aggregate cannot silently upgrade them.
+    extraction_truncated_goal_ids: tuple[str, ...] = ()
+    extraction_truncation_failures: dict[str, TypedFailure] = Field(
+        default_factory=dict
+    )
+    # Provider/task terminal failures belong to the aggregate execution record,
+    # not only to the process-local PlanExecutionResult that first observed one.
+    terminal_failure: Optional[TypedFailure] = None
+
+
+class SourceSpan(_PlanModel):
+    """One exact ``[start, end)`` character span in the user utterance."""
+
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    text: str
+
+    @model_validator(mode="after")
+    def _span_matches_text_length(self) -> "SourceSpan":
+        if self.end <= self.start:
+            raise ValueError("a source span end must be greater than its start")
+        if self.end - self.start != len(self.text):
+            raise ValueError("a source span length must equal its recorded text length")
+        return self
+
+
+class InvocationEvidence(_PlanModel):
+    """Selector/caller evidence for one explicitly supplied invocation slot."""
+
+    kind: BindingKind
+    source_spans: tuple[SourceSpan, ...] = ()
+    normalizer: Optional[str] = None
+    command_call_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _kind_matches_evidence(self) -> "InvocationEvidence":
+        if self.kind in ("exact_text", "normalized_enum") and not self.source_spans:
+            raise ValueError(f"{self.kind} evidence requires source spans")
+        if self.kind not in ("exact_text", "normalized_enum") and self.source_spans:
+            raise ValueError(f"{self.kind} evidence cannot carry source spans")
+        if self.kind == "normalized_enum" and not self.normalizer:
+            raise ValueError("normalized_enum evidence requires a normalizer id")
+        if self.kind != "normalized_enum" and self.normalizer is not None:
+            raise ValueError("only normalized_enum evidence may name a normalizer")
+        if self.kind == "captured_handle" and not self.command_call_id:
+            raise ValueError(
+                "captured_handle evidence requires its producing command_call_id"
+            )
+        if self.kind != "captured_handle" and self.command_call_id is not None:
+            raise ValueError(
+                "command_call_id is only valid on captured_handle evidence"
+            )
+        return self
+
+
 class Binding(_PlanModel):
     """One slot value, and where it came from.
 
@@ -147,7 +303,11 @@ class Binding(_PlanModel):
 
     value: Union[str, list[str], None] = None
     source: BindingSource
+    kind: Optional[BindingKind] = None
+    source_spans: tuple[SourceSpan, ...] = ()
+    normalizer: Optional[str] = None
     command_call_id: Optional[str] = None
+    on_repeat_policy: Optional[str] = None
 
     @model_validator(mode="after")
     def _source_matches_evidence(self) -> "Binding":
@@ -161,6 +321,39 @@ class Binding(_PlanModel):
             )
         if self.source != "captured" and self.command_call_id is not None:
             raise ValueError("command_call_id is only valid on a captured binding")
+        expected_source = {
+            "exact_text": "utterance",
+            "normalized_enum": "utterance",
+            "captured_handle": "captured",
+            "skill_literal": "skill",
+            None: "needs-user",
+        }[self.kind]
+        if self.source != expected_source:
+            raise ValueError(
+                f"binding kind {self.kind!r} requires source {expected_source!r}"
+            )
+        if self.kind in ("exact_text", "normalized_enum"):
+            if not self.source_spans:
+                raise ValueError(f"a {self.kind} binding requires source spans")
+            expected_span_count = (
+                len(self.value) if isinstance(self.value, list) else 1
+            )
+            if len(self.source_spans) != expected_span_count:
+                raise ValueError(
+                    f"a {self.kind} binding requires one source span per value"
+                )
+        elif self.source_spans:
+            raise ValueError(f"a {self.kind} binding cannot carry source spans")
+        if self.kind == "normalized_enum" and not self.normalizer:
+            raise ValueError("a normalized_enum binding requires a normalizer id")
+        if self.kind != "normalized_enum" and self.normalizer is not None:
+            raise ValueError("only a normalized_enum binding may name a normalizer")
+        if self.source == "needs-user" and not self.on_repeat_policy:
+            # A missing policy is legal for optional or deliberately unbindable
+            # slots. Required-slot policy is validated by the skill catalogue.
+            pass
+        if self.source != "needs-user" and self.on_repeat_policy is not None:
+            raise ValueError("on_repeat_policy is only valid on needs-user bindings")
         return self
 
     @property
@@ -186,13 +379,17 @@ class PlanNode(_PlanModel):
     #: with no skill, and nothing promotes it).
     skill: Optional[str] = None
     goal_text: str = ""
+    executable_goal_text: Optional[str] = None
+    executable: bool = False
     visibility: Visibility = "private"
+    task_key: Optional[str] = None
     bindings: dict[str, Binding] = Field(default_factory=dict)
     status: LeafStatus = "not-reached"
     budget_limit: Optional[int] = Field(default=None, ge=0)
     budget_consumed: int = Field(default=0, ge=0)
     failure_reason: Optional[str] = None
     command_call_ids: tuple[str, ...] = ()
+    prerequisite_provenance: dict[str, EdgeProvenance] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _leaf_status_has_evidence(self) -> "PlanNode":
@@ -200,6 +397,24 @@ class PlanNode(_PlanModel):
             raise ValueError("a done leaf requires at least one command_call_id")
         if self.budget_limit is not None and self.budget_consumed > self.budget_limit:
             raise ValueError("budget_consumed cannot exceed budget_limit")
+        if self.executable and not self.is_leaf:
+            raise ValueError("only leaf nodes may be executable")
+        if self.executable and not self.executable_goal_text:
+            raise ValueError("an executable leaf requires executable_goal_text")
+        if (
+            self.executable
+            and self.executable_goal_text
+            and _has_unresolved_placeholder(self.executable_goal_text)
+        ):
+            raise ValueError(
+                "an executable leaf goal must be fully rendered (no placeholders)"
+            )
+        unknown_provenance = set(self.prerequisite_provenance) - set(self.prerequisites)
+        if unknown_provenance:
+            raise ValueError(
+                "prerequisite provenance references unknown prerequisites: "
+                + ", ".join(sorted(unknown_provenance))
+            )
         return self
 
     @property
@@ -237,6 +452,12 @@ class PlanRecord(_PlanModel):
     selection_model: Optional[str] = None
     mode: PlanRecordMode = PlanMode.OFF.value
     nodes: tuple[PlanNode, ...] = ()
+    edges: tuple[PlanEdge, ...] = ()
+    requested_public_task_keys: tuple[str, ...] = ()
+    compiled_public_task_keys: tuple[str, ...] = ()
+    composite_groups: tuple[CompositeGroup, ...] = ()
+    packing: CompositePackingMetrics = Field(default_factory=CompositePackingMetrics)
+    execution: Optional[PlanExecutionMetadata] = None
     budget_limit: Optional[int] = Field(default=None, ge=0)
     budget_consumed: int = Field(default=0, ge=0)
 
@@ -299,6 +520,18 @@ class PlanRecord(_PlanModel):
     def add_node(self, node: PlanNode) -> PlanNode:
         self.nodes = self.nodes + (node,)
         return node
+
+    def add_edge(
+        self, from_goal_id: str, to_goal_id: str, provenance: EdgeProvenance
+    ) -> PlanEdge:
+        edge = PlanEdge(
+            from_goal_id=from_goal_id,
+            to_goal_id=to_goal_id,
+            provenance=provenance,
+        )
+        if edge not in self.edges:
+            self.edges = self.edges + (edge,)
+        return edge
 
 
 # ----------------------------------------------------------------------
@@ -363,6 +596,914 @@ class Invocation(_PlanModel):
 
     skill_name: str
     slots: dict[str, Union[str, list[str]]] = Field(default_factory=dict)
+    provenance: dict[str, InvocationEvidence] = Field(default_factory=dict)
+
+
+def _canonical_slot_value(
+    value: Union[str, list[str], tuple[str, ...], None]
+) -> str:
+    if value is None:
+        return "<unbound>"
+    if isinstance(value, (list, tuple)):
+        return "[" + "|".join(str(item) for item in value) + "]"
+    return str(value)
+
+
+def _canonical_value_task_key(
+    skill_name: str,
+    bindings: Mapping[str, Union[str, list[str], tuple[str, ...], None]],
+) -> str:
+    scalar_parts: list[str] = []
+    list_parts: list[str] = []
+    for slot_name in sorted(bindings):
+        value = bindings[slot_name]
+        rendered = _canonical_slot_value(value)
+        if isinstance(value, (list, tuple)):
+            list_parts.append(f"{slot_name}={rendered}")
+        else:
+            scalar_parts.append(f"{slot_name}={rendered}")
+    subject = "|".join(scalar_parts) or "<none>"
+    scope = "|".join(list_parts) or "<none>"
+    return f"{skill_name}::{subject}::{scope}"
+
+
+def _canonical_task_key(skill_name: str, bindings: Mapping[str, Binding]) -> str:
+    return _canonical_value_task_key(
+        skill_name,
+        {slot_name: binding.value for slot_name, binding in bindings.items()},
+    )
+
+
+def _expected_public_keys(
+    catalog: SkillCatalog,
+    skill: Skill,
+    bindings: Mapping[str, Binding],
+) -> tuple[str, ...]:
+    keys: list[str] = []
+    if _visibility(skill.level) == "public":
+        keys.append(_canonical_task_key(skill.name, bindings))
+    if skill.level == "atomic":
+        return tuple(keys)
+    for step in skill.steps:
+        if step.kind == "commands" or step.skill is None:
+            continue
+        child_skill = catalog.get(step.skill)
+        if child_skill is None:
+            continue
+        if step.kind == "for_each":
+            list_binding = bindings.get(step.list_slot or "")
+            list_values = list_binding.value if list_binding is not None else None
+            if isinstance(list_values, list):
+                for position, item in enumerate(list_values):
+                    child_bindings = _child_bindings(
+                        SimpleNamespace(bindings=dict(bindings)),
+                        child_skill,
+                        step.arguments,
+                        loop_variable=step.loop_variable,
+                        loop_value=item,
+                        loop_binding=list_binding,
+                        loop_index=position,
+                    )
+                    keys.extend(_expected_public_keys(catalog, child_skill, child_bindings))
+            elif list_values is not None:
+                child_bindings = _child_bindings(
+                    SimpleNamespace(bindings=dict(bindings)),
+                    child_skill,
+                    step.arguments,
+                    loop_variable=step.loop_variable,
+                )
+                keys.extend(_expected_public_keys(catalog, child_skill, child_bindings))
+            continue
+        child_bindings = _child_bindings(
+            SimpleNamespace(bindings=dict(bindings)),
+            child_skill,
+            step.arguments,
+        )
+        keys.extend(_expected_public_keys(catalog, child_skill, child_bindings))
+    return tuple(keys)
+
+
+def _requested_public_task_keys(
+    catalog: SkillCatalog,
+    invocations: Sequence[Invocation],
+    utterance: str,
+) -> tuple[str, ...]:
+    keys: list[str] = []
+    for invocation in invocations:
+        skill = catalog.get(invocation.skill_name)
+        if skill is None:
+            continue
+        _validate_invocation(skill, invocation, utterance)
+        keys.extend(
+            _expected_public_keys(
+                catalog,
+                skill,
+                _invocation_bindings(skill, invocation, utterance),
+            )
+        )
+    return tuple(keys)
+
+
+@dataclass(frozen=True)
+class _SlotExpression:
+    kind: str
+    slot_name: Optional[str] = None
+    literal: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _CompositePattern:
+    child_skill: str
+    child_expressions: tuple[tuple[str, _SlotExpression], ...]
+    iteration_expression: Optional[_SlotExpression]
+    order: tuple[int, ...]
+    group_path: tuple[tuple[str, tuple[int, ...]], ...]
+
+
+@dataclass(frozen=True)
+class _DerivedAssignment:
+    slot_name: str
+    value: Union[str, tuple[str, ...]]
+    append: bool = False
+
+
+@dataclass(frozen=True)
+class _PatternMatch:
+    node_position: int
+    pattern_index: int
+    assignments: tuple[_DerivedAssignment, ...]
+
+
+@dataclass(frozen=True)
+class _CompositeCandidate:
+    composite_skill: str
+    member_positions: tuple[int, ...]
+    member_goal_ids: tuple[str, ...]
+    member_task_keys: tuple[str, ...]
+    bindings: tuple[tuple[str, Union[str, tuple[str, ...]]], ...]
+    matches: tuple[_PatternMatch, ...]
+
+    @property
+    def stable_key(self) -> tuple[Any, ...]:
+        return (
+            self.composite_skill,
+            self.member_positions,
+            json.dumps(
+                dict(self.bindings),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+
+    @property
+    def order_inversions(self) -> int:
+        return sum(
+            left > right
+            for index, left in enumerate(self.member_positions)
+            for right in self.member_positions[index + 1 :]
+        )
+
+
+_UNSET = object()
+_MIN_COMPOSITE_PACK_MEMBERS = 2
+
+
+def _root_slot_expression(slot: Any) -> _SlotExpression:
+    return _SlotExpression(
+        kind="root-list" if slot.list else "root-scalar",
+        slot_name=slot.name,
+    )
+
+
+def _expression_for_argument(
+    raw: str,
+    environment: Mapping[str, _SlotExpression],
+    *,
+    loop_variable: Optional[str] = None,
+    loop_expression: Optional[_SlotExpression] = None,
+) -> _SlotExpression:
+    if not (raw.startswith("{") and raw.endswith("}")):
+        return _SlotExpression(kind="literal", literal=raw)
+    reference = raw[1:-1].strip()
+    if loop_variable is not None and reference == loop_variable:
+        return loop_expression or _SlotExpression(kind="unresolved")
+    return environment.get(reference, _SlotExpression(kind="unresolved"))
+
+
+def _child_expression_environment(
+    parent_environment: Mapping[str, _SlotExpression],
+    child_skill: Skill,
+    arguments: Mapping[str, str],
+    *,
+    loop_variable: Optional[str] = None,
+    loop_expression: Optional[_SlotExpression] = None,
+) -> dict[str, _SlotExpression]:
+    child_environment: dict[str, _SlotExpression] = {}
+    for slot in child_skill.slots:
+        if slot.name in arguments:
+            child_environment[slot.name] = _expression_for_argument(
+                arguments[slot.name],
+                parent_environment,
+                loop_variable=loop_variable,
+                loop_expression=loop_expression,
+            )
+        elif slot.name in parent_environment:
+            child_environment[slot.name] = parent_environment[slot.name]
+        else:
+            child_environment[slot.name] = _SlotExpression(kind="absent")
+    return child_environment
+
+
+def _list_item_expression(expression: _SlotExpression) -> _SlotExpression:
+    if expression.kind == "root-list":
+        return _SlotExpression(kind="root-item", slot_name=expression.slot_name)
+    return _SlotExpression(kind="unresolved")
+
+
+def _composite_has_exact_task_cover(
+    catalog: SkillCatalog,
+    composite: Skill,
+) -> bool:
+    """Whether inverse packing would omit no executable composite step."""
+    if not composite.steps:
+        return False
+    for step in composite.steps:
+        if step.kind == "guidance":
+            continue
+        if step.kind == "commands" or step.skill is None:
+            return False
+        child = catalog.get(step.skill)
+        if child is None:
+            return False
+        if (
+            child.level == "composite"
+            and not _composite_has_exact_task_cover(catalog, child)
+        ):
+            return False
+    return True
+
+
+def _composite_patterns(
+    catalog: SkillCatalog, composite: Skill
+) -> tuple[_CompositePattern, ...]:
+    if not _composite_has_exact_task_cover(catalog, composite):
+        return ()
+    patterns: list[_CompositePattern] = []
+    root_environment = {
+        slot.name: _root_slot_expression(slot) for slot in composite.slots
+    }
+
+    def walk(
+        skill: Skill,
+        environment: Mapping[str, _SlotExpression],
+        order_prefix: tuple[int, ...],
+        group_path: tuple[tuple[str, tuple[int, ...]], ...],
+    ) -> None:
+        for step in skill.steps:
+            if step.kind in ("commands", "guidance") or step.skill is None:
+                continue
+            child_skill = catalog.get(step.skill)
+            if child_skill is None:
+                continue
+            order = order_prefix + (step.ordinal,)
+            iteration_expression: Optional[_SlotExpression] = None
+            loop_expression: Optional[_SlotExpression] = None
+            if step.kind == "for_each":
+                iteration_expression = environment.get(
+                    step.list_slot or "",
+                    _SlotExpression(kind="unresolved"),
+                )
+                loop_expression = _list_item_expression(iteration_expression)
+            child_environment = _child_expression_environment(
+                environment,
+                child_skill,
+                step.arguments,
+                loop_variable=step.loop_variable,
+                loop_expression=loop_expression,
+            )
+            if child_skill.level == "composite":
+                walk(
+                    child_skill,
+                    child_environment,
+                    order,
+                    group_path + ((child_skill.name, order),),
+                )
+                continue
+            if child_skill.level not in ("task", "atomic"):
+                continue
+            patterns.append(
+                _CompositePattern(
+                    child_skill=child_skill.name,
+                    child_expressions=tuple(sorted(child_environment.items())),
+                    iteration_expression=iteration_expression,
+                    order=order,
+                    group_path=group_path,
+                )
+            )
+
+    walk(
+        composite,
+        root_environment,
+        (),
+        ((composite.name, ()),),
+    )
+    return tuple(sorted(patterns, key=lambda pattern: (pattern.order, pattern.child_skill)))
+
+
+def _normalise_assignment_value(
+    value: Union[str, list[str], tuple[str, ...]],
+) -> Union[str, tuple[str, ...]]:
+    return tuple(value) if isinstance(value, (list, tuple)) else value
+
+
+def _match_expression(
+    expression: _SlotExpression,
+    value: Union[str, list[str], None],
+) -> Optional[_DerivedAssignment]:
+    if expression.kind == "literal":
+        return (
+            _DerivedAssignment("", "")
+            if value == expression.literal
+            else None
+        )
+    if expression.kind in ("unresolved", "absent"):
+        return _DerivedAssignment("", "") if value is None else None
+    if value is None or expression.slot_name is None:
+        return None
+    if expression.kind == "root-item":
+        if isinstance(value, list):
+            return None
+        return _DerivedAssignment(
+            expression.slot_name,
+            str(value),
+            append=True,
+        )
+    if expression.kind == "root-list":
+        if not isinstance(value, list):
+            return None
+        return _DerivedAssignment(
+            expression.slot_name,
+            tuple(str(item) for item in value),
+        )
+    if expression.kind == "root-scalar":
+        if isinstance(value, list):
+            return None
+        return _DerivedAssignment(expression.slot_name, str(value))
+    return None
+
+
+def _pattern_match(
+    node: PlanNode,
+    child_skill: Skill,
+    pattern: _CompositePattern,
+    *,
+    node_position: int,
+    pattern_index: int,
+) -> Optional[_PatternMatch]:
+    if node.skill != pattern.child_skill:
+        return None
+    expressions = dict(pattern.child_expressions)
+    assignments: list[_DerivedAssignment] = []
+    actual_names = set(node.bindings)
+    for slot in child_skill.slots:
+        expression = expressions.get(slot.name, _SlotExpression(kind="absent"))
+        if slot.name not in actual_names:
+            if expression.kind == "absent" and not slot.required:
+                continue
+            return None
+        assignment = _match_expression(
+            expression,
+            node.bindings[slot.name].value,
+        )
+        if assignment is None:
+            return None
+        if assignment.slot_name:
+            assignments.append(assignment)
+    if actual_names - {slot.name for slot in child_skill.slots}:
+        return None
+    return _PatternMatch(
+        node_position=node_position,
+        pattern_index=pattern_index,
+        assignments=tuple(assignments),
+    )
+
+
+def _merge_assignments(
+    current: Mapping[str, Union[str, tuple[str, ...]]],
+    additions: Sequence[_DerivedAssignment],
+) -> Optional[dict[str, Union[str, tuple[str, ...]]]]:
+    merged = dict(current)
+    for addition in additions:
+        existing = merged.get(addition.slot_name, _UNSET)
+        if addition.append:
+            if existing is _UNSET:
+                merged[addition.slot_name] = (str(addition.value),)
+            elif isinstance(existing, tuple):
+                merged[addition.slot_name] = existing + (str(addition.value),)
+            else:
+                return None
+            continue
+        value = _normalise_assignment_value(addition.value)
+        if existing is not _UNSET and existing != value:
+            return None
+        merged[addition.slot_name] = value
+    return merged
+
+
+def _expression_value(
+    expression: _SlotExpression,
+    assignments: Mapping[str, Union[str, tuple[str, ...]]],
+    iteration_items: Mapping[str, str],
+) -> Any:
+    if expression.kind == "literal":
+        return expression.literal
+    if expression.kind in ("unresolved", "absent"):
+        return _UNSET
+    if expression.slot_name is None:
+        return _UNSET
+    if expression.kind == "root-item":
+        return iteration_items.get(expression.slot_name, _UNSET)
+    return assignments.get(expression.slot_name, _UNSET)
+
+
+def _generated_pattern_keys(
+    pattern: _CompositePattern,
+    child_skill: Skill,
+    assignments: Mapping[str, Union[str, tuple[str, ...]]],
+) -> tuple[str, ...]:
+    iterations: tuple[Mapping[str, str], ...]
+    if pattern.iteration_expression is None:
+        iterations = ({},)
+    else:
+        source = _expression_value(pattern.iteration_expression, assignments, {})
+        if source is _UNSET or source is None:
+            return ()
+        if not isinstance(source, tuple):
+            return ()
+        source_slot = pattern.iteration_expression.slot_name
+        if source_slot is None:
+            return ()
+        iterations = tuple({source_slot: item} for item in source)
+
+    keys: list[str] = []
+    expressions = dict(pattern.child_expressions)
+    for iteration_items in iterations:
+        values: dict[str, Union[str, tuple[str, ...], None]] = {}
+        for slot in child_skill.slots:
+            expression = expressions.get(slot.name, _SlotExpression(kind="absent"))
+            value = _expression_value(expression, assignments, iteration_items)
+            if value is _UNSET:
+                if expression.kind == "unresolved" or slot.required:
+                    values[slot.name] = None
+                continue
+            values[slot.name] = value
+        keys.append(_canonical_value_task_key(child_skill.name, values))
+    return tuple(keys)
+
+
+def _required_composite_slots_bound(
+    composite: Skill,
+    assignments: Mapping[str, Union[str, tuple[str, ...]]],
+) -> bool:
+    for slot in composite.required_slots:
+        value = assignments.get(slot.name)
+        if value is None or value == ():
+            return False
+    return True
+
+
+def _candidate_from_seed(
+    catalog: SkillCatalog,
+    composite: Skill,
+    patterns: Sequence[_CompositePattern],
+    eligible_nodes: Sequence[PlanNode],
+    matches_by_node: Mapping[int, tuple[_PatternMatch, ...]],
+    seed: _PatternMatch,
+) -> Optional[_CompositeCandidate]:
+    """Build one maximal exact candidate under the seed's scalar bindings."""
+    assignments = _merge_assignments({}, seed.assignments)
+    if assignments is None:
+        return None
+    chosen: dict[int, _PatternMatch] = {seed.node_position: seed}
+    for node_position in range(len(eligible_nodes)):
+        if node_position in chosen:
+            continue
+        for match in matches_by_node.get(node_position, ()):
+            merged = _merge_assignments(assignments, match.assignments)
+            if merged is None:
+                continue
+            chosen[node_position] = match
+            assignments = merged
+            break
+
+    ordered_matches = tuple(
+        sorted(
+            chosen.values(),
+            key=lambda match: (
+                patterns[match.pattern_index].order,
+                match.node_position,
+                match.pattern_index,
+            ),
+        )
+    )
+    canonical_assignments: dict[str, Union[str, tuple[str, ...]]] = {}
+    for match in ordered_matches:
+        merged = _merge_assignments(canonical_assignments, match.assignments)
+        if merged is None:
+            return None
+        canonical_assignments = merged
+    if len(ordered_matches) < _MIN_COMPOSITE_PACK_MEMBERS:
+        return None
+    if not _required_composite_slots_bound(composite, canonical_assignments):
+        return None
+
+    generated_keys: list[str] = []
+    for pattern in patterns:
+        child_skill = catalog.get(pattern.child_skill)
+        if child_skill is None:
+            return None
+        generated_keys.extend(
+            _generated_pattern_keys(
+                pattern,
+                child_skill,
+                canonical_assignments,
+            )
+        )
+    member_nodes = tuple(
+        eligible_nodes[match.node_position] for match in ordered_matches
+    )
+    member_keys = tuple(node.task_key or "" for node in member_nodes)
+    if not all(member_keys) or tuple(generated_keys) != member_keys:
+        return None
+    return _CompositeCandidate(
+        composite_skill=composite.name,
+        member_positions=tuple(match.node_position for match in ordered_matches),
+        member_goal_ids=tuple(node.goal_id for node in member_nodes),
+        member_task_keys=member_keys,
+        bindings=tuple(sorted(canonical_assignments.items())),
+        matches=ordered_matches,
+    )
+
+
+def _has_composite_ancestor(record: PlanRecord, node: PlanNode) -> bool:
+    ancestor = record.node(node.parent_goal_id) if node.parent_goal_id else None
+    while ancestor is not None:
+        if ancestor.level == "composite":
+            return True
+        ancestor = (
+            record.node(ancestor.parent_goal_id)
+            if ancestor.parent_goal_id is not None
+            else None
+        )
+    return False
+
+
+def _packing_eligible_nodes(record: PlanRecord) -> tuple[PlanNode, ...]:
+    return tuple(
+        node
+        for node in record.nodes
+        if node.level == "task"
+        and node.parent_goal_id is None
+        and node.is_public
+        and node.task_key is not None
+        and not _has_composite_ancestor(record, node)
+    )
+
+
+def _composite_candidates(
+    record: PlanRecord,
+    catalog: SkillCatalog,
+) -> tuple[
+    tuple[_CompositeCandidate, ...],
+    dict[str, tuple[_CompositePattern, ...]],
+    tuple[PlanNode, ...],
+]:
+    eligible_nodes = _packing_eligible_nodes(record)
+    candidates: dict[tuple[Any, ...], _CompositeCandidate] = {}
+    patterns_by_composite: dict[str, tuple[_CompositePattern, ...]] = {}
+    for composite_name in catalog:
+        composite = catalog[composite_name]
+        if composite.level != "composite":
+            continue
+        patterns = _composite_patterns(catalog, composite)
+        patterns_by_composite[composite.name] = patterns
+        if not patterns:
+            continue
+        matches_by_node: dict[int, tuple[_PatternMatch, ...]] = {}
+        for node_position, node in enumerate(eligible_nodes):
+            matches: list[_PatternMatch] = []
+            for pattern_index, pattern in enumerate(patterns):
+                child_skill = catalog.get(pattern.child_skill)
+                if child_skill is None:
+                    continue
+                match = _pattern_match(
+                    node,
+                    child_skill,
+                    pattern,
+                    node_position=node_position,
+                    pattern_index=pattern_index,
+                )
+                if match is not None:
+                    matches.append(match)
+            if matches:
+                matches_by_node[node_position] = tuple(
+                    sorted(
+                        matches,
+                        key=lambda match: (
+                            patterns[match.pattern_index].order,
+                            match.pattern_index,
+                        ),
+                    )
+                )
+        seeds = tuple(
+            match
+            for node_position in sorted(matches_by_node)
+            for match in matches_by_node[node_position]
+        )
+        for seed in seeds:
+            candidate = _candidate_from_seed(
+                catalog,
+                composite,
+                patterns,
+                eligible_nodes,
+                matches_by_node,
+                seed,
+            )
+            if candidate is not None:
+                candidates[candidate.stable_key] = candidate
+    return (
+        tuple(sorted(candidates.values(), key=lambda candidate: candidate.stable_key)),
+        patterns_by_composite,
+        eligible_nodes,
+    )
+
+
+def _packing_is_better(
+    proposed: tuple[int, ...],
+    incumbent: tuple[int, ...],
+    candidates: Sequence[_CompositeCandidate],
+) -> bool:
+    def primary(selection: tuple[int, ...]) -> tuple[int, int, int, int]:
+        sizes = [len(candidates[index].member_positions) for index in selection]
+        return (
+            sum(sizes),
+            sum(size * size for size in sizes),
+            -len(sizes),
+            -sum(candidates[index].order_inversions for index in selection),
+        )
+
+    proposed_primary = primary(proposed)
+    incumbent_primary = primary(incumbent)
+    if proposed_primary != incumbent_primary:
+        return proposed_primary > incumbent_primary
+    proposed_key = tuple(candidates[index].stable_key for index in proposed)
+    incumbent_key = tuple(candidates[index].stable_key for index in incumbent)
+    return proposed_key < incumbent_key
+
+
+def _select_non_overlapping_candidates(
+    candidates: Sequence[_CompositeCandidate],
+    task_count: int,
+) -> tuple[_CompositeCandidate, ...]:
+    """Choose the deterministic maximum-coverage non-overlapping packing.
+
+    The objective is lexicographic: tasks covered, concentration into larger
+    groups, fewer groups, fewer task-order inversions, then the canonical
+    composite/member/binding key. The memoized exact set-packing search matters:
+    largest-candidate-first can choose one three-task group over two compatible
+    two-task groups and leave a task unpacked.
+    """
+    if not candidates or task_count == 0:
+        return ()
+    masks = tuple(
+        sum(1 << position for position in candidate.member_positions)
+        for candidate in candidates
+    )
+    by_position: dict[int, tuple[int, ...]] = {
+        position: tuple(
+            index
+            for index, mask in enumerate(masks)
+            if mask & (1 << position)
+        )
+        for position in range(task_count)
+    }
+
+    @lru_cache(maxsize=None)
+    def choose(remaining_mask: int) -> tuple[int, ...]:
+        if remaining_mask == 0:
+            return ()
+        first_bit = remaining_mask & -remaining_mask
+        first_position = first_bit.bit_length() - 1
+        best = choose(remaining_mask ^ first_bit)
+        for candidate_index in by_position.get(first_position, ()):
+            candidate_mask = masks[candidate_index]
+            if candidate_mask & remaining_mask != candidate_mask:
+                continue
+            remainder = choose(remaining_mask ^ candidate_mask)
+            proposed = tuple(sorted((candidate_index, *remainder)))
+            if _packing_is_better(proposed, best, candidates):
+                best = proposed
+        return best
+
+    selected = choose((1 << task_count) - 1)
+    return tuple(candidates[index] for index in selected)
+
+
+def _canonical_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _group_edges(member_goal_ids: Sequence[str]) -> tuple[PlanEdge, ...]:
+    return tuple(
+        PlanEdge(
+            from_goal_id=left,
+            to_goal_id=right,
+            provenance="composite-pack",
+        )
+        for left, right in zip(member_goal_ids, member_goal_ids[1:])
+    )
+
+
+def _composite_group_payload(
+    *,
+    group_id: str,
+    composite_skill: str,
+    parent_group_id: Optional[str],
+    depth: int,
+    member_goal_ids: Sequence[str],
+    member_task_keys: Sequence[str],
+    shared_bindings: Mapping[str, Union[str, tuple[str, ...]]],
+    orchestration_edges: Sequence[PlanEdge],
+) -> dict[str, Any]:
+    return {
+        "group_id": group_id,
+        "composite_skill": composite_skill,
+        "parent_group_id": parent_group_id,
+        "depth": depth,
+        "member_goal_ids": tuple(member_goal_ids),
+        "member_task_keys": tuple(member_task_keys),
+        "shared_bindings": dict(sorted(shared_bindings.items())),
+        "orchestration_edges": [
+            edge.model_dump(mode="json") for edge in orchestration_edges
+        ],
+    }
+
+
+def _composite_group(
+    *,
+    group_id: str,
+    composite_skill: str,
+    parent_group_id: Optional[str],
+    depth: int,
+    member_nodes: Sequence[PlanNode],
+    shared_bindings: Mapping[str, Union[str, tuple[str, ...]]],
+) -> CompositeGroup:
+    member_goal_ids = tuple(node.goal_id for node in member_nodes)
+    member_task_keys = tuple(node.task_key or "" for node in member_nodes)
+    edges = _group_edges(member_goal_ids)
+    signature_payload = _composite_group_payload(
+        group_id=group_id,
+        composite_skill=composite_skill,
+        parent_group_id=parent_group_id,
+        depth=depth,
+        member_goal_ids=member_goal_ids,
+        member_task_keys=member_task_keys,
+        shared_bindings=shared_bindings,
+        orchestration_edges=edges,
+    )
+    return CompositeGroup(
+        group_id=group_id,
+        composite_skill=composite_skill,
+        parent_group_id=parent_group_id,
+        depth=depth,
+        member_goal_ids=member_goal_ids,
+        member_task_keys=member_task_keys,
+        shared_bindings=dict(sorted(shared_bindings.items())),
+        orchestration_edges=edges,
+        signature_sha256=_canonical_sha256(signature_payload),
+    )
+
+
+def _groups_for_candidate(
+    candidate: _CompositeCandidate,
+    *,
+    root_ordinal: int,
+    eligible_nodes: Sequence[PlanNode],
+    patterns: Sequence[_CompositePattern],
+) -> tuple[CompositeGroup, ...]:
+    root_group_id = f"pack-{root_ordinal}"
+    bindings = dict(candidate.bindings)
+    matches = candidate.matches
+    root_nodes = tuple(
+        eligible_nodes[match.node_position] for match in matches
+    )
+    groups: list[CompositeGroup] = [
+        _composite_group(
+            group_id=root_group_id,
+            composite_skill=candidate.composite_skill,
+            parent_group_id=None,
+            depth=1,
+            member_nodes=root_nodes,
+            shared_bindings=bindings,
+        )
+    ]
+
+    nested_members: dict[
+        tuple[tuple[str, tuple[int, ...]], ...],
+        list[PlanNode],
+    ] = {}
+    for match in matches:
+        pattern = patterns[match.pattern_index]
+        node = eligible_nodes[match.node_position]
+        for depth in range(2, len(pattern.group_path) + 1):
+            prefix = pattern.group_path[:depth]
+            members = nested_members.setdefault(prefix, [])
+            if node not in members:
+                members.append(node)
+
+    path_ids: dict[
+        tuple[tuple[str, tuple[int, ...]], ...],
+        str,
+    ] = {((candidate.composite_skill, ()),): root_group_id}
+    child_counts: Counter[str] = Counter()
+    for path in sorted(nested_members, key=lambda item: (len(item), item)):
+        parent_path = path[:-1]
+        parent_group_id = path_ids.get(parent_path, root_group_id)
+        child_counts[parent_group_id] += 1
+        group_id = f"{parent_group_id}.{child_counts[parent_group_id]}"
+        path_ids[path] = group_id
+        groups.append(
+            _composite_group(
+                group_id=group_id,
+                composite_skill=path[-1][0],
+                parent_group_id=parent_group_id,
+                depth=len(path),
+                member_nodes=nested_members[path],
+                shared_bindings=bindings,
+            )
+        )
+    return tuple(groups)
+
+
+def _synthesize_composite_packing(
+    record: PlanRecord,
+    catalog: SkillCatalog,
+) -> None:
+    candidates, patterns_by_composite, eligible_nodes = _composite_candidates(
+        record,
+        catalog,
+    )
+    selected = _select_non_overlapping_candidates(
+        candidates,
+        len(eligible_nodes),
+    )
+    selected = tuple(
+        sorted(
+            selected,
+            key=lambda candidate: (
+                min(candidate.member_positions),
+                candidate.stable_key,
+            ),
+        )
+    )
+    groups: list[CompositeGroup] = []
+    packed_positions: set[int] = set()
+    for root_ordinal, candidate in enumerate(selected, start=1):
+        packed_positions.update(candidate.member_positions)
+        groups.extend(
+            _groups_for_candidate(
+                candidate,
+                root_ordinal=root_ordinal,
+                eligible_nodes=eligible_nodes,
+                patterns=patterns_by_composite[candidate.composite_skill],
+            )
+        )
+    group_tuple = tuple(groups)
+    packing_payload = [
+        group.model_dump(mode="json") for group in group_tuple
+    ]
+    record.composite_groups = group_tuple
+    record.packing = CompositePackingMetrics(
+        candidate_count=len(candidates),
+        selected_root_group_count=len(selected),
+        selected_recursive_group_count=max(0, len(group_tuple) - len(selected)),
+        packed_task_count=len(packed_positions),
+        unpacked_task_count=len(eligible_nodes) - len(packed_positions),
+        orchestration_edge_count=sum(
+            len(group.orchestration_edges) for group in group_tuple
+        ),
+        shared_binding_count=sum(
+            len(group.shared_bindings)
+            for group in group_tuple
+            if group.parent_group_id is None
+        ),
+        packing_sha256=_canonical_sha256(packing_payload),
+    )
 
 
 # ----------------------------------------------------------------------
@@ -403,6 +1544,22 @@ def expand(
     record._catalog = catalog  # noqa: SLF001 - see _catalog's declaration
     record._utterance = utterance
 
+    requested_public_keys = _requested_public_task_keys(
+        catalog, invocations, utterance
+    )
+    duplicate_requested = sorted(
+        key
+        for key, count in Counter(requested_public_keys).items()
+        if count > 1
+    )
+    if duplicate_requested:
+        raise PlanConfigurationError(
+            "duplicate task coverage in requested public task keys: "
+            + ", ".join(duplicate_requested)
+        )
+    record.requested_public_task_keys = tuple(requested_public_keys)
+
+    previous_root_goal_id: Optional[str] = None
     for index, invocation in enumerate(invocations, start=1):
         skill = catalog.get(invocation.skill_name)
         if skill is None:
@@ -416,7 +1573,7 @@ def expand(
                     skill=None,
                     goal_text=invocation.skill_name,
                     visibility="private",
-                    bindings=_literal_bindings(invocation.slots),
+                    bindings=_literal_bindings(invocation.slots, utterance),
                     status="blocked",
                     failure_reason=(
                         f"selector named '{invocation.skill_name}', which is "
@@ -426,21 +1583,43 @@ def expand(
             )
             continue
         _validate_invocation(skill, invocation, utterance)
-        bindings = _invocation_bindings(skill, invocation)
+        bindings = _invocation_bindings(skill, invocation, utterance)
         node = record.add_node(
             PlanNode(
                 goal_id=f"g{index}",
                 level=_node_level(skill),
                 skill=skill.name,
                 goal_text="",
+                executable_goal_text=None,
+                executable=False,
                 visibility=_visibility(skill.level),
+                task_key=_canonical_task_key(skill.name, bindings),
                 bindings=bindings,
                 status="needs-user" if _needs_user(bindings) else "not-reached",
             )
         )
-        node.goal_text = _render(skill.goal or skill.description, node.bindings)
+        node.goal_text = (
+            _invocation_goal_text(skill, node.bindings)
+            if skill.level == "atomic"
+            else _render(skill.goal or skill.description, node.bindings)
+        )
+        _set_executable_state(node)
+        if previous_root_goal_id is not None:
+            record.add_edge(previous_root_goal_id, node.goal_id, "stable-tiebreak")
+        previous_root_goal_id = node.goal_id
         if not _awaiting(node):
             _expand_children(record, node, catalog)
+    compiled_public_keys = tuple(
+        node.task_key for node in record.public_nodes if node.task_key is not None
+    )
+    record.compiled_public_task_keys = compiled_public_keys
+    if Counter(requested_public_keys) != Counter(compiled_public_keys):
+        raise PlanConfigurationError(
+            "requested public task-key multiset does not match compiled public "
+            "task-key multiset"
+        )
+    _synthesize_composite_packing(record, catalog)
+    validate_compiled_plan(record)
     return record
 
 
@@ -477,18 +1656,34 @@ def _expand_children(
                 level="commands",
                 skill=None,
                 text=skill.body.strip(),
-                bindings={},
+                bindings=node.bindings,
             )
         )
-        _chain(created)
+        _chain(record, created)
         return tuple(created)
 
     previous_step: tuple[PlanNode, ...] = ()
     for step in skill.steps:
+        if step.kind == "guidance":
+            if not previous_step:
+                raise PlanConfigurationError(
+                    f"skill {skill.name} step {step.ordinal} is guidance with "
+                    "no preceding executable step"
+                )
+            guidance = _render(step.text, node.bindings)
+            for prior in previous_step:
+                prior.goal_text = f"{prior.goal_text}\n\n{guidance}"
+                _set_executable_state(prior)
+            continue
         current_step = tuple(_expand_step(record, node, skill, step, catalog))
         prerequisites = tuple(item.goal_id for item in previous_step)
         for child in current_step:
             child.prerequisites = prerequisites
+            child.prerequisite_provenance = {
+                goal_id: "explicit-order" for goal_id in prerequisites
+            }
+            for goal_id in prerequisites:
+                record.add_edge(goal_id, child.goal_id, "explicit-order")
         created.extend(current_step)
         if current_step:
             previous_step = current_step
@@ -511,7 +1706,7 @@ def _expand_step(
                 level="commands",
                 skill=None,
                 text=step.text,
-                bindings={},
+                bindings=node.bindings,
             )
         ]
 
@@ -539,11 +1734,13 @@ def _expand_step(
         ordinal=step.ordinal,
         level=_node_level(child_skill),
         skill=child_skill.name,
-        text=step.text,
+        text=_render(step.text, node.bindings),
         bindings=bindings,
         goal_template=child_skill.goal,
         visibility=_visibility(child_skill.level),
     )
+    if _step_has_data_dependency(step, node):
+        record.add_edge(node.goal_id, child.goal_id, "data")
     if not _awaiting(child):
         _expand_children(record, child, catalog)
     return [child]
@@ -577,24 +1774,27 @@ def _fan_out(
             ordinal=step.ordinal,
             level=_node_level(child_skill),
             skill=child_skill.name,
-            text=step.text,
+            text=_render(step.text, node.bindings),
             bindings=_child_bindings(
                 node, child_skill, step.arguments, loop_variable=step.loop_variable
             ),
             goal_template=child_skill.goal,
             visibility=_visibility(child_skill.level),
         )
+        if _step_has_data_dependency(step, node):
+            record.add_edge(node.goal_id, child.goal_id, "data")
         return [child]
 
     created: list[PlanNode] = []
-    for position, element in enumerate(values, start=1):
+    for position, element in enumerate(values):
         bindings = _child_bindings(
             node,
             child_skill,
             step.arguments,
             loop_variable=step.loop_variable,
             loop_value=element,
-            loop_source=binding.source if binding else "utterance",
+            loop_binding=binding,
+            loop_index=position,
         )
         child = _add_child(
             record,
@@ -602,12 +1802,14 @@ def _fan_out(
             ordinal=step.ordinal,
             level=_node_level(child_skill),
             skill=child_skill.name,
-            text=step.text,
+            text=_render(step.text, node.bindings),
             bindings=bindings,
             goal_template=child_skill.goal,
             visibility=_visibility(child_skill.level),
-            suffix=f"{step.ordinal}.{position}",
+            suffix=f"{step.ordinal}.{position + 1}",
         )
+        if _step_has_data_dependency(step, node):
+            record.add_edge(node.goal_id, child.goal_id, "data")
         if not _awaiting(child):
             _expand_children(record, child, catalog)
         created.append(child)
@@ -637,13 +1839,21 @@ def _add_child(
         skill=skill,
         goal_text=_render(goal_template or text, bindings),
         visibility=visibility,  # type: ignore[arg-type]
+        task_key=(
+            _canonical_task_key(skill, bindings)
+            if skill is not None and visibility == "public"
+            else None
+        ),
         bindings=dict(bindings),
         status="needs-user" if _needs_user(bindings) else "not-reached",
     )
-    return record.add_node(node)
+    _set_executable_state(node)
+    created = record.add_node(node)
+    record.add_edge(parent.goal_id, created.goal_id, "composite")
+    return created
 
 
-def _chain(nodes: Sequence[PlanNode]) -> None:
+def _chain(record: PlanRecord, nodes: Sequence[PlanNode]) -> None:
     """Sequential prerequisites within one node's children (decision 3).
 
     Across sibling task nodes there are no edges at all — three leavers are
@@ -651,6 +1861,298 @@ def _chain(nodes: Sequence[PlanNode]) -> None:
     """
     for previous, node in zip(nodes, nodes[1:]):
         node.prerequisites = (previous.goal_id,)
+        node.prerequisite_provenance = {previous.goal_id: "explicit-order"}
+        record.add_edge(previous.goal_id, node.goal_id, "explicit-order")
+
+
+def _set_executable_state(node: PlanNode) -> None:
+    executable = (
+        node.level in LEAF_LEVELS
+        and not _awaiting(node)
+        and not _has_unresolved_placeholder(node.goal_text)
+    )
+    node.executable_goal_text = node.goal_text if executable else None
+    node.executable = executable
+
+
+def _validate_composite_packing(record: PlanRecord, known: set[str]) -> None:
+    groups = record.composite_groups
+    group_ids = [group.group_id for group in groups]
+    if len(group_ids) != len(set(group_ids)):
+        raise PlanConfigurationError("composite packing repeats a group_id")
+    by_group_id = {group.group_id: group for group in groups}
+    eligible_nodes = _packing_eligible_nodes(record)
+    eligible_ids = {node.goal_id for node in eligible_nodes}
+    root_member_ids: set[str] = set()
+    packing_adjacency: dict[str, set[str]] = {
+        goal_id: set() for goal_id in known
+    }
+
+    for group in groups:
+        if group.parent_group_id is None:
+            if group.depth != 1:
+                raise PlanConfigurationError(
+                    f"root composite group {group.group_id} must have depth 1"
+                )
+            if len(group.member_goal_ids) < _MIN_COMPOSITE_PACK_MEMBERS:
+                raise PlanConfigurationError(
+                    f"root composite group {group.group_id} has fewer than "
+                    f"{_MIN_COMPOSITE_PACK_MEMBERS} task members"
+                )
+            overlap = root_member_ids & set(group.member_goal_ids)
+            if overlap:
+                raise PlanConfigurationError(
+                    "selected composite groups overlap task nodes: "
+                    + ", ".join(sorted(overlap))
+                )
+            root_member_ids.update(group.member_goal_ids)
+        else:
+            parent = by_group_id.get(group.parent_group_id)
+            if parent is None:
+                raise PlanConfigurationError(
+                    f"composite group {group.group_id} names unknown parent "
+                    f"{group.parent_group_id}"
+                )
+            if group.depth != parent.depth + 1:
+                raise PlanConfigurationError(
+                    f"composite group {group.group_id} depth does not follow "
+                    f"parent {parent.group_id}"
+                )
+            if not set(group.member_goal_ids) <= set(parent.member_goal_ids):
+                raise PlanConfigurationError(
+                    f"composite group {group.group_id} contains a task outside "
+                    f"parent {parent.group_id}"
+                )
+
+        if not set(group.member_goal_ids) <= eligible_ids:
+            raise PlanConfigurationError(
+                f"composite group {group.group_id} references an ineligible "
+                "or unknown public task node"
+            )
+        expected_task_keys = tuple(
+            (record.node(goal_id).task_key if record.node(goal_id) else None)
+            for goal_id in group.member_goal_ids
+        )
+        if expected_task_keys != group.member_task_keys:
+            raise PlanConfigurationError(
+                f"composite group {group.group_id} task keys do not match "
+                "its member nodes"
+            )
+        expected_edges = _group_edges(group.member_goal_ids)
+        if group.orchestration_edges != expected_edges:
+            raise PlanConfigurationError(
+                f"composite group {group.group_id} orchestration edges are "
+                "not its deterministic member chain"
+            )
+        expected_signature = _canonical_sha256(
+            _composite_group_payload(
+                group_id=group.group_id,
+                composite_skill=group.composite_skill,
+                parent_group_id=group.parent_group_id,
+                depth=group.depth,
+                member_goal_ids=group.member_goal_ids,
+                member_task_keys=group.member_task_keys,
+                shared_bindings=group.shared_bindings,
+                orchestration_edges=group.orchestration_edges,
+            )
+        )
+        if group.signature_sha256 != expected_signature:
+            raise PlanConfigurationError(
+                f"composite group {group.group_id} signature is not deterministic"
+            )
+        for edge in group.orchestration_edges:
+            if edge.from_goal_id not in known or edge.to_goal_id not in known:
+                raise PlanConfigurationError(
+                    f"composite group edge {edge.from_goal_id}->{edge.to_goal_id} "
+                    "references an unknown node"
+                )
+            packing_adjacency[edge.from_goal_id].add(edge.to_goal_id)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(goal_id: str) -> None:
+        if goal_id in visiting:
+            raise PlanConfigurationError(
+                f"composite packing contains a cycle through {goal_id}"
+            )
+        if goal_id in visited:
+            return
+        visiting.add(goal_id)
+        for child_id in packing_adjacency[goal_id]:
+            visit(child_id)
+        visiting.remove(goal_id)
+        visited.add(goal_id)
+
+    for goal_id in known:
+        visit(goal_id)
+
+    root_groups = tuple(
+        group for group in groups if group.parent_group_id is None
+    )
+    expected_metrics = {
+        "selected_root_group_count": len(root_groups),
+        "selected_recursive_group_count": len(groups) - len(root_groups),
+        "packed_task_count": len(root_member_ids),
+        "unpacked_task_count": len(eligible_nodes) - len(root_member_ids),
+        "orchestration_edge_count": sum(
+            len(group.orchestration_edges) for group in groups
+        ),
+        "shared_binding_count": sum(
+            len(group.shared_bindings) for group in root_groups
+        ),
+    }
+    for field_name, expected in expected_metrics.items():
+        if getattr(record.packing, field_name) != expected:
+            raise PlanConfigurationError(
+                f"composite packing metric {field_name} is "
+                f"{getattr(record.packing, field_name)}, expected {expected}"
+            )
+    if record.packing.candidate_count < len(root_groups):
+        raise PlanConfigurationError(
+            "composite packing selected more root groups than candidates"
+        )
+    expected_packing_sha = _canonical_sha256(
+        [group.model_dump(mode="json") for group in groups]
+    )
+    if (
+        record.packing.packing_sha256
+        and record.packing.packing_sha256 != expected_packing_sha
+    ):
+        raise PlanConfigurationError(
+            "composite packing serialization digest does not match its groups"
+        )
+
+    execution = record.execution
+    if execution is not None:
+        unknown_execution_groups = (
+            set(execution.composite_group_ids) - set(group_ids)
+        )
+        if unknown_execution_groups:
+            raise PlanConfigurationError(
+                "execution metadata references unknown composite groups: "
+                + ", ".join(sorted(unknown_execution_groups))
+            )
+        if Counter(execution.public_task_keys) != Counter(
+            record.compiled_public_task_keys
+        ):
+            raise PlanConfigurationError(
+                "execution metadata public task keys drift from compiled coverage"
+            )
+        unknown_schedule_nodes = (
+            set(execution.scheduled_leaf_goal_ids)
+            | set(execution.scheduled_task_goal_ids)
+            | set(execution.executed_leaf_goal_ids)
+        ) - known
+        if unknown_schedule_nodes:
+            raise PlanConfigurationError(
+                "execution metadata references unknown plan nodes: "
+                + ", ".join(sorted(unknown_schedule_nodes))
+            )
+
+
+def validate_compiled_plan(record: PlanRecord) -> None:
+    """Enforce coverage, overlap, DAG, and rendered-goal invariants."""
+    node_ids = [node.goal_id for node in record.nodes]
+    if len(node_ids) != len(set(node_ids)):
+        raise PlanConfigurationError("compiled plan repeats a goal_id")
+    known = set(node_ids)
+
+    requested = Counter(record.requested_public_task_keys)
+    compiled = Counter(record.compiled_public_task_keys)
+    if requested != compiled:
+        raise PlanConfigurationError(
+            "requested public task-key multiset does not match compiled public "
+            "task-key multiset"
+        )
+    duplicated = sorted(key for key, count in compiled.items() if count > 1)
+    if duplicated:
+        raise PlanConfigurationError(
+            "compiled public task coverage overlaps: " + ", ".join(duplicated)
+        )
+
+    adjacency: dict[str, set[str]] = {goal_id: set() for goal_id in known}
+    edge_pairs = set()
+    for edge in record.edges:
+        if edge.from_goal_id not in known or edge.to_goal_id not in known:
+            raise PlanConfigurationError(
+                f"plan edge {edge.from_goal_id}->{edge.to_goal_id} "
+                "references an unknown node"
+            )
+        if edge.from_goal_id == edge.to_goal_id:
+            raise PlanConfigurationError(
+                f"plan edge {edge.from_goal_id}->{edge.to_goal_id} is a self-cycle"
+            )
+        adjacency[edge.from_goal_id].add(edge.to_goal_id)
+        edge_pairs.add((edge.from_goal_id, edge.to_goal_id))
+
+    for node in record.nodes:
+        if set(node.prerequisite_provenance) != set(node.prerequisites):
+            raise PlanConfigurationError(
+                f"node {node.goal_id} prerequisite provenance is incomplete"
+            )
+        for prerequisite in node.prerequisites:
+            if prerequisite not in known:
+                raise PlanConfigurationError(
+                    f"node {node.goal_id} requires unknown node {prerequisite}"
+                )
+            if (prerequisite, node.goal_id) not in edge_pairs:
+                raise PlanConfigurationError(
+                    f"node {node.goal_id} prerequisite {prerequisite} "
+                    "has no matching DAG edge"
+                )
+
+    _validate_composite_packing(record, known)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(goal_id: str) -> None:
+        if goal_id in visiting:
+            raise PlanConfigurationError(
+                f"compiled execution DAG contains a cycle through {goal_id}"
+            )
+        if goal_id in visited:
+            return
+        visiting.add(goal_id)
+        for child_id in adjacency[goal_id]:
+            visit(child_id)
+        visiting.remove(goal_id)
+        visited.add(goal_id)
+
+    for goal_id in node_ids:
+        visit(goal_id)
+
+    for node in record.nodes:
+        if (
+            (node.is_leaf or node.is_public)
+            and not _awaiting(node)
+            and _has_unresolved_placeholder(node.goal_text)
+        ):
+            raise PlanConfigurationError(
+                f"node {node.goal_id} has bound inputs but an unresolved goal: "
+                f"{node.goal_text!r}"
+            )
+        if node.is_leaf and not _awaiting(node) and not node.executable:
+            raise PlanConfigurationError(
+                f"leaf {node.goal_id} has bound inputs but no executable goal"
+            )
+
+
+def _has_unresolved_placeholder(text: str) -> bool:
+    return re.search(r"\{[A-Za-z_][A-Za-z0-9_]*\}", text) is not None
+
+
+def _step_has_data_dependency(step: Step, parent: PlanNode) -> bool:
+    for raw in step.arguments.values():
+        if not (raw.startswith("{") and raw.endswith("}")):
+            continue
+        reference = raw[1:-1].strip()
+        if reference == step.loop_variable:
+            return True
+        if reference in parent.bindings:
+            return True
+    return False
 
 
 # ----------------------------------------------------------------------
@@ -658,26 +2160,33 @@ def _chain(nodes: Sequence[PlanNode]) -> None:
 # ----------------------------------------------------------------------
 
 
-def _invocation_bindings(skill: Skill, invocation: Invocation) -> dict[str, Binding]:
-    """Precedence 1 and 3 at the top of the tree: the utterance, then `on_repeat`."""
+def _invocation_bindings(
+    skill: Skill, invocation: Invocation, utterance: str
+) -> dict[str, Binding]:
+    """Bind supplied values with typed evidence; leave repeat policy as policy."""
+    supplied = _validate_invocation(skill, invocation, utterance)
     bindings: dict[str, Binding] = {}
     for slot in skill.slots:
-        if slot.name in invocation.slots:
-            bindings[slot.name] = Binding(
-                value=invocation.slots[slot.name], source="utterance"
-            )
+        if slot.name in supplied:
+            bindings[slot.name] = supplied[slot.name]
         elif slot.required:
             bindings[slot.name] = _fallback(slot)
-    for name, value in invocation.slots.items():
-        # A slot the selector bound that the skill does not declare is still
-        # recorded: dropping it would lose the only evidence that the selector
-        # and the catalogue disagreed.
-        bindings.setdefault(name, Binding(value=value, source="utterance"))
     return bindings
 
 
-def _validate_invocation(skill: Skill, invocation: Invocation, utterance: str) -> None:
+def _validate_invocation(
+    skill: Skill, invocation: Invocation, utterance: str
+) -> dict[str, Binding]:
     declared = {slot.name: slot for slot in skill.slots}
+    unknown_evidence = set(invocation.provenance) - set(invocation.slots)
+    if unknown_evidence:
+        names = ", ".join(sorted(unknown_evidence))
+        raise PlanConfigurationError(
+            f"invocation of '{skill.name}' has provenance for unbound slot(s): "
+            f"{names}"
+        )
+
+    bindings: dict[str, Binding] = {}
     for name, value in invocation.slots.items():
         slot = declared.get(name)
         if slot is None:
@@ -690,13 +2199,148 @@ def _validate_invocation(skill: Skill, invocation: Invocation, utterance: str) -
             raise PlanConfigurationError(
                 f"invocation of '{skill.name}' slot '{name}' requires {expected}"
             )
-        values = value if isinstance(value, list) else [value]
-        for item in values:
-            if not item or item not in utterance:
-                raise PlanConfigurationError(
-                    f"invocation of '{skill.name}' slot '{name}' value "
-                    f"{item!r} is not copied verbatim from the utterance"
+        bindings[name] = _invocation_binding(
+            skill, slot, value, invocation.provenance.get(name), utterance
+        )
+    return bindings
+
+
+def _invocation_binding(
+    skill: Skill,
+    slot: Any,
+    value: Union[str, list[str]],
+    evidence: Optional[InvocationEvidence],
+    utterance: str,
+) -> Binding:
+    values = value if isinstance(value, list) else [value]
+    if any(not item for item in values):
+        raise PlanConfigurationError(
+            f"invocation of '{skill.name}' slot '{slot.name}' has an empty value"
+        )
+
+    if evidence is None:
+        kind = slot.binding_kind
+        if kind == "exact_text":
+            spans = _find_exact_source_spans(
+                skill.name, slot.name, values, utterance
+            )
+            evidence = InvocationEvidence(kind=kind, source_spans=spans)
+        elif kind == "normalized_enum":
+            try:
+                spans = _find_exact_source_spans(
+                    skill.name, slot.name, values, utterance
                 )
+            except PlanConfigurationError as exc:
+                raise PlanConfigurationError(
+                    f"invocation of '{skill.name}' normalized slot "
+                    f"'{slot.name}' requires exact source span(s) and normalizer "
+                    f"{slot.normalizer!r}"
+                ) from exc
+            evidence = InvocationEvidence(
+                kind=kind,
+                source_spans=spans,
+                normalizer=slot.normalizer,
+            )
+        else:
+            raise PlanConfigurationError(
+                f"invocation of '{skill.name}' slot '{slot.name}' with "
+                f"binding_kind {kind!r} requires explicit provenance"
+            )
+
+    if evidence.kind == "skill_literal":
+        raise PlanConfigurationError(
+            f"invocation of '{skill.name}' slot '{slot.name}' cannot claim "
+            "skill_literal provenance; only a parsed skill body can supply it"
+        )
+    if evidence.kind != slot.binding_kind and evidence.kind != "captured_handle":
+        raise PlanConfigurationError(
+            f"invocation of '{skill.name}' slot '{slot.name}' declares "
+            f"binding_kind {slot.binding_kind!r}, not {evidence.kind!r}"
+        )
+
+    _validate_source_spans(skill.name, slot.name, evidence.source_spans, utterance)
+    if evidence.kind == "exact_text":
+        for item, span in zip(values, evidence.source_spans):
+            if span.text != item:
+                raise PlanConfigurationError(
+                    f"invocation of '{skill.name}' slot '{slot.name}' value "
+                    f"{item!r} is not copied verbatim from source span "
+                    f"[{span.start}, {span.end})"
+                )
+        source: BindingSource = "utterance"
+    elif evidence.kind == "normalized_enum":
+        if evidence.normalizer != slot.normalizer:
+            raise PlanConfigurationError(
+                f"invocation of '{skill.name}' slot '{slot.name}' must use "
+                f"normalizer {slot.normalizer!r}, got {evidence.normalizer!r}"
+            )
+        for item, span in zip(values, evidence.source_spans):
+            normalized = normalize_binding_value(evidence.normalizer or "", span.text)
+            if normalized != item:
+                raise PlanConfigurationError(
+                    f"invocation of '{skill.name}' slot '{slot.name}' source "
+                    f"{span.text!r} normalizes to {normalized!r}, not {item!r}"
+                )
+        source = "utterance"
+    else:
+        source = "captured"
+
+    try:
+        return Binding(
+            value=value,
+            source=source,
+            kind=evidence.kind,
+            source_spans=evidence.source_spans,
+            normalizer=evidence.normalizer,
+            command_call_id=evidence.command_call_id,
+        )
+    except ValueError as exc:
+        raise PlanConfigurationError(
+            f"invocation of '{skill.name}' slot '{slot.name}' has invalid "
+            f"{evidence.kind} provenance: {exc}"
+        ) from exc
+
+
+def _find_exact_source_spans(
+    skill_name: str,
+    slot_name: str,
+    values: Sequence[str],
+    utterance: str,
+) -> tuple[SourceSpan, ...]:
+    spans: list[SourceSpan] = []
+    cursor = 0
+    for value in values:
+        start = utterance.find(value, cursor)
+        if start < 0:
+            raise PlanConfigurationError(
+                f"invocation of '{skill_name}' slot '{slot_name}' value "
+                f"{value!r} is not copied verbatim from the utterance"
+            )
+        end = start + len(value)
+        spans.append(SourceSpan(start=start, end=end, text=utterance[start:end]))
+        cursor = end
+    return tuple(spans)
+
+
+def _validate_source_spans(
+    skill_name: str,
+    slot_name: str,
+    spans: Sequence[SourceSpan],
+    utterance: str,
+) -> None:
+    previous_end = -1
+    for span in spans:
+        if span.end > len(utterance) or utterance[span.start : span.end] != span.text:
+            raise PlanConfigurationError(
+                f"invocation of '{skill_name}' slot '{slot_name}' source span "
+                f"[{span.start}, {span.end}) does not match the utterance"
+            )
+        if span.start < previous_end:
+            raise PlanConfigurationError(
+                f"invocation of '{skill_name}' slot '{slot_name}' source spans "
+                "overlap or are out of order"
+            )
+        previous_end = span.end
 
 
 def _child_bindings(
@@ -706,7 +2350,8 @@ def _child_bindings(
     *,
     loop_variable: Optional[str] = None,
     loop_value: Optional[str] = None,
-    loop_source: str = "utterance",
+    loop_binding: Optional[Binding] = None,
+    loop_index: Optional[int] = None,
 ) -> dict[str, Binding]:
     """Bind a child's slots from the parent's bindings — never from invention.
 
@@ -718,65 +2363,112 @@ def _child_bindings(
     bindings: dict[str, Binding] = {}
     for slot_name, raw in arguments.items():
         if not (raw.startswith("{") and raw.endswith("}")):
-            bindings[slot_name] = Binding(value=raw, source="skill")
+            bindings[slot_name] = Binding(
+                value=raw,
+                source="skill",
+                kind="skill_literal",
+            )
             continue
         reference = raw[1:-1].strip()
         if loop_variable is not None and reference == loop_variable:
             if loop_value is None:
-                bindings[slot_name] = Binding(value=None, source="needs-user")
-            else:
+                child_slot = child_skill.slot(slot_name)
                 bindings[slot_name] = Binding(
-                    value=loop_value, source=loop_source  # type: ignore[arg-type]
+                    value=None,
+                    source="needs-user",
+                    on_repeat_policy=(
+                        child_slot.on_repeat if child_slot is not None else None
+                    ),
+                )
+            else:
+                bindings[slot_name] = (
+                    _binding_list_item(loop_binding, loop_value, loop_index)
+                    if loop_binding is not None
+                    else Binding(
+                        value=loop_value,
+                        source="skill",
+                        kind="skill_literal",
+                    )
                 )
             continue
         inherited = parent.bindings.get(reference)
         if inherited is not None and inherited.value is not None:
-            bindings[slot_name] = Binding(
-                value=inherited.value,
-                source=inherited.source,
-                command_call_id=inherited.command_call_id,
-            )
+            bindings[slot_name] = inherited.model_copy(deep=True)
             continue
         # An explicit placeholder says a prior step is expected to supply this
         # value. Keep it pending so captured evidence gets precedence over the
         # child's on_repeat fallback; applying that fallback now would make the
         # producing command's later artifact impossible to bind.
-        bindings[slot_name] = Binding(value=None, source="needs-user")
+        child_slot = child_skill.slot(slot_name)
+        bindings[slot_name] = Binding(
+            value=None,
+            source="needs-user",
+            on_repeat_policy=(
+                child_slot.on_repeat if child_slot is not None else None
+            ),
+        )
 
     for slot in child_skill.slots:
         if slot.name in bindings:
             continue
         inherited = parent.bindings.get(slot.name)
         if inherited is not None and inherited.value is not None:
-            bindings[slot.name] = Binding(
-                value=inherited.value,
-                source=inherited.source,
-                command_call_id=inherited.command_call_id,
-            )
+            bindings[slot.name] = inherited.model_copy(deep=True)
         elif slot.required:
             bindings[slot.name] = _fallback(slot)
     return bindings
 
 
+def _binding_list_item(
+    binding: Binding, value: str, index: Optional[int] = None
+) -> Binding:
+    source_spans = binding.source_spans
+    if isinstance(binding.value, list) and source_spans:
+        if index is None:
+            try:
+                index = binding.value.index(value)
+            except ValueError:
+                index = -1
+        source_spans = (
+            (source_spans[index],)
+            if index is not None and 0 <= index < len(source_spans)
+            else source_spans
+        )
+    return Binding(
+        value=value,
+        source=binding.source,
+        kind=binding.kind,
+        source_spans=source_spans,
+        normalizer=binding.normalizer,
+        command_call_id=binding.command_call_id,
+    )
+
+
 def _fallback(slot) -> Binding:
-    """Precedence 3, then 4.
-
-    `on_repeat` before asking is the deliberate choice (decision 2): ido's
-    slots already carry a deterministic fallback for exactly this, and using it
-    at bind time is the ask-policy's rows A and B applied one layer earlier,
-    where the answer is deterministic rather than a rewrite of a question
-    already formed. A required slot with no utterance value, no captured handle
-    and no `on_repeat` is `needs-user` and never a fabricated value
-    (FW-REQ-011 acceptance criterion 3).
-    """
-    if slot is not None and slot.on_repeat:
-        return Binding(value=slot.on_repeat, source="on_repeat")
-    return Binding(value=None, source="needs-user")
+    """Record a missing value and its repeat policy without using policy as data."""
+    return Binding(
+        value=None,
+        source="needs-user",
+        on_repeat_policy=getattr(slot, "on_repeat", None),
+    )
 
 
-def _literal_bindings(slots: Mapping[str, Any]) -> dict[str, Binding]:
+def _literal_bindings(
+    slots: Mapping[str, Any], utterance: str
+) -> dict[str, Binding]:
     return {
-        name: Binding(value=value, source="utterance") for name, value in slots.items()
+        name: Binding(
+            value=value,
+            source="utterance",
+            kind="exact_text",
+            source_spans=_find_exact_source_spans(
+                "<unknown-skill>",
+                name,
+                value if isinstance(value, list) else [value],
+                utterance,
+            ),
+        )
+        for name, value in slots.items()
     }
 
 
@@ -854,16 +2546,22 @@ def bind_captured(
         target: Binding(
             value=value,
             source="captured",
+            kind="captured_handle",
             command_call_id=command_call_id,
         ),
     }
     bound_skill = catalog.get(node.skill or "") if catalog is not None else None
     if bound_skill is not None:
-        node.goal_text = _render(
-            bound_skill.goal or bound_skill.description, node.bindings
+        node.goal_text = (
+            _invocation_goal_text(bound_skill, node.bindings)
+            if bound_skill.level == "atomic"
+            else _render(bound_skill.goal or bound_skill.description, node.bindings)
         )
+        if node.visibility == "public":
+            node.task_key = _canonical_task_key(bound_skill.name, node.bindings)
     if node.status == "needs-user" and not _needs_user(node.bindings):
         node.status = "not-reached"
+    _set_executable_state(node)
 
     if (
         catalog is not None
@@ -904,7 +2602,10 @@ def _widen(
             bindings={
                 **node.bindings,
                 slot: Binding(
-                    value=element, source="captured", command_call_id=command_call_id
+                    value=element,
+                    source="captured",
+                    kind="captured_handle",
+                    command_call_id=command_call_id,
                 ),
             },
         )
@@ -983,6 +2684,22 @@ def _artifact_payload(entry: Any) -> tuple[Any, Optional[str]]:
 # ----------------------------------------------------------------------
 # Rendering
 # ----------------------------------------------------------------------
+
+
+def _invocation_goal_text(skill: Skill, bindings: Mapping[str, Binding]) -> str:
+    """Render a private atomic invocation without inventing a public predicate."""
+    arguments: list[str] = []
+    for slot in skill.slots:
+        binding = bindings.get(slot.name)
+        if binding is None or binding.value is None:
+            continue
+        value = (
+            ", ".join(binding.value)
+            if isinstance(binding.value, list)
+            else str(binding.value)
+        )
+        arguments.append(f"{slot.name}={value}")
+    return " ".join((skill.name, *arguments)).strip()
 
 
 def _render(template: str, bindings: Mapping[str, Binding]) -> str:

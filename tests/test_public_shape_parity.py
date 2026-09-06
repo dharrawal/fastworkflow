@@ -421,6 +421,7 @@ def test_turn_result_round_trips_whole():
                     "query": Binding(
                         value="Devon Morrison",
                         source="captured",
+                        kind="captured_handle",
                         command_call_id="call-find-identity",
                     )
                 },

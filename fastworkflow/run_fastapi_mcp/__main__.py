@@ -53,6 +53,7 @@ from dotenv import dotenv_values
 import fastworkflow
 from fastworkflow import state_paths
 from fastworkflow.runtime_config import register_runtime_config
+from fastworkflow.runtime_readiness import runtime_readiness_snapshot
 from fastworkflow.runtime_manifest import (
     check_startup_conformance,
     deployment_env,
@@ -103,6 +104,7 @@ from .turns import (
     submit_turn,
     render_turn_response,
     resolve_logical_turn_key,
+    resolve_turn_deadline_seconds,
     compute_idempotency_key,
 )
 from . import server_memory
@@ -231,7 +233,9 @@ readiness_state = ReadinessState()
 session_manager = ChannelSessionManager()
 
 # Global turn registry — owns every async turn execution (wait-or-defer).
-turn_registry = TurnRegistry()
+turn_registry = TurnRegistry(
+    turn_deadline_seconds=resolve_turn_deadline_seconds()
+)
 # Wire eviction to skip channels with a live turn (§3.6): never close a live
 # turn's ctx mid-mutation.
 session_manager.is_channel_busy = turn_registry.has_active
@@ -838,7 +842,9 @@ async def liveness_probe() -> dict:
     tags=["probes"]
 )
 async def readiness_probe(
-    memory: bool = False, observability: bool = False
+    memory: bool = False,
+    observability: bool = False,
+    runtime: bool = False,
 ) -> JSONResponse:
     """
     Readiness probe endpoint for Kubernetes.
@@ -865,6 +871,11 @@ async def readiness_probe(
     ``SQLiteTraceSink.__init__`` prunes opportunistically. Exposing the value
     in effect lets a harness ASSERT that its requirement took hold here rather
     than hope, and cite the answer in its bundle. fix-ajv.14.
+
+    Pass ``?runtime=true`` for the credential-free effective feature and
+    planner-path snapshot in this process. This is intended for pre-execution
+    assertions that must distinguish a flat path from task-only unpacked and
+    packed execution before a paid request is admitted.
     
     This endpoint is not logged unless it returns a non-200 status code
     to avoid excessive logging from frequent Kubernetes health checks.
@@ -891,7 +902,11 @@ async def readiness_probe(
             f"{supervision['max_stuck_executions']} allowed"
         )
 
-    content: dict[str, Any] = {"status": "ready", "checks": status_info}
+    content: dict[str, Any] = {
+        "status": "ready",
+        "checks": status_info,
+        "process_pid": os.getpid(),
+    }
     content["turn_supervision"] = supervision
     if memory:
         content["memory"] = {
@@ -912,10 +927,23 @@ async def readiness_probe(
             "enabled": _obs.observability_enabled(default_on=True),
         }
 
+    if runtime:
+        try:
+            runtime_snapshot = runtime_readiness_snapshot(ARGS.workflow_path)
+        except Exception as exc:
+            runtime_snapshot = {
+                "configuration_valid": False,
+                "error_type": type(exc).__name__,
+            }
+        content["runtime"] = runtime_snapshot
+        if not runtime_snapshot["configuration_valid"]:
+            status_info["runtime_configuration"] = "invalid"
+
     if (
         readiness_state.is_ready()
         and "dspy_memory_policy" not in status_info
         and "turn_supervision" not in status_info
+        and "runtime_configuration" not in status_info
     ):
         return JSONResponse(status_code=status.HTTP_200_OK, content=content)
 

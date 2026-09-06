@@ -480,6 +480,8 @@ def _parse_sse(text: str) -> list[dict]:
     return events
 
 
+@pytest.mark.live_provider
+@pytest.mark.requires_llm_key
 @pytest.mark.parametrize("stream_format", ["ndjson", "sse"])
 def test_the_stream_terminal_output_event_is_a_turn_output(agent_app_module, stream_format):
     """The final 'output' event carries a TurnOutput, not a CommandOutput.

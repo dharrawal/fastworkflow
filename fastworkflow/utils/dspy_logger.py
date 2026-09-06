@@ -9,6 +9,7 @@ import functools
 import json
 import logging
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
@@ -367,6 +368,23 @@ class DSPyObservabilityCallback(BaseCallback):
         prompt = payload.pop("prompt", None)
         payload.pop("items", None)
         payload.pop("request", None)
+        # ido-mn1.6.18: DSPy hands the provider arguments to the callback under
+        # a nested `kwargs` key, so leaving the payload as-is recorded
+        # `call_kwargs = {"kwargs": {"max_tokens": ...}}`. Every reader of this
+        # span asks for a provider argument BY NAME (`call_kwargs.max_tokens`,
+        # `call_kwargs.timeout` — see `workflow_execution_context.py:164`), and
+        # against the nested shape each of those lookups silently returned
+        # nothing. The attribute is flattened once, here, so the recorded shape
+        # is the shape the readers ask for. A key already present at the top
+        # level wins: it came from the callback directly and is not a guess.
+        nested = payload.pop("kwargs", None)
+        if isinstance(nested, Mapping):
+            for key, value in nested.items():
+                payload.setdefault(str(key), value)
+        elif nested is not None:
+            # Not a mapping, so it cannot be flattened without inventing a
+            # shape. Keep it verbatim rather than dropping evidence.
+            payload["kwargs"] = nested
 
         attributes: dict[str, Any] = {
             "module": identity.name if identity else type(instance).__qualname__,

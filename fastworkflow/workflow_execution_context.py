@@ -24,9 +24,11 @@ import os
 import time
 import sqlite3
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from queue import Queue
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import dspy
@@ -34,21 +36,56 @@ import dspy
 import fastworkflow
 import fastworkflow.turn
 from fastworkflow import active_workflow, external_operations, metrics, tracing
+from fastworkflow.result_handles import (
+    PRESENTATION_TRUNCATION_CLASSIFICATION,
+    ResultHandleStore,
+)
 from fastworkflow.runtime_config import get_runtime_config
-from fastworkflow.runtime_manifest import get_runtime_metadata
+from fastworkflow.runtime_manifest import (
+    get_runtime_metadata,
+    load_manifest,
+    merge_and_gate,
+)
 from fastworkflow.session_state_store import (
     READABLE_SCHEMA_VERSIONS,
     SCHEMA_VERSION,
     IncompatibleSessionState,
 )
 from fastworkflow.turn_budget import LogicalTurnBudget
-from fastworkflow.typed_failure import TypedFailure, classify_exception
+from fastworkflow.typed_failure import (
+    CODE_EXTRACTION_TRUNCATED,
+    CODE_PROVIDER_TIMEOUT,
+    TypedFailure,
+    extraction_truncated_failure,
+    is_provider_timeout,
+    provider_timeout_failure,
+)
+from fastworkflow.plan import (
+    PlanConfigurationError,
+    PlanMode,
+    PlanRecord,
+    bind_captured,
+    expand,
+    render_account,
+)
+from fastworkflow.plan_execution import (
+    PlanExecutionArm,
+    PlanExecutionOutcome,
+    PlanExecutionScope,
+    SafetyEnvelopeState,
+    execute_plan,
+    plan_execution_arm_from_env,
+    plan_stress_mode_from_env,
+    reconcile_plan_statuses,
+    render_leaf_instruction,
+)
 from fastworkflow.state_serialization import validate_state
 from fastworkflow.execution_recorder import ExecutionRecorder, record_execution
+from fastworkflow.skill_catalog import load_skill_catalog
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
-from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
+from fastworkflow.utils.react import NoSuspendedAgentStateError
 
 
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
@@ -64,6 +101,16 @@ def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
         "suspended": bool(getattr(result, "suspended", False)),
         "clarification": getattr(result, "clarification", None),
         "exhausted": bool(getattr(result, "exhausted", False)),
+        "censored": bool(getattr(result, "censored", False)),
+        "censored_reason": getattr(result, "censored_reason", None),
+        "provider_timeout": bool(
+            getattr(result, "provider_timeout", False)
+        ),
+        "plan_outcome": getattr(
+            getattr(result, "plan_outcome", None),
+            "value",
+            getattr(result, "plan_outcome", None),
+        ),
     }
     # EXP-025a: the BEFORE_FINISH decision, when one was taken. It happens after
     # the tool loop has ended, so it has no step span to hang off, and without it
@@ -89,6 +136,86 @@ def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
         attributes["finish_policy_outcome"] = decision.outcome.value
         attributes["finish_policy_source"] = decision.source_policy
         attributes["finish_policy_table_version"] = decision.table_version
+
+    # ido-mn1.6.6: which result handles the extraction call was allowed to
+    # present, and what the byte cap did to them. Written key by key for the
+    # reason the partial block above gives: the span-contract scan reads
+    # emission sites statically, and a key it cannot see is a key nothing checks.
+    # Absent when the agent cited nothing and no skill marked a presentation
+    # output, which is every turn that produced no handle at all.
+    presented = getattr(result, "presented_results", None)
+    if presented:
+        attributes["presented_result_handles"] = presented.get("handles")
+        attributes["presented_result_bytes"] = presented.get("bytes")
+        attributes["presented_result_field_bytes"] = presented.get("field_bytes")
+        attributes["presented_result_trimmed"] = presented.get("trimmed")
+        attributes["presented_result_omitted_handles"] = presented.get(
+            "omitted_handles"
+        )
+        attributes["presented_result_truncation_classification"] = presented.get(
+            "truncation_classification"
+        )
+
+    # ido-mn1.6.10: the completion limit this turn's composition call was given,
+    # and what it was derived from. Written key by key for the reason the two
+    # blocks above give — the span-contract scan reads emission sites
+    # statically, so a key it cannot see is a key nothing checks.
+    #
+    # `fw.llm.call` already records `call_kwargs`, which will show the
+    # `max_tokens` and `timeout` that reached the provider. That says WHAT was
+    # asked for; these say WHY, and the difference is the whole point: a reader
+    # looking at a 4096-token answer cannot tell a floor from a derivation that
+    # happened to land there without the inputs, and 69 v4 calls are cut in
+    # exactly that undiagnosable way.
+    bound = getattr(result, "extraction_bound", None)
+    if bound:
+        attributes["extraction_max_tokens"] = bound.get("max_tokens")
+        attributes["extraction_timeout_s"] = bound.get("timeout_s")
+        attributes["extraction_field_bytes"] = bound.get("field_bytes")
+        attributes["extraction_thought_bytes"] = bound.get("thought_bytes")
+        # v9 (2026-09-05): the trajectory term, without which a flat turn's
+        # bound reads as a floor applied to a few hundred bytes.
+        attributes["extraction_trajectory_bytes"] = bound.get("trajectory_bytes")
+        # v10 (2026-09-05): the provider's completion ceiling for the agent
+        # route and whether it bound this call.
+        attributes["extraction_provider_max_output_tokens"] = bound.get(
+            "provider_max_output_tokens"
+        )
+        attributes["extraction_provider_cap_applied"] = bound.get(
+            "provider_cap_applied"
+        )
+        attributes["extraction_render_factor"] = bound.get("render_factor")
+        attributes["extraction_prose_allowance_tokens"] = bound.get(
+            "prose_allowance_tokens"
+        )
+        attributes["extraction_derived_tokens"] = bound.get("derived_tokens")
+        attributes["extraction_floor_applied"] = bound.get("floor_applied")
+        attributes["extraction_ceiling_applied"] = bound.get("ceiling_applied")
+        attributes["extraction_timeout_clamped"] = bound.get("timeout_clamped")
+        # ido-mn1.6.33: what the call ASKED for, what the turn had left, and
+        # whether what was left could buy an attempt at all. `timeout_s` alone
+        # cannot distinguish a bound that was shortened by the turn deadline
+        # from one that was never long, which is the reading the whole
+        # late-extraction finding turns on.
+        attributes["extraction_derived_timeout_s"] = bound.get(
+            "derived_timeout_s"
+        )
+        attributes["extraction_deadline_remaining_s"] = bound.get(
+            "deadline_remaining_s"
+        )
+        attributes["extraction_deadline_insufficient"] = bound.get(
+            "deadline_insufficient"
+        )
+    if getattr(result, "extraction_truncated", False):
+        attributes["extraction_truncated"] = True
+        attributes["extraction_truncated_goal_ids"] = list(
+            getattr(result, "extraction_truncated_goal_ids", ()) or ()
+        )
+        # Which mechanism produced the marker: an answer cut at `max_tokens`
+        # and an answer that was never composed are both infrastructure and
+        # both keep their evidence, but they are not the same finding.
+        if cause := getattr(result, "extraction_truncated_cause", None):
+            attributes["extraction_truncated_cause"] = cause
     return attributes
 
 
@@ -112,6 +239,18 @@ class _RestoredAgentResult:
     """
 
     exhausted: bool = False
+    censored: bool = False
+    censored_reason: Optional[str] = None
+    provider_timeout: bool = False
+    # ido-mn1.6.10: restored with the rest because a resumed turn that was
+    # truncated before suspension is still a truncated turn, and a restore that
+    # dropped it would silently upgrade the answer to complete.
+    extraction_truncated: bool = False
+    extraction_truncated_reason: Optional[str] = None
+    extraction_truncated_goal_ids: tuple[str, ...] = ()
+    extraction_failure: Optional[TypedFailure] = None
+    plan_outcome: Optional[str] = None
+    failure: Optional[TypedFailure] = None
 
 
 def _parse_isoformat(value: Optional[str]) -> Optional[datetime]:
@@ -173,6 +312,12 @@ class WorkflowExecutionContext:
 
         self._conversation_history: dspy.History = dspy.History(messages=[])
         self._action_log: list[dict[str, Any]] = []
+        # Full payloads of commands that opted into observation compaction
+        # (`result_handles`, ido-mn1.6.1). Session-scoped rather than
+        # turn-scoped: a handle the agent was given in one turn is one it may
+        # page through in the next, and a turn boundary is not a reason for a
+        # citation to stop resolving.
+        self._result_handles = ResultHandleStore()
 
         from fastworkflow.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
@@ -222,6 +367,10 @@ class WorkflowExecutionContext:
         # a null check. fix-ajv.20.
         self._execution_recorder: Optional[ExecutionRecorder] = None
         self._turn_key: Optional[str] = None
+        # ido-mn1.6.3: what_can_i_do listings the agent tool has already shown
+        # this turn. Reset lazily by `command_listing_memo` on turn-key change.
+        self._command_listing_memo: dict = {}
+        self._command_listing_memo_turn: Optional[str] = None
         # The logical turn's budget (arch §6.4). Created at _begin_turn, handed
         # to the planner and to ReAct, serialized at suspension, restored
         # unchanged on resume. None between turns and on every deterministic
@@ -246,6 +395,26 @@ class WorkflowExecutionContext:
         self._turn_entry_workflow_name: str = ""
         self._turn_entry_context: str = ""
         self._turn_agent_result: Any = None
+        self._turn_plan: Any = None
+        self._turn_plan_answers: list[dict[str, str]] = []
+        # One entry per fw.agent.execute: which result handles that call's
+        # extraction step was given, and what the byte cap did to them. Lives on
+        # the turn rather than only on the spans because the turn record is where
+        # `final_answer` provenance is read (ido-mn1.6.6).
+        self._turn_presented_results: list[dict[str, Any]] = []
+        # The authoritative binding/navigation envelope for the plan leaf
+        # currently driving the shared workflow tool. It is process-local and
+        # reconstructed from the persisted plan before a resumed leaf runs.
+        self._turn_leaf_scope: Optional[PlanExecutionScope] = None
+        self._turn_plan_frontier: list[str] = []
+        self._turn_active_leaf: Optional[str] = None
+        self._turn_plan_outcome: Optional[str] = None
+        self._turn_plan_checkpoint_count: int = 0
+        self._turn_plan_last_checkpoint_stored: Optional[bool] = None
+        self._turn_plan_last_checkpoint_leaf: Optional[str] = None
+        self._turn_safety_envelope: SafetyEnvelopeState = SafetyEnvelopeState(
+            enabled=False
+        )
         self._turn_history_baseline: int = 0
         # turn_key of the newest turn that both completed and contributed a
         # conversation-history entry — the row feedback attaches to (ruling
@@ -507,6 +676,23 @@ class WorkflowExecutionContext:
         finally:
             self._distillation_pass = previous
 
+    def command_listing_memo(self) -> dict[Any, Any]:
+        """Listings the agent-facing `what_can_i_do` TOOL already showed this turn.
+
+        ido-mn1.6.3. The entries are keyed and read by
+        `fastworkflow.workflow_agent._what_can_i_do_tool_observation`; the only
+        thing owned here is the lifetime — the dict is emptied whenever the
+        logical turn key changes, so nothing is remembered across turns, while a
+        suspended turn (which deliberately keeps its key) resumes with what it
+        had. Not serialized into the turn accumulator on purpose: losing the memo
+        costs one full listing, whereas a stale memo would cost a wrong reference.
+        """
+        turn_key = self._turn_key
+        if self._command_listing_memo_turn != turn_key:
+            self._command_listing_memo_turn = turn_key
+            self._command_listing_memo = {}
+        return self._command_listing_memo
+
     def clear_action_log(self) -> None:
         """Clear in-memory action log for a new agent turn."""
         self._action_log.clear()
@@ -518,6 +704,16 @@ class WorkflowExecutionContext:
     @property
     def action_log(self) -> list[dict[str, Any]]:
         return self._action_log
+
+    @property
+    def result_handles(self) -> ResultHandleStore:
+        """Stored full payloads for commands that opted into compaction.
+
+        Reached by `result_handles.store_for()` through the trace host, which is
+        what lets a command's `ResponseGenerator` — which holds a `Workflow` and
+        no session — fetch a page without a new parameter on every signature.
+        """
+        return self._result_handles
 
     # ------------------------------------------------------------------
     # Turn accumulator (v2.21: capture + TurnResult return type only)
@@ -598,6 +794,41 @@ class WorkflowExecutionContext:
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
         self._turn_agent_result = None
+        self._turn_plan = None
+        self._turn_plan_answers = []
+        self._turn_presented_results = []
+        self._turn_leaf_scope = None
+        self._turn_plan_frontier = []
+        self._turn_active_leaf = None
+        self._turn_plan_outcome = None
+        self._turn_plan_checkpoint_count = 0
+        self._turn_plan_last_checkpoint_stored = None
+        self._turn_plan_last_checkpoint_leaf = None
+        stress_mode = plan_stress_mode_from_env()
+        if stress_mode:
+            raw_wall_limit = os.environ.get(
+                "FW_PLAN_WALL_TIME_LIMIT_SECONDS",
+                "1800",
+            )
+            try:
+                wall_time_limit_s = int(raw_wall_limit)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "FW_PLAN_WALL_TIME_LIMIT_SECONDS must be a positive integer"
+                ) from exc
+            if wall_time_limit_s <= 0:
+                raise ValueError(
+                    "FW_PLAN_WALL_TIME_LIMIT_SECONDS must be a positive integer"
+                )
+            self._turn_safety_envelope = SafetyEnvelopeState(
+                enabled=True,
+                wall_time_limit_s=wall_time_limit_s,
+            )
+        else:
+            # Ordinary turns never parse or depend on EXP-028-only safety
+            # configuration. A stale experimental variable cannot break the
+            # compatible bounded path when stress mode is off.
+            self._turn_safety_envelope = SafetyEnvelopeState(enabled=False)
         # The classified failure this turn ended with, when it ended with one
         # (FW-REQ-008 clause 7). None on every turn that did not fail, and
         # cleared per turn like the rest of the accumulator.
@@ -610,7 +841,8 @@ class WorkflowExecutionContext:
         # "a clarification answer does not replenish the budget" structural
         # rather than a rule somebody has to remember.
         self._turn_budget = LogicalTurnBudget(
-            iteration_limit=self._effective_react_max_iterations()
+            iteration_limit=self._effective_react_max_iterations(),
+            enforce_iteration_limit=not stress_mode,
         )
 
         self._turn_entry_workflow_name = ""
@@ -955,6 +1187,56 @@ class WorkflowExecutionContext:
                     getattr(self._turn_agent_result, "exhausted", False)
                 )
             }
+            if getattr(self._turn_agent_result, "censored", False):
+                agent_result["censored"] = True
+            if censored_reason := getattr(
+                self._turn_agent_result,
+                "censored_reason",
+                None,
+            ):
+                agent_result["censored_reason"] = censored_reason
+            if getattr(self._turn_agent_result, "provider_timeout", False):
+                agent_result["provider_timeout"] = True
+            if getattr(
+                self._turn_agent_result, "extraction_truncated", False
+            ):
+                agent_result["extraction_truncated"] = True
+                agent_result["extraction_truncated_reason"] = getattr(
+                    self._turn_agent_result,
+                    "extraction_truncated_reason",
+                    None,
+                ) or CODE_EXTRACTION_TRUNCATED
+                agent_result["extraction_truncated_goal_ids"] = list(
+                    getattr(
+                        self._turn_agent_result,
+                        "extraction_truncated_goal_ids",
+                        (),
+                    )
+                    or ()
+                )
+                extraction_failure = getattr(
+                    self._turn_agent_result,
+                    "extraction_failure",
+                    None,
+                )
+                if not isinstance(extraction_failure, TypedFailure):
+                    extraction_failure = extraction_truncated_failure()
+                agent_result["extraction_failure"] = (
+                    extraction_failure.to_state()
+                )
+            if plan_outcome := getattr(
+                self._turn_agent_result,
+                "plan_outcome",
+                None,
+            ):
+                agent_result["plan_outcome"] = getattr(
+                    plan_outcome,
+                    "value",
+                    plan_outcome,
+                )
+            failure = getattr(self._turn_agent_result, "failure", None)
+            if isinstance(failure, TypedFailure):
+                agent_result["failure"] = failure.to_state()
 
         return {
             "key": self._turn_key,
@@ -971,6 +1253,27 @@ class WorkflowExecutionContext:
             "entry_workflow_name": self._turn_entry_workflow_name,
             "entry_context": self._turn_entry_context,
             "agent_result": agent_result,
+            "plan": (
+                self._turn_plan.model_dump(mode="json")
+                if self._turn_plan is not None
+                else None
+            ),
+            "plan_answers": list(self._turn_plan_answers),
+            "presented_results": list(self._turn_presented_results),
+            "plan_frontier": list(self._turn_plan_frontier),
+            "active_leaf": self._turn_active_leaf,
+            "active_leaf_scope": (
+                self._turn_leaf_scope.to_state()
+                if self._turn_leaf_scope is not None
+                else None
+            ),
+            "plan_outcome": self._turn_plan_outcome,
+            "plan_checkpoint_count": self._turn_plan_checkpoint_count,
+            "plan_last_checkpoint_stored": (
+                self._turn_plan_last_checkpoint_stored
+            ),
+            "plan_last_checkpoint_leaf": self._turn_plan_last_checkpoint_leaf,
+            "safety_envelope": self._turn_safety_envelope.to_state(),
         }
 
     def _serialize_cme_continuation(self) -> Optional[dict[str, Any]]:
@@ -1077,6 +1380,13 @@ class WorkflowExecutionContext:
             "cme": self._serialize_cme_continuation(),
             "current_command_context_name": current_context_name,
             "action_log": list(self._action_log),
+            # The handle store rides the suspension blob because a resumed turn
+            # continues the SAME logical turn: the agent's trajectory still
+            # carries the compact observations it was given before the
+            # suspension, each naming a handle, and a store that did not survive
+            # would leave every one of those citations unresolvable in the half
+            # of the turn that runs in the other process.
+            "result_handles": self._result_handles.to_state(),
             "conversation_history_turns": extract_turns_from_history(
                 self.conversation_history
             ),
@@ -1116,6 +1426,31 @@ class WorkflowExecutionContext:
             if isinstance(found, int) and found > SCHEMA_VERSION:
                 raise IncompatibleSessionState.forward_version(found)
             raise IncompatibleSessionState(found)
+        if int(found) >= 8:
+            if "result_handles" not in state or not isinstance(
+                state.get("result_handles"),
+                list,
+            ):
+                raise IncompatibleSessionState(
+                    f"{found} (missing or malformed result_handles)",
+                    expected=SCHEMA_VERSION,
+                )
+            react_state = state.get("react")
+            if react_state is not None:
+                presentation_commands = react_state.get(
+                    "presentation_commands"
+                ) if isinstance(react_state, dict) else None
+                if (
+                    not isinstance(presentation_commands, list)
+                    or any(
+                        not isinstance(command, str) or not command
+                        for command in presentation_commands
+                    )
+                ):
+                    raise IncompatibleSessionState(
+                        f"{found} (missing or malformed presentation_commands)",
+                        expected=SCHEMA_VERSION,
+                    )
         # Validated up here with the version check, not applied halfway down:
         # this method's contract is "raises having applied nothing", and a
         # malformed experiment triple must not be the one exception that leaves
@@ -1124,6 +1459,16 @@ class WorkflowExecutionContext:
             self._validate_experiment_labels(
                 state.get("experiment_id"), state.get("task_id"), state.get("attempt")
             )
+        try:
+            self._validate_turn_accumulator_state(
+                state.get("turn"),
+                schema_version=int(found),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IncompatibleSessionState(
+                f"{found} (malformed turn accumulator: {exc})",
+                expected=SCHEMA_VERSION,
+            ) from exc
 
         self._awaiting_user = bool(state.get("awaiting_user"))
         self._suspended_user_message = state.get("suspended_user_message")
@@ -1132,6 +1477,10 @@ class WorkflowExecutionContext:
         )
 
         self._action_log = list(state.get("action_log") or [])
+        # Absent from a schema-7 blob, which restores as an empty store: the
+        # agent then gets `UnknownResultHandle` and re-runs the command, which
+        # is a degradation rather than a wrong answer.
+        self._result_handles.apply_state(state.get("result_handles"))
         # Absent from blobs written before ruling I3 landed; a missing key just
         # means feedback has no turn to attach to until the next turn completes.
         self._last_completed_turn_key = state.get("last_completed_turn_key")
@@ -1195,6 +1544,295 @@ class WorkflowExecutionContext:
                 saved_context_name,
             )
 
+    @staticmethod
+    def _validate_turn_accumulator_state(
+        turn: Optional[dict[str, Any]],
+        *,
+        schema_version: int,
+    ) -> None:
+        """Validate versioned plan state before mutating a live context."""
+        if turn is None:
+            return
+        if not isinstance(turn, dict):
+            raise TypeError("turn must be an object or null")
+
+        required_by_version = {
+            5: {
+                "plan",
+                "plan_frontier",
+                "active_leaf",
+                "safety_envelope",
+            },
+            6: {"plan_answers"},
+            7: {
+                "plan_outcome",
+                "plan_checkpoint_count",
+                "plan_last_checkpoint_stored",
+                "plan_last_checkpoint_leaf",
+            },
+            8: {"presented_results", "active_leaf_scope"},
+        }
+        required = {
+            field
+            for version, fields in required_by_version.items()
+            if schema_version >= version
+            for field in fields
+        }
+        missing = sorted(required - set(turn))
+        if missing:
+            raise ValueError(
+                "schema "
+                f"{schema_version} turn is missing required fields: "
+                + ", ".join(missing)
+            )
+
+        for output in turn.get("outputs") or ():
+            fastworkflow.CommandOutput.model_validate(output)
+
+        agent_result = turn.get("agent_result")
+        extraction_truncated_goal_ids: list[str] = []
+        if agent_result is not None:
+            if not isinstance(agent_result, dict):
+                raise TypeError("agent_result must be an object or null")
+            if agent_result.get("failure"):
+                TypedFailure.model_validate(agent_result["failure"])
+            if agent_result.get("provider_timeout") and not agent_result.get(
+                "failure"
+            ):
+                raise ValueError(
+                    "a provider-timeout agent_result requires its typed failure"
+                )
+            if (
+                schema_version >= 8
+                and agent_result.get("extraction_truncated")
+            ):
+                if agent_result.get("extraction_truncated_reason") != (
+                    CODE_EXTRACTION_TRUNCATED
+                ):
+                    raise ValueError(
+                        "an extraction-truncated result requires the typed reason"
+                    )
+                goal_ids = agent_result.get("extraction_truncated_goal_ids")
+                if not isinstance(goal_ids, list) or any(
+                    not isinstance(goal_id, str) or not goal_id
+                    for goal_id in goal_ids
+                ):
+                    raise TypeError(
+                        "extraction_truncated_goal_ids must be a list of ids"
+                    )
+                if len(goal_ids) != len(set(goal_ids)):
+                    raise ValueError(
+                        "extraction_truncated_goal_ids repeats a goal_id"
+                    )
+                extraction_truncated_goal_ids = goal_ids
+                extraction_failure = TypedFailure.model_validate(
+                    agent_result.get("extraction_failure")
+                )
+                if extraction_failure.code != CODE_EXTRACTION_TRUNCATED:
+                    raise ValueError(
+                        "extraction_failure must classify extraction truncation"
+                    )
+
+        plan_blob = turn.get("plan")
+        plan = (
+            PlanRecord.model_validate(plan_blob)
+            if plan_blob is not None
+            else None
+        )
+        if plan is not None:
+            goal_ids = [node.goal_id for node in plan.nodes]
+            if len(goal_ids) != len(set(goal_ids)):
+                raise ValueError("restored plan repeats a goal_id")
+            known_goal_ids = set(goal_ids)
+            for node in plan.nodes:
+                if (
+                    node.parent_goal_id is not None
+                    and node.parent_goal_id not in known_goal_ids
+                ):
+                    raise ValueError(
+                        f"plan node {node.goal_id!r} has an unknown parent"
+                    )
+                unknown_prerequisites = (
+                    set(node.prerequisites) - known_goal_ids
+                )
+                if unknown_prerequisites:
+                    raise ValueError(
+                        f"plan node {node.goal_id!r} has unknown prerequisites"
+                    )
+            unknown_truncated_goals = (
+                set(extraction_truncated_goal_ids) - known_goal_ids
+            )
+            if unknown_truncated_goals:
+                raise ValueError(
+                    "extraction truncation references unknown goals: "
+                    + ", ".join(sorted(unknown_truncated_goals))
+                )
+            if (
+                schema_version >= 8
+                and
+                agent_result is not None
+                and plan.execution is not None
+                and set(plan.execution.extraction_truncated_goal_ids)
+                != set(extraction_truncated_goal_ids)
+            ):
+                raise ValueError(
+                    "agent and aggregate plan truncation goal ids disagree"
+                )
+
+        presented_results = turn.get("presented_results", [])
+        if not isinstance(presented_results, list):
+            raise TypeError("presented_results must be a list")
+        for item in presented_results:
+            if not isinstance(item, dict):
+                raise TypeError("each presented result must be an object")
+            if not isinstance(item.get("handles", []), list):
+                raise TypeError("presented result handles must be a list")
+            if not isinstance(item.get("unresolved", []), list):
+                raise TypeError("presented result unresolved must be a list")
+            if not isinstance(item.get("omitted_handles", []), list):
+                raise TypeError("presented result omitted_handles must be a list")
+            if "trimmed" in item and not isinstance(item["trimmed"], bool):
+                raise TypeError("presented result trimmed must be boolean")
+            if item.get("trimmed") and item.get(
+                "truncation_classification"
+            ) != PRESENTATION_TRUNCATION_CLASSIFICATION:
+                raise ValueError(
+                    "a trimmed presented result requires its infrastructure "
+                    "truncation classification"
+                )
+            leaf_goal_id = item.get("leaf_goal_id")
+            if leaf_goal_id is not None:
+                leaf = plan.node(leaf_goal_id) if plan is not None else None
+                if leaf is None or not leaf.is_leaf:
+                    raise ValueError(
+                        "presented result leaf_goal_id must name a plan leaf"
+                    )
+
+        answers = turn.get("plan_answers", [])
+        if not isinstance(answers, list):
+            raise TypeError("plan_answers must be a list")
+        answer_ids: list[str] = []
+        for item in answers:
+            if not isinstance(item, dict):
+                raise TypeError("each plan answer must be an object")
+            goal_id = item.get("goal_id")
+            answer = item.get("answer")
+            if not isinstance(goal_id, str) or not goal_id:
+                raise ValueError("each plan answer requires a goal_id")
+            if not isinstance(answer, str) or not answer:
+                raise ValueError("each plan answer requires non-empty evidence")
+            answer_ids.append(goal_id)
+            node = plan.node(goal_id) if plan is not None else None
+            if (
+                node is None
+                or not node.is_leaf
+                or (
+                    node.status != "done"
+                    and not node.command_call_ids
+                )
+            ):
+                raise ValueError(
+                    f"plan answer {goal_id!r} has no matching leaf evidence"
+                )
+        if len(answer_ids) != len(set(answer_ids)):
+            raise ValueError("plan_answers repeats a goal_id")
+
+        frontier = turn.get("plan_frontier", [])
+        if not isinstance(frontier, list):
+            raise TypeError("plan_frontier must be a list")
+        if len(frontier) != len(set(frontier)):
+            raise ValueError("plan_frontier repeats a goal_id")
+        for goal_id in frontier:
+            node = plan.node(goal_id) if plan is not None else None
+            if node is None or not node.is_leaf or node.status != "not-reached":
+                raise ValueError(
+                    f"frontier goal {goal_id!r} is not an unreached leaf"
+                )
+
+        active_leaf_id = turn.get("active_leaf")
+        if active_leaf_id is not None:
+            active_leaf = (
+                plan.node(active_leaf_id) if plan is not None else None
+            )
+            if (
+                active_leaf is None
+                or not active_leaf.is_leaf
+                or active_leaf.status != "needs-user"
+            ):
+                raise ValueError(
+                    "active_leaf must name the suspended needs-user leaf"
+                )
+        active_leaf_scope = turn.get("active_leaf_scope")
+        if schema_version >= 8 and active_leaf_id is not None and active_leaf_scope is None:
+            raise ValueError(
+                "schema 8 active_leaf requires its binding/navigation scope"
+            )
+        if active_leaf_scope is not None:
+            restored_scope = PlanExecutionScope.from_state(active_leaf_scope)
+            if active_leaf_id is None:
+                raise ValueError(
+                    "active_leaf_scope requires a suspended active_leaf"
+                )
+            if (
+                plan is not None
+                and plan.execution is not None
+                and restored_scope.arm.value != plan.execution.arm
+            ):
+                raise ValueError(
+                    "active_leaf_scope arm must match plan execution metadata"
+                )
+
+        plan_outcome = turn.get("plan_outcome")
+        if plan_outcome is not None:
+            PlanExecutionOutcome(plan_outcome)
+
+        checkpoint_count = turn.get("plan_checkpoint_count", 0)
+        if (
+            isinstance(checkpoint_count, bool)
+            or not isinstance(checkpoint_count, int)
+            or checkpoint_count < 0
+        ):
+            raise ValueError(
+                "plan_checkpoint_count must be a non-negative integer"
+            )
+        checkpoint_stored = turn.get("plan_last_checkpoint_stored")
+        if checkpoint_stored is not None and not isinstance(
+            checkpoint_stored,
+            bool,
+        ):
+            raise TypeError(
+                "plan_last_checkpoint_stored must be boolean or null"
+            )
+        checkpoint_leaf_id = turn.get("plan_last_checkpoint_leaf")
+        if checkpoint_count == 0:
+            if checkpoint_leaf_id is not None or checkpoint_stored is not None:
+                raise ValueError(
+                    "zero checkpoints cannot name or certify a checkpoint"
+                )
+        else:
+            checkpoint_leaf = (
+                plan.node(checkpoint_leaf_id)
+                if plan is not None and checkpoint_leaf_id is not None
+                else None
+            )
+            if (
+                checkpoint_leaf is None
+                or not checkpoint_leaf.is_leaf
+                or (
+                    checkpoint_leaf.status != "done"
+                    and not checkpoint_leaf.command_call_ids
+                )
+            ):
+                raise ValueError(
+                    "last checkpoint must name a leaf with durable evidence"
+                )
+            if not isinstance(checkpoint_stored, bool):
+                raise ValueError(
+                    "a checkpoint must record its synchronous-store result"
+                )
+
+        SafetyEnvelopeState.from_state(turn.get("safety_envelope"))
+
     def _apply_turn_accumulator(self, turn: Optional[dict[str, Any]]) -> None:
         """Restore the logical turn so resume continues it instead of starting one."""
         if not turn:
@@ -1231,8 +1869,73 @@ class WorkflowExecutionContext:
 
         if agent_result := turn.get("agent_result"):
             self._turn_agent_result = _RestoredAgentResult(
-                exhausted=bool(agent_result.get("exhausted"))
+                exhausted=bool(agent_result.get("exhausted")),
+                censored=bool(agent_result.get("censored")),
+                censored_reason=agent_result.get("censored_reason"),
+                provider_timeout=bool(
+                    agent_result.get("provider_timeout")
+                ),
+                extraction_truncated=bool(
+                    agent_result.get("extraction_truncated")
+                ),
+                extraction_truncated_reason=agent_result.get(
+                    "extraction_truncated_reason"
+                ),
+                extraction_truncated_goal_ids=tuple(
+                    agent_result.get("extraction_truncated_goal_ids") or ()
+                ),
+                extraction_failure=(
+                    TypedFailure.model_validate(
+                        agent_result["extraction_failure"]
+                    )
+                    if agent_result.get("extraction_failure")
+                    else None
+                ),
+                plan_outcome=agent_result.get("plan_outcome"),
+                failure=(
+                    TypedFailure.model_validate(agent_result["failure"])
+                    if agent_result.get("failure")
+                    else None
+                ),
             )
+        plan_blob = turn.get("plan")
+        if plan_blob:
+            self._turn_plan = PlanRecord.model_validate(plan_blob)
+        self._turn_plan_answers = [
+            {
+                "goal_id": str(item["goal_id"]),
+                "answer": str(item["answer"]),
+            }
+            for item in (turn.get("plan_answers") or [])
+            if isinstance(item, dict)
+            and item.get("goal_id")
+            and item.get("answer")
+        ]
+        self._turn_presented_results = [
+            dict(item)
+            for item in (turn.get("presented_results") or [])
+            if isinstance(item, dict)
+        ]
+        self._turn_plan_frontier = list(turn.get("plan_frontier") or [])
+        self._turn_active_leaf = turn.get("active_leaf")
+        self._turn_leaf_scope = (
+            PlanExecutionScope.from_state(turn["active_leaf_scope"])
+            if turn.get("active_leaf_scope") is not None
+            else None
+        )
+        self._turn_plan_outcome = turn.get("plan_outcome")
+        self._turn_plan_checkpoint_count = int(
+            turn.get("plan_checkpoint_count") or 0
+        )
+        self._turn_plan_last_checkpoint_stored = turn.get(
+            "plan_last_checkpoint_stored"
+        )
+        self._turn_plan_last_checkpoint_leaf = turn.get(
+            "plan_last_checkpoint_leaf"
+        )
+        self._turn_safety_envelope = SafetyEnvelopeState.from_state(
+            turn.get("safety_envelope")
+        )
 
     def _apply_cme_continuation(self, cme: Optional[dict[str, Any]]) -> None:
         """Restore the in-flight CME command so the next message continues it.
@@ -1459,6 +2162,10 @@ class WorkflowExecutionContext:
         except CommandCancelledError as exc:
             self._reset_agent_suspension()
             return self._command_cancelled_output(str(exc))
+        except Exception as exc:
+            if is_provider_timeout(exc):
+                return self._provider_timeout_output(exc)
+            raise
         finally:
             self.pop_active_workflow()
             if self._app_workflow:
@@ -1483,6 +2190,12 @@ class WorkflowExecutionContext:
             status = TurnStatus.COMPLETED
             completed_at = datetime.now(timezone.utc)
             if self._turn_agent_result is not None:
+                plan_outcome = getattr(
+                    self._turn_agent_result,
+                    "plan_outcome",
+                    None,
+                )
+                plan_outcome = getattr(plan_outcome, "value", plan_outcome)
                 # A classified failure from the agent's finish phase (EXP-011,
                 # arch §8.4): the extraction could not produce a final answer,
                 # and the turn returns that as a typed failure carrying the
@@ -1490,10 +2203,68 @@ class WorkflowExecutionContext:
                 # exhaustion because a turn can be both, and the specific
                 # classification is the more useful of the two.
                 agent_failure = getattr(self._turn_agent_result, "failure", None)
-                if agent_failure is not None:
+                if (
+                    getattr(
+                        self._turn_agent_result,
+                        "provider_timeout",
+                        False,
+                    )
+                    or plan_outcome
+                    == PlanExecutionOutcome.PROVIDER_TIMEOUT.value
+                ):
+                    status = TurnStatus.PROVIDER_TIMEOUT
+                    failure_reason = CODE_PROVIDER_TIMEOUT
+                    if isinstance(agent_failure, TypedFailure):
+                        self._turn_failure = agent_failure
+                elif (
+                    getattr(self._turn_agent_result, "censored", False)
+                    or plan_outcome == PlanExecutionOutcome.CENSORED.value
+                ):
+                    status = TurnStatus.CENSORED
+                    failure_reason = getattr(
+                        self._turn_agent_result,
+                        "censored_reason",
+                        None,
+                    )
+                # ido-mn1.6.10. The harness stopped the deliverable at its
+                # completion limit. `CENSORED` and not `FAILED`, because nothing
+                # about the task went wrong and the answer above is real work —
+                # it is the same class of outcome as the safety envelope and the
+                # provider timeout, an infrastructure cutoff a run must never
+                # read as the task failing. Ranked BELOW those two: a turn that
+                # was censored by the envelope or lost its provider has a more
+                # specific thing to say about why it stopped. Ranked ABOVE the
+                # generic `agent_failure` branch, which would otherwise record a
+                # turn that produced an answer as failed.
+                elif getattr(
+                    self._turn_agent_result, "extraction_truncated", False
+                ):
+                    status = TurnStatus.CENSORED
+                    failure_reason = getattr(
+                        self._turn_agent_result,
+                        "extraction_truncated_reason",
+                        None,
+                    ) or CODE_EXTRACTION_TRUNCATED
+                    truncation_failure = getattr(
+                        self._turn_agent_result, "extraction_failure", None
+                    )
+                    if isinstance(truncation_failure, TypedFailure):
+                        self._turn_failure = truncation_failure
+                elif agent_failure is not None:
                     status = TurnStatus.FAILED
                     failure_reason = agent_failure.code
                     self._turn_failure = agent_failure
+                elif plan_outcome == PlanExecutionOutcome.FAILED.value:
+                    status = TurnStatus.FAILED
+                    failure_reason = "plan-failed"
+                elif plan_outcome in {
+                    PlanExecutionOutcome.PARTIAL.value,
+                    PlanExecutionOutcome.NEEDS_USER.value,
+                    PlanExecutionOutcome.EXHAUSTED.value,
+                    PlanExecutionOutcome.BLOCKED.value,
+                }:
+                    status = TurnStatus.PARTIAL
+                    failure_reason = f"plan-{plan_outcome}"
                 elif getattr(self._turn_agent_result, "exhausted", False):
                     # The turn failed to complete (agent ran out of iterations).
                     # status carries the failure; failure_reason elaborates it.
@@ -1530,6 +2301,103 @@ class WorkflowExecutionContext:
         turn_metadata: dict[str, Any] = {}
         if self._app_workflow is not None:
             turn_metadata["workflow_folderpath"] = self._app_workflow.folderpath
+        stress_mode = plan_stress_mode_from_env()
+        if stress_mode:
+            budget = self._turn_budget
+            censored = bool(
+                self._turn_safety_envelope.censored
+                or (
+                    self._turn_agent_result is not None
+                    and getattr(self._turn_agent_result, "censored", False)
+                )
+            )
+            censored_reason = (
+                self._turn_safety_envelope.censored_reason
+                or (
+                    getattr(
+                        self._turn_agent_result,
+                        "censored_reason",
+                        None,
+                    )
+                    if self._turn_agent_result is not None
+                    else None
+                )
+            )
+            turn_metadata["exp028_stress"] = {
+                "stress_mode": True,
+                "iterations": (
+                    budget.iterations_consumed if budget is not None else None
+                ),
+                "model_calls": (
+                    budget.model_calls_consumed if budget is not None else None
+                ),
+                "command_outputs": len(
+                    [
+                        output
+                        for output in self._turn_outputs
+                        if not output.is_ask_user
+                    ]
+                ),
+                "safety_wall_time_limit_s": (
+                    self._turn_safety_envelope.wall_time_limit_s
+                ),
+                "censored": censored,
+                "censored_reason": censored_reason,
+            }
+        if self._turn_plan is not None:
+            leaves = self._turn_plan.leaves
+            turn_metadata["plan_runtime"] = {
+                "outcome": self._turn_plan_outcome,
+                "done_leaf_count": sum(
+                    leaf.status == "done" for leaf in leaves
+                ),
+                "leaf_count": len(leaves),
+                "command_evidence_count": sum(
+                    len(leaf.command_call_ids) for leaf in leaves
+                ),
+                "answer_count": len(self._turn_plan_answers),
+                "active_leaf": self._turn_active_leaf,
+                "frontier": list(self._turn_plan_frontier),
+                "checkpoint_count": self._turn_plan_checkpoint_count,
+                "last_checkpoint_stored": (
+                    self._turn_plan_last_checkpoint_stored
+                ),
+                "last_checkpoint_leaf": (
+                    self._turn_plan_last_checkpoint_leaf
+                ),
+                "durable_progress": any(
+                    leaf.status == "done" or bool(leaf.command_call_ids)
+                    for leaf in leaves
+                ),
+                "extraction_truncated_goal_ids": list(
+                    getattr(
+                        self._turn_agent_result,
+                        "extraction_truncated_goal_ids",
+                        (),
+                    )
+                    if self._turn_agent_result is not None
+                    else ()
+                ),
+                "extraction_truncation_failures": (
+                    {
+                        goal_id: failure.to_state()
+                        for goal_id, failure in (
+                            self._turn_plan.execution
+                            .extraction_truncation_failures.items()
+                        )
+                    }
+                    if self._turn_plan.execution is not None
+                    else {}
+                ),
+            }
+        if self._turn_presented_results:
+            # The provenance of what the answer was ABLE to present. An evaluator
+            # scoring a listing against the population needs to tell "the agent
+            # never fetched those rows" from "the runtime trimmed them", and
+            # `final_answer` alone cannot say which.
+            turn_metadata["presented_results"] = list(self._turn_presented_results)
+        if self._turn_failure is not None:
+            turn_metadata["runtime_failure"] = self._turn_failure.to_state()
 
         turn_result = TurnResult(
             turn_output=turn_output,
@@ -1553,6 +2421,7 @@ class WorkflowExecutionContext:
                 if self._execution_recorder is not None
                 else ()
             ),
+            plan=self._turn_plan,
         )
 
         self._finalize_turn_trace(turn_result)
@@ -1804,6 +2673,87 @@ class WorkflowExecutionContext:
         self._maybe_enqueue_trace_sentinel()
         return command_output
 
+    def _provider_timeout_output(
+        self,
+        exc: BaseException,
+    ) -> fastworkflow.CommandOutput:
+        """Terminalize a provider timeout while preserving prior plan evidence."""
+        completed_work = ()
+        if self._turn_plan is not None:
+            active_leaf = (
+                self._turn_plan.node(self._turn_active_leaf)
+                if self._turn_active_leaf is not None
+                else None
+            )
+            if (
+                active_leaf is not None
+                and active_leaf.status != "done"
+            ):
+                active_leaf.status = "blocked"
+                active_leaf.failure_reason = CODE_PROVIDER_TIMEOUT
+                reconcile_plan_statuses(self._turn_plan)
+                self._checkpoint_plan_progress(
+                    self._turn_plan,
+                    active_leaf,
+                    CODE_PROVIDER_TIMEOUT,
+                )
+            else:
+                reconcile_plan_statuses(self._turn_plan)
+            completed_work = tuple(
+                {
+                    "goal_id": leaf.goal_id,
+                    "status": leaf.status,
+                    "command_call_ids": leaf.command_call_ids,
+                }
+                for leaf in self._turn_plan.leaves
+                if leaf.status == "done" or leaf.command_call_ids
+            )
+            self._turn_plan_outcome = (
+                PlanExecutionOutcome.PROVIDER_TIMEOUT.value
+            )
+        failure = provider_timeout_failure(
+            exc,
+            completed_work=completed_work,
+        )
+        preserved = (
+            self._compose_plan_answer(render_account(self._turn_plan))
+            if self._turn_plan is not None
+            else ""
+        )
+        timeout_text = (
+            "The model provider timed out. This is an infrastructure outcome, "
+            "not a task failure or safety censor."
+        )
+        if completed_work:
+            timeout_text += " Prior plan progress remains recorded."
+        response = (
+            f"{preserved}\n\n{timeout_text}"
+            if preserved
+            else timeout_text
+        )
+        self._turn_failure = failure
+        self._turn_agent_result = SimpleNamespace(
+            final_answer=response,
+            exhausted=False,
+            censored=False,
+            provider_timeout=True,
+            plan_outcome=self._turn_plan_outcome,
+            failure=failure,
+        )
+        command_output = fastworkflow.CommandOutput(
+            command_response=fastworkflow.CommandResponse(
+                response=response,
+                success=False,
+            )
+        )
+        if self._app_workflow:
+            command_output.workflow_name = (
+                self._app_workflow.folderpath.split("/")[-1]
+            )
+        self._maybe_enqueue_output(command_output)
+        self._maybe_enqueue_trace_sentinel()
+        return command_output
+
     def _maybe_enqueue_output(self, command_output: fastworkflow.CommandOutput) -> None:
         if (
             (not command_output.success or self._keep_alive)
@@ -1861,6 +2811,7 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message = None
         self._pending_clarification_request = None
+        self._turn_leaf_scope = None
         if self._workflow_tool_agent is not None and hasattr(
             self._workflow_tool_agent, "clear_suspension"
         ):
@@ -1873,8 +2824,34 @@ class WorkflowExecutionContext:
 
         return lm, CommandsSystemPreludeAdapter()
 
+    def _remaining_turn_deadline_seconds(self) -> float:
+        """What is left of this logical turn's wall deadline, in seconds.
+
+        The deadline is `FW_TURN_DEADLINE_SECONDS`, resolved by
+        `external_operations` so the in-turn clamp and the server's watchdog
+        cannot hold two different numbers (ido-mn1.6.33).
+
+        The anchor is the safety envelope's own start, because that is the one
+        timestamp taken when the logical turn began; without it a planned turn
+        would hand every leaf a fresh full deadline and the bound would apply
+        to each leaf rather than to the turn. When no envelope is running --
+        ordinary, non-stress deployments -- there is nothing to anchor to and
+        the full deadline is used, which is still a bound where there was none.
+
+        Never returns zero or less: an already-overrun turn gets a floor rather
+        than a deadline in the past, so the failure it produces comes from the
+        call that has no time rather than from a context that refuses before
+        anything is attempted.
+        """
+        deadline = external_operations.resolve_turn_deadline_seconds()
+        envelope = getattr(self, "_turn_safety_envelope", None)
+        started = float(getattr(envelope, "started_at_epoch_s", 0.0) or 0.0)
+        if envelope is not None and getattr(envelope, "enabled", False) and started > 0:
+            deadline -= max(0.0, time.time() - started)
+        return max(1.0, deadline)
+
     def _call_agent(self, agent_call, lm=None, *, trace_input=None,
-                    resumed=False):
+                    resumed=False, presentation_commands=None):
         """Run agent_call once, under an agent dspy.context.
 
         lm: optional LM override (e.g. distillation's teacher/student model). When
@@ -1897,10 +2874,27 @@ class WorkflowExecutionContext:
         ``attempts`` stays on the span, now always 1, because the attribute is
         part of a recorded shape and a reader comparing G2A traces to later ones
         needs the field to exist in both.
+
+        ``presentation_commands`` is the executing skill's optional ``presents:``
+        OVERRIDE (ido-mn1.6.6), applied HERE rather than at each call site so the
+        flat turn, the shadow turn and every plan leaf reach the extraction-time
+        resolver by one road. Empty on the flat paths is not a gap: the DEFAULT
+        rule is the producing command's own ``presentation`` flag, which the
+        resolver reads off the stored handle in every arm. That is where it has
+        to live — with ``FW_PLAN_DECOMPOSITION=off`` the loader never opens
+        ``_skills/``, so a skill-only rule would have given the control arm less
+        mechanism than the treatment arms and the endpoint would have scored the
+        difference as an effect of decomposition.
+
+        ``None`` means LEAVE IT ALONE, which is what the resume path wants: a
+        resumed run continues the same leaf of the same logical turn, and
+        clearing the override on the way back in would drop the second half of
+        that leaf's answer from the presentation rule its first half had.
         """
         default_lm, agent_adapter = self._agent_dspy_context()
         if lm is None:
             lm = default_lm
+        turn_seconds = self._remaining_turn_deadline_seconds()
         span = tracing.start_span(
             self,
             tracing.SPAN_AGENT_EXECUTE,
@@ -1911,10 +2905,32 @@ class WorkflowExecutionContext:
             },
         )
         attempts = 1
+        agent = self._workflow_tool_agent
+        if presentation_commands is not None and agent is not None:
+            agent.presentation_commands = frozenset(presentation_commands)
         try:
             with tracing.host_scope(self):
-                with dspy.context(lm=lm, adapter=agent_adapter):
-                    result = agent_call()
+                # ido-mn1.6.33. THE turn-level deadline, opened once around the
+                # whole agent run. Until this existed there was no operation in
+                # force on this path at all, so `extraction_bound()`'s
+                # `clamp_timeout()` had nothing to clamp against and
+                # `timeout_clamped` was decorative: the extraction could derive
+                # an 802 s bound, take it three times across parse attempts,
+                # and outlive the watchdog that was supposed to bound the turn.
+                #
+                # `operation` nests to the INNER deadline, so the per-call
+                # classes underneath (`model.agent` 300 s for a react step,
+                # `backend.read` 60 s for a tool) are unchanged; what changes is
+                # that none of them, and no sum of them, can now outlive the
+                # turn. Opened per agent call rather than per turn because a
+                # planned turn calls the agent once per leaf, and the anchor is
+                # the turn's own start either way.
+                with external_operations.operation(
+                    "model.agent", seconds=turn_seconds
+                ):
+                    with dspy.context(lm=lm, adapter=agent_adapter):
+                        result = agent_call()
+                self._remember_presented_results(result)
                 tracing.end_span(
                     self, span, attributes=_agent_result_attributes(result, attempts)
                 )
@@ -1931,6 +2947,72 @@ class WorkflowExecutionContext:
             )
             raise
 
+    def _presentation_commands_for(self, node: Any) -> frozenset[str]:
+        """The `presents:` OVERRIDE governing one leaf, or none.
+
+        Empty is not "present nothing": it hands the decision back to the
+        producing command's own `presentation` flag, which is the arm-invariant
+        default and the only rule arm A can read at all. A skill declares
+        `presents:` only to narrow that default or to add a command the producer
+        did not flag.
+
+        Walks the leaf UP its parent chain and unions what each skill declares,
+        because the leaf that actually runs is often a command sequence with no
+        skill of its own (`PlanNode.skill` is None for one) while the skill whose
+        answer presents the result is its parent. Taking only the leaf's own
+        declaration would make `presents:` work on skills whose bodies happen to
+        have a leading skill step and silently not on the rest.
+
+        Never raises and returns the empty set for a missing plan or node: this
+        selects what MAY be resolved, and a selection failure must cost an answer
+        some rows, not a turn.
+        """
+        plan = self._turn_plan
+        if plan is None or node is None:
+            return frozenset()
+        commands: set[str] = set()
+        seen: set[str] = set()
+        current = node
+        while current is not None and current.goal_id not in seen:
+            seen.add(current.goal_id)
+            skill = self._presents_source(plan, current.skill)
+            if skill is not None:
+                commands.update(skill.presents)
+            parent_id = current.parent_goal_id
+            current = plan.node(parent_id) if parent_id else None
+        return frozenset(commands)
+
+    def _presents_source(self, plan: Any, skill_name: Optional[str]):
+        """The catalogue entry for `skill_name`, or None when it cannot be read."""
+        if not skill_name:
+            return None
+        try:
+            return self._catalog_for_plan_execution(plan).get(skill_name)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                f"could not read presents: for skill {skill_name!r}: {exc!r}"
+            )
+            return None
+
+    def _remember_presented_results(self, result: Any) -> None:
+        """Accumulate one agent call's presentation resolution for the turn record.
+
+        One entry per `fw.agent.execute`, so an Arm B/C turn records what each
+        leaf presented rather than one collapsed total: the leaves are composed
+        by concatenation, and a reader asking why one section of the answer is
+        short needs the leaf that produced it, not the turn.
+        """
+        presented = getattr(result, "presented_results", None)
+        if isinstance(presented, Mapping) and (
+            presented.get("handles")
+            or presented.get("unresolved")
+            or presented.get("omitted_handles")
+            or presented.get("trimmed")
+        ):
+            self._turn_presented_results.append(
+                {"leaf_goal_id": self._turn_active_leaf, **dict(presented)}
+            )
+
     def _run_agent(self, message: str):
         """Fresh agent turn setup and ReAct forward call."""
         self.clear_action_log()
@@ -1946,45 +3028,616 @@ class WorkflowExecutionContext:
             )
         self._turn_refined_message = refined_user_query
 
-        # Query refinement and planning are model calls the turn made. Counted
-        # on the turn's budget so the record is complete; unenforced today
-        # because `model_call_limit` is None until a host or contract sets one
-        # (arch §6.0: an absent limit records rather than forbids).
-        budget.consume_model_call()
+        # Query refinement above is deterministic string assembly. Model-call
+        # accounting starts at the planner/selector calls below, so Arm A and
+        # Arms B/C do not each receive one phantom call before their real one.
 
-        from fastworkflow.workflow_agent import build_query_with_next_steps, _what_can_i_do
-
-        # When there is prior conversation history, pass the agent trajectory and
-        # inputs to the planner so it does not re-plan steps already completed in
-        # earlier turns (uses TaskPlannerWithTrajectoryAndAgentInputsSignature).
-        has_history = bool(self.conversation_history.messages)
-        # The planner is its own deadline class (arch §13.2): it runs before any
-        # tool does, so a planner that never returns is a turn that never starts.
-        with external_operations.operation("model.planner"):
-            command_info_and_refined_message_with_todolist = build_query_with_next_steps(
-                refined_user_query,
-                self,
-                with_agent_inputs_and_trajectory=has_history,
-                planning_insights=self._planning_insights,
-                planner_lm=getattr(self, "_current_planner_lm", None),
-            )
-        available_commands = _what_can_i_do(self)
-        budget.consume_model_call()
-
-        return self._call_agent(
-            lambda: self._workflow_tool_agent(
-                user_query=command_info_and_refined_message_with_todolist,
-                available_commands=available_commands,
-                # The same object the planner above spent from — arch §6.4
-                # requires one budget per logical turn, not one per component.
-                budget=self._require_turn_budget(),
-            ),
-            trace_input=command_info_and_refined_message_with_todolist,
+        from fastworkflow.workflow_agent import (
+            _plan_decomposition_point,
+            _what_can_i_do,
+            build_query_with_next_steps,
+            select_skills,
         )
+
+        mode, catalog = _plan_decomposition_point(self)
+        has_history = bool(self.conversation_history.messages)
+
+        if mode is PlanMode.OFF:
+            with external_operations.operation("model.planner"):
+                command_info_and_refined_message_with_todolist = build_query_with_next_steps(
+                    refined_user_query,
+                    self,
+                    with_agent_inputs_and_trajectory=has_history,
+                    planning_insights=self._planning_insights,
+                    planner_lm=getattr(self, "_current_planner_lm", None),
+                )
+            available_commands = _what_can_i_do(self)
+            budget.consume_model_call()
+
+            return self._call_agent(
+                lambda: self._workflow_tool_agent(
+                    user_query=command_info_and_refined_message_with_todolist,
+                    available_commands=available_commands,
+                    budget=self._require_turn_budget(),
+                    safety_envelope=self._turn_safety_envelope,
+                ),
+                trace_input=command_info_and_refined_message_with_todolist,
+                # Arm A: `off` never opens `_skills/`, so there is no skill to
+                # override with. The resolver still runs the SAME two rules —
+                # citation, and the producing command's `presentation` flag —
+                # which is what keeps the control arm's mechanism equal to the
+                # treatment arms' (ido-mn1.6.6).
+                presentation_commands=self._presentation_commands_for(None),
+            )
+
+        with external_operations.operation("model.planner"):
+            selected = select_skills(
+                refined_user_query,
+                catalog,
+                getattr(self, "_current_planner_lm", None),
+            )
+        selector_provider_calls = int(
+            getattr(selected, "provider_call_count", 1) or 1
+        )
+        selector_provider_responses = int(
+            getattr(selected, "provider_response_count", 0) or 0
+        )
+        budget.consume_model_call(selector_provider_calls)
+        compile_span = tracing.start_span(
+            self,
+            tracing.SPAN_PLAN_COMPILE,
+            attributes={
+                "mode": mode.value,
+                "selector_application_attempts": int(
+                    getattr(selected, "application_attempt_count", 0) or 0
+                ),
+                "selector_provider_calls": selector_provider_calls,
+                "selector_provider_responses": selector_provider_responses,
+                "selector_adapter_identity": getattr(
+                    selected,
+                    "adapter_identity",
+                    None,
+                ),
+            },
+        )
+        try:
+            plan = expand(
+                catalog,
+                selected,
+                refined_user_query,
+                mode=mode,
+                selection_model=getattr(selected, "selection_model", None),
+            )
+            tracing.end_span(
+                self,
+                compile_span,
+                attributes={
+                    "requested_public_task_keys": list(plan.requested_public_task_keys),
+                    "compiled_public_task_keys": list(plan.compiled_public_task_keys),
+                    "public_node_count": len(plan.public_nodes),
+                    "leaf_count": len(plan.leaves),
+                    "executable_leaf_count": len(
+                        [leaf for leaf in plan.leaves if leaf.executable]
+                    ),
+                    "edge_count": len(plan.edges),
+                    "packing_candidate_count": plan.packing.candidate_count,
+                    "composite_group_count": (
+                        plan.packing.selected_root_group_count
+                    ),
+                    "recursive_composite_group_count": (
+                        plan.packing.selected_recursive_group_count
+                    ),
+                    "packed_task_count": plan.packing.packed_task_count,
+                    "packing_edge_count": (
+                        plan.packing.orchestration_edge_count
+                    ),
+                    "packing_sha256": plan.packing.packing_sha256,
+                },
+            )
+        except BaseException as exc:
+            tracing.end_span(
+                self,
+                compile_span,
+                status=tracing.status_for_dispatch_exception(exc),
+                attributes={"error_type": type(exc).__name__},
+            )
+            raise
+        self._turn_plan = plan
+        self._turn_plan_frontier = [
+            node.goal_id for node in plan.nodes if node.is_leaf and node.status == "not-reached"
+        ]
+
+        if mode is PlanMode.SHADOW:
+            with external_operations.operation("model.planner"):
+                command_info_and_refined_message_with_todolist = build_query_with_next_steps(
+                    refined_user_query,
+                    self,
+                    with_agent_inputs_and_trajectory=has_history,
+                    planning_insights=self._planning_insights,
+                    planner_lm=getattr(self, "_current_planner_lm", None),
+                )
+            available_commands = _what_can_i_do(self)
+            budget.consume_model_call()
+            return self._call_agent(
+                lambda: self._workflow_tool_agent(
+                    user_query=command_info_and_refined_message_with_todolist,
+                    available_commands=available_commands,
+                    budget=self._require_turn_budget(),
+                    safety_envelope=self._turn_safety_envelope,
+                ),
+                trace_input=command_info_and_refined_message_with_todolist,
+                # Shadow compiles a plan and then runs FLAT, so it must reach the
+                # resolver exactly as `off` does or it stops being `off`'s
+                # control. `None` here is that equality, not an oversight.
+                presentation_commands=self._presentation_commands_for(None),
+            )
+
+        arm = plan_execution_arm_from_env()
+        if arm is PlanExecutionArm.A:
+            raise PlanConfigurationError(
+                "FW_PLAN_EXECUTION_ARM=a requires FW_PLAN_DECOMPOSITION=off; "
+                "Arm A is the flat planner and cannot execute a compiled plan"
+            )
+
+        return self._execute_compiled_plan(plan, arm)
+
+    def _remember_plan_answer(self, goal_id: str, result: Any) -> None:
+        """Keep one final leaf answer so suspension cannot erase prior work."""
+        if (
+            getattr(result, "failure", None) is not None
+            or getattr(result, "censored", False)
+            or getattr(result, "provider_timeout", False)
+        ):
+            return
+        answer = (
+            getattr(result, "final_answer", None)
+            or getattr(result, "answer", None)
+        )
+        if not answer or getattr(result, "suspended", False):
+            return
+        node = (
+            self._turn_plan.node(goal_id)
+            if self._turn_plan is not None
+            else None
+        )
+        if node is None or not node.is_leaf or not node.command_call_ids:
+            # A model answer without command evidence is not leaf evidence.
+            # execute_plan will classify that leaf as blocked; retaining the
+            # prose here would let aggregation imply unsupported progress.
+            return
+        replacement = {"goal_id": goal_id, "answer": str(answer)}
+        for index, item in enumerate(self._turn_plan_answers):
+            if item["goal_id"] == goal_id:
+                self._turn_plan_answers[index] = replacement
+                return
+        self._turn_plan_answers.append(replacement)
+
+    def _compose_plan_answer(self, account: str) -> str:
+        """Compose leaf evidence without promoting it to contract success."""
+        sections = []
+        if self._turn_plan_answers and self._turn_plan is None:
+            raise PlanConfigurationError(
+                "plan answers cannot be rendered without their plan"
+            )
+        leaf_positions = {
+            leaf.goal_id: index
+            for index, leaf in enumerate(
+                self._turn_plan.leaves if self._turn_plan is not None else (),
+                start=1,
+            )
+        }
+        for item in self._turn_plan_answers:
+            node = self._turn_plan.node(item["goal_id"])
+            if node is None or not node.is_leaf:
+                raise PlanConfigurationError(
+                    "plan answer references a missing or non-leaf goal: "
+                    f"{item['goal_id']!r}"
+                )
+            position = leaf_positions[node.goal_id]
+            sections.append(
+                f"Leaf {position} execution evidence "
+                f"(runtime status: {node.status}; not independent contract "
+                f"verification) — {node.goal_text}:\n{item['answer']}"
+            )
+        if account:
+            sections.append(
+                "Runtime execution account "
+                "(does not certify contract success):\n"
+                f"{account}"
+            )
+        return "\n\n".join(sections)
+
+    def _catalog_for_plan_execution(self, plan: Any):
+        """Restore the exact catalogue needed for delayed deterministic binding."""
+        catalog = getattr(plan, "_catalog", None)
+        if catalog is None:
+            if self._app_workflow is None:
+                raise PlanConfigurationError(
+                    "cannot restore delayed plan bindings without a bound workflow"
+                )
+            manifest = merge_and_gate(
+                load_manifest(self._app_workflow.folderpath)
+            )
+            catalog = load_skill_catalog(
+                self._app_workflow.folderpath,
+                manifest,
+            )
+            if getattr(catalog, "fingerprint", None) != plan.skills_fingerprint:
+                raise PlanConfigurationError(
+                    "restored plan catalogue fingerprint differs from the "
+                    "catalogue that compiled it"
+                )
+            plan._catalog = catalog
+        return catalog
+
+    @staticmethod
+    def _node_descends_from(plan: Any, node: Any, ancestor_id: str) -> bool:
+        current = node
+        while current is not None:
+            if current.goal_id == ancestor_id:
+                return True
+            current = (
+                plan.node(current.parent_goal_id)
+                if current.parent_goal_id is not None
+                else None
+            )
+        return False
+
+    def _capture_outputs_for_node(self, plan: Any, node: Any) -> tuple[Any, ...]:
+        """Successful outputs from this node's completed producers, in order."""
+        producer_call_ids: set[str] = set()
+        for prerequisite_id in node.prerequisites:
+            predecessor = plan.node(prerequisite_id)
+            if predecessor is None or predecessor.status != "done":
+                continue
+            for candidate in plan.nodes:
+                if self._node_descends_from(
+                    plan,
+                    candidate,
+                    prerequisite_id,
+                ):
+                    producer_call_ids.update(candidate.command_call_ids)
+        if not producer_call_ids:
+            return ()
+        return tuple(
+            output
+            for output in self._turn_outputs
+            if output.success
+            and output.command_call_id in producer_call_ids
+        )
+
+    def _resolve_delayed_plan_bindings(self, plan: Any) -> bool:
+        """Bind captured handles from completed command evidence, if available."""
+        pending = tuple(
+            node
+            for node in plan.nodes
+            if node.parent_goal_id is not None
+            and node.status == "needs-user"
+            and node.unbound_slots()
+        )
+        if not pending:
+            return False
+        catalog = self._catalog_for_plan_execution(plan)
+        changed = False
+        while True:
+            pass_changed = False
+            for node in tuple(plan.nodes):
+                if (
+                    node.parent_goal_id is None
+                    or node.status != "needs-user"
+                ):
+                    continue
+                for slot_name in node.unbound_slots():
+                    producer_outputs = self._capture_outputs_for_node(
+                        plan,
+                        node,
+                    )
+                    if not producer_outputs:
+                        continue
+                    task_key = node.task_key
+                    binding = bind_captured(
+                        plan,
+                        node,
+                        slot_name,
+                        producer_outputs,
+                        slot=slot_name,
+                        catalog=catalog,
+                    )
+                    if binding is None:
+                        continue
+                    # Runtime-captured values complete execution inputs; they do
+                    # not rewrite the public task identity frozen at compile.
+                    node.task_key = task_key
+                    pass_changed = True
+                    changed = True
+            if not pass_changed:
+                break
+        return changed
+
+    def _checkpoint_plan_progress(
+        self,
+        plan: Any,
+        leaf: Any,
+        reason: str,
+    ) -> None:
+        """Persist progress before another provider call can obscure it."""
+        if reason in {
+            "blocked",
+            "censored",
+            "failed",
+            "needs-user",
+            "provider-timeout",
+        }:
+            self._turn_plan_answers = [
+                item
+                for item in self._turn_plan_answers
+                if item["goal_id"] != leaf.goal_id
+            ]
+        if not (
+            leaf.status == "done"
+            or bool(leaf.command_call_ids)
+        ):
+            return
+        self._turn_plan = plan
+        self._turn_plan_frontier = [
+            node.goal_id
+            for node in plan.leaves
+            if node.status == "not-reached"
+        ]
+        self._turn_plan_checkpoint_count += 1
+        self._turn_plan_last_checkpoint_leaf = leaf.goal_id
+        budget = self._turn_budget
+        checkpoint = TurnResult(
+            turn_output=fastworkflow.TurnOutput(
+                turn_key=self._turn_key or mint_turn_key(),
+                status=TurnStatus.IN_PROGRESS,
+                answer=self._compose_plan_answer(render_account(plan)),
+                command_outputs=list(self._turn_outputs),
+            ),
+            channel_id=self._channel_id,
+            conversation_id=self._conversation_id,
+            experiment_id=self._experiment_id,
+            task_id=self._task_id,
+            attempt=self._attempt,
+            user_message=self._turn_user_message,
+            refined_user_message=self._turn_refined_message,
+            entry_workflow_name=self._turn_entry_workflow_name,
+            entry_context=self._turn_entry_context,
+            started_at=self._turn_started_at,
+            completed_at=None,
+            suspended_ms=self._turn_suspended_ms,
+            metadata={
+                "plan_checkpoint": {
+                    "sequence": self._turn_plan_checkpoint_count,
+                    "leaf_goal_id": leaf.goal_id,
+                    "leaf_status": leaf.status,
+                    "reason": reason,
+                    "done_leaf_count": sum(
+                        node.status == "done" for node in plan.leaves
+                    ),
+                    "leaf_count": len(plan.leaves),
+                    "command_evidence_count": sum(
+                        len(node.command_call_ids) for node in plan.leaves
+                    ),
+                    "answer_count": len(self._turn_plan_answers),
+                    "iterations": (
+                        budget.iterations_consumed
+                        if budget is not None
+                        else None
+                    ),
+                    "model_calls": (
+                        budget.model_calls_consumed
+                        if budget is not None
+                        else None
+                    ),
+                }
+            },
+            execution_records=(
+                self._execution_recorder.records()
+                if self._execution_recorder is not None
+                else ()
+            ),
+            plan=plan,
+        )
+        self._turn_plan_last_checkpoint_stored = tracing.emit_turn_record(
+            self,
+            checkpoint,
+        )
+
+    def _execute_compiled_plan(
+        self,
+        plan: Any,
+        arm: PlanExecutionArm,
+        *,
+        resumed_leaf_result: Any = None,
+    ) -> Any:
+        """Execute or resume a compiled B/C plan through one shared chokepoint."""
+        from fastworkflow.workflow_agent import _what_can_i_do
+
+        # Restored plans do not serialize their catalogue object. Reload it
+        # before scope construction so versioned slot resolvers and typed task
+        # bindings reach the same leaf envelope as a fresh plan.
+        self._catalog_for_plan_execution(plan)
+        resumed_goal_id = self._turn_active_leaf if resumed_leaf_result is not None else None
+
+        def _execute_leaf(node, scope: PlanExecutionScope):
+            self._turn_active_leaf = node.goal_id
+            available_commands = _what_can_i_do(self)
+            agent_input = render_leaf_instruction(node, scope)
+            outputs_before = len(self._turn_outputs)
+            leaf_result = None
+            previous_scope = getattr(self, "_turn_leaf_scope", None)
+            self._turn_leaf_scope = scope
+            try:
+                leaf_result = self._call_agent(
+                    lambda: self._workflow_tool_agent(
+                        user_query=agent_input,
+                        available_commands=available_commands,
+                        budget=self._require_turn_budget(),
+                        safety_envelope=self._turn_safety_envelope,
+                    ),
+                    trace_input=agent_input,
+                    # Arms B and C: one leaf, one executing skill chain, one
+                    # `presents:` union — an OVERRIDE of the command flag the two
+                    # flat sites leave standing. The same parameter on the same
+                    # road, so the resolver is arm-invariant by construction
+                    # rather than by three agreeing copies.
+                    presentation_commands=self._presentation_commands_for(node),
+                )
+            finally:
+                self._turn_leaf_scope = (
+                    scope
+                    if leaf_result is not None
+                    and getattr(leaf_result, "suspended", False)
+                    else previous_scope
+                )
+                new_call_ids = tuple(
+                    output.command_call_id
+                    for output in self._turn_outputs[outputs_before:]
+                    if output.command_call_id
+                )
+                node.command_call_ids = tuple(
+                    dict.fromkeys((*node.command_call_ids, *new_call_ids))
+                )
+            if leaf_result is None:
+                raise RuntimeError("plan leaf execution returned no result")
+            self._remember_plan_answer(node.goal_id, leaf_result)
+            return leaf_result
+
+        frontier_before = len(
+            [
+                node
+                for node in plan.nodes
+                if node.is_leaf and node.status == "not-reached"
+            ]
+        )
+        execute_span = tracing.start_span(
+            self,
+            tracing.SPAN_PLAN_EXECUTE,
+            attributes={
+                "arm": arm.value,
+                "leaf_count": len(plan.leaves),
+                "executable_leaf_count": len(
+                    [leaf for leaf in plan.leaves if leaf.executable]
+                ),
+                "frontier_count_before": frontier_before,
+                "packing_candidate_count": plan.packing.candidate_count,
+                "composite_group_count": plan.packing.selected_root_group_count,
+                "recursive_composite_group_count": (
+                    plan.packing.selected_recursive_group_count
+                ),
+                "packed_task_count": plan.packing.packed_task_count,
+                "packing_edge_count": plan.packing.orchestration_edge_count,
+                "resumed": resumed_leaf_result is not None,
+            },
+        )
+        try:
+            result = execute_plan(
+                plan,
+                execute_leaf=_execute_leaf,
+                arm=arm,
+                safety=self._turn_safety_envelope,
+                resumed_from_goal_id=resumed_goal_id,
+                resumed_leaf_result=resumed_leaf_result,
+                resolve_delayed_bindings=self._resolve_delayed_plan_bindings,
+                current_navigation_context=self._plan_navigation_context,
+                on_progress=self._checkpoint_plan_progress,
+            )
+            self._turn_plan_outcome = result.outcome.value
+            self._turn_plan_frontier = [
+                node.goal_id
+                for node in plan.nodes
+                if node.is_leaf and node.status == "not-reached"
+            ]
+            tracing.end_span(
+                self,
+                execute_span,
+                attributes={
+                    "frontier_count_after": len(self._turn_plan_frontier),
+                    "budget_consumed": plan.budget_consumed,
+                    "budget_limit": plan.budget_limit,
+                    "censored": bool(result.censored),
+                    "censored_reason": result.censored_reason,
+                    "packing_applied": bool(
+                        result.metadata and result.metadata.packing_applied
+                    ),
+                    "schedule_sha256": (
+                        result.metadata.schedule_sha256
+                        if result.metadata is not None
+                        else None
+                    ),
+                    "composite_groups_applied": (
+                        result.metadata.composite_groups_applied
+                        if result.metadata is not None
+                        else 0
+                    ),
+                    "grouped_task_count": (
+                        result.metadata.grouped_task_count
+                        if result.metadata is not None
+                        else 0
+                    ),
+                    "grouped_leaf_count": (
+                        result.metadata.grouped_leaf_count
+                        if result.metadata is not None
+                        else 0
+                    ),
+                    "shared_binding_count": (
+                        result.metadata.shared_binding_count
+                        if result.metadata is not None
+                        else 0
+                    ),
+                    "context_reuse_count": (
+                        result.metadata.context_reuse_count
+                        if result.metadata is not None
+                        else 0
+                    ),
+                },
+            )
+        except BaseException as exc:
+            tracing.end_span(
+                self,
+                execute_span,
+                status=tracing.status_for_dispatch_exception(exc),
+                attributes={"error_type": type(exc).__name__},
+            )
+            raise
+
+        if result.outcome is PlanExecutionOutcome.COMPLETED:
+            self._turn_active_leaf = None
+        return SimpleNamespace(
+            final_answer=self._compose_plan_answer(result.answer),
+            plan_outcome=result.outcome,
+            exhausted=result.exhausted,
+            suspended=result.suspended,
+            needs_user=result.needs_user,
+            clarification=result.clarification,
+            censored=result.censored,
+            censored_reason=result.censored_reason,
+            provider_timeout=result.provider_timeout,
+            # ido-mn1.6.10. Arms B and C compose by concatenating one leaf
+            # answer per leaf with no model call, so a leaf whose own extraction
+            # was cut is a hole in the composed answer that nothing downstream
+            # could otherwise see.
+            extraction_truncated=result.extraction_truncated,
+            extraction_truncated_goal_ids=result.extraction_truncated_goal_ids,
+            extraction_failure=result.extraction_failure,
+            failure=result.failure,
+            successful_leaf_goal_ids=result.successful_leaf_goal_ids,
+        )
+
+    def _plan_navigation_context(self) -> Optional[str]:
+        """Return the concrete context an isolated plan leaf starts from."""
+        workflow = self._app_workflow
+        if workflow is None or workflow.current_command_context is None:
+            return "*"
+        return workflow.current_command_context_name
 
     def _call_agent_resume(self, observation: str):
         return self._call_agent(
-            lambda: self._workflow_tool_agent.resume(observation),
+            lambda: self._workflow_tool_agent.resume(
+                observation,
+                safety_envelope=self._turn_safety_envelope,
+            ),
             trace_input=observation,
             resumed=True,
         )
@@ -2012,9 +3665,50 @@ class WorkflowExecutionContext:
 
         command_response = fastworkflow.CommandResponse(response=result_text)
 
-        conversation_summary, _ = self.summarize_and_record_turn(
-            original_message, self._action_log, result_text
-        )
+        if (
+            getattr(agent_result, "censored", False)
+            or getattr(agent_result, "provider_timeout", False)
+            or self._turn_plan is not None
+        ):
+            # The safety envelope has already expired. Conversation memory is
+            # still updated, but deterministically: making another planner call
+            # after censoring would extend the attempt past its own cutoff and
+            # charge an unreported provider call to a result already frozen.
+            if getattr(agent_result, "censored", False):
+                conversation_summary = (
+                    f"Censored attempt: "
+                    f"{getattr(agent_result, 'censored_reason', None) or 'unknown'}"
+                )
+            elif getattr(agent_result, "provider_timeout", False):
+                conversation_summary = (
+                    "Provider timeout after "
+                    f"{self._turn_plan_checkpoint_count} durable plan "
+                    "checkpoint(s)."
+                )
+            else:
+                done_leaf_count = sum(
+                    leaf.status == "done"
+                    for leaf in self._turn_plan.leaves
+                )
+                conversation_summary = (
+                    f"Plan {self._turn_plan_outcome or 'partial'}: "
+                    f"{done_leaf_count} of "
+                    f"{len(self._turn_plan.leaves)} leaves done."
+                )
+            self.append_conversation_turn(
+                conversation_summary,
+                json.dumps(
+                    {
+                        "user_query": original_message,
+                        "agent_workflow_interactions": self._action_log,
+                        "final_agent_response": result_text,
+                    }
+                ),
+            )
+        else:
+            conversation_summary, _ = self.summarize_and_record_turn(
+                original_message, self._action_log, result_text
+            )
         if self._action_log:
             command_response.artifacts["conversation_summary"] = conversation_summary
 
@@ -2096,12 +3790,67 @@ class WorkflowExecutionContext:
             user_answer,
             self,
         )
-        agent_result = self._call_agent_resume(observation)
+        outputs_before_resume = len(self._turn_outputs)
+        agent_result = None
+        try:
+            agent_result = self._call_agent_resume(observation)
+        finally:
+            if (
+                self._turn_plan is not None
+                and self._turn_active_leaf is not None
+            ):
+                active_leaf = self._turn_plan.node(
+                    self._turn_active_leaf
+                )
+                if active_leaf is not None:
+                    resumed_call_ids = tuple(
+                        output.command_call_id
+                        for output in self._turn_outputs[outputs_before_resume:]
+                        if output.command_call_id
+                    )
+                    active_leaf.command_call_ids = tuple(
+                        dict.fromkeys(
+                            (
+                                *active_leaf.command_call_ids,
+                                *resumed_call_ids,
+                            )
+                        )
+                    )
+        if agent_result is None:
+            raise RuntimeError("resumed agent execution returned no result")
         self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
             self._pending_clarification_request = agent_result.clarification
             self._note_agent_suspension(agent_result.clarification)
             return self._awaiting_user_output(agent_result.clarification)
+
+        if (
+            self._turn_plan is not None
+            and self._turn_plan.mode == PlanMode.ENFORCE.value
+            and self._turn_active_leaf is not None
+        ):
+            active_goal_id = self._turn_active_leaf
+            active_leaf = self._turn_plan.node(active_goal_id)
+            if active_leaf is None:
+                raise PlanConfigurationError(
+                    f"resumed plan has no active leaf {active_goal_id!r}"
+                )
+            self._remember_plan_answer(active_goal_id, agent_result)
+            # Alias feedback needed the restored scope while the suspended
+            # agent ran. The plan executor now reconstructs authoritative scope
+            # for each remaining leaf, so do not leave the resumed leaf's
+            # envelope as the previous scope of its siblings.
+            self._turn_leaf_scope = None
+            agent_result = self._execute_compiled_plan(
+                self._turn_plan,
+                plan_execution_arm_from_env(),
+                resumed_leaf_result=agent_result,
+            )
+            self._turn_agent_result = agent_result
+            if getattr(agent_result, "suspended", None) is True:
+                self._pending_clarification_request = agent_result.clarification
+                self._note_agent_suspension(agent_result.clarification)
+                return self._awaiting_user_output(agent_result.clarification)
 
         original_message = self._suspended_user_message
         self._reset_agent_suspension()

@@ -46,12 +46,15 @@ guarantee they will disagree (EXP-028 "Two parsers is one too many").
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
+from fastworkflow.binding_normalizers import (
+    is_registered_alias_resolver,
+    is_registered_normalizer,
+)
 from fastworkflow.runtime_manifest import MANIFEST_FILENAME, canonical_content_hash
 
 #: The manifest feature id that turns this module on. `skills` at version 1,
@@ -115,6 +118,14 @@ _FRONT_MATTER_CLOSE = "\n---\n"
 # step is deliberately absent).
 _NUMBERED_STEP = re.compile(r"^\s*(\d+)\.\s+(.*\S)\s*$")
 
+# Presentation and accounting prose is attached to the preceding executable
+# step rather than compiled as a commandless leaf. The marker is explicit so
+# the compiler never has to guess from verbs such as "present" or "report".
+_GUIDANCE_STEP = re.compile(
+    r"^\[(?:guidance|presentation|accounting)\]\s*(?P<text>.*\S)\s*$",
+    re.IGNORECASE,
+)
+
 # The review amendment's one new step form:
 #   for each {x} in {xs}: <child-skill> <slot>={x}
 _FOR_EACH = re.compile(
@@ -134,10 +145,23 @@ _CODE_SPAN = re.compile(r"`([^`]+)`")
 _BARE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 
 _FRONT_MATTER_FIELDS = frozenset(
-    {"name", "description", "level", "goal", "slots", "uses"}
+    {"name", "description", "level", "goal", "slots", "uses", "presents"}
 )
-_LIST_FIELDS = frozenset({"slots", "uses"})
-_SLOT_FIELDS = frozenset({"name", "required", "on_repeat", "description", "list"})
+_LIST_FIELDS = frozenset({"slots", "uses", "presents"})
+#: List fields whose entries are bare scalars rather than slot mappings.
+_SCALAR_LIST_FIELDS = frozenset({"uses", "presents"})
+_SLOT_FIELDS = frozenset(
+    {
+        "name",
+        "required",
+        "on_repeat",
+        "description",
+        "list",
+        "binding_kind",
+        "normalizer",
+        "resolver",
+    }
+)
 
 
 class SkillCatalogError(ValueError):
@@ -177,6 +201,17 @@ class Slot:
     on_repeat: Optional[str] = None
     description: str = ""
     list: bool = False
+    # EXP-028 typed binding provenance: what value shape this slot expects.
+    # exact_text: copied verbatim from user request
+    # normalized_enum: copied from user then normalized by named normalizer
+    # captured_handle: bound from prior command artifacts
+    # skill_literal: supplied by the skill body itself
+    binding_kind: str = "exact_text"
+    # Versioned normalizer id for normalized_enum slots.
+    normalizer: Optional[str] = None
+    # Versioned candidate resolver for labels that become codes or handles
+    # only after a declared listing command returns its aligned artifacts.
+    resolver: Optional[str] = None
 
     @property
     def is_list(self) -> bool:
@@ -188,7 +223,7 @@ class Slot:
 class Step:
     """One step of a skill body, already classified by the grammar.
 
-    Three kinds, and the classification is deterministic:
+    Four kinds, and the classification is deterministic:
 
     * ``skill`` — the step *begins* with a name in `uses`. Begins, not
       mentions: `cross-system-privilege-audit` step 4 is "If the permission
@@ -198,15 +233,41 @@ class Step:
       nothing. A conditional mention is a command sequence.
     * ``for_each`` — the amendment's fan-out form.
     * ``commands`` — everything else, executed as a command sequence.
+    * ``guidance`` — explicitly marked presentation/accounting prose attached
+      to the preceding executable step, never a commandless execution leaf.
     """
 
     ordinal: int
-    kind: str  # "skill" | "for_each" | "commands"
+    kind: str  # "skill" | "for_each" | "commands" | "guidance"
     text: str
     skill: Optional[str] = None
     arguments: Mapping[str, str] = field(default_factory=dict)
     loop_variable: Optional[str] = None
     list_slot: Optional[str] = None
+
+
+def _slot_card_entry(
+    *,
+    name: str,
+    description: str,
+    required: bool,
+    is_list: bool,
+    binding_kind: str,
+    normalizer: Optional[str],
+    resolver: Optional[str],
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "required": required,
+        "list": is_list,
+        "binding_kind": binding_kind,
+    }
+    if normalizer:
+        entry["normalizer"] = normalizer
+    if resolver:
+        entry["resolver"] = resolver
+    return entry
 
 
 @dataclass(frozen=True)
@@ -219,6 +280,9 @@ class SkillCard:
     slots: tuple[tuple[str, str], ...]  # (slot name, slot description)
     required_slots: frozenset[str] = frozenset()
     list_slots: frozenset[str] = frozenset()
+    slot_binding_kinds: Mapping[str, str] = field(default_factory=dict)
+    slot_normalizers: Mapping[str, Optional[str]] = field(default_factory=dict)
+    slot_resolvers: Mapping[str, Optional[str]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -226,12 +290,15 @@ class SkillCard:
             "description": self.description,
             "level": self.level,
             "slots": [
-                {
-                    "name": name,
-                    "description": description,
-                    "required": name in self.required_slots,
-                    "list": name in self.list_slots,
-                }
+                _slot_card_entry(
+                    name=name,
+                    description=description,
+                    required=(name in self.required_slots),
+                    is_list=(name in self.list_slots),
+                    binding_kind=self.slot_binding_kinds.get(name, "exact_text"),
+                    normalizer=self.slot_normalizers.get(name),
+                    resolver=self.slot_resolvers.get(name),
+                )
                 for name, description in self.slots
             ],
         }
@@ -251,6 +318,22 @@ class Skill:
     path: str
     content_hash: str
     steps: tuple[Step, ...] = ()
+    #: Commands whose result this skill's answer PRESENTS (ido-mn1.6.6).
+    #: An OVERRIDE, not the rule: the arm-invariant default is the producing
+    #: command's own `ResultHandleSpec.presentation` flag, which every planner
+    #: arm can read because it lives on the stored handle rather than in
+    #: `_skills/` (`FW_PLAN_DECOMPOSITION=off` never opens that directory).
+    #: Declaring `presents:` narrows that default to the named commands, or
+    #: extends it with one the producer did not flag. Absent on every skill that
+    #: does not declare it, which leaves the command flag standing.
+    #:
+    #: Command names rather than step keys. The two carry the same information —
+    #: a step compiles to command calls and a call id IS the handle — but the
+    #: name is what the SKILL.md body already writes in code voice and what
+    #: `StoredResult.command_name` already records, so a name needs no second
+    #: index to reach a producer, and an author declaring one cannot get the
+    #: mapping wrong in a way validation would have to guess at.
+    presents: tuple[str, ...] = ()
 
     def slot(self, name: str) -> Optional[Slot]:
         return next((s for s in self.slots if s.name == name), None)
@@ -272,6 +355,9 @@ class Skill:
             slots=tuple((s.name, s.description) for s in self.slots),
             required_slots=frozenset(s.name for s in self.slots if s.required),
             list_slots=frozenset(s.name for s in self.slots if s.list),
+            slot_binding_kinds={s.name: s.binding_kind for s in self.slots},
+            slot_normalizers={s.name: s.normalizer for s in self.slots},
+            slot_resolvers={s.name: s.resolver for s in self.slots},
         )
 
 
@@ -492,7 +578,8 @@ def parse_front_matter(text: str, path: Any) -> tuple[dict[str, Any], str]:
             continue
         if match := re.match(r"^\s*-\s+(\S.*)$", line):
             # A scalar entry of a list: `- inspect-entity`.
-            if section != "uses":
+            # A scalar entry of a list: `- inspect-entity`, `- show_holders`.
+            if section not in _SCALAR_LIST_FIELDS:
                 raise SkillCatalogError(
                     path,
                     "front-matter",
@@ -596,6 +683,9 @@ def _parse_skill(text: str, *, path: Any, directory_name: str) -> Skill:
                     path=path,
                     field_name=f"{entry['name']}.list",
                 ),
+                binding_kind=(entry.get("binding_kind") or "exact_text").strip(),
+                normalizer=(entry.get("normalizer") or "").strip() or None,
+                resolver=(entry.get("resolver") or "").strip() or None,
             )
         )
 
@@ -614,6 +704,58 @@ def _parse_skill(text: str, *, path: Any, directory_name: str) -> Skill:
                 "when the user repeats without answering; FW-REQ-011 clause 6 "
                 "is ask once, then act on a declared default",
             )
+        if slot.binding_kind not in (
+            "exact_text",
+            "normalized_enum",
+            "captured_handle",
+            "skill_literal",
+        ):
+            raise SkillCatalogError(
+                path,
+                "slot-binding-kind",
+                f"slot '{slot.name}' declares unsupported binding_kind "
+                f"{slot.binding_kind!r}",
+            )
+        if slot.binding_kind == "normalized_enum" and not slot.normalizer:
+            raise SkillCatalogError(
+                path,
+                "slot-normalizer-required",
+                f"slot '{slot.name}' uses binding_kind 'normalized_enum' "
+                "but declares no normalizer id",
+            )
+        if (
+            slot.binding_kind == "normalized_enum"
+            and slot.normalizer
+            and not is_registered_normalizer(slot.normalizer)
+        ):
+            raise SkillCatalogError(
+                path,
+                "slot-normalizer-known",
+                f"slot '{slot.name}' names unknown normalizer "
+                f"{slot.normalizer!r}",
+            )
+        if slot.binding_kind != "normalized_enum" and slot.normalizer:
+            raise SkillCatalogError(
+                path,
+                "slot-normalizer-kind",
+                f"slot '{slot.name}' declares normalizer {slot.normalizer!r} "
+                f"for binding_kind {slot.binding_kind!r}",
+            )
+        if slot.resolver and not is_registered_alias_resolver(slot.resolver):
+            raise SkillCatalogError(
+                path,
+                "slot-resolver-known",
+                f"slot '{slot.name}' names unknown candidate resolver "
+                f"{slot.resolver!r}",
+            )
+        if slot.resolver and slot.binding_kind != "exact_text":
+            raise SkillCatalogError(
+                path,
+                "slot-resolver-kind",
+                f"slot '{slot.name}' declares resolver {slot.resolver!r} "
+                f"for binding_kind {slot.binding_kind!r}; candidate resolvers "
+                "preserve exact operator text until a listing is available",
+            )
 
     uses: list[str] = []
     for entry in fields.get("uses") or ():
@@ -622,6 +764,18 @@ def _parse_skill(text: str, *, path: Any, directory_name: str) -> Skill:
             raise SkillCatalogError(path, "uses-shape", f"uses entry {entry!r}")
         if target.strip() not in uses:
             uses.append(target.strip())
+
+    presents: list[str] = []
+    for entry in fields.get("presents") or ():
+        target = entry.get("name") if isinstance(entry, dict) else entry
+        if not isinstance(target, str) or not _BARE_IDENTIFIER.match(target.strip()):
+            raise SkillCatalogError(
+                path,
+                "presents-shape",
+                f"presents entry {entry!r} is not a bare command name",
+            )
+        if target.strip() not in presents:
+            presents.append(target.strip())
 
     steps = parse_steps(body, uses=tuple(uses), path=path)
     _validate_for_each(steps, slots=tuple(slots), uses=tuple(uses), path=path)
@@ -639,6 +793,7 @@ def _parse_skill(text: str, *, path: Any, directory_name: str) -> Skill:
             [(f"{directory_name}/{SKILL_FILENAME}", text.encode("utf-8"))]
         ),
         steps=steps,
+        presents=tuple(presents),
     )
 
 
@@ -672,6 +827,8 @@ def parse_steps(
 
 
 def _classify_step(text: str, *, ordinal: int, uses: Sequence[str]) -> Step:
+    if match := _GUIDANCE_STEP.match(text):
+        return Step(ordinal=ordinal, kind="guidance", text=match.group("text"))
     if match := _FOR_EACH.match(text):
         rest = match.group("rest")
         child, arguments = _leading_skill(rest, uses)
@@ -821,9 +978,7 @@ def _depth(name: str, skills: Mapping[str, Skill], memo: dict[str, int]) -> int:
     # caller that reordered them from recursing forever instead of failing.
     memo[name] = 1
     child_depths = [_depth(target, skills, memo) for target in skill.uses]
-    if not skill.steps or any(
-        step.kind == "commands" or step.skill is None for step in skill.steps
-    ):
+    if not skill.steps or any(step.kind == "commands" for step in skill.steps):
         child_depths.append(1)
     memo[name] = 1 + max(child_depths, default=0)
     return memo[name]
@@ -866,6 +1021,18 @@ def _validate_bodies(skills: Mapping[str, Skill], manifest: Any) -> None:
                     skill.path,
                     "body-names-a-declared-command",
                     f"names '{token}', which the runtime manifest does not "
+                    "declare as a command",
+                )
+        # `presents` is checked against commands only — never FRAMEWORK_VOCABULARY,
+        # which is manifest keys and parameter hints. A presentation output has to
+        # be something that RUNS and produces a handle, and admitting a parameter
+        # name here would declare a producer that can never produce.
+        for token in skill.presents:
+            if token not in (declared | CORE_VERBS):
+                raise SkillCatalogError(
+                    skill.path,
+                    "presents-names-a-declared-command",
+                    f"presents '{token}', which the runtime manifest does not "
                     "declare as a command",
                 )
 

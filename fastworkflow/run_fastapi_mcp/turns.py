@@ -36,6 +36,7 @@ import contextlib
 import enum
 import hashlib
 import json
+import os
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -114,7 +115,13 @@ class TurnPhase(str, enum.Enum):
 # design: the point is to detect an execution that will never terminalize, not
 # to bound a slow turn — bounding those is EXP-013's deadline classes, applied
 # at the call that is actually slow.
-DEFAULT_TURN_DEADLINE_SECONDS = 900.0
+# ido-mn1.6.33: both names now come from `external_operations`, which is also
+# where the in-turn clamp reads them. Re-exported here because this module is
+# where callers (and tests) have always imported them from, and because a
+# watchdog and an in-turn bound that resolve the deadline separately are two
+# numbers that can disagree.
+DEFAULT_TURN_DEADLINE_SECONDS = external_operations.DEFAULT_TURN_DEADLINE_SECONDS
+TURN_DEADLINE_ENV_VAR = external_operations.TURN_DEADLINE_ENV_VAR
 # Added to the deadline before anything is declared lost, so a turn finishing
 # right at its deadline is not raced by the watchdog.
 DEADLINE_GRACE_SECONDS = 30.0
@@ -122,6 +129,16 @@ WATCHDOG_INTERVAL_SECONDS = 5.0
 # Above this many stuck executions the server is not safe to send traffic to:
 # each one holds an executor thread that never comes back.
 DEFAULT_MAX_STUCK_EXECUTIONS = 4
+
+
+def resolve_turn_deadline_seconds() -> float:
+    """Resolve the watchdog deadline before the server admits any turn.
+
+    Delegates to `external_operations`, which owns the constant the in-turn
+    clamp uses (ido-mn1.6.33). Kept as a name here so the server's callers and
+    their tests are unchanged.
+    """
+    return external_operations.resolve_turn_deadline_seconds()
 
 
 # Kinds worth keeping after they finish. ``/initialize`` re-polls its startup
@@ -168,6 +185,7 @@ LABELABLE_TURN_KINDS = frozenset(
 # skipping it would leave a conversation whose first turn failed with no title
 # and no further trigger until its next refresh milestone.
 LABELABLE_TURN_STATUSES = frozenset({TurnStatus.COMPLETED, TurnStatus.FAILED})
+CONVERSATION_LABELING_ENV_VAR = "FW_CONVERSATION_LABELING"
 
 
 def _now() -> datetime:
@@ -747,6 +765,11 @@ async def _label_conversation_after_turn(
     re-read later. ``ensure_topic_and_summary`` reads it once, up front, for
     exactly this reason; do not move that read after an await.
     """
+    if os.environ.get(
+        CONVERSATION_LABELING_ENV_VAR,
+        "1",
+    ).strip().lower() in {"0", "false", "no", "off"}:
+        return
     if execn.kind not in LABELABLE_TURN_KINDS:
         return
     result = execn.result

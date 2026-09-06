@@ -33,6 +33,15 @@ import pytest
 import fastworkflow
 from fastworkflow import TurnStatus
 from fastworkflow import observability_store as obs
+from fastworkflow.plan import (
+    Binding,
+    CompositeGroup,
+    CompositePackingMetrics,
+    PlanExecutionMetadata,
+    PlanNode,
+    PlanRecord,
+    SourceSpan,
+)
 from fastworkflow.capture_policy import (
     CaptureFieldPolicy,
     CaptureProfileError,
@@ -111,6 +120,69 @@ def _turn_result(artifacts: dict | None = None, *, with_ask_user: bool = True):
     )
 
 
+def _plan_result_with_keys() -> fastworkflow.TurnResult:
+    plan = PlanRecord(
+        plan_id="p1",
+        mode="enforce",
+        requested_public_task_keys=("inspect-entity::identity_uid=sara_doe_496::<none>",),
+        compiled_public_task_keys=("inspect-entity::identity_uid=sara_doe_496::<none>",),
+        composite_groups=(
+            CompositeGroup(
+                group_id="pack-1",
+                composite_skill="identity-packet",
+                member_goal_ids=("g1",),
+                member_task_keys=(
+                    "inspect-entity::identity_uid=sara_doe_496::<none>",
+                ),
+                shared_bindings={"identity_queries": ("sara_doe_496",)},
+                signature_sha256="sha256:test",
+            ),
+        ),
+        packing=CompositePackingMetrics(
+            candidate_count=1,
+            selected_root_group_count=1,
+            packed_task_count=1,
+            shared_binding_count=1,
+            packing_sha256="sha256:test",
+        ),
+        execution=PlanExecutionMetadata(
+            arm="c",
+            packing_applied=True,
+            schedule_sha256="sha256:schedule",
+            public_task_keys=(
+                "inspect-entity::identity_uid=sara_doe_496::<none>",
+            ),
+        ),
+        nodes=(
+            PlanNode(
+                goal_id="g1",
+                level="atomic",
+                skill="inspect-entity",
+                goal_text="Inspect sara_doe_496",
+                executable_goal_text="Inspect sara_doe_496",
+                executable=True,
+                bindings={
+                    "identity_uid": Binding(
+                        value="sara_doe_496",
+                        source="utterance",
+                        kind="exact_text",
+                        source_spans=(
+                            SourceSpan(
+                                start=0,
+                                end=len("sara_doe_496"),
+                                text="sara_doe_496",
+                            ),
+                        ),
+                    )
+                },
+                status="done",
+                command_call_ids=("call-1",),
+            ),
+        ),
+    )
+    return _turn_result(with_ask_user=False).model_copy(update={"plan": plan})
+
+
 def _first_command(turn_row: dict) -> dict:
     return json.loads(turn_row["record_json"])["turn_output"]["command_outputs"][0]
 
@@ -179,6 +251,16 @@ def test_evidence_profile_withholds_parameters_response_and_artifacts():
     assert command["command_parameters"]["note"]["disposition"] == "omit"
     assert command["command_response"]["response"]["disposition"] == "omit"
     assert command["command_response"]["artifacts"]["row"]["disposition"] == "omit"
+
+
+def test_evidence_profile_redacts_plan_public_task_keys():
+    turn_row, _ = obs.serialize_turn_result(_plan_result_with_keys(), policy=evidence_policy())
+    record = json.loads(turn_row["record_json"])
+    assert "sara_doe_496" not in json.dumps(record["plan"])
+    group = record["plan"]["composite_groups"][0]
+    assert is_capture_envelope(group["member_task_keys"][0])
+    assert is_capture_envelope(group["shared_bindings"]["identity_queries"])
+    assert is_capture_envelope(record["plan"]["execution"]["public_task_keys"][0])
 
 
 def test_evidence_profile_leaks_no_tenant_string_into_any_column():

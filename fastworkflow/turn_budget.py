@@ -105,6 +105,7 @@ class LogicalTurnBudget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     iteration_limit: int = Field(gt=0)
+    enforce_iteration_limit: bool = True
     iterations_consumed: int = Field(default=0, ge=0)
     model_call_limit: Optional[int] = Field(default=None, gt=0)
     model_calls_consumed: int = Field(default=0, ge=0)
@@ -144,7 +145,7 @@ class LogicalTurnBudget(BaseModel):
         turn* consumed its own budget. With a per-turn object that is what this
         property means by construction — there is no prior turn's spend in it.
         """
-        return self.iterations_remaining == 0
+        return self.enforce_iteration_limit and self.iterations_remaining == 0
 
     def consume_iteration(self, count: int = 1) -> int:
         """Record ``count`` iterations and return what remains.
@@ -223,6 +224,7 @@ class LogicalTurnBudget(BaseModel):
         state: dict[str, Any] = {
             "kind": self.state_kind(),
             "iteration_limit": self.iteration_limit,
+            "enforce_iteration_limit": self.enforce_iteration_limit,
             "iterations_consumed": self.iterations_consumed,
             "model_call_limit": self.model_call_limit,
             "model_calls_consumed": self.model_calls_consumed,
@@ -261,6 +263,9 @@ class LogicalTurnBudget(BaseModel):
         try:
             return cls(
                 iteration_limit=int(state["iteration_limit"]),
+                enforce_iteration_limit=bool(
+                    state.get("enforce_iteration_limit", True)
+                ),
                 iterations_consumed=int(state.get("iterations_consumed", 0)),
                 model_call_limit=_optional_int(state.get("model_call_limit")),
                 model_calls_consumed=int(state.get("model_calls_consumed", 0)),

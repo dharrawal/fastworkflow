@@ -48,9 +48,24 @@ ResolutionFailure = Literal[
 ]
 
 # Where a definition came from, in precedence order (arch §10.1).
-CapabilitySource = Literal["own", "inherited", "core"]
+#
+# `global` is the workflow's OWN context-free surface: a command file at the
+# root of `_commands/`, which `CommandContextModel.load` files under `*`. It is
+# deliberately not folded into `core`, which is fastWorkflow's framework surface
+# (`IntentDetection/*`, `wildcard`) and belongs to no workflow — "who owns this
+# command" is the question `capability_source` exists to answer, and reporting
+# ido's `who_am_i` as `core` would attribute a workflow command to the
+# framework. It ranks below `inherited` and above `core`: a context's own or
+# inherited definition shadows a global of the same simple name, and a global
+# shadows a framework command of the same name.
+CapabilitySource = Literal["own", "inherited", "global", "core"]
 
-_SOURCE_RANK: dict[CapabilitySource, int] = {"own": 0, "inherited": 1, "core": 2}
+_SOURCE_RANK: dict[CapabilitySource, int] = {
+    "own": 0,
+    "inherited": 1,
+    "global": 2,
+    "core": 3,
+}
 
 
 class CommandDefinitionRef(BaseModel):
@@ -283,6 +298,36 @@ class CommandCapabilityIndex:
         # Core/global definitions are callable everywhere, at the lowest
         # precedence: a workflow command of the same simple name overrides them
         # (arch §10.1 precedence 3).
+        # The historical combined rule above remains the compatibility intent;
+        # the implementation below now distinguishes workflow-owned globals
+        # from framework-owned core definitions so provenance stays truthful.
+        # The workflow's OWN global surface. A command file at the root of
+        # `_commands/` is filed under `*` (`CommandContextModel.load`), and `*`
+        # is a base of nothing, so before this it was callable from `*` and
+        # nowhere else — which is the opposite of what "context-free" means and
+        # is what refused `open_directory` from `Organization` and
+        # `open_controls_monitor` from `ControlFinding` in the EXP-028 Gate 4 v4
+        # traces (38 `not-callable-here` rows, each followed by an abort).
+        # Grafted at `global` precedence, so a context's own or inherited
+        # definition of the same simple name still wins.
+        #
+        # Only the raw `/` declarations of `*` are grafted, never anything `*`
+        # might inherit through a `base`: a global is a global because of where
+        # its file sits, and nothing else.
+        for qualified in (raw_contexts.get(GLOBAL_CONTEXT) or {}).get("/") or []:
+            index._definitions.add(qualified)
+            for context_name in list(index._by_context):
+                if context_name == GLOBAL_CONTEXT:
+                    # Already present as `own`; re-adding would only add a
+                    # lower-ranked duplicate to its own collision bucket.
+                    continue
+                index._add(
+                    context_name,
+                    EffectiveCapability.build(qualified, context_name, "global"),
+                )
+        # Core definitions are callable everywhere, at the lowest precedence: a
+        # workflow command of the same simple name overrides them (arch §10.1
+        # precedence 3).
         for qualified in core_command_names:
             index._definitions.add(qualified)
             for context_name in list(index._by_context) or [GLOBAL_CONTEXT]:

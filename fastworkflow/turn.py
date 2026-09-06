@@ -84,9 +84,13 @@ def collect_artifact_responses(
 class TurnStatus(str, Enum):
     """Terminal (or suspended) status of a logical turn. [A3]"""
 
+    IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     AWAITING_USER = "awaiting_user"
     FAILED = "failed"
+    CENSORED = "censored"
+    PROVIDER_TIMEOUT = "provider_timeout"
     CANCELLED = "cancelled"
     ABANDONED = "abandoned"
 

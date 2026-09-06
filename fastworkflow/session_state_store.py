@@ -34,7 +34,25 @@ PENDING_STATE_KEY = "pending"
 # 4: the per-logical-turn budget (FW-REQ-001, arch §6.4/§9.2). The suspended
 # ReAct blob carries a whole `LogicalTurnBudget` instead of a bare
 # `iteration_counter`, so a resumed turn continues on the budget it had left.
-SCHEMA_VERSION = 4
+# 5: EXP-028 plan runtime state (compiled plan, frontier, safety envelope,
+# active leaf) is persisted across suspend/resume.
+# 6: EXP-028 leaf answers are persisted with the plan so resuming one leaf does
+# not erase the completed leaves from the final composed answer.
+# 7: plan outcome and durable progress-checkpoint certification survive a
+# suspend/restore boundary alongside the plan and leaf answers.
+# 8: the result-handle store (`result_handles`, ido-mn1.6.1). A suspended
+# trajectory carries compact observations that each name a handle; without the
+# store the resumed half of the turn cannot resolve one, so the agent would page
+# a listing it can still see itself citing. A v7 blob IS still read — the store
+# restores empty, which degrades to "re-run the command" rather than to a wrong
+# answer — but a v8 blob is refused by a v7 engine, which is the direction that
+# matters: that engine would drop the store silently.
+# Schema 8 also closes the rest of that same cold-resume boundary: the active
+# skill's presentation-command override, per-call presented-result provenance,
+# exact extraction-truncation goal ids and typed aggregate failures all travel
+# with the turn. They are required in v8 wherever applicable; silently
+# defaulting one can promote an incomplete resumed answer to complete.
+SCHEMA_VERSION = 8
 
 # The versions this build can restore. Unlike the 2→3 break, 3 is *readable*:
 # the only difference is a field the v3 writer did not have, and a v3 blob is a
@@ -42,7 +60,9 @@ SCHEMA_VERSION = 4
 # into an explicit `LegacyTurnBudget` (arch §9.2) — the persisted counter is
 # kept, a per-turn reconstruction is not claimed, and that one turn stays pinned
 # to legacy semantics until it completes or is cancelled.
-READABLE_SCHEMA_VERSIONS: frozenset[int] = frozenset({3, SCHEMA_VERSION})
+READABLE_SCHEMA_VERSIONS: frozenset[int] = frozenset(
+    {3, 4, 5, 6, 7, SCHEMA_VERSION}
+)
 
 
 class IncompatibleSessionState(Exception):

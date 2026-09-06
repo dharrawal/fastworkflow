@@ -766,6 +766,13 @@ def generate_dspy_examples(
 
     model = fastworkflow.get_env_var("LLM_SYNDATA_GEN")
     api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
+    # Bedrock authenticates from the ambient AWS credential chain; the role key
+    # is an unrelated provider secret (an OpenAI key when the role is routed
+    # through Bedrock), and forwarding it as api_key can displace SigV4 in
+    # recent litellm (AWS_BEARER_TOKEN_BEDROCK). Same rule as
+    # utils/dspy_utils.get_lm, which this call site bypasses. (2026-09-05)
+    if str(model or "").startswith(("bedrock/", "bedrock_converse/")):
+        api_key = None
     temperature =  DSPY_EXAMPLE_TEMPERATURE
     if seed is None:
         seed = get_training_seed()

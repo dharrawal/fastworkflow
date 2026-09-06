@@ -552,7 +552,54 @@ class ParameterExtraction:
                     extracted_data[field_name] = parameter_value
 
         # Check if we extracted values for ALL fields (safest criteria for LLM fallback)
-        all_fields_extracted = len(extracted_data) == len(field_names)
+        # The historical rule above is refined here: optional defaults count as
+        # satisfied, while every genuinely required field still must be extracted.
+        # A field is satisfied either by a tag the caller wrote or, for a field
+        # that is not required, by its own default. Requiring a tag for EVERY
+        # declared field made the ordinary call to a command with optional
+        # parameters — the one its docstring tells the agent to make, e.g.
+        # `fetch_result_page <handle>abc</handle>` with `cursor` and `contains`
+        # omitted — return None, which `_extract_impl` reads as "regex failed"
+        # and answers with an LLM round trip. That bought a model call per page
+        # to conclude that two omitted optionals are None, which is exactly what
+        # the default-initialisation below already does.
+        #
+        # `is_required()` is Pydantic's own answer, so it covers `Optional[str]`
+        # with a default, a plain default and `default_factory` alike, and keeps
+        # the LLM fallback for a genuinely missing REQUIRED field.
+        #
+        # The NOT_FOUND exception is not a special case, it is the same rule.
+        # fastWorkflow's own convention for a required parameter is
+        # `Field(default=NOT_FOUND, pattern=r"^(NOT_FOUND|...)$")` — the whole
+        # `retail_workflow` is written that way. Pydantic calls such a field
+        # optional because it has a default, but the default IS the missing
+        # sentinel: it says "nobody supplied this", not "this value will do". So
+        # a field defaulted to NOT_FOUND is still unsatisfied when its tag is
+        # absent, and the LLM is still the layer that can find it in prose.
+        def _satisfied_by_default(field_info) -> bool:
+            if field_info.is_required():
+                return False
+            if field_info.default_factory is not None:
+                return True
+            return field_info.default != NOT_FOUND
+
+        missing_fields = [
+            field_name
+            for field_name in field_names
+            if field_name not in extracted_data
+            and not _satisfied_by_default(
+                command_parameters_class.model_fields[field_name]
+            )
+        ]
+        all_fields_extracted = not missing_fields
+
+        # ...with one guard. When nothing at all was extracted and the caller
+        # still supplied text, that text was meant for some field: an all-
+        # optional command called as `command_name some free text` would
+        # otherwise be answered with defaults and the text silently dropped.
+        # Only the LLM can place unlabelled text, so that case still falls back.
+        if all_fields_extracted and not extracted_data and command.strip():
+            all_fields_extracted = False
 
         # Check if agent used example values
         if all_fields_extracted:

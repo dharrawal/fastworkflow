@@ -9,16 +9,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from dspy.utils.exceptions import LMError
 from pydantic import ValidationError
 
 from fastworkflow import CommandOutput, CommandResponse, workflow_agent
 from fastworkflow.plan import (
     Binding,
     Invocation,
+    InvocationEvidence,
     PlanConfigurationError,
+    PlanEdge,
     PlanMode,
     PlanNode,
     PlanRecord,
+    SourceSpan,
     bind_captured,
     expand,
     plan_mode_from_env,
@@ -155,6 +159,10 @@ def test_for_each_fans_out_in_utterance_order(catalog):
     assert [child.bindings["identity_query"].value for child in children] == people
     assert [child.goal_text.split("'s", 1)[0] for child in children] == people
     assert all(child.prerequisites == () for child in children)
+    assert [
+        child.bindings["identity_query"].source_spans[0].text
+        for child in children
+    ] == people
 
 
 def test_absent_optional_list_slots_create_no_phantom_children():
@@ -289,6 +297,7 @@ def test_delayed_expansion_binds_first_captured_uid_and_producer(catalog):
     assert binding == Binding(
         value="acct-first",
         source="captured",
+        kind="captured_handle",
         command_call_id="call-list-accounts",
     )
     assert delayed.bindings["account_uid"] == binding
@@ -346,6 +355,7 @@ def test_bind_captured_accepts_a_mapping_directly(catalog, artifacts):
     assert binding == Binding(
         value="acct-first",
         source="captured",
+        kind="captured_handle",
         command_call_id="call-list-accounts",
     )
 
@@ -402,6 +412,7 @@ def test_explicit_missing_child_placeholder_waits_for_capture_before_fallback():
     assert delayed.bindings["query"] == Binding(
         value=None,
         source="needs-user",
+        on_repeat_policy="find a default subject",
     )
     assert delayed.status == "needs-user"
 
@@ -421,6 +432,8 @@ def test_binding_source_utterance(catalog):
     assert record.roots[0].bindings["identity_query"] == Binding(
         value="Devon Morrison",
         source="utterance",
+        kind="exact_text",
+        source_spans=(SourceSpan(start=0, end=14, text="Devon Morrison"),),
     )
 
 
@@ -440,14 +453,179 @@ def test_body_literal_binding_records_its_skill_source(catalog):
     assert atomic.bindings["entity_type"] == Binding(
         value="identity",
         source="skill",
+        kind="skill_literal",
     )
     assert atomic.bindings["query"] == Binding(
         value="Devon Morrison",
         source="utterance",
+        kind="exact_text",
+        source_spans=(SourceSpan(start=0, end=14, text="Devon Morrison"),),
     )
 
 
-def test_binding_source_on_repeat(catalog):
+def test_normalized_enum_binding_records_exact_source_span_and_normalizer():
+    inspect = _skill(
+        "inspect-subject",
+        "atomic",
+        slots=(
+            Slot(
+                name="entity_type",
+                binding_kind="normalized_enum",
+                normalizer="entity-type@1",
+            ),
+            Slot(name="query"),
+        ),
+    )
+    utterance = "Inspect the right SCCM_Monitoring Specialist"
+    start = utterance.index("right")
+    record = expand(
+        _catalog(inspect),
+        [
+            Invocation(
+                skill_name="inspect-subject",
+                slots={
+                    "entity_type": "permission",
+                    "query": "SCCM_Monitoring Specialist",
+                },
+                provenance={
+                    "entity_type": InvocationEvidence(
+                        kind="normalized_enum",
+                        normalizer="entity-type@1",
+                        source_spans=(
+                            SourceSpan(
+                                start=start,
+                                end=start + len("right"),
+                                text="right",
+                            ),
+                        ),
+                    )
+                },
+            )
+        ],
+        utterance,
+    )
+
+    binding = record.roots[0].bindings["entity_type"]
+    assert binding.kind == "normalized_enum"
+    assert binding.normalizer == "entity-type@1"
+    assert binding.source_spans == (
+        SourceSpan(start=start, end=start + len("right"), text="right"),
+    )
+
+
+def test_normalized_enum_binding_rejects_a_span_that_normalizes_differently():
+    inspect = _skill(
+        "inspect-subject",
+        "atomic",
+        slots=(
+            Slot(
+                name="entity_type",
+                binding_kind="normalized_enum",
+                normalizer="entity-type@1",
+            ),
+        ),
+        body="1. `inspect`",
+    )
+    utterance = "Inspect the account"
+    start = utterance.index("account")
+
+    with pytest.raises(PlanConfigurationError, match="normalizes to 'account'"):
+        expand(
+            _catalog(inspect),
+            [
+                Invocation(
+                    skill_name="inspect-subject",
+                    slots={"entity_type": "permission"},
+                    provenance={
+                        "entity_type": InvocationEvidence(
+                            kind="normalized_enum",
+                            normalizer="entity-type@1",
+                            source_spans=(
+                                SourceSpan(
+                                    start=start,
+                                    end=start + len("account"),
+                                    text="account",
+                                ),
+                            ),
+                        )
+                    },
+                )
+            ],
+            utterance,
+        )
+
+
+def test_captured_invocation_binding_requires_and_records_producer_call_id():
+    investigate = _skill(
+        "investigate",
+        "task",
+        goal="Control {control_code} is investigated.",
+        slots=(Slot(name="control_code"),),
+        body="1. `known`",
+    )
+    record = expand(
+        _catalog(investigate),
+        [
+            Invocation(
+                skill_name="investigate",
+                slots={"control_code": "ctrl_derived"},
+                provenance={
+                    "control_code": InvocationEvidence(
+                        kind="captured_handle",
+                        command_call_id="call-list-findings",
+                    )
+                },
+            )
+        ],
+        "Investigate the contractor control",
+    )
+
+    assert record.roots[0].bindings["control_code"] == Binding(
+        value="ctrl_derived",
+        source="captured",
+        kind="captured_handle",
+        command_call_id="call-list-findings",
+    )
+    with pytest.raises(ValidationError, match="producing command_call_id"):
+        InvocationEvidence(kind="captured_handle")
+
+
+def test_child_scope_renders_atomic_goal_and_merges_nonexecuting_guidance():
+    atomic = _skill(
+        "inspect-subject",
+        "atomic",
+        slots=(
+            Slot(name="entity_type"),
+            Slot(name="query"),
+        ),
+    )
+    parent = _skill(
+        "review-subject",
+        "task",
+        goal="{subject} is reviewed.",
+        slots=(Slot(name="subject"),),
+        uses=("inspect-subject",),
+        body=(
+            "1. inspect-subject entity_type=identity query={subject}\n"
+            "2. [presentation] Present the completed review for {subject}."
+        ),
+    )
+    record = expand(
+        _catalog(parent, atomic),
+        [Invocation(skill_name="review-subject", slots={"subject": "Casey"})],
+        "Review Casey",
+    )
+
+    assert len(record.leaves) == 1
+    leaf = record.leaves[0]
+    assert leaf.executable
+    assert leaf.executable_goal_text == leaf.goal_text
+    assert "{subject}" not in leaf.goal_text
+    assert "query=Casey" in leaf.goal_text
+    assert "Present the completed review for Casey." in leaf.goal_text
+
+
+def test_on_repeat_remains_policy_and_is_not_used_as_a_value(catalog):
     record = expand(
         catalog,
         [Invocation(skill_name="leaver-sweep")],
@@ -455,8 +633,11 @@ def test_binding_source_on_repeat(catalog):
     )
 
     binding = record.roots[0].bindings["identity_query"]
-    assert binding.source == "on_repeat"
-    assert binding.value == ("find_identity with query=*, then offer the named matches")
+    assert binding.source == "needs-user"
+    assert binding.value is None
+    assert binding.on_repeat_policy == (
+        "find_identity with query=*, then offer the named matches"
+    )
 
 
 def test_unbindable_required_slot_is_needs_user_and_never_invented():
@@ -761,14 +942,20 @@ def test_select_skills_makes_one_typed_model_call_with_cards_only(catalog, monke
                 invocations=[
                     {
                         "skill_name": "leaver-sweep",
-                        "slots": {"identity_query": "Devon Morrison"},
+                        "bindings": [
+                            {
+                                "slot_name": "identity_query",
+                                "value": "Devon Morrison",
+                                "source_text": "Devon Morrison",
+                            }
+                        ],
                     }
                 ]
             )
 
     monkeypatch.setattr(
         workflow_agent.dspy,
-        "ChainOfThought",
+        "Predict",
         lambda _signature: FakeSelector(),
     )
     monkeypatch.setattr(
@@ -787,13 +974,155 @@ def test_select_skills_makes_one_typed_model_call_with_cards_only(catalog, monke
         Invocation(
             skill_name="leaver-sweep",
             slots={"identity_query": "Devon Morrison"},
+            provenance={
+                "identity_query": InvocationEvidence(
+                    kind="exact_text",
+                    source_spans=(
+                        SourceSpan(start=0, end=14, text="Devon Morrison"),
+                    ),
+                )
+            },
         )
     ]
     assert selected.selection_model == "selector-model"
     assert len(calls) == 1
+    assert "config" not in calls[0]
     cards = json.loads(calls[0]["catalogue"])
     assert cards
     assert all("body" not in card for card in cards)
+    assert all(card["level"] == "task" for card in cards)
+
+
+def test_select_skills_retries_compiler_validation_once(catalog, monkeypatch):
+    calls = []
+
+    class DuplicateThenValidSelector:
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            invocation = {
+                "skill_name": "leaver-sweep",
+                "bindings": [
+                    {
+                        "slot_name": "identity_query",
+                        "value": "Devon Morrison",
+                        "source_text": "Devon Morrison",
+                    }
+                ],
+            }
+            return SimpleNamespace(
+                invocations=(
+                    [invocation, invocation]
+                    if len(calls) == 1
+                    else [invocation]
+                )
+            )
+
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "Predict",
+        lambda _signature: DuplicateThenValidSelector(),
+    )
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "context",
+        lambda **_kwargs: nullcontext(),
+    )
+
+    selected = select_skills(
+        "Devon Morrison is leaving",
+        catalog,
+        SimpleNamespace(model="selector-model"),
+    )
+
+    assert len(calls) == 2
+    assert selected.validation_retry_used is True
+    assert len(selected.validation_errors) == 1
+    assert "repeats canonical invocation" in selected.validation_errors[0]
+    assert "repeats canonical invocation" in calls[1]["validation_feedback"]
+
+
+def test_select_skills_refuses_composite_names_under_task_first_contract(
+    catalog, monkeypatch
+):
+    calls = []
+
+    class CompositeSelector:
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                invocations=[
+                    {
+                        "skill_name": "offboarding-batch",
+                        "bindings": [
+                            {
+                                "slot_name": "identity_queries",
+                                "value": "Devon Morrison",
+                                "source_text": "Devon Morrison",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "Predict",
+        lambda _signature: CompositeSelector(),
+    )
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "context",
+        lambda **_kwargs: nullcontext(),
+    )
+
+    with pytest.raises(
+        PlanConfigurationError, match="must name a task skill"
+    ):
+        select_skills(
+            "Devon Morrison is leaving",
+            catalog,
+            SimpleNamespace(model="selector-model"),
+        )
+
+    assert len(calls) == 2
+    assert all(
+        card["level"] == "task"
+        for card in json.loads(calls[0]["catalogue"])
+    )
+    assert "must name a task skill" in (
+        calls[1]["validation_feedback"]
+    )
+
+
+def test_select_skills_does_not_response_retry_provider_failures(
+    catalog, monkeypatch
+):
+    calls = []
+
+    class FailingProviderSelector:
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            raise LMError("provider authentication failed")
+
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "Predict",
+        lambda _signature: FailingProviderSelector(),
+    )
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "context",
+        lambda **_kwargs: nullcontext(),
+    )
+
+    with pytest.raises(LMError, match="provider authentication failed"):
+        select_skills(
+            "Devon Morrison is leaving",
+            catalog,
+            SimpleNamespace(model="selector-model"),
+        )
+
+    assert len(calls) == 1
 
 
 def test_select_skills_rejects_prose_instead_of_parsing_it(catalog, monkeypatch):
@@ -803,7 +1132,7 @@ def test_select_skills_rejects_prose_instead_of_parsing_it(catalog, monkeypatch)
 
     monkeypatch.setattr(
         workflow_agent.dspy,
-        "ChainOfThought",
+        "Predict",
         lambda _signature: ProseSelector(),
     )
     monkeypatch.setattr(
@@ -827,14 +1156,20 @@ def test_select_skills_rejects_nonverbatim_slot_values(catalog, monkeypatch):
                 invocations=[
                     {
                         "skill_name": "leaver-sweep",
-                        "slots": {"identity_query": "Invented Person"},
+                        "bindings": [
+                            {
+                                "slot_name": "identity_query",
+                                "value": "Invented Person",
+                                "source_text": "Devon Morrison",
+                            }
+                        ],
                     }
                 ]
             )
 
     monkeypatch.setattr(
         workflow_agent.dspy,
-        "ChainOfThought",
+        "Predict",
         lambda _signature: InventingSelector(),
     )
     monkeypatch.setattr(
@@ -849,6 +1184,67 @@ def test_select_skills_rejects_nonverbatim_slot_values(catalog, monkeypatch):
             catalog,
             SimpleNamespace(model="selector-model"),
         )
+
+
+def test_select_skills_carries_normalized_source_span_into_invocation(
+    monkeypatch,
+):
+    inspect = _skill(
+        "inspect-subject",
+        "task",
+        goal="{entity_type} is inspected.",
+        slots=(
+            Slot(
+                name="entity_type",
+                binding_kind="normalized_enum",
+                normalizer="entity-type@1",
+            ),
+        ),
+        body="1. `inspect`",
+    )
+    utterance = "Inspect the right"
+    start = utterance.index("right")
+
+    class NormalizingSelector:
+        def __call__(self, **_kwargs):
+            return SimpleNamespace(
+                invocations=[
+                    {
+                        "skill_name": "inspect-subject",
+                        "bindings": [
+                            {
+                                "slot_name": "entity_type",
+                                "value": "permission",
+                                "source_text": "right",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "Predict",
+        lambda _signature: NormalizingSelector(),
+    )
+    monkeypatch.setattr(
+        workflow_agent.dspy,
+        "context",
+        lambda **_kwargs: nullcontext(),
+    )
+
+    selected = select_skills(
+        utterance,
+        _catalog(inspect),
+        SimpleNamespace(model="selector-model"),
+    )
+
+    evidence = selected[0].provenance["entity_type"]
+    assert evidence.kind == "normalized_enum"
+    assert evidence.normalizer == "entity-type@1"
+    assert evidence.source_spans == (
+        SourceSpan(start=start, end=start + len("right"), text="right"),
+    )
 
 
 def test_plan_mode_parses_from_fw_plan_decomposition():
@@ -919,3 +1315,403 @@ def test_plan_decomposition_point_loads_dual_gated_catalogue(monkeypatch):
         "leaver-sweep",
         "offboarding-batch",
     )
+
+
+def test_public_nodes_carry_canonical_task_keys(catalog):
+    record = expand(
+        catalog,
+        [
+            Invocation(
+                skill_name="offboarding-batch",
+                slots={"identity_queries": ["Devon Morrison", "Sean Lyons"]},
+            )
+        ],
+        "Devon Morrison and Sean Lyons are leaving",
+    )
+    public = [node for node in record.public_nodes]
+    assert public
+    assert all(node.task_key for node in public)
+    assert tuple(node.task_key for node in public) == record.compiled_public_task_keys
+    assert record.requested_public_task_keys == record.compiled_public_task_keys
+
+
+def test_duplicate_requested_public_task_keys_are_refused():
+    sweep = _skill(
+        "leaver-sweep",
+        "task",
+        goal="The {identity_query} sweep is complete.",
+        slots=(Slot(name="identity_query", required=True),),
+        body="1. `inspect`",
+    )
+    with pytest.raises(PlanConfigurationError, match="duplicate task coverage"):
+        expand(
+            _catalog(sweep),
+            [
+                Invocation(
+                    skill_name="leaver-sweep",
+                    slots={"identity_query": "Devon Morrison"},
+                ),
+                Invocation(
+                    skill_name="leaver-sweep",
+                    slots={"identity_query": "Devon Morrison"},
+                ),
+            ],
+            "Devon Morrison is leaving",
+        )
+
+
+def test_edges_record_provenance_classes(catalog):
+    record = expand(
+        catalog,
+        [
+            Invocation(
+                skill_name="offboarding-batch",
+                slots={"identity_queries": ["Devon Morrison"]},
+            ),
+            Invocation(
+                skill_name="leaver-sweep",
+                slots={"identity_query": "Sean Lyons"},
+            ),
+        ],
+        "Devon Morrison and Sean Lyons are leaving",
+    )
+    kinds = {edge.provenance for edge in record.edges}
+    assert {"composite", "explicit-order", "data", "stable-tiebreak"} <= kinds
+    assert all(isinstance(edge, PlanEdge) for edge in record.edges)
+
+
+def test_only_fully_rendered_leaves_are_marked_executable(catalog):
+    child = _skill(
+        "inspect-subject",
+        "atomic",
+        goal="Inspect {subject}.",
+        slots=(Slot(name="subject", required=True),),
+    )
+    parent = _skill(
+        "packet",
+        "task",
+        goal="Handle packet.",
+        uses=("inspect-subject",),
+        body="1. inspect-subject subject={missing_subject}\n2. `record completion`",
+    )
+    record = expand(_catalog(parent, child), [Invocation(skill_name="packet")], "Handle it")
+    executable = [node for node in record.leaves if node.executable]
+    non_executable = [node for node in record.leaves if not node.executable]
+    assert executable
+    assert non_executable
+    assert all(node.executable_goal_text for node in executable)
+    assert all(node.executable_goal_text is None for node in non_executable)
+
+
+def test_task_first_compiler_synthesizes_private_composite_without_coverage_drift(
+    catalog,
+):
+    invocations = [
+        Invocation(
+            skill_name="leaver-sweep",
+            slots={"identity_query": "Devon Morrison"},
+        ),
+        Invocation(
+            skill_name="leaver-sweep",
+            slots={"identity_query": "Sean Lyons"},
+        ),
+    ]
+    record = expand(
+        catalog,
+        invocations,
+        "Devon Morrison and Sean Lyons are leaving",
+        plan_id="packing-exact",
+    )
+
+    assert [node.skill for node in record.public_nodes] == [
+        "leaver-sweep",
+        "leaver-sweep",
+    ]
+    assert record.requested_public_task_keys == record.compiled_public_task_keys
+    assert record.packing.selected_root_group_count == 1
+    assert record.packing.packed_task_count == 2
+    group = record.composite_groups[0]
+    assert group.composite_skill == "offboarding-batch"
+    assert group.member_goal_ids == ("g1", "g2")
+    assert group.shared_bindings == {
+        "identity_queries": ("Devon Morrison", "Sean Lyons")
+    }
+    assert all(node.level != "composite" for node in record.nodes)
+
+
+def test_composite_packing_refuses_singletons_and_literal_near_matches():
+    inspect = _skill(
+        "inspect-subject",
+        "task",
+        goal="{query} is inspected as {entity_type}.",
+        slots=(Slot(name="entity_type"), Slot(name="query")),
+        body="1. `inspect`",
+    )
+    packet = _skill(
+        "identity-packet",
+        "composite",
+        goal="The identities in {queries} are inspected.",
+        slots=(Slot(name="queries", list=True),),
+        uses=("inspect-subject",),
+        body=(
+            "1. for each {query} in {queries}: "
+            "inspect-subject entity_type=identity query={query}"
+        ),
+    )
+    catalog = _catalog(packet, inspect)
+
+    singleton = expand(
+        catalog,
+        [
+            Invocation(
+                skill_name="inspect-subject",
+                slots={"entity_type": "identity", "query": "Casey"},
+            )
+        ],
+        "Inspect Casey as identity",
+    )
+    near_match = expand(
+        catalog,
+        [
+            Invocation(
+                skill_name="inspect-subject",
+                slots={"entity_type": "account", "query": "Casey"},
+            ),
+            Invocation(
+                skill_name="inspect-subject",
+                slots={"entity_type": "account", "query": "Riley"},
+            ),
+        ],
+        "Inspect Casey and Riley as account",
+    )
+
+    assert singleton.composite_groups == ()
+    assert singleton.packing.unpacked_task_count == 1
+    assert near_match.composite_groups == ()
+    assert near_match.packing.candidate_count == 0
+    assert near_match.requested_public_task_keys == near_match.compiled_public_task_keys
+
+
+def test_composite_packing_refuses_partial_cover_with_private_extra_work():
+    first = _skill("task-a", "task", goal="A is done.", body="1. `a`")
+    second = _skill("task-b", "task", goal="B is done.", body="1. `b`")
+    inspect = _skill("inspect", "atomic", goal="Inspection is done.")
+    with_atomic = _skill(
+        "packet-with-atomic",
+        "composite",
+        goal="Packet is done.",
+        uses=("task-a", "task-b", "inspect"),
+        body="1. task-a\n2. task-b\n3. inspect",
+    )
+    with_commands = _skill(
+        "packet-with-commands",
+        "composite",
+        goal="Packet is done.",
+        uses=("task-a", "task-b"),
+        body="1. task-a\n2. task-b\n3. `summarize`",
+    )
+    invocations = [
+        Invocation(skill_name="task-a"),
+        Invocation(skill_name="task-b"),
+    ]
+
+    atomic_record = expand(
+        _catalog(first, second, inspect, with_atomic),
+        invocations,
+        "Do A and B",
+    )
+    commands_record = expand(
+        _catalog(first, second, with_commands),
+        invocations,
+        "Do A and B",
+    )
+
+    assert atomic_record.packing.candidate_count == 0
+    assert atomic_record.composite_groups == ()
+    assert commands_record.packing.candidate_count == 0
+    assert commands_record.composite_groups == ()
+
+
+def test_composite_packing_requires_exact_shared_scalar_bindings():
+    triage = _skill(
+        "triage",
+        "task",
+        goal="{permission} is triaged for {requester}.",
+        slots=(Slot(name="permission"), Slot(name="requester")),
+        body="1. `triage`",
+    )
+    packet = _skill(
+        "request-packet",
+        "composite",
+        goal="{permissions} are triaged for {requester}.",
+        slots=(
+            Slot(name="permissions", list=True),
+            Slot(name="requester"),
+        ),
+        uses=("triage",),
+        body=(
+            "1. for each {permission} in {permissions}: "
+            "triage permission={permission} requester={requester}"
+        ),
+    )
+    record = expand(
+        _catalog(packet, triage),
+        [
+            Invocation(
+                skill_name="triage",
+                slots={"permission": "Admin", "requester": "Casey"},
+            ),
+            Invocation(
+                skill_name="triage",
+                slots={"permission": "Operator", "requester": "Casey"},
+            ),
+            Invocation(
+                skill_name="triage",
+                slots={"permission": "Reader", "requester": "Riley"},
+            ),
+        ],
+        "Admin and Operator for Casey; Reader for Riley",
+    )
+
+    assert record.packing.packed_task_count == 2
+    assert record.packing.unpacked_task_count == 1
+    assert record.composite_groups[0].member_goal_ids == ("g1", "g2")
+    assert record.composite_groups[0].shared_bindings == {
+        "permissions": ("Admin", "Operator"),
+        "requester": "Casey",
+    }
+
+
+def test_composite_set_packing_maximizes_total_non_overlapping_coverage():
+    tasks = tuple(
+        _skill(
+            name,
+            "task",
+            goal=f"{name} is done.",
+            body="1. `work`",
+        )
+        for name in ("task-a", "task-b", "task-c", "task-d")
+    )
+    wide = _skill(
+        "wide",
+        "composite",
+        goal="Wide work is done.",
+        uses=("task-a", "task-b", "task-c"),
+        body="1. task-a\n2. task-b\n3. task-c",
+    )
+    left = _skill(
+        "left",
+        "composite",
+        goal="Left work is done.",
+        uses=("task-a", "task-b"),
+        body="1. task-a\n2. task-b",
+    )
+    right = _skill(
+        "right",
+        "composite",
+        goal="Right work is done.",
+        uses=("task-c", "task-d"),
+        body="1. task-c\n2. task-d",
+    )
+    record = expand(
+        _catalog(*tasks, wide, left, right),
+        [Invocation(skill_name=task.name) for task in tasks],
+        "Do task a, task b, task c, and task d",
+    )
+
+    root_groups = [
+        group for group in record.composite_groups if group.parent_group_id is None
+    ]
+    assert [group.composite_skill for group in root_groups] == ["left", "right"]
+    assert record.packing.packed_task_count == 4
+    assert record.packing.selected_root_group_count == 2
+
+
+def test_composite_overlap_tie_breaks_by_stable_composite_name():
+    first = _skill("task-a", "task", goal="A is done.", body="1. `a`")
+    second = _skill("task-b", "task", goal="B is done.", body="1. `b`")
+    alpha = _skill(
+        "alpha-packet",
+        "composite",
+        goal="Alpha packet is done.",
+        uses=("task-a", "task-b"),
+        body="1. task-a\n2. task-b",
+    )
+    zeta = _skill(
+        "zeta-packet",
+        "composite",
+        goal="Zeta packet is done.",
+        uses=("task-a", "task-b"),
+        body="1. task-a\n2. task-b",
+    )
+
+    record = expand(
+        _catalog(first, second, alpha, zeta),
+        [Invocation(skill_name="task-a"), Invocation(skill_name="task-b")],
+        "Do A and B",
+    )
+
+    assert record.packing.candidate_count == 2
+    assert record.packing.selected_root_group_count == 1
+    assert record.composite_groups[0].composite_skill == "alpha-packet"
+
+
+def test_recursive_composite_packing_records_private_group_hierarchy():
+    first = _skill("task-a", "task", goal="A is done.", body="1. `a`")
+    second = _skill("task-b", "task", goal="B is done.", body="1. `b`")
+    inner = _skill(
+        "z-inner",
+        "composite",
+        goal="Inner work is done.",
+        uses=("task-a", "task-b"),
+        body="1. task-a\n2. task-b",
+    )
+    outer = _skill(
+        "a-outer",
+        "composite",
+        goal="Outer work is done.",
+        uses=("z-inner",),
+        body="1. z-inner",
+    )
+
+    record = expand(
+        _catalog(first, second, inner, outer),
+        [Invocation(skill_name="task-a"), Invocation(skill_name="task-b")],
+        "Do A and B",
+    )
+
+    assert record.packing.selected_root_group_count == 1
+    assert record.packing.selected_recursive_group_count == 1
+    root, nested = record.composite_groups
+    assert root.composite_skill == "a-outer"
+    assert nested.composite_skill == "z-inner"
+    assert nested.parent_group_id == root.group_id
+    assert nested.member_goal_ids == root.member_goal_ids
+
+
+def test_composite_packing_serialization_is_deterministic(catalog):
+    invocations = [
+        Invocation(
+            skill_name="leaver-sweep",
+            slots={"identity_query": "Devon Morrison"},
+        ),
+        Invocation(
+            skill_name="leaver-sweep",
+            slots={"identity_query": "Sean Lyons"},
+        ),
+    ]
+    first = expand(
+        catalog,
+        invocations,
+        "Devon Morrison and Sean Lyons are leaving",
+        plan_id="deterministic-plan",
+    )
+    second = expand(
+        catalog,
+        invocations,
+        "Devon Morrison and Sean Lyons are leaving",
+        plan_id="deterministic-plan",
+    )
+
+    assert first.model_dump_json() == second.model_dump_json()
+    assert first.packing.packing_sha256 == second.packing.packing_sha256

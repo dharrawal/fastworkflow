@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from fastworkflow.plan_execution import SafetyEnvelopeState
 from fastworkflow.runtime_config import (
     DEFAULT_REACT_MAX_ITERATIONS,
     DERIVED_REACT_MAX_ITERATIONS,
@@ -242,6 +243,99 @@ def test_a_budget_exhausted_by_invalid_selections_ends_the_turn():
 
     assert budget.exhausted
     assert agent._exhausted_last_run is True
+
+
+def test_stress_mode_uses_safety_censor_not_iteration_exhaustion():
+    agent = _bare_react_agent(do_it=lambda: "did it", finish=lambda: "done")
+    agent._call_with_potential_trajectory_truncation = _never_finishes(agent)
+    budget = LogicalTurnBudget(
+        iteration_limit=1,
+        enforce_iteration_limit=False,
+    )
+    safety = SafetyEnvelopeState(
+        wall_time_limit_s=30,
+        started_at_epoch_s=100.0,
+    )
+
+    result = agent.forward(
+        query="stress",
+        budget=budget,
+        safety_envelope=safety,
+    )
+
+    assert result.censored is True
+    assert result.censored_reason == "wall-time-cutoff"
+    assert result.exhausted is False
+    assert budget.exhausted is False
+
+
+def test_unlimited_stress_budget_requires_an_enabled_safety_envelope():
+    agent = _bare_react_agent(do_it=lambda: "did it", finish=lambda: "done")
+    agent._call_with_potential_trajectory_truncation = _never_finishes(agent)
+    budget = LogicalTurnBudget(
+        iteration_limit=1,
+        enforce_iteration_limit=False,
+    )
+
+    with pytest.raises(ValueError, match="enabled safety envelope"):
+        agent.forward(
+            query="unsafe stress",
+            budget=budget,
+            safety_envelope=SafetyEnvelopeState(enabled=False),
+        )
+
+
+def test_unlimited_stress_resume_requires_restored_safety_envelope():
+    agent = _bare_react_agent(do_it=lambda: "did it", finish=lambda: "done")
+    agent._budget = LogicalTurnBudget(
+        iteration_limit=1,
+        enforce_iteration_limit=False,
+    )
+    agent._suspended = {
+        "trajectory": {
+            "thought_0": "ask",
+            "tool_name_0": "ask_user",
+            "tool_args_0": {"question": "Which one?"},
+        },
+        "idx": 0,
+        "input_args": {"query": "stress"},
+        "max_iters": 1,
+        "clarification": "Which one?",
+    }
+
+    with pytest.raises(ValueError, match="enabled safety envelope"):
+        agent.resume(
+            "the first one",
+            safety_envelope=SafetyEnvelopeState(enabled=False),
+        )
+    assert agent._suspended is not None
+
+
+def test_four_identical_tool_decisions_trigger_no_progress_censor():
+    calls = {"tools": 0}
+
+    def tool():
+        calls["tools"] += 1
+        return "same"
+
+    agent = _bare_react_agent(do_it=tool, finish=lambda: "done")
+    agent._call_with_potential_trajectory_truncation = _never_finishes(agent)
+    budget = LogicalTurnBudget(
+        iteration_limit=1,
+        enforce_iteration_limit=False,
+    )
+    safety = SafetyEnvelopeState(wall_time_limit_s=3600)
+
+    result = agent.forward(
+        query="loop",
+        budget=budget,
+        safety_envelope=safety,
+    )
+
+    assert result.censored is True
+    assert result.censored_reason == "no-progress-cycle"
+    assert result.exhausted is False
+    assert calls["tools"] == 3
 
 
 def test_forward_requires_a_budget():
@@ -560,8 +654,8 @@ def test_a_malformed_schema_three_counter_is_rejected():
 
 
 def test_schema_three_is_readable_and_earlier_versions_are_not():
-    assert SCHEMA_VERSION == 4
-    assert READABLE_SCHEMA_VERSIONS == frozenset({3, 4})
+    assert SCHEMA_VERSION == 8
+    assert READABLE_SCHEMA_VERSIONS == frozenset({3, 4, 5, 6, 7, 8})
 
 
 def test_a_forward_version_blob_is_preserved_rather_than_discarded(

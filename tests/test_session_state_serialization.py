@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -51,6 +50,7 @@ def _suspended_react_blob() -> dict:
         "max_iters": 25,
         "clarification": "Which task?",
         "iteration_counter": 1,
+        "presentation_commands": [],
     }
 
 
@@ -225,6 +225,7 @@ def test_readable_schema_version_still_applies(
     ctx.apply_serialized_state(
         {
             "schema_version": SCHEMA_VERSION,
+            "result_handles": [],
             "awaiting_user": True,
             "suspended_user_message": "the urgent one",
             "action_log": [{"command_name": "list_tasks"}],

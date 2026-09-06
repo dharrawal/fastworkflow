@@ -8,6 +8,7 @@ from pathlib import Path
 
 import fastworkflow
 from fastworkflow.command_directory import get_cached_command_directory
+from fastworkflow.command_resolution import CommandCapabilityIndex
 from fastworkflow.utils import python_utils
 
 """Utility for loading and traversing the single-file workflow command context model.
@@ -269,6 +270,19 @@ class CommandContextModel:
 
         return final_effective_commands_list
 
+    def global_command_names(self) -> list[str]:
+        """The workflow's context-free commands: the raw `/` declarations of `*`.
+
+        A command file at the root of `_commands/` has no context segment, so
+        `load` files it under `*` (step 2 above). Those commands are callable
+        from every context — `CommandCapabilityIndex.build` grafts them at
+        `global` precedence — so anything that answers "what can I call from
+        here" has to include them. Read from the raw declarations rather than
+        from `commands('*')`, which would fold in whatever `*` inherits; a
+        global is a global because of where its file sits and nothing else.
+        """
+        return sorted((self._command_contexts.get("*") or {}).get("/") or [])
+
     # ---------------------------------------------------------------------
     # Occupancy and effective capability (arch §11.1, FW-REQ-004/005)
     # ---------------------------------------------------------------------
@@ -320,8 +334,6 @@ class CommandContextModel:
         exists to represent are gone by then.
         """
         if self._capability_index is None:
-            from fastworkflow.command_resolution import CommandCapabilityIndex
-
             cmd_dir = get_cached_command_directory(self._workflow_path)
             occupiable = self._manifest_occupiable()
             self._capability_index = CommandCapabilityIndex.build(

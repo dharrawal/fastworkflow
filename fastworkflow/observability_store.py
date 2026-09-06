@@ -55,7 +55,17 @@ from fastworkflow.utils.logging import logger
 
 SCHEMA_VERSION = 1
 
-TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned"})
+TERMINAL_TURN_STATUSES = frozenset(
+    {
+        "completed",
+        "partial",
+        "failed",
+        "censored",
+        "provider_timeout",
+        "cancelled",
+        "abandoned",
+    }
+)
 
 # Defaults per design §5.
 _DEFAULT_DB_MAX_BYTES = 1_073_741_824
@@ -655,6 +665,92 @@ def _apply_capture_policy(
                 classification=_policy_classification(classify, command_name, key),
             )
 
+    # EXP-028 plan payload (optional): redact goal text and binding values.
+    plan = record.get("plan")
+    if isinstance(plan, dict):
+        for field_name in ("requested_public_task_keys", "compiled_public_task_keys"):
+            keys = plan.get(field_name)
+            if isinstance(keys, list):
+                plan[field_name] = [
+                    policy.apply(f"plan.{field_name}", key, classification="user-text")
+                    if key
+                    else key
+                    for key in keys
+                ]
+        nodes = plan.get("nodes")
+        if isinstance(nodes, list):
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                goal_text = node.get("goal_text")
+                if goal_text:
+                    node["goal_text"] = policy.apply(
+                        "plan.node.goal_text",
+                        goal_text,
+                        classification="user-text",
+                    )
+                executable_goal_text = node.get("executable_goal_text")
+                if executable_goal_text:
+                    node["executable_goal_text"] = policy.apply(
+                        "plan.node.executable_goal_text",
+                        executable_goal_text,
+                        classification="user-text",
+                    )
+                task_key = node.get("task_key")
+                if task_key:
+                    node["task_key"] = policy.apply(
+                        "plan.node.task_key",
+                        task_key,
+                        classification="user-text",
+                    )
+                bindings = node.get("bindings")
+                if isinstance(bindings, dict):
+                    for binding_name in list(bindings):
+                        bindings[binding_name] = policy.apply(
+                            f"plan.node.bindings.{binding_name}",
+                            bindings[binding_name],
+                            classification="user-text",
+                        )
+        groups = plan.get("composite_groups")
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                member_task_keys = group.get("member_task_keys")
+                if isinstance(member_task_keys, list):
+                    group["member_task_keys"] = [
+                        policy.apply(
+                            "plan.composite_group.member_task_keys",
+                            task_key,
+                            classification="user-text",
+                        )
+                        if task_key
+                        else task_key
+                        for task_key in member_task_keys
+                    ]
+                shared_bindings = group.get("shared_bindings")
+                if isinstance(shared_bindings, dict):
+                    for binding_name in list(shared_bindings):
+                        shared_bindings[binding_name] = policy.apply(
+                            f"plan.composite_group.shared_bindings.{binding_name}",
+                            shared_bindings[binding_name],
+                            classification="user-text",
+                        )
+        execution = plan.get("execution")
+        if isinstance(execution, dict):
+            public_task_keys = execution.get("public_task_keys")
+            if isinstance(public_task_keys, list):
+                execution["public_task_keys"] = [
+                    policy.apply(
+                        "plan.execution.public_task_keys",
+                        task_key,
+                        classification="user-text",
+                    )
+                    if task_key
+                    else task_key
+                    for task_key in public_task_keys
+                ]
+
 
 def _policed_column(
     policy: "capture_policy_module.CapturePolicy",
@@ -1020,6 +1116,8 @@ def serialize_turn_result(
         record = turn_result.model_dump(mode="python")
     except Exception:
         record = {"turn_output": {"turn_key": turn_output.turn_key}}
+    if record.get("plan") is None:
+        record.pop("plan", None)
     record = _sanitize_json_value(record)
     # computed_field `success` is included by model_dump; make sure it is
     # present even on the fallback path.
@@ -5232,6 +5330,11 @@ class SQLiteTraceSink:
         self._writer = threading.Thread(
             target=self._writer_loop, name="fw-obs-writer", daemon=True
         )
+        # Publish the zero baseline immediately. A process can fail after
+        # emitting spans but before any TurnResult exists; without this row an
+        # external evidence harness cannot distinguish a healthy zero-drop
+        # writer from a writer that never reported health at all.
+        self.persist_health()
         self._writer.start()
         # Opportunistic bounded prune at sink startup [R12].
         try:

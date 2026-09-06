@@ -25,6 +25,8 @@ The taxonomies layer rather than compete (arch §6.0):
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -57,11 +59,18 @@ FailureCode = str
 # sites cannot spell the same mechanism differently.
 CODE_ADAPTER_PARSE = "adapter-parse"
 CODE_EXTRACTION_FAILED = "extraction-failed"
+# ido-mn1.6.10. Distinct from `extraction-failed`, which means no answer could
+# be parsed at all: here an answer WAS produced and is kept as evidence, and the
+# provider stopped it at the completion limit. That is the harness cutting the
+# deliverable short, so it is classified the way `provider-timeout` is — an
+# infrastructure outcome the run must not read as the task failing.
+CODE_EXTRACTION_TRUNCATED = "extraction-truncated"
 CODE_TOOL_FAILED = "tool-failed"
 CODE_WORKER_FAILED = "worker-failed"
 CODE_WORKER_STUCK = "worker-stuck"
 CODE_WORKER_DEAD = "worker-dead"
 CODE_BACKEND_TIMEOUT = "backend-timeout"
+CODE_PROVIDER_TIMEOUT = "provider-timeout"
 CODE_STATE_STORE_UNAVAILABLE = "state-store-unavailable"
 CODE_INCOMPATIBLE_STATE = "incompatible-state"
 CODE_BUDGET_EXHAUSTED = "budget-exhausted"
@@ -158,6 +167,93 @@ class TurnFailedError(Exception):
         super().__init__(failure.as_observation())
 
 
+_PROVIDER_MODULE_PREFIXES = (
+    "dspy.",
+    "litellm.",
+    "openai.",
+)
+
+
+def _exception_chain(exc: BaseException):
+    """Yield one exception chain once, including wrapped provider causes."""
+    current: Optional[BaseException] = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def is_provider_timeout(exc: BaseException) -> bool:
+    """Whether a model/provider call ended on a typed timeout.
+
+    DSPy wraps LiteLLM, which wraps httpx/httpcore. Checking the full exception
+    chain keeps the classification stable across those wrapper boundaries
+    without treating an arbitrary application ``TimeoutError`` as a provider
+    failure.
+    """
+    chain = tuple(_exception_chain(exc))
+    has_provider_layer = any(
+        type(current).__module__.startswith(_PROVIDER_MODULE_PREFIXES)
+        for current in chain
+    )
+    has_timeout = any(
+        "timeout" in type(current).__name__.lower()
+        for current in chain
+    )
+    return has_provider_layer and has_timeout
+
+
+def _is_timeout_exception(exc: BaseException) -> bool:
+    return any(
+        isinstance(current, TimeoutError)
+        or "timeout" in type(current).__name__.lower()
+        for current in _exception_chain(exc)
+    )
+
+
+def provider_timeout_failure(
+    exc: BaseException,
+    *,
+    completed_work: tuple[Any, ...] = (),
+) -> TypedFailure:
+    """Classify provider unavailability without calling it task failure."""
+    return TypedFailure(
+        disposition="transient",
+        code=CODE_PROVIDER_TIMEOUT,
+        detail=(
+            f"{type(exc).__name__}: the model provider did not return before "
+            "its configured timeout"
+        ),
+        completed_work=completed_work,
+    )
+
+
+def extraction_truncated_failure(
+    *,
+    max_tokens: Optional[int] = None,
+    completed_work: tuple[Any, ...] = (),
+) -> TypedFailure:
+    """Classify a composition call the provider stopped at its token limit.
+
+    ``transient`` for the same reason ``provider_timeout_failure`` is: the same
+    request with a larger limit could succeed, and nothing about the task was
+    answered wrongly. It is emphatically not ``permanent`` — a permanent code
+    here would license a reader to record the turn as a task failure, which is
+    the one reading this classification exists to prevent.
+    """
+    detail = "the composition call stopped at its completion limit"
+    if max_tokens is not None:
+        detail += f" of {max_tokens} tokens"
+    detail += "; the answer produced so far is kept as evidence and is not complete"
+    return TypedFailure(
+        disposition="transient",
+        code=CODE_EXTRACTION_TRUNCATED,
+        detail=detail,
+        completed_work=completed_work,
+    )
+
+
 def classify_exception(exc: BaseException) -> TypedFailure:
     """Best classification for an exception with nothing else to go on.
 
@@ -172,14 +268,15 @@ def classify_exception(exc: BaseException) -> TypedFailure:
     can say. Guessing here would be the conversion FW-REQ-008B forbids, in the
     other direction.
     """
-    import asyncio
-    import concurrent.futures
-
+    if isinstance(exc, (TurnFailedError, ControlSignal)):
+        return exc.failure
     if isinstance(exc, (asyncio.CancelledError, concurrent.futures.CancelledError)):
         return TypedFailure(
             disposition="cancelled", code=CODE_CANCELLED, detail=str(exc)
         )
-    if isinstance(exc, TimeoutError):
+    if is_provider_timeout(exc):
+        return provider_timeout_failure(exc)
+    if _is_timeout_exception(exc):
         return TypedFailure(
             disposition="transient", code=CODE_BACKEND_TIMEOUT, detail=str(exc)
         )

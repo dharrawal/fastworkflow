@@ -633,6 +633,19 @@ def test_the_aggregate_is_kept_beside_the_map_not_replaced_by_it():
     assert provenance.span_contract_versions
 
 
+def test_observation_compaction_bumped_aggregate_provenance():
+    """The result/presentation emitter changes must be visible run-to-run."""
+    provenance = capture_observability_provenance()
+    assert tracing.SPAN_CONTRACT_VERSION == 5
+    assert provenance.span_contract_version == 5
+    assert provenance.span_contract_versions[
+        tracing.SPAN_COMMAND_EXECUTE
+    ] >= 2
+    assert provenance.span_contract_versions[
+        tracing.SPAN_AGENT_EXECUTE
+    ] >= 6
+
+
 def test_a_provenance_record_written_before_the_map_still_validates():
     """`ObservabilityProvenance` is frozen with `extra="forbid"`, so the new field
     had to be optional: a required one would reject every already-serialized

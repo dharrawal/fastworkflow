@@ -107,6 +107,112 @@ def test_a_core_command_is_available_everywhere_at_lowest_precedence(index):
 
 
 # ----------------------------------------------------------------------
+# ido-mn1.6.12: a command filed under `*` is a capability EVERYWHERE
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("context", ["Identity", "Account", "Explorer", "Resource"])
+def test_a_global_command_is_callable_from_every_context(index, context):
+    """The defect: "context-free" meant "callable in `*` and nowhere else".
+
+    `*` is a base of nothing, and `build` grafted only fastWorkflow's own
+    `core_command_names` onto every context — never the workflow's own globals.
+    So a workflow whose navigation entry points sit at the root of `_commands/`
+    got `not-callable-here` for every one of them from every context it can
+    actually be standing in. Measured live in the EXP-028 Gate 4 v4 corpus:
+    `open_directory` refused from `Organization` 4 times and
+    `open_controls_monitor` from `ControlFinding` 4 times, each followed by an
+    abort.
+    """
+    resolution = index.resolve_exact("who_am_i", context)
+    assert resolution.resolved
+    assert resolution.capability.definition.definition_id == "who_am_i"
+    assert resolution.capability.source == "global"
+    # The alias names where you are standing, like every other capability.
+    assert resolution.capability.display_alias == f"{context}/who_am_i"
+
+
+def test_in_the_global_context_a_global_command_is_still_its_own(index):
+    """`*` owns it; nowhere else does. Attribution must not blur that."""
+    resolution = index.resolve_exact("who_am_i", "*")
+    assert resolution.resolved
+    assert resolution.capability.source == "own"
+    assert resolution.capability.display_alias == "*/who_am_i"
+
+
+def test_a_global_is_not_attributed_to_the_framework(index):
+    """`global` and `core` are different provenances and must stay different.
+
+    `core` is fastWorkflow's surface (`IntentDetection/*`, `wildcard`) and
+    belongs to no workflow. Folding a workflow's own context-free commands into
+    it would be cheaper by one Literal member and would make
+    `capability_source` — whose entire job is "who owns this command" — answer
+    "the framework" about a file in the workflow's own `_commands/` directory.
+    """
+    assert index.resolve_exact("who_am_i", "Identity").capability.source != "core"
+    assert index.resolve_exact("go_up", "Identity").capability.source == "core"
+
+
+def test_a_context_command_still_shadows_a_global_of_the_same_name():
+    """Precedence, not replacement: `global` ranks below `own` and `inherited`.
+
+    A global is the fallback meaning of a name, never an override of a context
+    that has its own. If it outranked `own`, adding a file to the root of
+    `_commands/` would silently retarget every context that already had that
+    command.
+    """
+    index = CommandCapabilityIndex.build(
+        {
+            "Identity": {"/": ["Identity/who_am_i"]},
+            "Account": {"/": ["Account/list_permissions"], "base": ["Resource"]},
+            "Resource": {"/": ["Resource/who_am_i"]},
+            "*": {"/": ["who_am_i"]},
+        }
+    )
+    own = index.resolve_exact("who_am_i", "Identity")
+    assert own.capability.definition.definition_id == "Identity/who_am_i"
+    assert own.capability.source == "own"
+
+    inherited = index.resolve_exact("who_am_i", "Account")
+    assert inherited.capability.definition.definition_id == "Resource/who_am_i"
+    assert inherited.capability.source == "inherited"
+
+    # And the shadowed global is still KNOWN, not erased — the same thing
+    # `collisions` preserves for base-vs-own.
+    assert "who_am_i" in {
+        cap.definition.definition_id
+        for cap in index.collisions("Identity", "who_am_i")
+    }
+
+
+def test_making_globals_reachable_does_not_make_everything_reachable(index):
+    """The scope of the change, pinned.
+
+    Only the raw `/` declarations of `*` are grafted. A command scoped to a
+    context is still `not-callable-here` from a context that does not inherit
+    it — otherwise the typed refusal this layer exists to produce would never
+    fire again.
+    """
+    assert index.resolve_exact("list_permissions", "Identity").failure == (
+        "not-callable-here"
+    )
+    assert index.resolve_exact("list_controls", "Identity").failure == (
+        "not-callable-here"
+    )
+
+
+def test_a_workflow_with_no_globals_is_untouched():
+    index = CommandCapabilityIndex.build(
+        {"Identity": {"/": ["Identity/list_accounts"]}},
+        core_command_names=("IntentDetection/go_up",),
+    )
+    assert {cap.source for cap in index.effective_capabilities("Identity")} == {
+        "own",
+        "core",
+    }
+
+
+# ----------------------------------------------------------------------
 # FW-REQ-003 clause 4 / FW-REQ-005 clause 1: typed, not arbitrary
 # ----------------------------------------------------------------------
 

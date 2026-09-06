@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import os
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal, Mapping, Optional
@@ -103,10 +104,25 @@ _RETRY_OWNERS: Mapping[str, RetryOwner] = {
 # for a call that will never return, not a performance target. A contract or a
 # host lowers them; nothing raises them (the same restrictive rule as the turn
 # budget, arch §6.0).
+# The original invariant above refers to runtime precedence. The derived
+# extraction deadline may choose a larger class default before the runtime
+# clamp, which is why the wording below makes that boundary explicit.
+# host lowers them; nothing raises them at runtime (the same restrictive rule as
+# the turn budget, arch §6.0).
+#
+# The three roles that generate to `max_tokens` bound a call at 300 s rather
+# than 120 s. This is a deadline on ONE model call, and 120 s was below what one
+# of these calls nominally costs: 4096 output tokens at the ~35 tok/s measured
+# on bedrock/us.anthropic.claude-sonnet-4-6 is ~117 s of generation before a
+# non-streaming Converse response sends its first byte. A deadline shorter than
+# the work it bounds does not bound a hang — it cancels healthy calls, and (in
+# EXP-028 Gate 4 v4) got them silently re-dispatched by the provider library
+# until a turn had spent ~484 s to produce nothing. `dspy_utils.RoleBoundLM`
+# spends this budget across attempts; see the note on `_ROLE_TIMEOUTS` there.
 DEFAULT_DEADLINES: Mapping[str, float] = {
-    "model.planner": 120.0,
-    "model.agent": 120.0,
-    "model.extraction": 120.0,
+    "model.planner": 300.0,
+    "model.agent": 300.0,
+    "model.extraction": 300.0,
     "model.clarification": 120.0,
     "model.parameter_extraction": 120.0,
     "model.summarization": 120.0,
@@ -123,6 +139,45 @@ DEFAULT_DEADLINES: Mapping[str, float] = {
     "reconciliation": 120.0,
     "compensation": 120.0,
 }
+
+
+# ---------------------------------------------------------------------------
+# The turn deadline (ido-mn1.6.33)
+#
+# The watchdog in `run_fastapi_mcp.turns` has always resolved this variable to
+# decide when an execution is stuck. Nothing INSIDE the turn read it, so the
+# bound existed only as an observer: `WorkflowExecutionContext` opened no
+# operation around the agent run, `extraction_bound()`'s `clamp_timeout()` had
+# no deadline to clamp against, and `timeout_clamped` was decorative on the one
+# path where the whole turn's remaining time is the binding constraint.
+#
+# It lives here, and not in the server module, because the deadline is a
+# property of the turn rather than of the transport: WEC must be able to ask
+# for it without importing the FastAPI server, and the watchdog and the
+# in-turn clamp must not be able to disagree about the number.
+DEFAULT_TURN_DEADLINE_SECONDS = 900.0
+TURN_DEADLINE_ENV_VAR = "FW_TURN_DEADLINE_SECONDS"
+
+
+def resolve_turn_deadline_seconds() -> float:
+    """The configured whole-turn deadline, in seconds.
+
+    Read per call rather than captured at import: a deployment (or a test) sets
+    it without rebuilding a session, and a value captured once would describe
+    the process that started rather than the turn that is running.
+    """
+    raw = os.environ.get(TURN_DEADLINE_ENV_VAR)
+    if raw in (None, ""):
+        return DEFAULT_TURN_DEADLINE_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{TURN_DEADLINE_ENV_VAR}={raw!r} is not a number"
+        ) from exc
+    if value <= 0:
+        raise ValueError(f"{TURN_DEADLINE_ENV_VAR} must be positive")
+    return value
 
 
 def retry_owner(kind: str) -> RetryOwner:

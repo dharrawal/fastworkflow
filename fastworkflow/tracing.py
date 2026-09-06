@@ -39,7 +39,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Optional, Protocol, runtime_checkable
+from typing import Any, Iterator, Optional, Protocol, Sequence, runtime_checkable
 
 from fastworkflow import capture_policy, decision_signals, runtime_manifest
 
@@ -104,6 +104,19 @@ ATTR_CHILD_CALLS = "child_calls"
 ATTR_CONTEXT_BEFORE = "context_before"
 ATTR_CONTEXT_AFTER = "context_after"
 ATTR_CONSEQUENCE = "consequence"
+# Which stored result payload the agent's compact observation for this command
+# stands in for (`result_handles`). Written ONLY when the command opted into
+# compaction, so a command that did not is byte-identical to before. Without it
+# a later composition step reading a trajectory that cites a handle has nothing
+# to resolve the citation against — the observation names a handle and no span
+# says which execution issued it.
+ATTR_RESULT_HANDLE_ID = "result_handle_id"
+# The stored payloads this dispatch's own storage displaced, if any. An eviction
+# nobody recorded makes a later "handle not found" undiagnosable: nothing would
+# say the handle had existed, when it was dropped, or what dropped it — and since
+# a composition step resolves CITED handles at the end of a turn, that is the
+# difference between a missing table with a cause and one without.
+ATTR_RESULT_HANDLES_EVICTED = "result_handles_evicted"
 
 # The emitter's own attribute-contract version, stamped on every span by `_emit`
 # (arch §12.0 delta 5). It is an ATTRIBUTE rather than a `Span` field because
@@ -206,7 +219,12 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # fw.agent.tool_call gained the §12.1.1 capture keys at its third emission site
 # (workflow_agent.py, previously the only unmigrated one); and fw.nlu.intent's
 # `classifier` attribute gained `topk_scores`.
-SPAN_CONTRACT_VERSION = 3
+#
+# v4: plan compile/execute spans gained selector application-attempt, actual
+# provider-call, provider-response, and adapter-identity accounting.
+# v5: presentation evidence now records the total bounded field bytes, omitted
+# handles and the explicit infrastructure-truncation classification.
+SPAN_CONTRACT_VERSION = 5
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -215,6 +233,8 @@ SPAN_PLANNER_REPLAN = "fw.planner.replan"
 SPAN_AGENT_TOOL_CALL = "fw.agent.tool_call"
 SPAN_COMMAND_EXECUTE = "fw.command.execute"
 SPAN_ASK_USER = "fw.ask_user"
+SPAN_PLAN_COMPILE = "fw.plan.compile"
+SPAN_PLAN_EXECUTE = "fw.plan.execute"
 
 V1_SPAN_NAMES = frozenset(
     {
@@ -324,8 +344,15 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             {"agent_query", "attempt", "user_response", "human_wait_ms"}
         ),
     ),
+    # v2 (ido-mn1.6.1): `result_handle_id` on a command that opted into
+    # observation compaction. `response_text` here still carries the FULL
+    # payload — that is the point of the split — so a reader comparing this span
+    # to the agent-step observation beside it can see exactly what the agent was
+    # not shown, and resolve the handle the compact observation cited. Absent on
+    # every command that did not opt in, so v1 and v2 rows are identical for
+    # those; the version says a key CAN appear, not that it always does.
     SPAN_COMMAND_EXECUTE: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "raw_command",
@@ -339,6 +366,8 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 ATTR_CONTEXT_BEFORE,
                 ATTR_CONTEXT_AFTER,
                 ATTR_CONSEQUENCE,
+                ATTR_RESULT_HANDLE_ID,
+                ATTR_RESULT_HANDLES_EVICTED,
             }
         ),
     ),
@@ -372,8 +401,41 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # that does not defer, with nothing saying why. A treatment whose mechanism
     # cannot be observed cannot be measured, which is the whole objection this
     # programme exists to answer.
+    # v4 (ido-mn1.6.6): which result handles the extraction step was given, and
+    # whether the presentation byte cap trimmed them. Under compact observations
+    # the rows an answer presents no longer come from the trajectory a reader can
+    # see, so without these keys a short listing has two indistinguishable
+    # explanations — the agent never fetched the rows, or the runtime did not
+    # hand them to the composition step. Absent on a turn that produced no
+    # handle, so v3 and v4 rows are identical for every workflow that has not
+    # opted in.
+    # v5 (ido-mn1.6.10): the completion limit the composition call was given and
+    # the inputs it was derived from, plus the marker for a call the provider
+    # stopped at that limit. `fw.llm.call` records the `max_tokens` that reached
+    # the provider; only these say where the number came from, and a reader
+    # comparing a run recorded before this change to one after has no way to
+    # tell a 4096-token answer that hit the old fixed cap from one that hit the
+    # new floor without them. Absent on turns whose agent never reached the
+    # extraction step, so a v4 row and a v5 row for such a turn are identical.
+    # v6: the 32 KiB cap now governs the complete presentation field rather than
+    # row bytes alone, and records omitted handles plus its closed truncation
+    # classification so a reader never has to infer why the field is partial.
+    # v7: plan/censor/provider terminal attributes already emitted by the shared
+    # result projector are now declared rather than left outside the contract.
+    # v8 (ido-mn1.6.33): the turn deadline made real. The extraction's DERIVED
+    # timeout beside the one it actually got, what the turn had left when it was
+    # derived, whether that was enough to attempt at all, and -- when the marker
+    # fired -- which mechanism produced it. Without the pair a reader cannot
+    # tell an answer the deadline shortened from one that was never long, and
+    # cannot tell an answer cut at `max_tokens` from one never composed.
     SPAN_AGENT_EXECUTE: SpanContract(
-        version=3,
+        # v9 (2026-09-05): `extraction_trajectory_bytes`, the third term of the
+        # extraction bound's payload (Gate 4 v5 shadow blocks: a flat turn's
+        # answer is rendered from the trajectory, not from the field).
+        # v10 (2026-09-05): `extraction_provider_max_output_tokens` and
+        # `extraction_provider_cap_applied` -- the agent route's own completion
+        # ceiling (gpt-oss-120b: 32,768) now bounds the derived limit.
+        version=10,
         attributes=frozenset(
             {
                 "agent_input",
@@ -397,6 +459,36 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "partial_iterations_consumed",
                 "partial_iteration_limit",
                 "partial_commands_executed",
+                "presented_result_handles",
+                "presented_result_bytes",
+                "presented_result_field_bytes",
+                "presented_result_trimmed",
+                "presented_result_omitted_handles",
+                "presented_result_truncation_classification",
+                "extraction_max_tokens",
+                "extraction_timeout_s",
+                "extraction_field_bytes",
+                "extraction_thought_bytes",
+                "extraction_trajectory_bytes",
+                "extraction_provider_max_output_tokens",
+                "extraction_provider_cap_applied",
+                "extraction_render_factor",
+                "extraction_prose_allowance_tokens",
+                "extraction_derived_tokens",
+                "extraction_floor_applied",
+                "extraction_ceiling_applied",
+                "extraction_timeout_clamped",
+                # v4 (ido-mn1.6.33): the turn deadline made real.
+                "extraction_derived_timeout_s",
+                "extraction_deadline_remaining_s",
+                "extraction_deadline_insufficient",
+                "extraction_truncated",
+                "extraction_truncated_goal_ids",
+                "extraction_truncated_cause",
+                "censored",
+                "censored_reason",
+                "provider_timeout",
+                "plan_outcome",
             }
         ),
     ),
@@ -413,8 +505,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # see that a step with no `tool_error` and an observation the agent did not
     # get from a tool is a POLICY rewrite, not a mystery — hence the version
     # bump rather than a quiet widening.
+    # v4 declares emergency-censor fields emitted on step termination.
     SPAN_AGENT_STEP: SpanContract(
-        version=3,
+        version=4,
         attributes=frozenset(
             {
                 "step_index",
@@ -431,6 +524,8 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "policy_outcome",
                 "policy_source",
                 "policy_table_version",
+                "censored",
+                "censored_reason",
             }
         ),
     ),
@@ -445,6 +540,63 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     SPAN_PLANNER_REPLAN: SpanContract(
         version=1,
         attributes=frozenset({"model", "replan_trigger", "plan"}),
+    ),
+    # v3 separates the compile and execute attribute sets; the prior combined
+    # declaration described keys neither emitter actually wrote.
+    SPAN_PLAN_COMPILE: SpanContract(
+        version=3,
+        attributes=frozenset(
+            {
+                "mode",
+                "selector_application_attempts",
+                "selector_provider_calls",
+                "selector_provider_responses",
+                "selector_adapter_identity",
+                "requested_public_task_keys",
+                "compiled_public_task_keys",
+                "public_node_count",
+                "leaf_count",
+                "executable_leaf_count",
+                "edge_count",
+                "packing_candidate_count",
+                "composite_group_count",
+                "recursive_composite_group_count",
+                "packed_task_count",
+                "packing_edge_count",
+                "packing_sha256",
+                "error_type",
+            }
+        ),
+    ),
+    SPAN_PLAN_EXECUTE: SpanContract(
+        version=3,
+        attributes=frozenset(
+            {
+                "arm",
+                "leaf_count",
+                "executable_leaf_count",
+                "packing_candidate_count",
+                "composite_group_count",
+                "recursive_composite_group_count",
+                "packed_task_count",
+                "packing_edge_count",
+                "frontier_count_before",
+                "frontier_count_after",
+                "budget_consumed",
+                "budget_limit",
+                "censored",
+                "censored_reason",
+                "packing_applied",
+                "schedule_sha256",
+                "composite_groups_applied",
+                "grouped_task_count",
+                "grouped_leaf_count",
+                "shared_binding_count",
+                "context_reuse_count",
+                "resumed",
+                "error_type",
+            }
+        ),
     ),
     # v2 (EXP-012): exact-identity resolution adds a `matcher_layer` value
     # (`exact_identity`) and, with it, the identity facts that layer knows and
@@ -1043,6 +1195,48 @@ def end_span(
             _emit(sink, span)
     except Exception as exc:
         logger.warning(f"end_span({span.name}) failed: {exc!r}")
+
+
+def result_handle_attributes(
+    result_handle_id: Optional[str] = None,
+    evicted_handle_ids: Sequence[str] = (),
+) -> dict[str, Any]:
+    """The span attribute naming a stored result payload, or nothing at all.
+
+    Lives here rather than in `result_handles` for the same reason
+    `context_handle` does: it is a projection ONTO span attributes, and the
+    attribute-contract scan resolves a `**helper()` spread only against the
+    emitting module and this one. Keeping it beside `ATTR_RESULT_HANDLE_ID` also
+    means the key and the only thing that writes it cannot drift apart.
+
+    Returns `{}` rather than `{key: None}` deliberately: a command that did not
+    opt into compaction must produce a span byte-identical to the one it
+    produced before the feature existed, and a null-valued key is not that.
+
+    `evicted_handle_ids` is separate rather than folded in because the two facts
+    are independent: a command can issue a handle without displacing anything,
+    and — once the byte budget is the bound — it can displace something without
+    issuing one at all (a restore, or a payload the capture policy shrank to
+    nothing). Four returns rather than one built dict, so the attribute-contract
+    scan can read every key statically.
+
+    The parameter is `result_handle_id` and not `handle_id` on purpose:
+    `handle_id` is the §6.7 CONTEXT handle's field, which nothing may branch on
+    (`tests/test_no_capture_control_flow.py`, arch §17.3). This is an execution
+    identity minted by the dispatcher — a different thing that happens to end in
+    the same two words — and the emptiness tests below decide only whether an
+    attribute key exists, never what the workflow does.
+    """
+    if not result_handle_id and not evicted_handle_ids:
+        return {}
+    if not evicted_handle_ids:
+        return {ATTR_RESULT_HANDLE_ID: result_handle_id}
+    if not result_handle_id:
+        return {ATTR_RESULT_HANDLES_EVICTED: list(evicted_handle_ids)}
+    return {
+        ATTR_RESULT_HANDLE_ID: result_handle_id,
+        ATTR_RESULT_HANDLES_EVICTED: list(evicted_handle_ids),
+    }
 
 
 # ----------------------------------------------------------------------

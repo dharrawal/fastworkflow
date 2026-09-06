@@ -11,6 +11,12 @@ from fastworkflow.command_routing import RoutingDefinition
 from typing import Optional
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_resolution import (
+    ExactResolution,
+    index_for_workflow,
+    simple_name_resolution_enforced,
+)
+from fastworkflow import result_handles
 from fastworkflow.utils.logging import logger
 
 
@@ -184,6 +190,25 @@ class CommandExecutor(CommandExecutorInterface):
         # still be read back through a public API.
         command_output.command_call_id = call_id
 
+        # Observation compaction (ido-mn1.6.1). Stores the full payload of a
+        # command that OPTED IN, keyed by this dispatch's call id — which is why
+        # it happens here and not at the agent seam: the call id is minted in
+        # this frame, and `plan.py` already binds a captured handle to the
+        # producing `command_call_id`, so one id serves both. A command that did
+        # not opt in returns None from one Mapping lookup and nothing else
+        # happens: no store write, no attribute, no change to `command_output`.
+        # Unconditional on tracing, unlike the attribute prep above, because the
+        # agent needs the payload whether or not anything is being recorded.
+        #
+        # The second half of the return is what storing this payload DISPLACED.
+        # It rides this span rather than being logged and forgotten because a
+        # composition step resolves cited handles at the end of a turn: when one
+        # is gone, the only way to find out why is a record naming the dispatch
+        # that dropped it.
+        result_handle_id, evicted_handle_ids = (
+            result_handles.store_from_command_output(chat_session, command_output)
+        )
+
         context_after = None
         consequence = None
         if span is not None:
@@ -216,6 +241,12 @@ class CommandExecutor(CommandExecutorInterface):
                 # calls" and "nothing captured them" are different facts, and an
                 # absent key cannot tell them apart.
                 tracing.ATTR_CHILD_CALLS: list(child_calls),
+                # Spread, not a key with a None value: an off-path command must
+                # produce a span byte-identical to the one it produced before
+                # this feature existed, and `result_handle_id: null` is not that.
+                **tracing.result_handle_attributes(
+                    result_handle_id, evicted_handle_ids
+                ),
             },
         )
         record_execution(
@@ -358,8 +389,6 @@ class CommandExecutor(CommandExecutorInterface):
         somewhere else — is the silent cross-context dispatch FW-REQ-005 exists
         to stop.
         """
-        from fastworkflow.command_resolution import ExactResolution, index_for_workflow
-
         current = workflow.current_command_context_name or "*"
         if requested_context and requested_context != current:
             return ExactResolution(
@@ -398,8 +427,6 @@ class CommandExecutor(CommandExecutorInterface):
         failure. Nothing navigates and no backend call is made either way
         (FW-REQ-005 clauses 3 and 5).
         """
-        from fastworkflow.command_resolution import simple_name_resolution_enforced
-
         detail = resolution.detail or f"'{command_name}' is not callable here"
         if not simple_name_resolution_enforced(workflow.folderpath):
             logger.warning(

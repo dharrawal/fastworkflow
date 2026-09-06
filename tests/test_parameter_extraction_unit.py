@@ -92,3 +92,105 @@ def test_xml_extraction_no_params_returns_empty_model():
     result = ParameterExtraction._extract_parameters_from_xml("anything", _NoParams)
     assert result is not None
     assert isinstance(result, _NoParams)
+
+
+# ---------------------------------------------------------------------------
+# _extract_parameters_from_xml — an omitted OPTIONAL tag is not a regex failure
+# (ido-mn1.6.12)
+# ---------------------------------------------------------------------------
+#
+# `all_fields_extracted = len(extracted_data) == len(field_names)` demanded a tag
+# for every declared field, and returning None is what `_extract_impl` reads as
+# "regex failed" — so it answered with `extract_parameters`, an LLM round trip
+# (`extraction_method="llm"`). A command whose docstring TELLS the agent to omit
+# its optional parameters therefore bought a model call on every ordinary call,
+# to conclude that the omitted optionals are their defaults.
+
+
+class _OptionalParams(BaseModel):
+    handle: str = Field(description="required")
+    cursor: Optional[str] = Field(default=None)
+    contains: Optional[str] = Field(default=None)
+
+
+def test_omitted_optional_tags_are_satisfied_by_their_defaults():
+    result = ParameterExtraction._extract_parameters_from_xml(
+        "<handle>abc</handle>", _OptionalParams
+    )
+    assert result is not None, "regex declined; the runtime would call the LLM"
+    assert result.handle == "abc"
+    assert result.cursor is None
+    assert result.contains is None
+
+
+def test_a_supplied_optional_still_wins_over_its_default():
+    result = ParameterExtraction._extract_parameters_from_xml(
+        "<handle>abc</handle> <cursor>c2</cursor>", _OptionalParams
+    )
+    assert result is not None
+    assert result.cursor == "c2"
+    assert result.contains is None
+
+
+def test_an_omitted_REQUIRED_tag_still_falls_back_to_the_llm():
+    """The other half of the rule. Only the LLM can find a value in prose."""
+    assert (
+        ParameterExtraction._extract_parameters_from_xml(
+            "<cursor>c2</cursor>", _OptionalParams
+        )
+        is None
+    )
+
+
+class _SentinelParams(BaseModel):
+    """fastWorkflow's own convention for a REQUIRED parameter.
+
+    The whole `retail_workflow` is written this way: a default of `NOT_FOUND`
+    plus a pattern that accepts the sentinel. Pydantic calls the field optional
+    because it has a default, but the default IS the missing marker — so the
+    rule cannot be "any field with a default is satisfied", or every command in
+    that workflow would stop consulting the LLM for parameters nobody supplied.
+    """
+
+    order_id: str = Field(default="NOT_FOUND")
+    reason: str = Field(default="NOT_FOUND")
+
+
+def test_a_field_defaulted_to_the_missing_sentinel_is_not_satisfied():
+    assert (
+        ParameterExtraction._extract_parameters_from_xml(
+            "<order_id>#W1</order_id>", _SentinelParams
+        )
+        is None
+    )
+
+
+def test_unlabelled_text_still_goes_to_the_llm():
+    """An all-optional command called with prose and no tags.
+
+    Nothing was extracted and the caller still supplied text, so that text was
+    meant for a field. Answering with defaults would drop it silently; only the
+    LLM can place it.
+    """
+
+    class _AllOptional(BaseModel):
+        note: Optional[str] = Field(default=None)
+        other: Optional[str] = Field(default=None)
+
+    assert (
+        ParameterExtraction._extract_parameters_from_xml(
+            "remind me about the invoice", _AllOptional
+        )
+        is None
+    )
+
+
+def test_an_all_optional_command_called_bare_extracts_deterministically():
+    class _AllOptional(BaseModel):
+        note: Optional[str] = Field(default=None)
+        other: Optional[str] = Field(default=None)
+
+    result = ParameterExtraction._extract_parameters_from_xml("  ", _AllOptional)
+    assert result is not None
+    assert result.note is None
+    assert result.other is None

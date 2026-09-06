@@ -365,6 +365,27 @@ def _is_template_echo(utterance: str) -> bool:
     return _TRAILING_INDEX.sub("", normalized).strip() in _TEMPLATE_ECHOES
 
 
+def _sampling_kwargs(model) -> dict:
+    """Sampling parameters for one generation request, per provider.
+
+    Anthropic models on Bedrock REJECT a request carrying both `temperature`
+    and `top_p` (measured 2026-09-05 against
+    bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0: BedrockException
+    "`temperature` and `top_p` cannot both be specified for this model").
+    The request is rejected before generation, so every utterance batch
+    would fail and fall back to seed utterances only. Bedrock gets
+    temperature alone: dropping `top_p` (0.9 against temperature 1.0) removes
+    a mild tail trim, dropping `temperature` would halve the diversity this
+    generator exists to produce. Every other provider keeps the pair.
+
+    This is inside the digested generation source, so landing it invalidates
+    every utterance-cache entry once, as an edit to the prompt path must.
+    """
+    if str(model or "").startswith(("bedrock/", "bedrock_converse/")):
+        return {"temperature": 1.0}
+    return {"temperature": 1.0, "top_p": 0.9}
+
+
 def generate_utterances_for_personas(
     seed_utterances: List[str],
     command_name,
@@ -487,8 +508,7 @@ def generate_utterances_for_personas(
                     model=model,  # Corrected model name
                     messages=messages,
                     max_tokens=1000,
-                    temperature=1.0,
-                    top_p=0.9,
+                    **_sampling_kwargs(model),
                     stop=["<|end_of_text|>"]
                 ),
                 description=(

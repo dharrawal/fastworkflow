@@ -146,6 +146,12 @@ def add_temp_workflow_path():
 
 def pytest_collection_modifyitems(config, items):
     """Modify test collection to add markers."""
+    offline = os.environ.get("FW_TEST_OFFLINE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     for item in items:
         # Add integration marker to integration tests
         if "integration" in item.nodeid:
@@ -154,6 +160,18 @@ def pytest_collection_modifyitems(config, items):
         # Add slow marker to tests that might take longer
         if "mcp_server" in item.nodeid:
             item.add_marker(pytest.mark.slow)
+        if offline and (
+            item.get_closest_marker("live_provider") is not None
+            or item.get_closest_marker("requires_llm_key") is not None
+        ):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        "FW_TEST_OFFLINE blocks tests that may call a live "
+                        "model provider"
+                    )
+                )
+            )
 
 
 def pytest_configure(config):
@@ -172,6 +190,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "requires_llm_key: mark test as needing a real LLM API key to do more than skip",
+    )
+    config.addinivalue_line(
+        "markers",
+        "live_provider: mark test as making a real model-provider call",
     )
 
 
