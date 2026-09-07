@@ -52,6 +52,7 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import state_paths
+from fastworkflow.runtime_readiness import runtime_readiness_snapshot
 from fastworkflow.runtime_manifest import (
     check_startup_conformance,
     deployment_env,
@@ -842,7 +843,7 @@ async def liveness_probe() -> dict:
     tags=["probes"]
 )
 async def readiness_probe(
-    memory: bool = False, observability: bool = False
+    memory: bool = False, observability: bool = False, runtime: bool = False
 ) -> JSONResponse:
     """
     Readiness probe endpoint for Kubernetes.
@@ -869,6 +870,14 @@ async def readiness_probe(
     ``SQLiteTraceSink.__init__`` prunes opportunistically. Exposing the value
     in effect lets a harness ASSERT that its requirement took hold here rather
     than hope, and cite the answer in its bundle. fix-ajv.14.
+
+    Pass ``?runtime=true`` for the credential-free snapshot of the effective
+    runtime in this process (fix-qe2): the feature vector and manifest
+    fingerprint registered at startup, the trained model version, the served
+    command count, the capture regime and the pid. This is what an experiment
+    driver asserts against before admitting a paid request, and what the
+    server stamps on an attempt when it binds (`runtime_snapshot_json`). An
+    invalid runtime configuration makes the pod not ready.
     
     This endpoint is not logged unless it returns a non-200 status code
     to avoid excessive logging from frequent Kubernetes health checks.
@@ -910,7 +919,25 @@ async def readiness_probe(
             "enabled": _obs.observability_enabled(default_on=True),
         }
 
-    if readiness_state.is_ready() and "dspy_memory_policy" not in status_info:
+    if runtime:
+        try:
+            runtime_snapshot = runtime_readiness_snapshot(ARGS.workflow_path)
+        except Exception as exc:
+            # Never a traceback or message here: the probe is unauthenticated
+            # and an exception text can carry a path.
+            runtime_snapshot = {
+                "configuration_valid": False,
+                "error_type": type(exc).__name__,
+            }
+        content["runtime"] = runtime_snapshot
+        if not runtime_snapshot["configuration_valid"]:
+            status_info["runtime_configuration"] = "invalid"
+
+    if (
+        readiness_state.is_ready()
+        and "dspy_memory_policy" not in status_info
+        and "runtime_configuration" not in status_info
+    ):
         return JSONResponse(status_code=status.HTTP_200_OK, content=content)
 
     content["status"] = "not_ready"

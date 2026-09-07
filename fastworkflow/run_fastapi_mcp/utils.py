@@ -26,6 +26,7 @@ from fastworkflow.session_state_store import (
 )
 from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.runtime_readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
 from fastworkflow.experiment import (
     MissingExperimentLifecycleFeature,
@@ -393,6 +394,26 @@ def _merge_workflow_context(
     return context
 
 
+def _runtime_snapshot_for_binding(workflow_path: str) -> Optional[dict[str, Any]]:
+    """The server's runtime snapshot to stamp on an attempt it binds (fix-qe2).
+
+    Taken in-process, at the moment of binding, from the same function the
+    ``?runtime=true`` probe answers with -- so what the attempt record says
+    about its server is what the driver could have asserted against. A
+    failure to describe the runtime records None rather than refusing the
+    bind: the attempt still runs, and a null stamp is visible evidence that
+    the configuration could not be certified, which is more useful than a
+    403 that hides it.
+    """
+    try:
+        return runtime_readiness_snapshot(workflow_path)
+    except Exception as exc:  # noqa: BLE001 - never block a bind on a probe
+        logger.warning(
+            f"runtime snapshot unavailable at attempt binding: {type(exc).__name__}"
+        )
+        return None
+
+
 def _claim_registered_attempt(
     workflow_path: str,
     channel_id: str,
@@ -423,6 +444,7 @@ def _claim_registered_attempt(
             },
             channel_id=channel_id,
             server_incarnation=SERVER_INCARNATION,
+            runtime_snapshot=_runtime_snapshot_for_binding(workflow_path),
         )
     except MissingExperimentLifecycleFeature as exc:
         raise HTTPException(

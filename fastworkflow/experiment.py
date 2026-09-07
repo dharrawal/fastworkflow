@@ -396,13 +396,24 @@ class ExperimentController:
         *,
         server_incarnation: str,
         lease_seconds: float = 300.0,
+        runtime_snapshot: Optional[dict[str, Any]] = None,
     ) -> AttemptClaim:
+        """Claim on behalf of a server, stamping its runtime snapshot (fix-qe2).
+
+        ``runtime_snapshot`` is the claiming server's
+        ``runtime_readiness_snapshot``. The FastAPI server takes it in-process
+        at its own bind (`run_fastapi_mcp.utils._claim_registered_attempt`);
+        a caller claiming from outside the server passes what it fetched from
+        that server's ``/probes/readyz?runtime=true``, or None when it has no
+        such answer. None is recorded as null, never as an invented snapshot.
+        """
         return AttemptClaim(
             **self.store.claim_attempt(
                 bootstrap.as_dict(),
                 channel_id=bootstrap.channel_id,
                 server_incarnation=server_incarnation,
                 lease_seconds=lease_seconds,
+                runtime_snapshot=runtime_snapshot,
             )
         )
 

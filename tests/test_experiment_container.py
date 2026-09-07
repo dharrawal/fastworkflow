@@ -199,17 +199,23 @@ class TestAdditiveSchema:
         assert {"experiment_id", "task_id", "attempt"} <= conv_cols
         assert {"idx_turns_experiment", "idx_conv_experiment_attempt"} <= indexes
 
-    def test_schema_version_is_two_for_benchmark_pin_columns(self, db_path):
-        """fix-42b added create-time-only experiment columns and bumped v1->v2."""
+    def test_schema_version_is_three_for_create_time_only_columns(self, db_path):
+        """fix-42b added create-time-only experiment columns and bumped v1->v2;
+        fix-qe2 added experiment_attempts.runtime_snapshot_json and bumped
+        v2->v3. Both are create-time columns with no migration path."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            attempt_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
+            }
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 2
+        assert obs.SCHEMA_VERSION == 3
+        assert "runtime_snapshot_json" in attempt_cols
 
-    def test_a_pre_v2_db_fails_fast_instead_of_migrating(self, db_path):
+    def test_a_pre_v3_db_fails_fast_instead_of_migrating(self, db_path):
         """No legacy support: a populated v1 store is refused on open with a
         reason a human can act on, and is left untouched (not migrated).
 
@@ -259,7 +265,7 @@ class TestAdditiveSchema:
             obs.ObservabilityStore(db_path)
         message = str(excinfo.value)
         assert "schema v1" in message
-        assert "requires v2" in message
+        assert "requires v3" in message
         assert "carries no migration" in message
 
         conn = sqlite3.connect(db_path)
@@ -1771,3 +1777,124 @@ class TestSpaSurface:
         # [R22] and the packaging rules still hold.
         assert b"innerHTML" not in page
         assert b"https://" not in page
+
+
+# ----------------------------------------------------------------------
+# fix-qe2: the binding server's runtime snapshot on the attempt row
+# ----------------------------------------------------------------------
+
+
+class TestRuntimeSnapshotStamp:
+    """Stamped at claim, read back decoded, null when the server had none."""
+
+    @staticmethod
+    def _controller(db_path):
+        from fastworkflow.experiment import ExperimentController
+
+        store = obs.ObservabilityStore(db_path)
+        controller = ExperimentController(
+            db_path, store.store_identity(), migrate=False, external=True
+        )
+        controller.create_experiment(
+            "exp-stamp",
+            "runtime snapshot stamp",
+            declared_tasks=1,
+            declared_attempts=2,
+            declarations=[("task-1", 1, "job-1"), ("task-1", 2, "job-2")],
+        )
+        return controller
+
+    @staticmethod
+    def _bootstrap(controller, attempt):
+        return controller.register_attempt(
+            "exp-stamp",
+            "task-1",
+            attempt,
+            f"job-{attempt}",
+            f"registered:task-1:{attempt}",
+        )
+
+    def test_a_claimed_attempt_carries_its_servers_snapshot_readable_back(
+        self, db_path
+    ):
+        controller = self._controller(db_path)
+        snapshot = {
+            "configuration_valid": True,
+            "effective_features": {"decision_signals_v1": "shadow"},
+            "workflow_fingerprint": "sha256:abc",
+            "capture_profile": "debug",
+            "pid": 4242,
+        }
+
+        controller.claim_attempt(
+            self._bootstrap(controller, 1),
+            server_incarnation="server-a",
+            runtime_snapshot=snapshot,
+        )
+
+        row = controller.store.experiment_attempt_rows("exp-stamp")[0]
+        assert row["runtime_snapshot"] == snapshot
+        assert "runtime_snapshot_json" not in row
+        with sqlite3.connect(db_path) as conn:
+            raw = conn.execute(
+                "SELECT runtime_snapshot_json FROM experiment_attempts "
+                "WHERE experiment_id='exp-stamp' AND attempt=1"
+            ).fetchone()[0]
+        assert json.loads(raw) == snapshot
+        # start_attempt on the same row (the WEC's first turn) does not
+        # clobber the stamp: it belongs to the binding, not to the turn.
+        controller.store.start_attempt(
+            "exp-stamp", "task-1", 1, "registered:task-1:1", source_key="job-1"
+        )
+        assert controller.store.experiment_attempt_rows("exp-stamp")[0][
+            "runtime_snapshot"
+        ] == snapshot
+
+    def test_an_attempt_bound_without_a_snapshot_reads_back_null(self, db_path):
+        controller = self._controller(db_path)
+
+        controller.claim_attempt(
+            self._bootstrap(controller, 2), server_incarnation="server-b"
+        )
+
+        rows = controller.store.experiment_attempt_rows("exp-stamp", task_id="task-1")
+        row = next(r for r in rows if r["attempt"] == 2)
+        assert row["runtime_snapshot"] is None
+        assert "runtime_snapshot_json" not in row
+
+    def test_the_chatbot_attempts_api_exposes_the_decoded_stamp(
+        self, experiment_server, db_path
+    ):
+        """The UI (fix-49m.6) reads `runtime_snapshot` off the attempt rows the
+        chatbot server already returns; rows that never bound read null."""
+        controller = self._controller(db_path)
+        snapshot = {"configuration_valid": True, "pid": 7, "effective_features": {}}
+        controller.claim_attempt(
+            self._bootstrap(controller, 1),
+            server_incarnation="server-api",
+            runtime_snapshot=snapshot,
+        )
+
+        status, data = _request(experiment_server, "/api/experiment/exp-stamp/attempts")
+        assert status == 200
+        assert data["attempts"][0]["runtime_snapshot"] == snapshot
+        assert "runtime_snapshot_json" not in data["attempts"][0]
+
+        _, data = _request(experiment_server, "/api/experiment/exp-a/attempts?task=t1")
+        assert [a["runtime_snapshot"] for a in data["attempts"]] == [None, None]
+
+    def test_a_v2_store_is_refused_on_open_not_migrated(self, db_path):
+        """The column is create-time only; a populated v2 store fails fast
+        through the existing gate, with the reason."""
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(obs.IncompatibleObservabilityDB) as excinfo:
+            obs.ObservabilityStore(db_path)
+        message = str(excinfo.value)
+        assert "schema v2" in message
+        assert "requires v3" in message
+        assert "runtime_snapshot_json" in message

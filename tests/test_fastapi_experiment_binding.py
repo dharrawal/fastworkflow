@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import sqlite3
 import sys
@@ -339,3 +340,114 @@ def test_bootstrap_refused_when_claim_feature_is_missing(
 
     assert response.status_code == 503
     assert bootstrap.channel_id not in binding_harness.main.session_manager._sessions
+
+
+# ----------------------------------------------------------------------
+# fix-qe2: the runtime snapshot -- answered by the probe, stamped on bind
+# ----------------------------------------------------------------------
+
+
+def _attempt_row(binding_harness, task_id="task-1", attempt=1):
+    rows = binding_harness.controller.store.experiment_attempt_rows(
+        "exp-http", task_id=task_id
+    )
+    return next(r for r in rows if int(r["attempt"]) == attempt)
+
+
+def _raw_stamp(binding_harness):
+    with sqlite3.connect(binding_harness.controller.db_path) as conn:
+        return conn.execute(
+            """SELECT runtime_snapshot_json FROM experiment_attempts
+                WHERE experiment_id='exp-http' AND task_id='task-1' AND attempt=1"""
+        ).fetchone()[0]
+
+
+def test_the_runtime_snapshot_is_absent_unless_asked_for(binding_harness):
+    """Probes are frequent; this is opt-in like ?memory and ?observability."""
+    assert "runtime" not in binding_harness.client.get("/probes/readyz").json()
+
+
+def test_the_runtime_probe_reports_a_valid_credential_free_snapshot(
+    binding_harness,
+):
+    response = binding_harness.client.get("/probes/readyz?runtime=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    runtime = body["runtime"]
+    assert body["status"] == "ready"
+    assert runtime["configuration_valid"] is True
+    assert runtime["runtime_metadata_registered"] is True
+    assert runtime["pid"] == os.getpid()
+    assert runtime["capture_profile"] == "evidence"
+    assert runtime["command_surface_count"] > 0
+    assert isinstance(runtime["effective_features"], dict)
+    # The snapshot itself carries no path, no store location, no env value.
+    # (The surrounding body's `experiment_store_readiness.resolved_path` is
+    # the pre-existing fix-rj2 handshake, outside this snapshot.)
+    rendered = json.dumps(runtime)
+    assert binding_harness.workflow_path not in rendered
+    assert binding_harness.controller.db_path not in rendered
+    for word in ("KEY", "SECRET", "TOKEN", "PASSWORD"):
+        assert word not in rendered.upper()
+
+
+def test_an_invalid_runtime_configuration_makes_the_pod_not_ready(
+    binding_harness, monkeypatch
+):
+    monkeypatch.setattr(
+        "fastworkflow.run_fastapi_mcp.__main__.runtime_readiness_snapshot",
+        lambda _path: {"configuration_valid": False, "runtime_metadata_registered": False},
+    )
+
+    response = binding_harness.client.get("/probes/readyz?runtime=true")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    assert body["checks"]["runtime_configuration"] == "invalid"
+    # Without the flag the probe keeps its ordinary answer.
+    assert binding_harness.client.get("/probes/readyz").status_code == 200
+
+
+def test_binding_stamps_the_servers_runtime_snapshot_on_the_attempt(
+    binding_harness,
+):
+    """Taken in-process at the bind, from the same function the probe answers
+    with: what the attempt record says about its server is what the driver
+    could have asserted against."""
+    bootstrap = binding_harness.register()
+    assert binding_harness.initialize(bootstrap).status_code == 200
+
+    probed = binding_harness.client.get("/probes/readyz?runtime=true").json()["runtime"]
+    row = _attempt_row(binding_harness)
+
+    assert row["runtime_snapshot"] == probed
+    assert row["runtime_snapshot"]["configuration_valid"] is True
+    assert row["runtime_snapshot"]["pid"] == os.getpid()
+    # Projected once, decoded; the raw column is not duplicated.
+    assert "runtime_snapshot_json" not in row
+    # And it is a JSON document on disk, readable without this code.
+    assert json.loads(_raw_stamp(binding_harness)) == probed
+
+
+def test_binding_records_null_when_the_snapshot_is_unavailable(
+    binding_harness, monkeypatch
+):
+    """A probe failure never blocks the bind. The attempt runs, and the null
+    stamp is visible evidence that the configuration was not certified."""
+
+    def unavailable(_path):
+        raise RuntimeError("no runtime description")
+
+    monkeypatch.setattr(
+        "fastworkflow.run_fastapi_mcp.utils.runtime_readiness_snapshot",
+        unavailable,
+    )
+    bootstrap = binding_harness.register()
+
+    assert binding_harness.initialize(bootstrap).status_code == 200
+    row = _attempt_row(binding_harness)
+    assert row["runtime_snapshot"] is None
+    assert "runtime_snapshot_json" not in row
+    assert _raw_stamp(binding_harness) is None

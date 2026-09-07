@@ -45,7 +45,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -61,7 +61,11 @@ from fastworkflow.utils.logging import logger
 # Fresh schema (fix-49m.3): the `_SCHEMA_STATEMENTS` literal is the ONLY
 # creator of every table and column. There is no ALTER/migration path; a store
 # whose user_version is older than this constant is refused on open.
-SCHEMA_VERSION = 2
+#
+# v3 (fix-qe2): experiment_attempts.runtime_snapshot_json -- the binding
+# server's credential-free runtime snapshot, stamped at claim time. Create-time
+# column only; a v2 store is refused on open like every older one.
+SCHEMA_VERSION = 3
 
 # Which capture profile this deployment records under (arch §12.0 delta 3).
 # Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
@@ -739,6 +743,34 @@ class Redactor:
 # ----------------------------------------------------------------------
 
 
+def _decode_attempt_row(row: Any) -> dict[str, Any]:
+    """An `experiment_attempts` row as readers see it.
+
+    `runtime_snapshot_json` (fix-qe2) is exposed decoded under
+    `runtime_snapshot` -- a dict, or None when the binding server recorded no
+    snapshot -- so the chatbot UI and the workspace render it without parsing.
+    The raw column is dropped from the projection rather than duplicated: one
+    key, one shape. An unreadable value is reported as None with the raw text
+    kept under `runtime_snapshot_json`, so a corrupt stamp is visible rather
+    than silently the same as an absent one.
+    """
+    record = dict(row)
+    raw = record.pop("runtime_snapshot_json", None)
+    if raw is None:
+        record["runtime_snapshot"] = None
+        return record
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        record["runtime_snapshot"] = None
+        record["runtime_snapshot_json"] = raw
+        return record
+    record["runtime_snapshot"] = decoded if isinstance(decoded, dict) else None
+    if record["runtime_snapshot"] is None:
+        record["runtime_snapshot_json"] = raw
+    return record
+
+
 def _sanitize_json_value(value: Any) -> Any:
     """Coerce a dumped value into JSON-safe form; non-serializable values
     become placeholder envelopes rather than failing the record."""
@@ -1120,6 +1152,7 @@ _SCHEMA_STATEMENTS = [
         detail_json TEXT,
         source_attempt_json TEXT,
         source_key TEXT,
+        runtime_snapshot_json TEXT,
         PRIMARY KEY (experiment_id, task_id, attempt))""",
     """CREATE TABLE IF NOT EXISTS experiment_attempt_declarations (
         experiment_id TEXT NOT NULL,
@@ -1261,8 +1294,9 @@ class ObservabilityStore:
                         f"{self.db_path} has schema v{found}; this build requires "
                         f"v{SCHEMA_VERSION} and carries no migration (fresh "
                         "observability schema, fix-49m.3; experiments."
-                        "benchmark_id, benchmark_version, benchmark_digest_sha256 "
-                        "and analysis_json are create-time columns). Move or "
+                        "benchmark_id, benchmark_version, benchmark_digest_sha256, "
+                        "analysis_json and experiment_attempts."
+                        "runtime_snapshot_json are create-time columns). Move or "
                         "delete the file and its -wal/-shm sidecars to start a "
                         f"new store, or open it read-only with a v{found} build."
                     )
@@ -3039,14 +3073,35 @@ class ObservabilityStore:
         channel_id: str,
         server_incarnation: str,
         lease_seconds: float = 300.0,
+        runtime_snapshot: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Consume a bootstrap and reserve its labelled conversation atomically."""
+        """Consume a bootstrap and reserve its labelled conversation atomically.
+
+        ``runtime_snapshot`` (fix-qe2) is the claiming server's credential-free
+        ``runtime_readiness_snapshot``, stored verbatim as JSON on the attempt
+        row so the record says which configuration served it. None is stored
+        as NULL: an attempt whose server could not be described is a real
+        state and must not be dressed up as a described one. A re-claim (a new
+        binding) replaces the stamp, because the stamp belongs to the binding,
+        not to the attempt's first server.
+        """
         registration_id = str(bootstrap.get("registration_id") or "")
         secret = str(bootstrap.get("secret") or "")
         if not registration_id or not secret or not channel_id or not server_incarnation:
             raise AttemptClaimError(
                 "registration_id, secret, channel_id and server_incarnation are required"
             )
+        runtime_snapshot_json = (
+            None
+            if runtime_snapshot is None
+            else self._scrub(
+                json.dumps(
+                    _sanitize_json_value(dict(runtime_snapshot)),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        )
         now = time.time()
         incoming_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
         with self._connect() as conn:
@@ -3122,13 +3177,15 @@ class ObservabilityStore:
                    (experiment_id, task_id, attempt, channel_id, conversation_id,
                     outcome, outcome_source, reward, restarts, started_at,
                     execution_status, execution_finished_at, finished_at,
-                    detail_json, source_attempt_json, source_key)
+                    detail_json, source_attempt_json, source_key,
+                    runtime_snapshot_json)
                    VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 0, ?,
-                           NULL, NULL, NULL, NULL, NULL, ?)
+                           NULL, NULL, NULL, NULL, NULL, ?, ?)
                    ON CONFLICT(experiment_id, task_id, attempt) DO UPDATE SET
                      channel_id=excluded.channel_id,
                      conversation_id=excluded.conversation_id,
-                     source_key=excluded.source_key""",
+                     source_key=excluded.source_key,
+                     runtime_snapshot_json=excluded.runtime_snapshot_json""",
                 (
                     row["experiment_id"],
                     row["task_id"],
@@ -3137,6 +3194,7 @@ class ObservabilityStore:
                     conversation_id,
                     _utcnow_iso(),
                     row["source_key"],
+                    runtime_snapshot_json,
                 ),
             )
             updated = conn.execute(
@@ -4203,7 +4261,7 @@ class ObservabilityStore:
                      ORDER BY task_id, attempt""",
                 params,
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [_decode_attempt_row(r) for r in rows]
 
     def experiment_attempt_declarations(
         self, experiment_id: str
