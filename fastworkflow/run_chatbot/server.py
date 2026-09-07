@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -92,6 +93,236 @@ _SCRIPT_RE = re.compile(rb"<script\b[^>]*>(.*?)</script>", re.DOTALL)
 # sandboxed iframe by the SPA; direct responses are additionally sandboxed via
 # CSP (see _artifact_headers) [R22].
 _HTMLISH_TYPES = ("text/html", "application/xhtml+xml", "image/svg+xml")
+
+# ----------------------------------------------------------------------
+# Derived fields for the SPA (fix-49m.6)
+# ----------------------------------------------------------------------
+#
+# Three things the debug UI shows are not columns: whether an `fw.llm.call`
+# stopped at its output cap, how many such calls a turn or an attempt made,
+# and the verdict an experiment's evidence segments add up to. They are derived
+# here, in the read layer, from ObservabilityStore reads only [R12] -- never
+# from a query of this module's own -- so the workspace's archived stores
+# render them through the very same functions. (The fourth, the attempt's
+# runtime snapshot, IS a column: `_decode_attempt_row` already exposes it.)
+
+SPAN_LLM_CALL = "fw.llm.call"
+
+EVIDENCE_VALID = "valid"
+EVIDENCE_INVALID = "invalid"
+EVIDENCE_UNRECORDED = "unrecorded"
+
+
+def _mapping_attr(value: Any) -> Optional[dict[str, Any]]:
+    """A span attribute as a dict, or None.
+
+    `usage` and `call_kwargs` are persisted as JSON text
+    (`dspy_logger._json_text`); the `attributes` column itself is text straight
+    off the row and a dict once a route has decoded it. Both forms are
+    accepted; anything that is not a mapping answers None.
+    """
+    if isinstance(value, (str, bytes)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def _exact_int(value: Any) -> Optional[int]:
+    """An int, or None. bool is excluded on purpose: `True == 1` would let a
+    malformed payload read as a one-token call cut at a one-token cap."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def llm_call_cut_at_limit(span: Mapping[str, Any]) -> bool:
+    """Whether an `fw.llm.call` produced exactly `call_kwargs.max_tokens` tokens.
+
+    A completion that stops exactly at the cap stopped because of the cap, not
+    because the model finished. `call_kwargs` is flat -- `call_kwargs.max_tokens`
+    (`tests/test_dspy_call_kwargs_shape.py`). Missing usage, a missing cap, a
+    non-integral value on either side or a non-positive cap all answer False:
+    the chip must never be a false positive, so absence of evidence is "no".
+    """
+    if span.get("name") != SPAN_LLM_CALL:
+        return False
+    attributes = _mapping_attr(span.get("attributes"))
+    if attributes is None:
+        return False
+    usage = _mapping_attr(attributes.get("usage"))
+    call_kwargs = _mapping_attr(attributes.get("call_kwargs"))
+    if usage is None or call_kwargs is None:
+        return False
+    produced = _exact_int(usage.get("completion_tokens"))
+    cap = _exact_int(call_kwargs.get("max_tokens"))
+    if produced is None or cap is None or cap <= 0:
+        return False
+    return produced == cap
+
+
+def count_llm_calls_cut_at_limit(spans: Iterable[Mapping[str, Any]]) -> int:
+    return sum(1 for span in spans if llm_call_cut_at_limit(span))
+
+
+def annotate_turn_rows(
+    store: ReadOnlyObservabilityStore, turns: list[dict[str, Any]]
+) -> None:
+    """Stamp each listed turn with its count of calls cut at the limit."""
+    for turn in turns:
+        turn["llm_calls_cut_at_limit"] = count_llm_calls_cut_at_limit(
+            store.get_spans(turn["turn_key"])
+        )
+
+
+def evidence_verdict(evidence_runs: Optional[Iterable[Mapping[str, Any]]]) -> dict[str, Any]:
+    """The verdict the UI badges an experiment and its attempts with.
+
+    Built from the experiment's stored evidence segments
+    (`experiment.get("evidence_runs")`, one per `evidence_run()`): the `valid`
+    column decides -- it is monotone in invalidity, so it outranks whatever the
+    latest record says -- and the reasons are the record's `problems` list,
+    quoted verbatim. A valid segment can still carry problems (dropped spans
+    leave a run valid); those are reported as `warnings`, so a reader sees
+    "valid, with incomplete detail on these turns" rather than a clean badge.
+    An experiment with no segment is `unrecorded`, which is neither verdict.
+    """
+    segments: list[dict[str, Any]] = []
+    problems: list[str] = []
+    warnings: list[str] = []
+    for segment in evidence_runs or []:
+        record = segment.get("record")
+        if not isinstance(record, dict):
+            record = {}
+        stored = record.get("problems")
+        stored_problems = (
+            [str(problem) for problem in stored] if isinstance(stored, list) else []
+        )
+        valid = bool(segment.get("valid"))
+        delta = record.get("writer_health_delta")
+        segments.append(
+            {
+                "seq": segment.get("seq"),
+                "evidence_run_id": segment.get("evidence_run_id"),
+                "valid": valid,
+                "problems": stored_problems,
+                "writer_health_delta": delta if isinstance(delta, dict) else None,
+                "in_process": record.get("in_process"),
+                "started_at": segment.get("started_at"),
+                "completed_at": segment.get("completed_at"),
+            }
+        )
+        (warnings if valid else problems).extend(stored_problems)
+    if not segments:
+        state = EVIDENCE_UNRECORDED
+    elif all(segment["valid"] for segment in segments):
+        state = EVIDENCE_VALID
+    else:
+        state = EVIDENCE_INVALID
+    return {
+        "state": state,
+        "segments": segments,
+        "problems": problems,
+        "warnings": warnings,
+    }
+
+
+def annotate_attempt_rows(
+    store: ReadOnlyObservabilityStore,
+    rows: list[dict[str, Any]],
+    verdict: dict[str, Any],
+) -> None:
+    """Stamp attempt rows with their token-limit tally and the evidence verdict.
+
+    The verdict is the experiment's: a segment records the interval a batch of
+    attempts ran in, not which attempt it covered, so the honest per-attempt
+    badge is the experiment's verdict and not a guess at a mapping.
+    """
+    for row in rows:
+        turns = store.list_turns(
+            experiment_id=row["experiment_id"],
+            task_id=row["task_id"],
+            attempt=int(row["attempt"]),
+            limit=10_000,
+        )
+        row["turn_count"] = len(turns)
+        row["llm_calls_cut_at_limit"] = sum(
+            count_llm_calls_cut_at_limit(store.get_spans(turn["turn_key"]))
+            for turn in turns
+        )
+        row["evidence"] = verdict
+
+
+def _workspace_segment_verdicts(
+    workspace: ObservabilityWorkspace, experiment_id: str
+) -> dict[str, dict[str, Any]]:
+    return {
+        segment["segment_id"]: evidence_verdict(
+            workspace.evidence_runs(
+                segment["store_id"], segment["local_experiment_id"]
+            )
+        )
+        for segment in workspace.segments(experiment_id)
+    }
+
+
+def annotate_workspace_attempts(
+    workspace: ObservabilityWorkspace,
+    rows: list[dict[str, Any]],
+    verdict_by_segment: Mapping[str, dict[str, Any]],
+) -> None:
+    """The workspace twin of `annotate_attempt_rows`, over scoped trace reads."""
+    for row in rows:
+        total = 0
+        for ref in row.get("turn_refs") or []:
+            count = count_llm_calls_cut_at_limit(
+                workspace.trace(ref["store_id"], ref["logical_turn_key"])
+            )
+            ref["llm_calls_cut_at_limit"] = count
+            total += count
+        row["turn_count"] = len(row.get("turn_refs") or [])
+        row["llm_calls_cut_at_limit"] = total
+        row["evidence"] = verdict_by_segment.get(
+            row.get("segment_id"), evidence_verdict([])
+        )
+
+
+def annotate_projected_attempts(
+    workspace: ObservabilityWorkspace, rows: list[dict[str, Any]]
+) -> None:
+    """Projected history rows: tally the resolved turns once each, and badge
+    every resolved source with the verdict its own store persisted."""
+    for row in rows:
+        seen: set[tuple[str, str]] = set()
+        total = 0
+
+        def tally(turn: Any) -> None:
+            nonlocal total
+            if not isinstance(turn, dict):
+                return
+            store_id = turn.get("store_id")
+            key = turn.get("logical_turn_key")
+            if not store_id or not key:
+                return
+            count = count_llm_calls_cut_at_limit(workspace.trace(store_id, key))
+            turn["llm_calls_cut_at_limit"] = count
+            if (store_id, key) not in seen:
+                seen.add((store_id, key))
+                total += count
+
+        for turn in row.get("resolved_turns") or []:
+            tally(turn)
+        for source in row.get("resolved_sources") or []:
+            tally(source.get("resolved_turn"))
+            local_id = source.get(
+                "local_experiment_id", source.get("experiment_id")
+            )
+            if source.get("store_id") and local_id is not None:
+                source["evidence"] = evidence_verdict(
+                    workspace.evidence_runs(str(source["store_id"]), str(local_id))
+                )
+        row["llm_calls_cut_at_limit"] = total
 
 
 def load_index_html() -> bytes:
@@ -1397,31 +1628,29 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     self._error(400, "attempt must be an integer")
                     return
-            self._send_json(
-                {
-                    "turns": store.list_turns(
-                        channel_id=q("channel"),
-                        conversation_id=(
-                            self._int(q("conversation"), None)
-                            if q("conversation") is not None
-                            else None
-                        ),
-                        status=q("status"),
-                        success=(
-                            None
-                            if success is None
-                            else success in ("1", "true", "True")
-                        ),
-                        command_name=q("command"),
-                        context=q("context"),
-                        experiment_id=q("experiment"),
-                        task_id=q("task"),
-                        attempt=attempt_filter,
-                        limit=self._int(q("limit"), 100),
-                        offset=self._int(q("offset"), 0),
-                    )
-                }
+            turns = store.list_turns(
+                channel_id=q("channel"),
+                conversation_id=(
+                    self._int(q("conversation"), None)
+                    if q("conversation") is not None
+                    else None
+                ),
+                status=q("status"),
+                success=(
+                    None
+                    if success is None
+                    else success in ("1", "true", "True")
+                ),
+                command_name=q("command"),
+                context=q("context"),
+                experiment_id=q("experiment"),
+                task_id=q("task"),
+                attempt=attempt_filter,
+                limit=self._int(q("limit"), 100),
+                offset=self._int(q("offset"), 0),
             )
+            annotate_turn_rows(store, turns)
+            self._send_json({"turns": turns})
         elif path.startswith("/api/turn/"):
             turn_key = path[len("/api/turn/") :]
             turn = store.get_turn(turn_key)
@@ -1618,15 +1847,13 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     except ValueError:
                         self._error(400, "attempt must be an integer")
                         return
-                self._send_json(
-                    {
-                        "projected_attempts": workspace.projected_attempts(
-                            experiment_id=q("experiment"),
-                            task_id=q("task"),
-                            attempt=attempt,
-                        )
-                    }
+                projected = workspace.projected_attempts(
+                    experiment_id=q("experiment"),
+                    task_id=q("task"),
+                    attempt=attempt,
                 )
+                annotate_projected_attempts(workspace, projected)
+                self._send_json({"projected_attempts": projected})
                 return
             experiment_prefix = "/api/workspace/experiment/"
             if path.startswith(experiment_prefix):
@@ -1641,17 +1868,24 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     self._error(404, "not found")
                     return
                 if operation == "segments":
-                    self._send_json({"segments": workspace.segments(experiment_id)})
+                    segments = workspace.segments(experiment_id)
+                    for segment in segments:
+                        segment["evidence"] = evidence_verdict(
+                            workspace.evidence_runs(
+                                segment["store_id"], segment["local_experiment_id"]
+                            )
+                        )
+                    self._send_json({"segments": segments})
                 elif operation == "tasks":
                     self._send_json({"tasks": workspace.tasks(experiment_id)})
                 else:
-                    self._send_json(
-                        {
-                            "attempts": workspace.attempts(
-                                experiment_id, task_id=q("task")
-                            )
-                        }
+                    rows = workspace.attempts(experiment_id, task_id=q("task"))
+                    annotate_workspace_attempts(
+                        workspace,
+                        rows,
+                        _workspace_segment_verdicts(workspace, experiment_id),
                     )
+                    self._send_json({"attempts": rows})
                 return
             for noun in ("turn", "trace", "spans"):
                 prefix = f"/api/workspace/{noun}/"
@@ -1918,6 +2152,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             if detail is None:
                 self._error(404, "experiment not found")
                 return
+            detail["evidence"] = evidence_verdict(detail.get("evidence_runs"))
             self._send_json({"experiment": detail})
         elif sub == "tasks":
             if store.get_experiment(experiment_id) is None:
@@ -1925,16 +2160,15 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"tasks": store.experiment_tasks(experiment_id)})
         elif sub == "attempts":
-            if store.get_experiment(experiment_id) is None:
+            detail = store.get_experiment(experiment_id)
+            if detail is None:
                 self._error(404, "experiment not found")
                 return
-            self._send_json(
-                {
-                    "attempts": store.experiment_attempt_rows(
-                        experiment_id, task_id=q("task")
-                    )
-                }
+            rows = store.experiment_attempt_rows(experiment_id, task_id=q("task"))
+            annotate_attempt_rows(
+                store, rows, evidence_verdict(detail.get("evidence_runs"))
             )
+            self._send_json({"attempts": rows})
         elif sub == "score":
             try:
                 self._send_json({"score": store.experiment_scores(experiment_id)})

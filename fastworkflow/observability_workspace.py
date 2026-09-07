@@ -570,6 +570,29 @@ class ObservabilityWorkspace:
             result["record"] = None
         return result
 
+    def evidence_runs(
+        self, store_id: str, local_experiment_id: str
+    ) -> list[dict[str, Any]]:
+        """The evidence segments one store persisted for one local experiment.
+
+        Exactly what `ObservabilityStore.get_experiment` returns under
+        `evidence_runs` (the `experiment_evidence_runs` rows, each with its
+        decoded record), scoped to the named store like every other read here;
+        an experiment the store does not know answers `[]`. Exposed so the
+        read-only UI can badge a logical experiment's segments and attempts with
+        the verdicts the archives already hold (fix-49m.6), rather than
+        deriving a verdict from anything else.
+        """
+        if not store_id:
+            raise UnknownWorkspaceStore(
+                "store_id is required; experiments are never searched across stores"
+            )
+        with self.registry.open(store_id) as store:
+            experiment = store.get_experiment(local_experiment_id)
+        if not experiment:
+            return []
+        return [dict(segment) for segment in experiment.get("evidence_runs") or []]
+
     def trace(self, store_id: str, logical_turn_key: str) -> list[dict[str, Any]]:
         if not store_id:
             raise UnknownWorkspaceStore(
