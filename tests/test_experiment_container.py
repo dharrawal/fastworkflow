@@ -13,8 +13,10 @@ delete them as redundant.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import stat
 import threading
 import time
 import urllib.error
@@ -94,6 +96,38 @@ def deterministic_commands(monkeypatch):
         )
 
     monkeypatch.setattr(CommandExecutor, "invoke_command", classmethod(fake_invoke))
+
+
+def _sha256_file(path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _a_probe_turn():
+    """One real turn record, for asserting a quiesced writer resumed work."""
+    output = fastworkflow.CommandOutput(
+        command_name="add_todo",
+        command_response=fastworkflow.CommandResponse(response="ok"),
+    )
+    turn_output = fastworkflow.TurnOutput(
+        turn_key=fastworkflow.mint_turn_key(),
+        status=fastworkflow.TurnStatus.COMPLETED,
+        answer="answer",
+        command_outputs=[output],
+    )
+    return fastworkflow.TurnResult(
+        turn_output=turn_output,
+        channel_id="probe",
+        conversation_id=1,
+        user_message="probe",
+        conversation_summary="s",
+        conversation_traces="t",
+        entry_workflow_name="w",
+        entry_context="C",
+    )
 
 
 def _turn_row(turn_key: str, channel_id: str, **overrides) -> dict:
@@ -1304,6 +1338,138 @@ class TestHarness:
                 [ExperimentTask(task_id="t0"), ExperimentTask(task_id="t0")],
                 attempts=1,
             )
+
+    def test_an_in_process_run_with_an_archive_dir_produces_one(
+        self, initialized_fastworkflow, todo_workflow_path, deterministic_commands,
+        tmp_path,
+    ):
+        """fix-7de: the archive an in-process runner asked for must exist.
+
+        The bug this pins was total and silent. `_prepare_process` takes the
+        process sink BEFORE `evidence_run` opens — deliberately, so the verdict
+        rests on live counters — and `archive_to` then refused every store whose
+        writer was open. So a harness with `archive_dir` set produced NO archive,
+        ever, and recorded "evidence archival failed: WriterStillOpen" as a
+        problem on its own evidence segment: a run that did everything right and
+        was marked invalid for it.
+
+        Asserted end to end rather than on `archive_to` alone, because the two
+        halves that were wrong are the runner's lifecycle and the store's
+        refusal, and either one passing on its own proves nothing about the
+        shape a real run takes.
+        """
+        bundle = tmp_path / "bundle"
+        harness = ExperimentHarness(
+            todo_workflow_path, label="archived", hypothesis="h",
+            run_as_agent=False, archive_dir=str(bundle),
+        )
+        result = harness.run(
+            [ExperimentTask(task_id="t0", messages=["add milk"])],
+            attempts=1,
+            grader=lambda run: ("pass", "g", 1.0, None),
+        )
+
+        assert result["status"] == "complete"
+        assert result["evidence_problems"] == []
+        assert result["evidence_valid"] is True
+        # The writer was never closed to buy the archive: this is an archive
+        # taken of a store that is still being recorded into.
+        sink = obs.existing_observability_sink(todo_workflow_path)
+        assert sink is not None and sink._closed is False
+
+        store = obs.ObservabilityStore(
+            state_paths.observability_db(todo_workflow_path)
+        )
+        segments = store.get_experiment(harness.experiment_id)["evidence_runs"]
+        assert len(segments) == 1
+        record = segments[0]["record"]
+        assert segments[0]["valid"] == 1
+        assert record["problems"] == []
+        archive = record["archive"]
+        assert archive is not None
+
+        path = Path(archive["path"])
+        assert path.parent == bundle
+        assert _sha256_file(path) == archive["sha256"]
+        assert archive["sealed"] is True
+        assert archive["source_bytes_verified_unchanged"] is True
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
+        assert not Path(f"{path}-wal").exists()
+
+        archived = obs.ReadOnlyObservabilityStore(str(path))
+        assert (
+            archived.get_experiment(harness.experiment_id)["experiment_id"]
+            == harness.experiment_id
+        )
+        assert archived.list_turns(experiment_id=harness.experiment_id, limit=50)
+
+    def test_archiving_a_live_store_does_not_change_its_bytes(
+        self, initialized_fastworkflow, todo_workflow_path, deterministic_commands,
+        tmp_path,
+    ):
+        """The quiesce is what makes the digest claim true (fix-7de).
+
+        `archive_to` records `source_bytes_verified_unchanged` by digesting the
+        source before and after the snapshot, and the writer's periodic health
+        persist is a write that lands between those two digests — which is why
+        `test_the_archive_is_immutable_and_its_digest_verifies` was flaky under
+        load rather than wrong. Holding the writer still is not an optimisation
+        of that check; it is the only thing that makes it pass for a reason.
+        """
+        harness = ExperimentHarness(
+            todo_workflow_path, label="stable", hypothesis="h", run_as_agent=False
+        )
+        harness.run(
+            [ExperimentTask(task_id="t0", messages=["add milk"])],
+            attempts=1,
+            grader=lambda run: ("pass", "g", 1.0, None),
+        )
+        db_path = state_paths.observability_db(todo_workflow_path)
+        sink = obs.existing_observability_sink(todo_workflow_path)
+        assert sink is not None
+
+        store = obs.ObservabilityStore(db_path)
+        # Ten back-to-back snapshots of a live store: one that succeeds by luck
+        # succeeds once, not ten times.
+        for index in range(10):
+            archive = store.archive_to(str(tmp_path / f"live-{index}.sqlite3"))
+            assert archive["source_bytes_verified_unchanged"] is True
+            assert _sha256_file(Path(archive["path"])) == archive["sha256"]
+        assert sink._closed is False
+        assert sink._writer.is_alive()
+        # And the writer picked its work straight back up.
+        assert sink.emit_turn_record(_a_probe_turn()) is True
+
+    def test_a_writer_this_process_cannot_reach_still_refuses(
+        self, initialized_fastworkflow, todo_workflow_path, tmp_path
+    ):
+        """Quiescing replaces the refusal only where it can actually be done.
+
+        A sink built directly never enters the factory registry, so
+        `sink_for_db_path` cannot see it and `quiesced()` cannot be called on
+        it — the same blindness this process has toward a writer in another
+        process, which is the topology `_external_writer` exists to simulate in
+        `tests/test_evidence_run.py`. There is nothing to hold still, so the
+        only honest answer is the one fix-7de kept: refuse.
+        """
+        db_path = state_paths.observability_db(todo_workflow_path)
+        unreachable = obs.SQLiteTraceSink(db_path)
+        try:
+            assert obs.sink_for_db_path(db_path) is None  # invisible, as in prod
+            with pytest.raises(obs.WriterStillOpen):
+                obs.ObservabilityStore(db_path).archive_to(
+                    str(tmp_path / "refused.sqlite3")
+                )
+            assert not (tmp_path / "refused.sqlite3").exists()
+        finally:
+            unreachable.close()
+
+        # Once that writer is gone its marker is stale, and the store is
+        # archivable again — an open marker must not wedge a store forever.
+        archive = obs.ObservabilityStore(db_path).archive_to(
+            str(tmp_path / "allowed.sqlite3")
+        )
+        assert archive["sealed"] is True
 
 
 @pytest.fixture

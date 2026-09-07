@@ -664,7 +664,15 @@ class ExperimentController:
                 f"refusing to seal {self.db_path!r} while its writer is open"
             )
         self.store.begin_workspace_seal(experiment_id)
-        archive = self.store.archive_to(destination)
+        # `quiesce_live_writer=False` keeps the seal's refusal unconditional
+        # (fix-7de). `archive_to` will now hold a live writer still rather than
+        # refuse it, which is right for an evidence run archiving its own DB
+        # mid-flight — and wrong here, where the promotion above has already
+        # declared the capture complete. A writer that appears between the two
+        # is a contract violation, not a scheduling detail, and quiescing it
+        # would seal a store somebody is still writing to under a status that
+        # says nobody is.
+        archive = self.store.archive_to(destination, quiesce_live_writer=False)
         status = self.store.record_workspace_archive(
             experiment_id,
             sha256=archive["sha256"],

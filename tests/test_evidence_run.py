@@ -76,20 +76,14 @@ def _turn(index: int = 0):
     )
 
 
-def _drain_writer(workflow_path: str) -> None:
-    """Close this process's writer before the block exits.
-
-    3.3 port adaptation. On this branch `ObservabilityStore.archive_to` SEALS:
-    it refuses with `WriterStillOpen` while a live sink holds the DB, the same
-    rule `ExperimentController.drain_before_certify()` enforces. So an
-    in-process run that wants an archive drains its writer first (the sink's
-    close persists a final writer-health row, which `evidence_run` then reads
-    on its persisted-row path), and `evidence_run` seals on exit exactly as it
-    would for a stopped server.
-    """
-    sink = obs.existing_observability_sink(workflow_path)
-    if sink is not None:
-        sink.close()
+# NOTE (fix-7de). Every archiving test below leaves its writer OPEN, which is
+# the shape a real in-process run has: `ExperimentRunner` takes the process sink
+# before the gate opens and holds it for the whole run. The 3.3 port could not
+# do that — `archive_to` refused any store with a live writer — so these tests
+# carried a `_drain_writer()` helper that closed the sink inside the block, and
+# the one path the bug lived on was the one path no test took. `archive_to` now
+# holds the writer still instead, so the drain is gone and the tests exercise
+# the lifecycle the bug was in.
 
 
 def _sha256(path: str) -> str:
@@ -107,8 +101,8 @@ def _sha256(path: str) -> str:
 
 def test_a_clean_run_is_valid_and_reports_nothing(workflow_path, tmp_path):
     # Taken BEFORE the gate opens, as `ExperimentRunner._prepare_process` does,
-    # so the verdict rests on this process's live counters (3.3 port adaptation;
-    # see `_drain_writer`).
+    # so the verdict rests on this process's live counters — and stays open
+    # across the archive, which is what fix-7de made possible.
     sink = obs.get_observability_sink(workflow_path)
     with evidence_run(
         workflow_path,
@@ -118,7 +112,6 @@ def test_a_clean_run_is_valid_and_reports_nothing(workflow_path, tmp_path):
     ) as run:
         for index in range(3):
             sink.emit_turn_record(_turn(index))
-        _drain_writer(workflow_path)
 
     assert run.valid
     assert run.problems() == ()
@@ -134,7 +127,6 @@ def test_the_archived_db_holds_the_run(workflow_path, tmp_path):
         sink = obs.get_observability_sink(workflow_path)
         for index in range(3):
             sink.emit_turn_record(_turn(index))
-        _drain_writer(workflow_path)
 
     archived = obs.ReadOnlyObservabilityStore(run.archive["path"])
     assert len(archived.list_turns(limit=50)) == 3
@@ -148,7 +140,6 @@ def test_the_archive_is_a_single_wal_free_file(workflow_path, tmp_path):
         workflow_path, run_id="run-wal", archive_dir=str(tmp_path / "bundle")
     ) as run:
         obs.get_observability_sink(workflow_path).emit_turn_record(_turn())
-        _drain_writer(workflow_path)
 
     path = run.archive["path"]
     assert not Path(f"{path}-wal").exists()
@@ -166,7 +157,6 @@ def test_the_archive_is_immutable_and_its_digest_verifies(workflow_path, tmp_pat
         workflow_path, run_id="run-immutable", archive_dir=str(tmp_path / "bundle")
     ) as run:
         obs.get_observability_sink(workflow_path).emit_turn_record(_turn())
-        _drain_writer(workflow_path)
 
     path = run.archive["path"]
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o444
@@ -186,7 +176,6 @@ def test_archiving_never_overwrites_a_previous_run(workflow_path, tmp_path):
         workflow_path, run_id="run-once", archive_dir=str(tmp_path / "bundle")
     ) as run:
         obs.get_observability_sink(workflow_path).emit_turn_record(_turn())
-        _drain_writer(workflow_path)
 
     store = obs.ObservabilityStore(obs.state_paths.observability_db(workflow_path))
     with pytest.raises(FileExistsError):
@@ -443,7 +432,6 @@ def test_the_run_record_is_serializable(workflow_path, tmp_path):
         dspy_history_enabled=True,
     ) as run:
         sink.emit_turn_record(_turn())
-        _drain_writer(workflow_path)
 
     record = json.loads(json.dumps(run.as_record()))
     assert record["run_id"] == "run-record"
@@ -528,7 +516,6 @@ def test_a_crashed_run_is_still_verified_and_archived(workflow_path, tmp_path):
             workflow_path, run_id="run-crash", archive_dir=str(tmp_path / "bundle")
         ) as run:
             obs.get_observability_sink(workflow_path).emit_turn_record(_turn())
-            _drain_writer(workflow_path)
             raise ValueError("boom")
 
     assert run.delta is not None
@@ -718,12 +705,14 @@ def test_a_silent_external_writer_still_fails_the_run(workflow_path):
 
 
 def test_reopening_a_store_does_not_reset_its_writer_health(workflow_path):
-    """The baseline is a floor, not a reset.
+    """The row is a floor under every writer, and it says whose floor it is.
 
-    A second sink over a store that already carries a writer-health row must
-    leave that row exactly as it found it: overwriting it with zeros would erase
-    a predecessor's recorded drops and make the next delta subtract from a
-    history that no longer exists.
+    fix-dnb. fix-485 got half of this by inserting the baseline only when the
+    key was absent, which left a reopened store's row untouched — counters AND
+    the stamp naming a writer that had already died. The merge keeps the
+    counters and re-stamps the row, so the next reader can tell that the writer
+    changed. That distinction is the whole of fix-dnb: a preserved counter says
+    nothing about what the dying writer had accepted and never got to count.
     """
     from fastworkflow import state_paths
 
@@ -737,6 +726,8 @@ def test_reopening_a_store_does_not_reset_its_writer_health(workflow_path):
     first.close()
     first_row = obs.ObservabilityStore(db_path).writer_health()
     assert first_row["records_dropped"] == 1
+    assert obs.writer_incarnation_id(first_row) == first._incarnation["id"]
+    assert first_row[obs.WRITER_INCARNATION_FIELD]["open"] is False
 
     second = _external_writer(workflow_path)
     try:
@@ -744,9 +735,121 @@ def test_reopening_a_store_does_not_reset_its_writer_health(workflow_path):
     finally:
         second.close()
 
+    # The predecessor's evidence survives the second writer's zero baseline...
     assert reopened["records_dropped"] == 1
     assert reopened["records_dropped_turn_keys"] == [turn_row["turn_key"]]
-    assert reopened["updated_at"] == first_row["updated_at"]
+    # ...and the row now names the writer that is actually running, which is
+    # what `health_delta` needs in order to see a restart at all.
+    assert obs.writer_incarnation_id(reopened) == second._incarnation["id"]
+    assert obs.writer_incarnation_id(reopened) != obs.writer_incarnation_id(first_row)
+
+
+def test_counters_never_decrease_across_a_close_and_reopen(workflow_path):
+    """No column of the row ever goes down, whatever the newcomer counted.
+
+    Not a restatement of the test above: there the second writer counted nothing,
+    so "kept the row" and "merged the row" are indistinguishable. Here it counts
+    a smaller number of its own, which is precisely the shape that used to
+    LOWER the row — one drop written over two — and make the next
+    `max(0, after - before)` read as a clean interval.
+
+    A floor, not a sum, and it has to be: every persist carries the writer's
+    running total, so a heartbeat that added would count the same drop again on
+    every tick. The floor is why the counters are safe to subtract; the
+    incarnation guard is what covers the successor's own drops that a floor
+    cannot see.
+    """
+    from fastworkflow import state_paths
+
+    db_path = state_paths.observability_db(workflow_path)
+    dropped = [obs.serialize_turn_result(_turn(index))[0] for index in (1, 2, 3)]
+
+    first = _external_writer(workflow_path)
+    for row in dropped[:2]:
+        first._requeue_records([("turn", row, [], obs._RECORD_BUSY_MAX_RETRIES)])
+    first._count("spans_dropped", turn_key="trace-first")
+    first.close()
+    assert obs.ObservabilityStore(db_path).writer_health()["records_dropped"] == 2
+
+    second = _external_writer(workflow_path)
+    second._requeue_records([("turn", dropped[2], [], obs._RECORD_BUSY_MAX_RETRIES)])
+    second.persist_health()
+    second.close()
+
+    row = obs.ObservabilityStore(db_path).writer_health()
+    assert row["records_dropped"] == 2  # never 1: the newcomer cannot lower it
+    assert row["spans_dropped"] == 1  # nor erase a counter it never touched
+    # The affected-turn lists are unioned, so a predecessor's incomplete turns
+    # stay named even though its successor never heard of them.
+    assert sorted(row["records_dropped_turn_keys"]) == sorted(
+        [turn["turn_key"] for turn in dropped]
+    )
+    assert row["spans_dropped_turn_keys"] == ["trace-first"]
+
+
+def test_a_writer_restart_inside_the_interval_invalidates_the_run(workflow_path):
+    """A handover inside the measured interval is not a measured interval.
+
+    fix-dnb. The counters are merged now, so they no longer go backwards across
+    the restart — which is exactly what makes this test necessary. Arithmetic
+    that looks clean is not evidence that nothing was lost: whatever the first
+    writer had accepted and not yet committed died with it, uncounted, and no
+    subtraction can recover it.
+    """
+    first = _external_writer(workflow_path)
+    with evidence_run(workflow_path, run_id="run-restart", health_settle_s=0.3) as run:
+        first_id = first._incarnation["id"]
+        first.close()
+        second = _external_writer(workflow_path)
+        second_id = second._incarnation["id"]
+        second.persist_health()
+    second.close()
+
+    assert run.delta.writer_restarted is True
+    assert run.delta.writer_incarnation_before == first_id
+    assert run.delta.writer_incarnation_after == second_id
+    assert run.delta.evidence_valid is False
+    assert run.valid is False
+    assert (
+        f"the observability writer was replaced during this run "
+        f"(incarnation {first_id} -> {second_id}); records the previous writer "
+        f"had accepted may have been lost without ever being counted, so this "
+        f"interval is not valid evidence (§12.4)."
+    ) in run.problems()
+
+
+def test_a_writer_restart_outside_the_interval_does_not(workflow_path):
+    """The guard names the interval, not the store's whole history.
+
+    A store whose writer was replaced BEFORE the gate opened is a perfectly
+    measurable store: one writer held it from the first snapshot to the last.
+    Invalidating that run would make any long-lived store permanently
+    unreportable, which is the failure mode that makes an honesty check get
+    switched off.
+    """
+    first = _external_writer(workflow_path)
+    first._requeue_records(
+        [("turn", obs.serialize_turn_result(_turn())[0], [], obs._RECORD_BUSY_MAX_RETRIES)]
+    )
+    first.close()
+
+    second = _external_writer(workflow_path)
+    try:
+        with evidence_run(
+            workflow_path, run_id="run-no-restart", health_settle_s=0.3
+        ) as run:
+            second.emit_turn_record(_turn(1))
+            assert second.flush()
+            second.persist_health()
+    finally:
+        second.close()
+
+    assert run.delta.writer_restarted is False
+    assert run.delta.records_dropped == 0
+    # The predecessor's drop is in both snapshots, so it is history, not a
+    # finding of this run.
+    assert run.health_before["records_dropped"] == 1
+    assert run.valid is True
 
 
 def test_the_baseline_row_is_published_by_construction_alone(workflow_path):

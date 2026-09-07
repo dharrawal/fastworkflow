@@ -421,6 +421,17 @@ def evidence_run(
         run.delta = observability_store.health_delta(run.health_before, run.health_after)
 
         if archive_dir is not None:
+            # The sink is deliberately still open here (fix-7de). An in-process
+            # run holds its writer for the whole block — `ExperimentRunner` takes
+            # it BEFORE this gate opens, precisely so the verdict above rests on
+            # live counters — and until fix-7de `archive_to` refused any store
+            # whose writer was open, so every such run recorded "evidence
+            # archival failed: WriterStillOpen" and produced no archive at all.
+            # `archive_to` now holds that writer still for the snapshot instead
+            # (`SQLiteTraceSink.quiesced`), which is also what keeps the writer's
+            # heartbeat from landing between the archive's two digests. The
+            # refusal survives for the case that earned it: a writer this process
+            # cannot reach cannot be held still, and is still refused.
             try:
                 target = Path(archive_dir) / f"{run_id}-observability.sqlite3"
                 run.archive = observability_store.ObservabilityStore(db_path).archive_to(

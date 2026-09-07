@@ -320,7 +320,7 @@ def test_a_seal_whose_archive_failed_is_retryable_and_not_reportable(
     sealing exists — and the operator must be able to try again."""
     controller = _sealable(installed_db)
 
-    def boom(destination):
+    def boom(destination, **archive_options):
         raise OSError("no space left on device")
 
     monkeypatch.setattr(controller.store, "archive_to", boom)

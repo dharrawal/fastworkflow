@@ -39,6 +39,7 @@ import json
 import os
 import queue
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -105,6 +106,11 @@ _PENDING_RETRY_MAX = 64
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_MAX_BATCHES = 20
 
+# Poll interval for the quiesce handshake (fix-7de). Short, because it is only
+# ever spun on for the moment it takes the writer to finish the batch it is in
+# and reach the top of its loop, and an archive should not pay a tick for it.
+_QUIESCE_POLL_S = 0.005
+
 # Which drop counters carry an affected-turn-key list, and where it lives in the
 # health dict. Only drops get one: a write error is about the DB, not about a turn.
 _DROP_TURN_KEY_FIELDS: dict[str, str] = {
@@ -127,6 +133,115 @@ _HEALTH_DELTA_COUNTERS: tuple[str, ...] = (
     "busy_retries",
     "sync_fallbacks",
 )
+
+# ----------------------------------------------------------------------
+# The writer-health row is shared property, not one writer's scratchpad (fix-dnb)
+# ----------------------------------------------------------------------
+#
+# `writer_health` is ONE diagnostics row per store, and more than one writer can
+# own that store over its lifetime — a restarted server, a second harness, a
+# sink recycled because the DB file was replaced. Until fix-dnb every persist
+# REPLACED the row with the persisting sink's own counters, which start at zero,
+# so a restart silently erased the predecessor's drops. `evidence_run`'s delta is
+# `max(0, after - before)`, so a smaller `after` did not read as "impossible", it
+# read as "no drops" — the one answer an evidence gate must never invent.
+#
+# Two changes, and both are needed. The merge below keeps the counters honest
+# ACROSS writers; the incarnation stamp keeps them honest ABOUT writers, because
+# a merged counter still cannot say whether the interval it spans contained a
+# handover during which records were lost before anyone counted them.
+_HEALTH_MONOTONE_COUNTERS: tuple[str, ...] = (
+    "records_dropped",
+    "spans_dropped",
+    "write_errors",
+    "busy_retries",
+    "refused_terminal_writes",
+    "sync_writes",
+    "sync_fallbacks",
+    # A high-water mark rather than a tally, but monotone under `max` all the
+    # same: a later writer's smaller peak does not unmake an earlier one.
+    "sync_write_ms_max",
+    "dropped_turn_keys_elided",
+)
+
+# Everything NOT on that list — `pending_retry_depth`, `sync_breaker_open`, the
+# incarnation stamp — is a gauge: it describes the writer that is running, not
+# the store's history, so the newcomer's value simply wins and the merge below
+# needs no rule for it. A predecessor's queue depth is not a floor under
+# anything.
+#
+# Who wrote the counters. `id` is what `health_delta` compares — pid plus start
+# time would collide across a fast restart inside one clock second, and a run
+# whose writer was replaced must never look like a run whose writer persisted.
+WRITER_INCARNATION_FIELD = "writer_incarnation"
+
+
+def writer_incarnation_id(health: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The id of the writer that last wrote this health snapshot, if it says."""
+    if not health:
+        return None
+    stamp = health.get(WRITER_INCARNATION_FIELD)
+    if not isinstance(stamp, Mapping):
+        return None
+    value = stamp.get("id")
+    return str(value) if value else None
+
+
+def merge_writer_health(
+    stored: Optional[Mapping[str, Any]], incoming: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Fold one writer's counters into the store's row without lowering it.
+
+    Every persist goes through here (baseline, heartbeat, `persist_health`,
+    close), so the row is a floor under everything any writer has ever counted
+    for this store rather than a snapshot of whoever wrote last. The affected-turn
+    lists are unioned for the same reason and under the same cap: a predecessor's
+    named turns are the only record that those turns are incomplete.
+
+    A FLOOR, NOT A SUM, and it could not be a sum: every persist carries the
+    writer's cumulative total, so adding would count the same drop again on
+    every heartbeat. The consequence is real and is covered elsewhere — a
+    successor's own drops are invisible to a predecessor's larger count, so the
+    row alone cannot be read as "everything this store ever lost". What it can be
+    read as is what `evidence_run` needs: a number that never falls, so a
+    subtraction across an interval cannot come out lower than the truth. The
+    interval that actually SPANS a handover is caught by the incarnation stamp
+    instead (`WriterHealthDelta.writer_restarted`), because no arithmetic over
+    these counters could catch it.
+    """
+    incoming = dict(incoming)
+    incoming.pop("updated_at", None)
+    if not stored:
+        return incoming
+    merged = dict(stored)
+    merged.pop("updated_at", None)
+    # The newcomer's word on everything it is authoritative about — the
+    # incarnation stamp, the gauges, the profile — then the floor re-imposed.
+    merged.update(incoming)
+    for name in _HEALTH_MONOTONE_COUNTERS:
+        merged[name] = max(
+            int(stored.get(name) or 0), int(incoming.get(name) or 0)
+        )
+    # A writer that has hit no error yet must not erase the error that made the
+    # previous writer's run unreportable.
+    if incoming.get("last_error") is None and stored.get("last_error") is not None:
+        merged["last_error"] = stored.get("last_error")
+    elided = 0
+    for field in _DROP_TURN_KEY_FIELDS.values():
+        union: list[str] = []
+        for key in list(stored.get(field) or ()) + list(incoming.get(field) or ()):
+            if key in union:
+                continue
+            if len(union) < _DROP_TURN_KEY_MAX:
+                union.append(key)
+            else:
+                elided += 1
+        merged[field] = union
+    merged["dropped_turn_keys_elided"] = (
+        int(merged.get("dropped_turn_keys_elided") or 0) + elided
+    )
+    return merged
+
 
 # Retention pruning must not run while an evaluation is recording (§12.4: "pruning
 # shall not run mid-evaluation") — the prune horizon is 30 days by default, but a
@@ -345,6 +460,14 @@ class WriterHealthDelta(BaseModel):
     # True when either snapshot was unavailable. Distinct from "no drops": nothing
     # was compared, so nothing may be claimed.
     incomparable: bool = False
+    # True when a DIFFERENT writer wrote the two snapshots (fix-dnb). The
+    # counters are merged rather than replaced now, so they no longer go
+    # backwards across a handover — but a record the dying writer had accepted
+    # and not yet written is lost without ever being counted, so the interval
+    # cannot claim zero drops however healthy its arithmetic looks.
+    writer_restarted: bool = False
+    writer_incarnation_before: Optional[str] = None
+    writer_incarnation_after: Optional[str] = None
 
     @property
     def lost_turn_records(self) -> bool:
@@ -357,8 +480,16 @@ class WriterHealthDelta(BaseModel):
         False when a turn record was dropped, and False when the interval could
         not be compared at all — an unknown is not a pass. Dropped spans leave
         this True; they are reported through `problems()`.
+
+        A writer restart inside the interval is fatal for the same reason the
+        unknown is: the counters that would have named the loss died with the
+        writer that was holding them (fix-dnb).
         """
-        return not self.incomparable and not self.lost_turn_records
+        return (
+            not self.incomparable
+            and not self.lost_turn_records
+            and not self.writer_restarted
+        )
 
     def problems(self) -> tuple[str, ...]:
         """Every reason this interval is imperfect, worst first.
@@ -371,6 +502,14 @@ class WriterHealthDelta(BaseModel):
             found.append(
                 "writer health could not be compared (a snapshot was missing); "
                 "evidence validity is unknown, which is not the same as valid"
+            )
+        if self.writer_restarted:
+            found.append(
+                f"the observability writer was replaced during this run "
+                f"(incarnation {self.writer_incarnation_before} -> "
+                f"{self.writer_incarnation_after}); records the previous writer "
+                f"had accepted may have been lost without ever being counted, so "
+                f"this interval is not valid evidence (§12.4)."
             )
         if self.records_dropped:
             affected = ", ".join(self.records_dropped_turn_keys) or "unknown turns"
@@ -411,10 +550,25 @@ def health_delta(
     A missing snapshot yields `incomparable=True` rather than a zero delta,
     because "we could not tell" and "nothing was dropped" are the two answers an
     evidence gate must never confuse.
+
+    A snapshot pair written by two DIFFERENT writers yields `writer_restarted`
+    (fix-dnb). The subtraction is still performed and still meaningful — the row
+    is merged monotonically now, so the counters do not go backwards — but the
+    handover itself is unmeasured: whatever the dying writer had accepted and not
+    yet committed left no counter behind. Only a stamp on BOTH sides can say
+    this; a snapshot with no stamp (the in-process `{}` baseline for a sink that
+    appeared mid-run) is not evidence of a restart and is not reported as one.
     """
     if before is None or after is None:
         return WriterHealthDelta(incomparable=True)
 
+    before_writer = writer_incarnation_id(before)
+    after_writer = writer_incarnation_id(after)
+    restarted = (
+        before_writer is not None
+        and after_writer is not None
+        and before_writer != after_writer
+    )
     counters = {
         name: max(0, int(after.get(name) or 0) - int(before.get(name) or 0))
         for name in _HEALTH_DELTA_COUNTERS
@@ -434,6 +588,9 @@ def health_delta(
             int(after.get("dropped_turn_keys_elided") or 0)
             - int(before.get("dropped_turn_keys_elided") or 0),
         ),
+        writer_restarted=restarted,
+        writer_incarnation_before=before_writer,
+        writer_incarnation_after=after_writer,
     )
 
 
@@ -2442,28 +2599,40 @@ class ObservabilityStore:
             ),
         )
 
-    def set_diagnostic_if_absent(
-        self, conn: sqlite3.Connection, key: str, value: dict[str, Any]
-    ) -> bool:
-        """Insert one diagnostics row only if the key has none. fix-485.
+    # `set_diagnostic_if_absent` lived here until fix-dnb. It was fix-485's way
+    # of keeping a baseline from clobbering a predecessor's counters, and
+    # `merge_writer_health_row` below now does that job properly — for the
+    # heartbeat and `close()` too, which is where the clobbering actually
+    # happened. Leaving an insert-if-absent beside a merge would be leaving a
+    # second answer to a question that has one.
 
-        `set_diagnostic` upserts, which is right for a heartbeat and wrong for a
-        baseline: a writer publishing its opening counters must not overwrite the
-        row a PREVIOUS writer left behind, because that row is the only record
-        that the earlier writer dropped anything. Returns whether it wrote.
+    def merge_writer_health_row(
+        self, conn: sqlite3.Connection, incoming: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Persist one writer's counters through the monotone merge (fix-dnb).
+
+        The single write path for `writer_health`. `set_diagnostic` replaces,
+        which is right for every other diagnostics key and wrong for this one:
+        the row outlives the writer that wrote it, so a second writer's zeros
+        would erase a first writer's drops and leave `health_delta` subtracting
+        from a history that no longer exists.
+
+        Read-modify-write, so it must run inside the caller's `BEGIN IMMEDIATE`:
+        every caller here already holds one, and the write lock is what keeps two
+        writers from interleaving a read and a write of the same row.
         """
-        cursor = conn.execute(
-            """INSERT INTO diagnostics (key, value, updated_at) VALUES (?, ?, ?)
-               ON CONFLICT(key) DO NOTHING""",
-            (
-                key,
-                self._store_redactor().redact(
-                    json.dumps(value, ensure_ascii=False)
-                ),
-                _utcnow_iso(),
-            ),
-        )
-        return bool(cursor.rowcount)
+        row = conn.execute(
+            "SELECT value FROM diagnostics WHERE key='writer_health'"
+        ).fetchone()
+        stored: Optional[dict[str, Any]] = None
+        if row is not None:
+            try:
+                stored = json.loads(row[0])
+            except Exception:
+                stored = None
+        merged = merge_writer_health(stored, incoming)
+        self.set_diagnostic(conn, "writer_health", merged)
+        return merged
 
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
@@ -4668,13 +4837,38 @@ class ObservabilityStore:
         except FileNotFoundError:
             return None
 
-    def archive_to(self, destination: str) -> dict[str, Any]:
+    def archive_to(
+        self, destination: str, *, quiesce_live_writer: bool = True
+    ) -> dict[str, Any]:
         """Seal a source-read-only snapshot, including committed WAL content.
 
         The source is opened with ``mode=ro`` and never through ``_connect``,
         whose journal-mode pragma is intentionally write-capable. SQLite's
         backup API reads one consistent transaction including committed WAL.
         Only that copied database is vacuumed into the final destination.
+
+        THE LIVE WRITER (fix-7de). Refusing outright was the wrong half of a
+        true idea. The idea is that a snapshot must not be taken of a moving
+        file — the digest recorded beside the archive is a claim about bytes
+        that were still, and `SourceChangedDuringArchive` is what happens when
+        they were not. The wrong half was concluding that the only writer a
+        snapshot can survive is a dead one: an in-process run that wants an
+        archive of its own evidence then has to kill the writer that is
+        recording it, and `ExperimentRunner` — which takes the process sink
+        BEFORE opening `evidence_run`, precisely so the verdict rests on live
+        counters — could never produce an archive at all.
+
+        So a writer THIS process owns is held still instead: flushed, parked off
+        its heartbeat, its counters persisted and its WAL folded back in, for
+        the duration of the snapshot (`SQLiteTraceSink.quiesced`). The one-writer
+        contract is untouched — no second writer is created, and the one writer
+        there is simply stops for a moment. A writer this process cannot reach
+        cannot be held still, so that case still refuses: an archive is either
+        provably of a stopped store or it is not taken.
+
+        `quiesce_live_writer=False` restores the unconditional refusal for a
+        caller whose contract is "the writer must already be gone" — the seal
+        path checks that itself, before it promotes the experiment's status.
         """
         target = Path(destination)
         if target.exists():
@@ -4685,15 +4879,75 @@ class ObservabilityStore:
         source = os.path.abspath(self.db_path)
         live_sink = sink_for_db_path(source)
         if live_sink is not None and not live_sink._closed:
-            raise WriterStillOpen(
-                f"refusing to seal {source!r} while its writer is open"
-            )
+            if not quiesce_live_writer:
+                raise WriterStillOpen(
+                    f"refusing to seal {source!r} while its writer is open"
+                )
+            with live_sink.quiesced():
+                return self._snapshot_to(target, source)
+        self._refuse_if_an_unreachable_writer_holds(source)
+        return self._snapshot_to(target, source)
+
+    def _refuse_if_an_unreachable_writer_holds(self, source: str) -> None:
+        """Refuse a snapshot of a store some OTHER writer is still holding.
+
+        `sink_for_db_path` only sees the sinks this process's factory minted, so
+        before fix-dnb stamped an incarnation on the writer-health row there was
+        nothing to consult about a writer living anywhere else — a server in
+        another process, or a sink built directly and never registered. Those
+        runs did not refuse; they raced, and the race surfaces as
+        `SourceChangedDuringArchive` if it is caught at all.
+
+        The stamp is only trusted where it can be checked. A row left open by a
+        writer whose process is gone is a crash marker, not a live writer, and
+        must not wedge every future archive of the store — so the refusal needs
+        the pid to still exist on this host. A recycled pid can therefore hold a
+        seal off for one extra run; refusing an archive that could have been
+        taken is recoverable, and taking one of a store being written is not.
+        """
+        try:
+            stamp = (self.writer_health() or {}).get(WRITER_INCARNATION_FIELD)
+        except Exception:  # pragma: no cover - defensive; health is diagnostics
+            return
+        if not isinstance(stamp, Mapping) or not stamp.get("open"):
+            return
+        if str(stamp.get("host") or "") != socket.gethostname():
+            return
+        try:
+            pid = int(stamp.get("pid") or 0)
+        except (TypeError, ValueError):
+            return
+        if pid <= 0:
+            return
+        if pid != os.getpid():
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return  # the writer's process is gone; the marker is stale
+        raise WriterStillOpen(
+            f"refusing to seal {source!r}: writer incarnation "
+            f"{stamp.get('id')} (pid {pid}) still holds it and is not reachable "
+            f"from this process, so it cannot be held still for the snapshot"
+        )
+
+    def _snapshot_to(self, target: Path, source: str) -> dict[str, Any]:
+        """Take the snapshot. The caller has already settled the source."""
         source_paths = (source, f"{source}-wal")
+        # One connection held open, doing nothing, for the whole snapshot.
+        # SQLite checkpoints a WAL database when its LAST connection closes, so
+        # an unrelated reader letting go mid-snapshot rewrites `-wal` and the
+        # comparison below reports a change to a source nobody wrote to. This
+        # pin makes that close never the last one; no statement is ever run on
+        # it, and it is what makes "source bytes verified unchanged" a fact
+        # about the source rather than about the timing of a garbage collection.
+        pin = self._connect()
         before = {path: self._file_digest(path) for path in source_paths}
         confirmed_before = {
             path: self._file_digest(path) for path in source_paths
         }
         if before != confirmed_before:
+            with contextlib.suppress(Exception):
+                pin.close()
             raise SourceChangedDuringArchive(
                 "source DB/WAL bytes changed before the snapshot could start"
             )
@@ -4760,6 +5014,8 @@ class ObservabilityStore:
                 target.unlink()
             raise
         finally:
+            with contextlib.suppress(Exception):
+                pin.close()
             for scratch in (temporary, compacted):
                 with contextlib.suppress(FileNotFoundError):
                     scratch.unlink()
@@ -5020,6 +5276,30 @@ class SQLiteTraceSink:
         )
         self._closed = False
         self._stop = threading.Event()
+        # Who this writer is, stamped into every health row it persists
+        # (fix-dnb). The row outlives the writer, so without a name on it a
+        # reader cannot tell one writer's whole run from two writers' halves —
+        # and the handover between two halves is where records go missing
+        # without being counted. `open` is also what tells a would-be archiver
+        # in another process that this store is still being written to
+        # (`_refuse_if_an_unreachable_writer_holds`).
+        self._incarnation: dict[str, Any] = {
+            "id": uuid.uuid4().hex,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "started_at": _utcnow_iso(),
+            "open": True,
+        }
+        # Quiesce handshake (fix-7de): a snapshot needs the writer to stop
+        # touching the file, not to die. The lock serializes archivers, the
+        # request/parked pair is the handshake with the writer thread. Both are
+        # events rather than a Condition because the writer must be able to
+        # notice a request while it is blocked on its own queue poll, and
+        # because `close()` has to be able to release a parked writer by setting
+        # `_stop` alone.
+        self._quiesce_lock = threading.Lock()
+        self._quiesce_request = threading.Event()
+        self._quiesce_parked = threading.Event()
         self._health = {
             "spans_dropped": 0,
             "records_dropped": 0,
@@ -5036,6 +5316,7 @@ class SQLiteTraceSink:
             "spans_dropped_turn_keys": [],
             "records_dropped_turn_keys": [],
             "dropped_turn_keys_elided": 0,
+            WRITER_INCARNATION_FIELD: self._incarnation,
         }
         self._health_dirty = False
         self._health_lock = threading.Lock()
@@ -5281,13 +5562,17 @@ class SQLiteTraceSink:
         return snapshot
 
     def _publish_baseline_health(self) -> None:
-        """Publish this writer's opening counters, once per store. fix-485.
+        """Publish this writer's opening counters. fix-485, amended by fix-dnb.
 
-        Never clobbers: an existing row belongs to an earlier writer over the
-        same DB and carries the drops it recorded, so writing zeros over it
-        would erase evidence rather than establish a baseline. A reopened store
-        therefore keeps whatever it already had, and only a store that has never
-        had a writer gains a row here.
+        Never lowers what is already there: an existing row belongs to an
+        earlier writer over the same DB and carries the drops it recorded, so
+        writing zeros over it would erase evidence rather than establish a
+        baseline. fix-485 achieved that with an insert-if-absent, which left a
+        reopened store's row untouched — including the incarnation stamp, so the
+        row went on naming a writer that had already died. The monotone merge
+        does the same job without that side effect: the counters keep their
+        floor, and the stamp names the writer that is actually running, which is
+        what lets `health_delta` see a restart at all.
 
         Best-effort like every other write on this class ([R14]): a store that
         cannot take the row degrades to exactly the pre-fix behaviour — an
@@ -5299,9 +5584,7 @@ class SQLiteTraceSink:
             conn = self.store._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                self.store.set_diagnostic_if_absent(
-                    conn, "writer_health", snapshot
-                )
+                self.store.merge_writer_health_row(conn, snapshot)
                 conn.commit()
             finally:
                 conn.close()
@@ -5364,10 +5647,139 @@ class SQLiteTraceSink:
         if self._closed:
             return
         self._closed = True
+        # Stamp the handover BEFORE the writer is told to stop, so the final
+        # health write the writer thread makes on its way out already says this
+        # writer is gone (fix-dnb). A NEW dict rather than a mutation: snapshots
+        # taken earlier hold a reference to the old one and must keep reading
+        # `open: True`, which is what they were true about.
+        self._incarnation = {**self._incarnation, "open": False}
+        with self._health_lock:
+            self._health[WRITER_INCARNATION_FIELD] = self._incarnation
+            self._health_dirty = True
         self._stop.set()
+        # A parked writer releases on `_stop` alone, so an archive in flight
+        # cannot wedge a close.
         self._writer.join(timeout)
         if self._writer.is_alive():
             logger.warning("Observability writer did not stop within timeout")
+        # Belt and braces: the writer normally persists on its way out, but a
+        # writer that died, hung, or timed out above leaves the row claiming an
+        # open writer forever — and an open marker is what stops the next
+        # archive of this store (`_refuse_if_an_unreachable_writer_holds`).
+        #
+        # Only into the file this writer actually opened. `get_observability_sink`
+        # closes a sink whose DB was deleted or replaced underneath it, and
+        # writing there would either resurrect a deleted file as an empty
+        # schema-less database or stamp a successor's file with a dead writer's
+        # row.
+        if self._owns_its_db_file():
+            self.persist_health()
+
+    def _owns_its_db_file(self) -> bool:
+        """Whether the file at this sink's path is still the file it opened."""
+        try:
+            return os.stat(self.store.db_path).st_ino == self._db_ino
+        except OSError:
+            return False
+
+    @contextlib.contextmanager
+    def quiesced(self, timeout: float = 10.0):
+        """Hold this writer still, without closing it, for a snapshot (fix-7de).
+
+        Everything a snapshot has to survive, in the order it has to happen:
+
+        1. **Flush.** Whatever is already enqueued is written, so the archive
+           carries the run it claims to and the queue has nothing left to land
+           mid-snapshot.
+        2. **Park.** The writer thread stops at the top of its loop and waits.
+           This is what stops the heartbeat — the periodic health write that
+           lands between two digests and produces the load-sensitive
+           `SourceChangedDuringArchive` — along with the pending-retry ring and
+           the breaker probe, which are on the same idle tick.
+        3. **Settle.** The counters are persisted once, deliberately, and the
+           WAL is checkpointed back into the main file, so what the digest
+           covers is the whole store rather than a main file plus a sidecar that
+           is still moving.
+
+        Then the caller takes its snapshot and the writer is released. The sink
+        is never closed and no second writer is created: the [R7] one-writer
+        contract is about how many threads may write, not about whether the one
+        that may is currently mid-stride.
+
+        Raises `WriterStillOpen` if the writer cannot be brought to a stop —
+        refusing is right when the alternative is a snapshot of a moving file.
+        A sink whose thread is already gone quiesces trivially.
+        """
+        if not self._quiesce_lock.acquire(timeout=timeout):
+            raise WriterStillOpen(
+                f"another archive is already holding {self.store.db_path!r} "
+                f"still; refusing to take a second snapshot of it"
+            )
+        try:
+            if self._closed or not self._writer.is_alive():
+                # Nothing to hold still. A closed sink's writer has already
+                # drained, persisted and let go of its connection.
+                yield
+                return
+            if not self.flush(timeout):
+                raise WriterStillOpen(
+                    f"the writer for {self.store.db_path!r} did not flush within "
+                    f"{timeout}s, so a snapshot of it cannot claim to hold the "
+                    f"records this run enqueued"
+                )
+            self._quiesce_request.set()
+            try:
+                deadline = time.monotonic() + timeout
+                while not self._quiesce_parked.is_set():
+                    if self._closed or not self._writer.is_alive():
+                        break
+                    if time.monotonic() >= deadline:
+                        raise WriterStillOpen(
+                            f"the writer for {self.store.db_path!r} did not park "
+                            f"within {timeout}s; refusing to snapshot a store "
+                            f"that is still being written"
+                        )
+                    time.sleep(_QUIESCE_POLL_S)
+                self._settle_for_snapshot()
+                yield
+            finally:
+                self._quiesce_request.clear()
+        finally:
+            self._quiesce_lock.release()
+
+    def _park_if_quiescing(self) -> None:
+        """Writer-thread side of `quiesced`. Called at the top of each loop."""
+        if not self._quiesce_request.is_set():
+            return
+        self._quiesce_parked.set()
+        try:
+            while self._quiesce_request.is_set() and not self._stop.is_set():
+                time.sleep(_QUIESCE_POLL_S)
+        finally:
+            self._quiesce_parked.clear()
+
+    def _settle_for_snapshot(self) -> None:
+        """Persist the counters and fold the WAL back in, with the writer parked.
+
+        Both writes happen HERE rather than being left to the heartbeat, which is
+        the point: they are the two writes that would otherwise have landed
+        between the archive's `before` and `after` digests. Doing them under the
+        quiesce makes them part of what is being archived instead of a change to
+        it. Best-effort like every other write on this class: a checkpoint that
+        cannot take the lock leaves a larger `-wal`, not a wrong archive, because
+        the digest comparison is still the thing that decides.
+        """
+        try:
+            conn = self.store._connect()
+            try:
+                self._maybe_write_health(conn, force=True)
+                with contextlib.suppress(Exception):
+                    conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(f"Could not settle the store for a snapshot: {exc!r}")
 
     # -- internals -------------------------------------------------------
 
@@ -5403,6 +5815,11 @@ class SQLiteTraceSink:
         try:
             conn = self.store._connect()
             while not self._stop.is_set():
+                # The one place this thread stops touching the DB on request
+                # (fix-7de). At the top of the loop, so a parked writer is
+                # between batches and between heartbeats — holding no
+                # transaction and owing no write.
+                self._park_if_quiescing()
                 item = self._next_item()
                 if item is None:
                     self._heartbeat(conn)
@@ -5627,7 +6044,9 @@ class SQLiteTraceSink:
         try:
             if not in_txn:
                 conn.execute("BEGIN IMMEDIATE")
-            self.store.set_diagnostic(conn, "writer_health", snapshot)
+            # Merged, never replaced (fix-dnb): the heartbeat is the write that
+            # used to reset a predecessor's counters to this writer's own.
+            self.store.merge_writer_health_row(conn, snapshot)
             if not in_txn:
                 conn.commit()
         except Exception:
