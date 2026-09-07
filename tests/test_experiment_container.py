@@ -331,28 +331,38 @@ class TestAdditiveSchema:
         assert row["user_message"] == "hi"
         assert features == {"distillation_v1"}
 
-    def test_features_are_detected_from_the_columns_when_the_marker_is_missing(
-        self, db_path
-    ):
-        """§4 point 5: a DB migrated by a build that added the columns before
-        the marker existed must still read as `experiments_v1`.
+    def test_the_marker_row_is_the_only_source_of_features(self, db_path):
+        """fix-9zb: the column-sniffing fallback is gone, and must stay gone.
 
-        Only the negative arm was covered, so a `_load_features` that always
-        returned the empty set on a missing marker would have passed.
+        It existed for "a DB migrated by a build that added the columns before
+        the marker existed" — a legacy shape the fresh-schema rule (fix-49m.3)
+        no longer admits: every DB that opens is at SCHEMA_VERSION and was
+        created from the literal schema with `_merge_schema_features` writing
+        its markers in the same transaction. Sniffing could then only re-derive
+        what the row already says, and on a DB whose row is genuinely missing it
+        would be guessing the capabilities of a schema this build did not write.
+        So the answer is now the honest empty set, even though every experiments
+        column the old fallback keyed on is still present.
         """
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
             conn.execute("DELETE FROM diagnostics WHERE key='schema_features'")
             conn.commit()
+            turn_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
         finally:
             conn.close()
+        assert "experiment_id" in turn_cols  # what the old fallback keyed on
         store = obs.ObservabilityStore(db_path, migrate=False)
-        assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1) is True
+        assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1) is False
         # This upstream-shaped port intentionally excludes the distillation
         # container. Its marker must therefore not be inferred from experiment
         # columns alone.
         assert store.has_feature(obs.FEATURE_DISTILLATION_V1) is False
+        # And a store opened normally, with its markers intact, still reads them.
+        assert obs.ObservabilityStore(db_path).has_feature(obs.FEATURE_EXPERIMENTS_V1)
 
     def test_migration_is_idempotent(self, db_path):
         for _ in range(3):

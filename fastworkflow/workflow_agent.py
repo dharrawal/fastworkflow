@@ -210,7 +210,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.command_executor import CommandExecutor, _annotation
     started = datetime.now(timezone.utc)
     try:
         command_output = CommandExecutor.invoke_command(chat_session_obj, command)
@@ -250,8 +250,32 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
                 error_message = str(e)[:1000]
             except Exception:
                 error_message = repr(e)[:1000]
+            # Routing has almost always completed by the time a command raises,
+            # and command_executor stamps what it had resolved onto the
+            # exception. These stay empty only when the failure really did
+            # pre-empt routing, or when invoke_command was replaced wholesale
+            # (tests/test_turn_result_capture.py does), hence the annotation
+            # defaults rather than a declared attribute. fix-ajv.16 FW-2.
+            #
+            # CAPTURE-POLICY CONSEQUENCE, handled in _apply_capture_policy.
+            # Naming the command moves this record's policy field paths from
+            # command.unknown.* to command.<name>.*, and that ran the UNSAFE
+            # way round: capture_policy short-circuits and returns a value
+            # WHOLE when a declared policy is not gated for the sink, so a rule
+            # written about a command's benign NORMAL response would also
+            # release the failure text below — an exception repr, an error
+            # message, a 4KB traceback. Fixed in fix-ajv.18 by deriving a
+            # failed command's response/artifacts paths under
+            # command.<name>.error.* instead, so releasing error text is
+            # something a deployment declares rather than inherits. Parameters
+            # stay on the ordinary path deliberately; see the comment there.
+            # A blanket command.unknown.* rule no longer matches these
+            # failures either — that is the same fix, seen from the other side.
             failure_output = fastworkflow.CommandOutput(
-                command_name="",  # unknown at this point (failure pre-empted routing)
+                command_name=_annotation(e, "_fw_command_name") or "",
+                workflow_name=_annotation(e, "_fw_workflow_name") or "",
+                context=_annotation(e, "_fw_context") or "",
+                command_call_id=_annotation(e, "_fw_call_id"),
                 # Explicitly False, not left to the name: this is the output
                 # whose routed name could collide with `ask_user`. fix-ajv.17.
                 ask_user_entry=False,

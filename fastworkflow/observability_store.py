@@ -1002,6 +1002,42 @@ def _apply_capture_policy(
     """
     for command_output in record.get("turn_output", {}).get("command_outputs", []):
         command_name = command_output.get("command_name") or "unknown"
+        # A FAILED command's response and artifacts are diagnostic content —
+        # an exception repr, a message, a traceback — not the command's normal
+        # output, so they must not inherit the policy written for its happy
+        # path. `CapturePolicy.apply` returns a value WHOLE when a declared
+        # policy is not gated for this sink, so a perfectly reasonable
+        # `command.X.response` rule (X's normal response is benign, keep it)
+        # would also release X's failure text once fix-ajv.16 started naming
+        # failed commands. A separate segment makes releasing error text
+        # something a deployment has to say, rather than something it inherits.
+        # fix-ajv.18.
+        #
+        # ask_user is excluded deliberately [A7]: `success=False` on an
+        # ask_user entry means the question is still unanswered, not that
+        # anything failed, and its response is the user's ANSWER — ordinary
+        # user text that belongs on the ordinary path.
+        #
+        # Read via the structural marker with the name as fallback, mirroring
+        # `CommandOutput.is_ask_user` — this walks the model_dump()ed dict, so
+        # it cannot call the property. `ask_user_entry` absent means a record
+        # written before that field existed (fix-ajv.17); True/False are
+        # authoritative, and False is what a failed command NAMED `ask_user`
+        # carries, which is the whole point of not testing the name here.
+        response_dict = command_output.get("command_response") or {}
+        marker = command_output.get("ask_user_entry")
+        is_ask_user = marker if marker is not None else command_name == "ask_user"
+        is_failure = response_dict.get("success") is False and not is_ask_user
+        # PARAMETERS DELIBERATELY STAY ON THE ORDINARY PATH, and this asymmetry
+        # is the point rather than an oversight. A failure's parameters are the
+        # SAME values the success path carries, so a rule written to gate them
+        # must keep applying; moving them under `.error.` would stop that rule
+        # matching and fall through to the profile default — which under
+        # `debug` returns the value whole. Separating them would un-gate the
+        # one field group the success policy is right about.
+        outcome_prefix = (
+            f"command.{command_name}.error" if is_failure else f"command.{command_name}"
+        )
         parameters = command_output.get("command_parameters")
         if isinstance(parameters, dict):
             for field_name in list(parameters):
@@ -1025,7 +1061,7 @@ def _apply_capture_policy(
         response = command_output.get("command_response") or {}
         if response.get("response"):
             response["response"] = policy.apply(
-                f"command.{command_name}.response",
+                f"{outcome_prefix}.response",
                 response["response"],
                 classification="user-text",
             )
@@ -1040,7 +1076,7 @@ def _apply_capture_policy(
             if isinstance(value, dict) and "__fw_artifact_ref__" in value:
                 continue
             artifacts[key] = policy.apply(
-                f"command.{command_name}.artifacts.{key}",
+                f"{outcome_prefix}.artifacts.{key}",
                 value,
                 classification=_policy_classification(classify, command_name, key),
             )
@@ -1546,7 +1582,21 @@ class ObservabilityStore:
         )
 
     def _load_features(self) -> frozenset[str]:
-        """Read feature markers, falling back to additive schema detection."""
+        """Read the feature markers this store's DB declares.
+
+        The `schema_features` row is the only source. There is no
+        column-sniffing fallback any more, and re-adding one would be a bug:
+        under the fresh-schema rule (fix-49m.3) every DB that reaches this
+        method is at `SCHEMA_VERSION` — both `ObservabilityStore` and
+        `ReadOnlyObservabilityStore` refuse anything else up front — and such
+        a DB was created from the literal `_SCHEMA_STATEMENTS` with
+        `_merge_schema_features` writing its markers in the same transaction. So the sniff could only ever re-derive what the row
+        already says, and a store whose row is genuinely missing is one whose
+        schema this build did not write: guessing its capabilities from column
+        names is exactly the dual-shape reader the fresh-schema rule exists to
+        forbid. Absent/unreadable therefore means "no features", not "go and
+        look".
+        """
         conn = None
         try:
             conn = self._connect(timeout=5.0)
@@ -1557,30 +1607,7 @@ class ObservabilityStore:
                 loaded = json.loads(row[0])
                 if isinstance(loaded, list):
                     return frozenset(str(name) for name in loaded)
-            detected: set[str] = set()
-            turn_cols = {
-                row[1] for row in conn.execute("PRAGMA table_info(turns)").fetchall()
-            }
-            if "experiment_id" in turn_cols:
-                detected.add(FEATURE_EXPERIMENTS_V1)
-            attempt_cols = {
-                row[1]
-                for row in conn.execute(
-                    "PRAGMA table_info(experiment_attempts)"
-                ).fetchall()
-            }
-            if {
-                "execution_status",
-                "execution_finished_at",
-                "source_attempt_json",
-            } <= attempt_cols:
-                detected.add(FEATURE_EXPERIMENT_LIFECYCLE_V1)
-            span_cols = {
-                row[1] for row in conn.execute("PRAGMA table_info(spans)").fetchall()
-            }
-            if "distillation_pass" in span_cols:
-                detected.add(FEATURE_DISTILLATION_V1)
-            return frozenset(detected)
+            return frozenset()
         except Exception:
             return frozenset()
         finally:

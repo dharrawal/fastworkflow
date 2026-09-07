@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import inspect
 import sqlite3
 import stat
 import time
@@ -194,6 +195,46 @@ class TestSchema:
             assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
         finally:
             conn.close()
+
+    def test_a_current_store_loads_its_features_from_the_marker_row(self, db_path):
+        """The `schema_features` row is the only source (fix-9zb).
+
+        Under the fresh-schema rule every DB that reaches `_load_features` is at
+        SCHEMA_VERSION and was created from the literal schema with its markers
+        written in the same transaction, so the row is always there — writable
+        and read-only view alike.
+        """
+        store = obs.ObservabilityStore(db_path)
+        assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1)
+        assert store.has_feature(obs.FEATURE_EXPERIMENT_LIFECYCLE_V1)
+        assert obs.ReadOnlyObservabilityStore(db_path)._features == store._features
+
+    def test_features_are_empty_when_the_marker_row_is_missing(self, db_path):
+        """No column sniffing: absent means "no features", not "go and look".
+
+        A v3 DB whose marker row was deleted still has every experiments column,
+        so the old fallback would have re-derived the markers from
+        `PRAGMA table_info`. That dual-shape reader is what the fresh-schema rule
+        forbids, so the answer is now the honest empty set.
+        """
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DELETE FROM diagnostics WHERE key='schema_features'")
+            conn.commit()
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
+        finally:
+            conn.close()
+        assert "experiment_id" in columns  # the sniff would have found this
+        assert obs.ReadOnlyObservabilityStore(db_path)._features == frozenset()
+
+    def test_no_column_sniffing_remains_in_load_features(self):
+        """Pinned by source: a future edit must not reintroduce the fallback."""
+        source = inspect.getsource(obs.ObservabilityStore._load_features)
+        assert "PRAGMA table_info" not in source
+        assert "schema_features" in source
 
     def test_read_only_store_refuses_an_older_schema_the_same_way(self, db_path):
         """The read-only view applies the same rule as the writable store
