@@ -56,6 +56,31 @@ def _required_text(value: Any, field: str) -> str:
     return value.strip()
 
 
+def _optional_workflow_folderpath(value: Any) -> Optional[str]:
+    """The workflow folder a sealed run named, or None.
+
+    Optional and absolute. Optional because every manifest written before this
+    field existed is still valid — the exp029 trial's is one — and a workspace
+    that cannot say which workflow it came from must still open. Absolute
+    because, unlike ``stores[].path``, this is NOT resolved against the
+    manifest's own folder: an archive is copied around, and a relative folder
+    reference would silently name a different tree in each copy.
+
+    A named folder that is not there is not a manifest error. Evidence outlives
+    the workflow checkout it was produced from; the field is kept as recorded
+    and the catalogue is reported unavailable, which is a fact about this
+    machine, not a defect in the archive.
+    """
+    if value is None:
+        return None
+    raw = _required_text(value, "workflow_folderpath")
+    if not (Path(raw).is_absolute() or PureWindowsPath(raw).is_absolute()):
+        raise WorkspaceManifestError(
+            f"workflow_folderpath must be an absolute path, found {raw!r}"
+        )
+    return raw
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -262,6 +287,9 @@ class ObservabilityWorkspace:
         self.manifest_path = manifest_path
         self.workspace_id = _required_text(manifest.get("workspace_id"), "workspace_id")
         self.label = _required_text(manifest.get("label"), "label")
+        self.workflow_folderpath = _optional_workflow_folderpath(
+            manifest.get("workflow_folderpath")
+        )
         self._manifest = manifest
         self._stores = stores
         self.registry = ReadOnlyWorkspaceStoreRegistry(stores, max_open_handles)
@@ -475,12 +503,29 @@ class ObservabilityWorkspace:
             ),
         }
 
+    @property
+    def benchmark_catalogue_state(self) -> str:
+        """``not_declared`` | ``available`` | ``unavailable``.
+
+        Three states, not two: a manifest that never named a workflow folder
+        and one whose folder is missing from this machine are different facts,
+        and the second is the one worth showing a reader who expected to see
+        the corpus a run was pinned to.
+        """
+        if self.workflow_folderpath is None:
+            return "not_declared"
+        return (
+            "available" if Path(self.workflow_folderpath).is_dir() else "unavailable"
+        )
+
     def summary(self) -> dict[str, Any]:
         return {
             "schema": WORKSPACE_SCHEMA,
             "workspace_id": self.workspace_id,
             "label": self.label,
             "manifest_path": str(self.manifest_path),
+            "workflow_folderpath": self.workflow_folderpath,
+            "benchmark_catalogue": self.benchmark_catalogue_state,
             "store_count": len(self._stores),
             "experiment_count": len(self._experiments),
             "projected_attempt_count": len(self._projected_attempts),

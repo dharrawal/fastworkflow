@@ -1276,6 +1276,43 @@ function renderProvenance(container, provenance, label) {
   det.addEventListener("click", function (evt) { evt.stopPropagation(); });
   container.appendChild(det);
 }
+/* The benchmark pin, checked against the catalogue file the sealed workspace
+   names — never a bare digest, and never silence. A mismatch is quoted with
+   both digests: the reader decides whether the corpus moved on or the run was
+   pinned wrong, and neither reading survives the UI hiding one of them. */
+function renderBenchmarkPin(container, pin) {
+  if (!pin) { return; }
+  var status = pin.status || "catalogue_unavailable";
+  var headline = {
+    match: "Benchmark pin verified against the catalogue.",
+    mismatch: "Benchmark pin does NOT match the catalogue file.",
+    pin_incomplete: "Benchmark pin recorded no digest.",
+    catalogue_unavailable: "Benchmark catalogue unavailable — pin unchecked."
+  }[status] || ("Benchmark pin: " + status);
+  var box = el("div", status === "match" ? "provDiff" : "nonComparable");
+  box.appendChild(el("strong", null, headline));
+  var kv = el("dl", "kv");
+  function pair(k, v) {
+    kv.appendChild(el("dt", null, k));
+    kv.appendChild(el("dd", null,
+      v === null || v === undefined || v === "" ? "—" : String(v)));
+  }
+  pair("benchmark", pin.benchmark_id + "@" + pin.benchmark_version);
+  pair("pinned digest", pin.pinned_digest);
+  pair("catalogue digest", pin.catalogue_digest);
+  pair("workflow folder", pin.workflow_folderpath);
+  box.appendChild(kv);
+  if (pin.detail) { box.appendChild(el("div", "sub", pin.detail)); }
+  if (pin.catalogue_digest) {
+    var open = el("button", null, "Open catalogue version");
+    open.addEventListener("click", function (evt) {
+      evt.stopPropagation();
+      showBenchmarkVersion(pin.benchmark_id, pin.benchmark_version);
+    });
+    box.appendChild(open);
+  }
+  container.appendChild(box);
+}
 
 function renderProvenanceDifferences(container, differences) {
   var box = el("div", "provDiff");
@@ -1991,6 +2028,14 @@ function showBenchmarks() {
     card.appendChild(el("div", "sub",
       "Versioned task corpora under this workflow's benchmarks/ folder. "
       + "Browse tasks and payloads as opaque JSON — not a task player."));
+    if (session && session.workspace_mode) {
+      /* Say whose folder this is: in workspace mode it is not "this
+         workflow" — there is no live workflow — but the folder the sealed
+         manifest named, read without writing. */
+      card.appendChild(el("div", "sub",
+        "sealed workspace · read from " + session.workspace.workflow_folderpath
+        + " · writes disabled"));
+    }
     var rows = data.benchmarks || [];
     if (!rows.length) {
       card.appendChild(el("div", "empty", "no benchmarks yet"));
@@ -2599,6 +2644,9 @@ function showWorkspaceExperiment(experiment) {
       renderEvidenceVerdict(segBox, segment.evidence);
       renderProvenance(segBox, segment.provenance,
         "provenance · segment " + segment.segment_id);
+      /* Pinned corpus, checked against the catalogue when this workspace
+         names the workflow folder it was sealed from. */
+      renderBenchmarkPin(segBox, segment.benchmark_pin);
       head.appendChild(segBox);
     });
     d.appendChild(head);
@@ -2642,6 +2690,29 @@ function loadWorkspaceChrome() {
       storeHead.appendChild(el("div", "sub", workspaceStoreText(storeId)));
     });
     list.appendChild(storeHead);
+    /* The rail is the only way into the catalogue here: the filter row that
+       carries the Benchmarks button is hidden in workspace mode, and it stays
+       hidden — those filters act on a live workflow. The catalogue itself
+       drills down in #detail like everything else. */
+    var catalogue = session.workspace.benchmark_catalogue;
+    var catBox = el("div", "railSection");
+    catBox.appendChild(el("label", null, "Benchmark catalogue"));
+    if (catalogue === "available") {
+      var catItem = el("div", "listItem");
+      catItem.appendChild(el("div", "title", "Browse pinned corpora"));
+      catItem.appendChild(el("div", "sub",
+        "read-only · " + session.workspace.workflow_folderpath));
+      catItem.addEventListener("click", showBenchmarks);
+      catBox.appendChild(catItem);
+    } else if (catalogue === "unavailable") {
+      catBox.appendChild(el("div", "sub",
+        "the workflow folder this workspace names is not on this machine: "
+        + session.workspace.workflow_folderpath));
+    } else {
+      catBox.appendChild(el("div", "sub",
+        "this workspace manifest names no workflow folder"));
+    }
+    list.appendChild(catBox);
     var experiments = results[1].experiments || [];
     experiments.forEach(function (experiment) {
       var item = el("div", "listItem");
@@ -4013,7 +4084,11 @@ function browseTo(dir) {
       (data.workspace_manifests || []).forEach(function (manifest) {
         var rowEl = el("div", "wfItem");
         var grow = el("div", "grow");
-        grow.appendChild(el("div", "name", manifest.name));
+        /* The label is the collection folder for a manifest found one level
+           down ("exp029-trial-3.3-lifecycle-2026-09-06"), and the file name
+           for one sitting in this directory. The full path stays on the row
+           below it, so the label never hides which file will be opened. */
+        grow.appendChild(el("div", "name", manifest.label || manifest.name));
         grow.appendChild(el("div", "path", manifest.path));
         rowEl.appendChild(grow);
         var use = el("button", "primary", "Open read-only");

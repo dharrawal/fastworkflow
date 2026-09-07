@@ -283,6 +283,7 @@ class ExperimentController:
         external: bool = True,
         capture_profile: Optional[str] = None,
         capture_policy_version: Optional[str] = None,
+        workflow_folderpath: Optional[str] = None,
     ) -> None:
         if not db_path:
             raise ValueError("db_path is required")
@@ -297,6 +298,14 @@ class ExperimentController:
             )
         self.db_path = db_path
         self.external = bool(external)
+        # The folder this controller's runs come from, when the caller knows
+        # it. Not stored in the DB (no schema change): it is the caller's own
+        # fact about this machine, and it travels out again at seal time so a
+        # workspace manifest can name the workflow whose benchmark catalogue
+        # the run was pinned against.
+        self.workflow_folderpath = (
+            os.path.abspath(workflow_folderpath) if workflow_folderpath else None
+        )
         self.store = observability_store.ObservabilityStore(
             db_path, migrate=migrate
         )
@@ -595,7 +604,11 @@ class ExperimentController:
         return self.store.complete_experiment(experiment_id)
 
     def seal_workspace_evidence(
-        self, experiment_id: str, destination: str
+        self,
+        experiment_id: str,
+        destination: str,
+        *,
+        workflow_folderpath: Optional[str] = None,
     ) -> dict[str, Any]:
         """Freeze captured data, then attach its digest as the sole handle.
 
@@ -614,6 +627,14 @@ class ExperimentController:
         an unfinished seal, which `experiment_scores` refuses to report on and
         which this method re-enters rather than rejects, so a seal that lost its
         archive to a full disk is retryable instead of terminal.
+
+        `workflow_folderpath` rides out on the same return value, defaulting to
+        the controller's own, for the manifest writer to record as the sealed
+        workspace's `workflow_folderpath` (fix-zns). It is what makes a sealed
+        archive able to say which workflow's benchmark catalogue its pin refers
+        to; without it, a reader can see the pinned digest and has nothing to
+        check it against. It is not written to the store: the experiments table
+        holds `workflow_name`, not a folder, and this needs no schema change.
         """
         self._require_writer_drained()
         experiment = self.store.get_experiment(experiment_id)
@@ -651,6 +672,10 @@ class ExperimentController:
         )
         archive["experiment_id"] = experiment_id
         archive["experiment_status"] = status
+        folder = workflow_folderpath or self.workflow_folderpath
+        archive["workflow_folderpath"] = (
+            os.path.abspath(folder) if folder else None
+        )
         return archive
 
     def invalidate_experiment(

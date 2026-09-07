@@ -784,6 +784,74 @@ def _git_revision_of(record: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def benchmark_pin_check(
+    workflow_folderpath: Optional[str], detail: Mapping[str, Any]
+) -> Optional[dict[str, Any]]:
+    """Check an experiment's benchmark pin against the catalogue file itself.
+
+    The pin (`benchmark_id@version` plus the digest recorded when the run was
+    declared) is stored in the experiment row; the version file it names lives
+    in the workflow folder. Showing the recorded digest alone tells a reader
+    nothing about whether the corpus still says what it said — that needs the
+    file, which is why a sealed workspace now carries the folder.
+
+    Four honest answers, never a hidden one: `match`, `mismatch` (both digests
+    quoted verbatim, the reader decides what it means), `catalogue_unavailable`
+    (with the reason: no folder declared, folder gone, benchmark or version
+    missing), and `pin_incomplete` (the run recorded an id and version but no
+    digest, so there is nothing to compare). ``None`` only when nothing was
+    pinned at all.
+    """
+    benchmark_id = _text_or_none(detail.get("benchmark_id"))
+    version = _text_or_none(detail.get("benchmark_version"))
+    if not benchmark_id or not version:
+        return None
+    pinned = _text_or_none(detail.get("benchmark_digest_sha256"))
+    check: dict[str, Any] = {
+        "benchmark_id": benchmark_id,
+        "benchmark_version": version,
+        "pinned_digest": pinned,
+        "catalogue_digest": None,
+        "workflow_folderpath": workflow_folderpath,
+        "status": "catalogue_unavailable",
+        "detail": "",
+    }
+    if not workflow_folderpath:
+        check["detail"] = (
+            "this workspace manifest names no workflow folder, so the "
+            "benchmark catalogue cannot be read"
+        )
+        return check
+    if not os.path.isdir(workflow_folderpath):
+        check["detail"] = (
+            f"the workflow folder named by this workspace is not on this "
+            f"machine: {workflow_folderpath}"
+        )
+        return check
+    try:
+        loaded = load_version(workflow_folderpath, benchmark_id, version)
+    except (BenchmarkManifestError, OSError) as exc:
+        check["detail"] = f"{benchmark_id}@{version} cannot be read: {exc}"
+        return check
+    check["catalogue_digest"] = loaded.get("digest_sha256")
+    if not pinned:
+        check["status"] = "pin_incomplete"
+        check["detail"] = (
+            "the experiment recorded no benchmark digest; the catalogue file "
+            "is shown but nothing was pinned to compare it against"
+        )
+        return check
+    if check["catalogue_digest"] == pinned:
+        check["status"] = "match"
+        check["detail"] = "the catalogue file still matches the pinned digest"
+    else:
+        check["status"] = "mismatch"
+        check["detail"] = (
+            f"pinned {pinned}, catalogue {check['catalogue_digest']}"
+        )
+    return check
+
+
 def experiment_provenance(
     detail: Mapping[str, Any], attempts: Iterable[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -1129,14 +1197,50 @@ def list_workflow_candidates() -> list[dict[str, Any]]:
     return candidates[:_MAX_WF_CANDIDATES]
 
 
+def _nested_workspace_manifests(base: str, name: str) -> list[dict[str, str]]:
+    """``workspace.json`` one level under ``base/name``, labelled by that folder.
+
+    What an owner points the picker at is the collection folder
+    (``evaluation/collections/``); the manifest lives two levels down, at
+    ``<collection>/workspace/workspace.json`` or ``<collection>/workspace.json``.
+    Listing only the current directory made those invisible, so opening a
+    sealed collection meant knowing and typing the path.
+
+    Only the exact name ``workspace.json`` is looked for, never arbitrary
+    ``*.json`` one level down: a collection folder holds many unrelated JSON
+    files (scores, summaries, seal records), and offering those as manifests
+    would fill the picker with entries that cannot be opened. Nothing is read
+    — existence and the folder name are the whole probe.
+    """
+    found: list[dict[str, str]] = []
+    for relative in ("workspace.json", os.path.join("workspace", "workspace.json")):
+        candidate = os.path.join(base, name, relative)
+        if os.path.isfile(candidate):
+            found.append(
+                {
+                    "name": os.path.join(name, relative),
+                    "label": name,
+                    "path": os.path.abspath(candidate),
+                }
+            )
+    return found
+
+
 def browse_directories(dir_path: str) -> dict[str, Any]:
     """One level of the local filesystem for the workflow picker: directories
-    only, never file contents; each entry flagged when it is a workflow."""
+    only, never file contents; each entry flagged when it is a workflow.
+
+    Workspace manifests come from two places: every ``*.json`` in this
+    directory (any of them may be a manifest — the picker cannot tell without
+    opening it, and it does not open it), plus the well-known
+    ``workspace.json`` one level down inside each subdirectory.
+    """
     base = os.path.abspath(dir_path or os.getcwd())
     if not os.path.isdir(base):
         return {"error": f"not a directory: {base}"}
     entries = []
-    workspace_manifests = []
+    workspace_manifests: list[dict[str, str]] = []
+    nested_manifests: list[dict[str, str]] = []
     try:
         names = sorted(os.listdir(base))
     except OSError as exc:
@@ -1147,8 +1251,11 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
         full = os.path.join(base, name)
         if not os.path.isdir(full):
             if name.lower().endswith(".json"):
-                workspace_manifests.append({"name": name, "path": full})
+                workspace_manifests.append(
+                    {"name": name, "label": name, "path": full}
+                )
             continue
+        nested_manifests.extend(_nested_workspace_manifests(base, name))
         is_workflow = _looks_like_workflow(full)
         entry = {
             "name": name,
@@ -1166,7 +1273,10 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
         "dir": base,
         "parent": parent if parent != base else None,
         "entries": entries,
-        "workspace_manifests": workspace_manifests,
+        # This directory's own JSON first, then what was found one level down:
+        # the same 300 cap covers both, so a directory of many collections
+        # cannot make the answer unbounded.
+        "workspace_manifests": (workspace_manifests + nested_manifests)[:300],
     }
 
 
@@ -2488,6 +2598,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                                 segment["store_id"], segment["local_experiment_id"]
                             ),
                         )
+                        # Provenance lists the pin as recorded; this checks it
+                        # against the catalogue file the manifest points at.
+                        # Attached to the segment because the pin belongs to
+                        # the local experiment row, and two segments of one
+                        # logical experiment may have been pinned differently.
+                        segment["benchmark_pin"] = benchmark_pin_check(
+                            workspace.workflow_folderpath, local or {}
+                        )
                     self._send_json({"segments": segments})
                 elif operation == "tasks":
                     self._send_json({"tasks": workspace.tasks(experiment_id)})
@@ -2537,19 +2655,40 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._error(503, str(exc))
 
     def _benchmark_workflow_path(self, *, write: bool = False) -> Optional[str]:
-        """Live workflow folder for versioned benchmark corpus files."""
+        """Workflow folder for versioned benchmark corpus files.
+
+        In workspace mode this is the folder the manifest named at seal time,
+        and it is served for READS only: the corpus a sealed run was pinned to
+        is part of reading that run's evidence, and refusing it left the pin as
+        a digest with nothing behind it. Writes stay refused exactly as before
+        — the folder is a live checkout that a read-only workspace must not
+        touch, and `write=True` returns None before the manifest is consulted.
+
+        A manifest with no folder keeps its 409, and so does one whose folder
+        is gone: nothing was found to read, and the reason is quoted.
+        """
         if self.chatbot.workspace is not None:
             if write:
                 self._error(
                     403,
                     "workspace mode is read-only; benchmark corpus files cannot be changed",
                 )
-            else:
+                return None
+            declared = self.chatbot.workspace.workflow_folderpath
+            if not declared:
                 self._error(
                     409,
                     "benchmarks are available in live workflow mode only",
                 )
-            return None
+                return None
+            if not os.path.isdir(declared):
+                self._error(
+                    409,
+                    "the workflow folder named by this workspace is not on "
+                    f"this machine: {declared}",
+                )
+                return None
+            return declared
         workflow_path = (self.chatbot.workflow_path or "").strip()
         if not workflow_path:
             self._error(
