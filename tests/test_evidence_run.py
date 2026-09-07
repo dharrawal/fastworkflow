@@ -600,3 +600,170 @@ def test_the_record_says_which_process_the_verdict_came_from(workflow_path, tmp_
     record = run.as_record()
     assert record["in_process"] is True
     assert json.dumps(record)
+
+
+# ----------------------------------------------------------------------
+# The fresh store an external driver opens first (fix-485)
+# ----------------------------------------------------------------------
+
+
+def _external_writer(workflow_path: str) -> obs.SQLiteTraceSink:
+    """A live writer this process holds but `evidence_run` cannot see.
+
+    Built directly instead of through `get_observability_sink`, so it never
+    enters the `_sinks` registry and `existing_observability_sink` returns None
+    — exactly what the driver process sees in a two-process run, while a real
+    writer thread is genuinely running against the DB. That is the topology of
+    the trial that found fix-485: an external `run_fastapi_mcp` server plus a
+    driver that reads the persisted `diagnostics` row.
+    """
+    from fastworkflow import state_paths
+
+    return obs.SQLiteTraceSink(state_paths.observability_db(workflow_path))
+
+
+def test_a_fresh_store_with_a_live_external_writer_is_comparable(workflow_path):
+    """fix-485, reproducing run 1 of exp029-trial-3.3-lifecycle-2026-09-06.
+
+    The driver opened the gate on a store the server had opened but not yet
+    written to, and got the segment recorded in that trial's
+    `run-1-invalid/evidence-segment.json`:
+
+        "writer_health_before": null,
+        "writer_health_delta": {"incomparable": true, ...},
+        "valid": false,
+        "problems": ["writer health could not be compared ...",
+                     "no writer health is available ..."]
+
+    — because the sink published its first writer-health row only after its
+    first counted event. The experiment went terminal `invalid` and the run was
+    lost. The baseline row the sink now publishes at construction is a real
+    measurement by the real writer at a moment its counters really were zero,
+    so the interval is comparable from the first turn onwards.
+    """
+    writer = _external_writer(workflow_path)
+    try:
+        with evidence_run(workflow_path, run_id="run-fresh-store") as run:
+            # Asserted inside the block: this is the moment run 1 decided.
+            assert run.in_process is False
+            assert run.health_before is not None
+            assert run.health_before["records_dropped"] == 0
+            assert not any(
+                "no writer health is available" in problem
+                for problem in run.extra_problems
+            )
+            writer.emit_turn_record(_turn(0))
+            assert writer.flush()
+            writer.persist_health()
+    finally:
+        writer.close()
+
+    record = run.as_record()
+    assert record["in_process"] is False
+    assert record["writer_health_before"] is not None
+    assert record["writer_health_delta"]["incomparable"] is False
+    assert record["writer_health_delta"]["records_dropped"] == 0
+    assert record["problems"] == []
+    assert record["valid"] is True
+
+
+def test_a_fresh_store_baseline_still_catches_a_drop_inside_the_run(workflow_path):
+    """The baseline may not be bought with an assumption.
+
+    A turn record the external writer drops inside the interval has to reach
+    the delta and invalidate the run; if it did not, fix-485 would have traded
+    a lost run for a laundered one.
+    """
+    writer = _external_writer(workflow_path)
+    turn_row, _ = obs.serialize_turn_result(_turn())
+    try:
+        with evidence_run(workflow_path, run_id="run-fresh-drop") as run:
+            writer._requeue_records(
+                [("turn", turn_row, [], obs._RECORD_BUSY_MAX_RETRIES)]
+            )
+            writer.persist_health()
+    finally:
+        writer.close()
+
+    assert run.delta.incomparable is False
+    assert run.delta.records_dropped == 1
+    assert run.delta.records_dropped_turn_keys == (turn_row["turn_key"],)
+    assert run.valid is False
+
+
+def test_a_silent_external_writer_still_fails_the_run(workflow_path):
+    """The baseline must not disable the staleness guard.
+
+    Before fix-485 a cross-process run with no baseline row skipped the "did the
+    writer publish anything during this run?" check outright — that branch only
+    fires when there IS a `before` stamp to compare against. A writer that
+    publishes nothing inside the interval leaves an "after" that describes a
+    moment before the run's last writes, and the run must say so.
+    """
+    writer = _external_writer(workflow_path)
+    try:
+        with evidence_run(
+            workflow_path, run_id="run-silent", health_settle_s=0.3
+        ) as run:
+            pass
+    finally:
+        writer.close()
+
+    assert run.in_process is False
+    assert any(
+        "did not publish writer health during this run" in problem
+        for problem in run.problems()
+    )
+    assert run.valid is False
+
+
+def test_reopening_a_store_does_not_reset_its_writer_health(workflow_path):
+    """The baseline is a floor, not a reset.
+
+    A second sink over a store that already carries a writer-health row must
+    leave that row exactly as it found it: overwriting it with zeros would erase
+    a predecessor's recorded drops and make the next delta subtract from a
+    history that no longer exists.
+    """
+    from fastworkflow import state_paths
+
+    db_path = state_paths.observability_db(workflow_path)
+    first = _external_writer(workflow_path)
+    turn_row, _ = obs.serialize_turn_result(_turn())
+    first._requeue_records([("turn", turn_row, [], obs._RECORD_BUSY_MAX_RETRIES)])
+    first.persist_health()
+    # Read after close(), which persists one last row of its own: the question
+    # here is what REOPENING does, not what closing does.
+    first.close()
+    first_row = obs.ObservabilityStore(db_path).writer_health()
+    assert first_row["records_dropped"] == 1
+
+    second = _external_writer(workflow_path)
+    try:
+        reopened = obs.ObservabilityStore(db_path).writer_health()
+    finally:
+        second.close()
+
+    assert reopened["records_dropped"] == 1
+    assert reopened["records_dropped_turn_keys"] == [turn_row["turn_key"]]
+    assert reopened["updated_at"] == first_row["updated_at"]
+
+
+def test_the_baseline_row_is_published_by_construction_alone(workflow_path):
+    """No counted event, no heartbeat, no close — the row is simply there."""
+    from fastworkflow import state_paths
+
+    db_path = state_paths.observability_db(workflow_path)
+    assert obs.ObservabilityStore(db_path).writer_health() is None
+
+    writer = _external_writer(workflow_path)
+    try:
+        baseline = obs.ObservabilityStore(db_path).writer_health()
+    finally:
+        writer.close()
+
+    assert baseline is not None
+    assert baseline["records_dropped"] == 0
+    assert baseline["spans_dropped"] == 0
+    assert baseline["write_errors"] == 0
+    assert baseline["updated_at"]

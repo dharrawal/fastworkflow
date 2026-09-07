@@ -248,6 +248,15 @@ def evidence_run(
     than as a clean interval — an unread counter is not a measurement of zero.
     See `EvidenceRun.in_process`. fix-ajv.13.
 
+    A writer publishes a zero baseline row when it is CONSTRUCTED, not when it
+    first counts something (`SQLiteTraceSink._publish_baseline_health`, fix-485),
+    so a gate opened on a store whose server is up but idle reads a real
+    `before` row instead of `None`. That is what makes the cross-process shape
+    measurable at all: the "the writing process did not publish writer health
+    during this run" check below compares stamps, so with no `before` stamp it
+    cannot fire — a run with no baseline was never merely pessimistic, it was
+    unmeasurable.
+
     CROSS-PROCESS PRUNING is a separate contract this cannot enforce from here:
     `suppress_pruning()` below is an in-process counter, so it withholds pruning
     in THIS process and not in the server that is actually writing. The only
@@ -298,10 +307,17 @@ def evidence_run(
         # No sink here and no persisted row there: nothing to compare against,
         # and the run must say so rather than report a clean interval. Zero
         # drops out of an unread counter is not a measurement.
+        #
+        # Since fix-485 a writer publishes a zero baseline row when it is
+        # constructed, so reaching here means no writer has EVER opened this
+        # store — the gate was opened before the server was, or against the
+        # wrong path. It no longer means "the server is up but has not written
+        # yet", which is the case that used to lose a whole run here.
         run.extra_problems.append(
             "no writer health is available: this process holds no observability "
             "sink and the database has no persisted writer-health row, so no "
-            "drop could have been detected by this run"
+            "writer has opened this store and no drop could have been detected "
+            "by this run"
         )
     if not provenance.enabled:
         run.extra_problems.append(

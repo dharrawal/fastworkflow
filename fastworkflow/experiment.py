@@ -597,16 +597,52 @@ class ExperimentController:
     def seal_workspace_evidence(
         self, experiment_id: str, destination: str
     ) -> dict[str, Any]:
-        """Archive captured data, then attach its digest as the sole handle."""
+        """Freeze captured data, then attach its digest as the sole handle.
+
+        ORDER, and why it is this one (fix-tcg). `complete` is stamped on the
+        source row BEFORE the snapshot. The snapshot is byte-immutable — 0444,
+        sidecar-free, verified against a digest on every open — so anything
+        written to the source afterwards exists only in the source, and the
+        archive is the copy a reader opens. Sealing used to archive first, which
+        is why the trial's sealed archive reported `capture_complete` about an
+        experiment `workspace.json` presented as sealed.
+
+        The digest cannot go the same way: the archive does not exist yet when
+        the status is stamped, and a file cannot contain its own hash. It lands
+        afterwards on the source row and, through this return value, in the
+        manifest. Between the two writes the row is `complete` with no digest —
+        an unfinished seal, which `experiment_scores` refuses to report on and
+        which this method re-enters rather than rejects, so a seal that lost its
+        archive to a full disk is retryable instead of terminal.
+        """
         self._require_writer_drained()
         experiment = self.store.get_experiment(experiment_id)
         if experiment is None:
             raise observability_store.ExperimentNotFound(experiment_id)
-        if experiment["status"] != "capture_complete":
+        if experiment["workspace_archive_sha256"]:
+            raise ValueError(
+                f"experiment {experiment_id!r} is already sealed under "
+                f"{experiment['workspace_archive_sha256']}; re-sealing is "
+                "refused — one experiment names one immutable archive"
+            )
+        if experiment["status"] not in {"capture_complete", "complete"}:
             raise ValueError(
                 f"experiment {experiment_id!r} is {experiment['status']!r}; "
                 "workspace evidence can only seal capture_complete data"
             )
+        # `archive_to` refuses while a live writer holds the DB, and it would do
+        # so AFTER the promotion — leaving an unfinished seal for a condition
+        # that was knowable beforehand. `_require_writer_drained` above only
+        # checks this for an external controller, so check it here for every
+        # caller and fail before touching the row. (fix-7de is the related
+        # narrower race: a writer that opens BETWEEN this check and the
+        # snapshot is still caught by `archive_to`, which is where the
+        # authoritative check has to live.)
+        if observability_store.sink_for_db_path(self.db_path) is not None:
+            raise observability_store.WriterStillOpen(
+                f"refusing to seal {self.db_path!r} while its writer is open"
+            )
+        self.store.begin_workspace_seal(experiment_id)
         archive = self.store.archive_to(destination)
         status = self.store.record_workspace_archive(
             experiment_id,

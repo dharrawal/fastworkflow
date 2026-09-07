@@ -2442,6 +2442,29 @@ class ObservabilityStore:
             ),
         )
 
+    def set_diagnostic_if_absent(
+        self, conn: sqlite3.Connection, key: str, value: dict[str, Any]
+    ) -> bool:
+        """Insert one diagnostics row only if the key has none. fix-485.
+
+        `set_diagnostic` upserts, which is right for a heartbeat and wrong for a
+        baseline: a writer publishing its opening counters must not overwrite the
+        row a PREVIOUS writer left behind, because that row is the only record
+        that the earlier writer dropped anything. Returns whether it wrote.
+        """
+        cursor = conn.execute(
+            """INSERT INTO diagnostics (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO NOTHING""",
+            (
+                key,
+                self._store_redactor().redact(
+                    json.dumps(value, ensure_ascii=False)
+                ),
+                _utcnow_iso(),
+            ),
+        )
+        return bool(cursor.rowcount)
+
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
     def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
@@ -3454,6 +3477,60 @@ class ObservabilityStore:
             )
             conn.commit()
 
+    def begin_workspace_seal(self, experiment_id: str) -> str:
+        """Stamp the terminal status a seal is about to freeze. fix-tcg.
+
+        Runs BEFORE `archive_to`, and it has to. The archive is a byte-immutable
+        snapshot: whatever the source row says at the instant of the snapshot is
+        what the archived copy says forever, and the archived copy is the one a
+        reader opens. Stamping `complete` afterwards — as the seal used to —
+        left every sealed archive reporting `capture_complete` about an
+        experiment its own manifest presented as sealed.
+
+        `evidence_sealed_at` is stamped here too, which is what makes the two
+        halves of a seal distinguishable afterwards without a new column: a row
+        with a seal timestamp and no `workspace_archive_sha256` is a seal whose
+        archive never landed, and `experiment_scores` refuses to report on it.
+
+        Idempotent for a retry (`complete` with no digest re-enters), refused
+        once a digest exists, and never reached from `invalid` — that verdict
+        stays terminal here as everywhere.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT status, workspace_archive_sha256
+                     FROM experiments WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ExperimentNotFound(experiment_id)
+            if row["status"] == "invalid":
+                conn.rollback()
+                raise ExperimentIsClosed(experiment_id, "invalid")
+            if row["workspace_archive_sha256"]:
+                conn.rollback()
+                raise AttemptValueConflict(
+                    f"experiment {experiment_id!r} already names a sealed "
+                    "workspace archive"
+                )
+            if row["status"] not in {"capture_complete", "complete"}:
+                conn.rollback()
+                raise ValueError(
+                    f"experiment {experiment_id!r} is {row['status']!r}; "
+                    "only capture_complete evidence can be sealed"
+                )
+            conn.execute(
+                """UPDATE experiments
+                      SET status='complete',
+                          evidence_sealed_at=COALESCE(evidence_sealed_at, ?)
+                    WHERE experiment_id=? AND status <> 'invalid'""",
+                (_utcnow_iso(), experiment_id),
+            )
+            conn.commit()
+        return "complete"
+
     def record_workspace_archive(
         self,
         experiment_id: str,
@@ -3461,11 +3538,14 @@ class ObservabilityStore:
         sha256: str,
         store_identity: str,
     ) -> str:
-        """Attach the sole sealed-evidence handle and promote a captured run.
+        """Attach the sole sealed-evidence handle to an already-promoted run.
 
         The archive is created first. This write intentionally happens only
         afterwards, so the helper can prove that snapshotting did not modify
-        the source DB or its committed WAL.
+        the source DB or its committed WAL — and because a file cannot contain
+        its own digest, which is why the digest lives on the source row and in
+        the manifest while the STATUS lives in the archive too
+        (`begin_workspace_seal`, fix-tcg).
         """
         if not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
             raise ValueError("sha256 must be a lowercase 64-character digest")
@@ -4349,6 +4429,20 @@ class ObservabilityStore:
                 "reportable for a complete experiment"
             )
             return result
+        if experiment.get("evidence_sealed_at") and not experiment.get(
+            "workspace_archive_sha256"
+        ):
+            # A seal in two halves (fix-tcg): `begin_workspace_seal` stamped
+            # `complete` so the ARCHIVE would carry it, and the archive never
+            # landed. `complete` alone would otherwise make this reportable, and
+            # a headline number resting on sealed evidence that does not exist
+            # is the exact failure sealing was added to prevent.
+            result["reason_not_reportable"] = (
+                "a workspace seal was started for this experiment and recorded "
+                "no archive digest; the sealed evidence a score would rest on "
+                "does not exist. Re-run the seal."
+            )
+            return result
         if len(scored) != expected or len(tasks) != declared_tasks:
             # Unreachable while `complete_experiment` is the only way to reach
             # `complete`, and kept anyway: this function divides by the DECLARED
@@ -4950,6 +5044,21 @@ class SQLiteTraceSink:
         self._sync_lock = threading.Lock()
         self._sync_breaker_until = 0.0
         self._pending: "dict[str, tuple]" = {}
+        # The zero baseline, published BEFORE the writer thread can count
+        # anything (fix-485). Until this existed the first writer-health row
+        # appeared only after the first counted event, so an external driver
+        # that opened `evidence_run` on a fresh store — the ordinary shape when
+        # a harness starts a server and then opens the gate — read
+        # `health_before=None`, got `incomparable=True`, and lost the run to a
+        # terminal `invalid` verdict it had no way to avoid.
+        #
+        # This is a measurement, not an assumption: these counters really are
+        # zero at this instant, and the writer that publishes them is the writer
+        # that will do the counting. It is also what keeps the honesty guard in
+        # `evidence_run` armed — that guard fires only when there is a `before`
+        # stamp to compare the `after` stamp against, so a run against a silent
+        # writer is still reported as unmeasured rather than as clean.
+        self._publish_baseline_health()
         self._writer = threading.Thread(
             target=self._writer_loop, name="fw-obs-writer", daemon=True
         )
@@ -5170,6 +5279,34 @@ class SQLiteTraceSink:
         for field in _DROP_TURN_KEY_FIELDS.values():
             snapshot[field] = list(snapshot.get(field) or ())
         return snapshot
+
+    def _publish_baseline_health(self) -> None:
+        """Publish this writer's opening counters, once per store. fix-485.
+
+        Never clobbers: an existing row belongs to an earlier writer over the
+        same DB and carries the drops it recorded, so writing zeros over it
+        would erase evidence rather than establish a baseline. A reopened store
+        therefore keeps whatever it already had, and only a store that has never
+        had a writer gains a row here.
+
+        Best-effort like every other write on this class ([R14]): a store that
+        cannot take the row degrades to exactly the pre-fix behaviour — an
+        evidence run over it reports `incomparable`, which is the honest answer.
+        """
+        with self._health_lock:
+            snapshot = dict(self._health)
+        try:
+            conn = self.store._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                self.store.set_diagnostic_if_absent(
+                    conn, "writer_health", snapshot
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"Could not publish the writer-health baseline: {exc!r}")
 
     def persist_health(self) -> None:
         """Force the counters into the `diagnostics` row.
