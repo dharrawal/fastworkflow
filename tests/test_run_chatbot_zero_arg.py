@@ -61,6 +61,13 @@ def collections_tree(tmp_path) -> Path:
     hidden.mkdir()
     (hidden / "workspace.json").write_text("{}", encoding="utf-8")
 
+    # This directory's own JSON: the well-known name, a renamed manifest that
+    # declares the schema, and a stray result file that is not a manifest --
+    # only the first two may be offered (fix-o8s).
+    (root / "workspace.json").write_text("{}", encoding="utf-8")
+    (root / "renamed-manifest.json").write_text(
+        json.dumps({"schema": WORKSPACE_SCHEMA, "stores": []}), encoding="utf-8"
+    )
     (root / "loose.json").write_text("{}", encoding="utf-8")
     return root
 
@@ -69,7 +76,8 @@ def test_picker_lists_collection_manifests_one_level_down(collections_tree):
     listing = browse_directories(str(collections_tree))
     found = {m["label"]: m["path"] for m in listing["workspace_manifests"]}
     assert found == {
-        "loose.json": str(collections_tree / "loose.json"),
+        "renamed-manifest.json": str(collections_tree / "renamed-manifest.json"),
+        "workspace.json": str(collections_tree / "workspace.json"),
         "exp028-flat": str(collections_tree / "exp028-flat" / "workspace.json"),
         "exp029-trial-3.3-lifecycle-2026-09-06": str(
             collections_tree
@@ -79,7 +87,10 @@ def test_picker_lists_collection_manifests_one_level_down(collections_tree):
         ),
     }
     # This directory's own JSON comes first; nested discovery is additive.
-    assert listing["workspace_manifests"][0]["label"] == "loose.json"
+    assert [m["label"] for m in listing["workspace_manifests"][:2]] == [
+        "renamed-manifest.json",
+        "workspace.json",
+    ]
     assert all(Path(m["path"]).is_absolute() for m in listing["workspace_manifests"])
 
 
@@ -92,6 +103,128 @@ def test_picker_never_offers_arbitrary_json_one_level_down(collections_tree):
     assert "summary.json" not in names
     assert "seal-record.json" not in names
     assert "notes.json" not in names
+
+
+# ----------------------------------------------------------------------
+# fix-o8s: this directory's own JSON is filtered too
+# ----------------------------------------------------------------------
+#
+# Before this, every `*.json` beside the browsed folder was offered as a
+# manifest, so from a project root the picker filled with score dumps and
+# trajectory files, each of which opens into an error. The rule now: the
+# well-known name `workspace.json`, or a head that declares the workspace
+# schema. Everything else is omitted -- not offered, not labelled.
+
+
+def _manifest_labels(directory) -> set[str]:
+    return {
+        m["label"] for m in browse_directories(str(directory))["workspace_manifests"]
+    }
+
+
+def test_picker_omits_stray_json_in_the_browsed_directory(collections_tree):
+    assert "loose.json" not in _manifest_labels(collections_tree)
+
+
+def test_picker_offers_workspace_json_on_its_name_alone(tmp_path):
+    """Offered without being read: a `workspace.json` that fails validation
+    must still be reachable, so the developer sees *why* it is refused rather
+    than a picker that silently has nothing."""
+    (tmp_path / "workspace.json").write_text("not json at all", encoding="utf-8")
+    assert _manifest_labels(tmp_path) == {"workspace.json"}
+
+
+def test_picker_offers_a_renamed_manifest(tmp_path):
+    (tmp_path / "exp029.json").write_text(
+        json.dumps(
+            {
+                "schema": WORKSPACE_SCHEMA,
+                "workspace_id": "w1",
+                "label": "renamed",
+                "stores": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "legacy.json").write_text(
+        json.dumps({"schema_version": WORKSPACE_SCHEMA, "stores": []}),
+        encoding="utf-8",
+    )
+    assert _manifest_labels(tmp_path) == {"exp029.json", "legacy.json"}
+
+
+def test_picker_omits_json_declaring_another_schema(tmp_path):
+    (tmp_path / "other.json").write_text(
+        json.dumps({"schema": "something-else/2", "stores": []}), encoding="utf-8"
+    )
+    (tmp_path / "nested.json").write_text(
+        # The key exists, but nested — not a top-level declaration.
+        json.dumps({"payload": {"schema": WORKSPACE_SCHEMA}}), encoding="utf-8"
+    )
+    assert _manifest_labels(tmp_path) == set()
+
+
+def test_picker_reads_at_most_the_probe_window(tmp_path):
+    """A huge result file is not loaded to decide this. The schema key placed
+    past the probe window reads as "not a manifest" — absence of evidence is
+    "no" — and the same file with the key first is offered."""
+    padding = {"junk": "x" * 200_000}
+    (tmp_path / "huge-late.json").write_text(
+        json.dumps({**padding, "schema": WORKSPACE_SCHEMA}), encoding="utf-8"
+    )
+    (tmp_path / "huge-early.json").write_text(
+        json.dumps({"schema": WORKSPACE_SCHEMA, **padding}), encoding="utf-8"
+    )
+    assert _manifest_labels(tmp_path) == {"huge-early.json"}
+
+
+def test_picker_skips_an_unreadable_json_without_failing(tmp_path):
+    (tmp_path / "workspace.json").write_text("{}", encoding="utf-8")
+    denied = tmp_path / "denied.json"
+    denied.write_text(
+        json.dumps({"schema": WORKSPACE_SCHEMA, "stores": []}), encoding="utf-8"
+    )
+    os.chmod(denied, 0o000)
+    try:
+        if os.access(denied, os.R_OK):  # running as root: the probe would succeed
+            pytest.skip("cannot make a file unreadable for this user")
+        listing = browse_directories(str(tmp_path))
+        assert "error" not in listing
+        assert {m["label"] for m in listing["workspace_manifests"]} == {
+            "workspace.json"
+        }
+    finally:
+        os.chmod(denied, 0o644)
+
+
+def test_picker_skips_undecodable_bytes_without_failing(tmp_path):
+    (tmp_path / "binary.json").write_bytes(b"\xff\xfe\x00\x01" * 64)
+    listing = browse_directories(str(tmp_path))
+    assert "error" not in listing
+    assert listing["workspace_manifests"] == []
+
+
+def test_browse_route_reflects_the_manifest_filter(collections_tree):
+    server = run_chatbot_server.ChatbotServer(
+        db_path="",
+        workflow_path="",
+        port=0,
+        spawn_options={"no_server": True},
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, data = _request(
+            server,
+            "/api/browse?dir=" + urllib.parse.quote(str(collections_tree)),
+        )
+        assert status == 200
+        labels = {m["label"] for m in data["workspace_manifests"]}
+        assert "loose.json" not in labels
+        assert {"workspace.json", "renamed-manifest.json"} <= labels
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 def test_picker_skips_dot_directories(collections_tree):

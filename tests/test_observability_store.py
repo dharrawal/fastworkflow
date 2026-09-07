@@ -634,6 +634,114 @@ class TestWriterDiscipline:
 
 
 # ----------------------------------------------------------------------
+# Bulk span reads (fix-tk5)
+# ----------------------------------------------------------------------
+#
+# The debug UI stamps every listed turn from its spans. Through `get_spans`
+# that was one indexed query per listed turn, so a 500-turn rail refresh paid
+# 500 round trips. `spans_for_turns` answers a whole page in a bounded number
+# of queries; these pin that it answers exactly what the per-turn path would.
+
+
+def _count_selects(store) -> dict:
+    """Count SELECT statements this store issues, by tracing its connections."""
+    counts = {"selects": 0}
+    original = store._connect
+
+    def connect(*args, **kwargs):
+        conn = original(*args, **kwargs)
+        conn.set_trace_callback(
+            lambda sql: counts.__setitem__(
+                "selects", counts["selects"] + ("SELECT" in sql.upper())
+            )
+        )
+        return conn
+
+    store._connect = connect
+    return counts
+
+
+@pytest.fixture
+def many_turn_spans(db_path):
+    """30 turns x 4 spans, plus a turn with no spans and one span alone."""
+    sink = obs.SQLiteTraceSink(db_path)
+    keys = [f"20260907T{index:06d}-turn" for index in range(30)]
+    for turn_index, key in enumerate(keys):
+        for span_index in range(4):
+            sink.emit_span(
+                tracing.Span(
+                    span_id=f"{key}-s{span_index}",
+                    trace_id=key,
+                    name="fw.llm.call" if span_index else "fw.turn",
+                    start_ns=1_000 + turn_index * 100 + span_index,
+                    status="ok",
+                    attributes={"seq": span_index},
+                )
+            )
+    assert sink.flush()
+    sink.close()
+    return db_path, keys
+
+
+class TestSpansForTurns:
+    def test_matches_the_per_turn_path_exactly(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        bulk = store.spans_for_turns(keys)
+        assert bulk == {key: store.get_spans(key) for key in keys}
+        # Not vacuous: the fixture really did write spans.
+        assert all(len(bulk[key]) == 4 for key in keys)
+
+    def test_is_a_bounded_number_of_queries(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        counts = _count_selects(store)
+        store.spans_for_turns(keys)
+        assert counts["selects"] == 1
+
+    def test_unknown_keys_map_to_empty_lists(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        answer = store.spans_for_turns([keys[0], "never-recorded"])
+        assert answer["never-recorded"] == []
+        assert answer[keys[0]] == store.get_spans(keys[0])
+
+    def test_duplicate_and_blank_keys_are_collapsed(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        answer = store.spans_for_turns([keys[0], keys[0], "", None])
+        assert list(answer) == [keys[0]]
+
+    def test_no_keys_reads_nothing(self, many_turn_spans):
+        db, _keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        counts = _count_selects(store)
+        assert store.spans_for_turns([]) == {}
+        assert counts["selects"] == 0
+
+    def test_more_keys_than_one_chunk_are_chunked_not_refused(self, many_turn_spans):
+        """SQLite caps bound variables per statement; 1200 keys must answer,
+        in chunks, rather than raising."""
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        padding = [f"absent-{index}" for index in range(1200 - len(keys))]
+        counts = _count_selects(store)
+        answer = store.spans_for_turns(keys + padding)
+        assert len(answer) == 1200
+        assert answer[keys[0]] == store.get_spans(keys[0])
+        assert all(answer[key] == [] for key in padding)
+        # Chunked, but nowhere near one query per key.
+        assert 1 < counts["selects"] <= 5
+
+    def test_the_writable_store_has_it_too(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ObservabilityStore(db, migrate=False)
+        assert store.spans_for_turns(keys[:3]) == {
+            key: store.get_spans(key) for key in keys[:3]
+        }
+
+
+# ----------------------------------------------------------------------
 # Maintenance [R12] and erasure [R21]
 # ----------------------------------------------------------------------
 

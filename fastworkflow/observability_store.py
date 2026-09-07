@@ -2650,6 +2650,41 @@ class ObservabilityStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def spans_for_turns(
+        self, turn_keys: Iterable[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """`get_spans` for many turns at once: ``{turn_key: [span row, ...]}``.
+
+        The debug UI stamps every listed turn with things derived from its
+        spans (cut-at-limit tallies, cost roll-ups, decision signals). Doing
+        that through `get_spans` cost one indexed query per listed turn, so a
+        rail refresh of 500 turns paid 500 round trips (fix-tk5). This answers
+        the same rows for a whole page in a bounded number of queries.
+
+        Rows have exactly `get_spans`'s shape and per-turn order (`start_ns`,
+        over ``idx_spans_trace``). Every requested key is present in the
+        answer, mapping to ``[]`` when the store holds no spans for it, so a
+        caller never has to distinguish "absent" from "no spans"; duplicate
+        keys are collapsed and blank ones dropped. Keys are bound in chunks
+        well under SQLite's variable limit, so an arbitrarily long list is
+        safe.
+        """
+        keys = list(dict.fromkeys(key for key in turn_keys if key))
+        spans_by_turn: dict[str, list[dict[str, Any]]] = {key: [] for key in keys}
+        if not keys:
+            return spans_by_turn
+        with self._connect() as conn:
+            for chunk in _chunked(keys):
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders}) "
+                    "ORDER BY trace_id, start_ns",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    spans_by_turn[row["trace_id"]].append(dict(row))
+        return spans_by_turn
+
     def list_conversations(
         self, channel_id: Optional[str] = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:

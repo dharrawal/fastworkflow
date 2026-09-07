@@ -40,7 +40,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -64,6 +64,7 @@ from fastworkflow.observability_store import (
     ReadOnlyObservabilityStore,
 )
 from fastworkflow.observability_workspace import (
+    WORKSPACE_SCHEMA,
     ObservabilityWorkspace,
     UnknownLogicalExperiment,
     UnknownWorkspaceStore,
@@ -170,9 +171,17 @@ def annotate_turn_rows(
     store: ReadOnlyObservabilityStore, turns: list[dict[str, Any]]
 ) -> None:
     """Stamp each listed turn with its cut-at-limit tally, decision signals
-    and cost roll-up, from one read of its spans (tiers 1 and 2)."""
+    and cost roll-up, from one read of its spans (tiers 1 and 2).
+
+    The spans for the whole page come from one bulk read, not one query per
+    listed turn: the rail asks for up to 500 turns and refreshes on a timer,
+    so per-turn reads meant ~500 round trips a refresh (fix-tk5). The stamps
+    themselves are unchanged -- `turn_span_stamps` still sees exactly the rows
+    `get_spans` would have handed it for that turn.
+    """
+    spans_by_turn = store.spans_for_turns(turn["turn_key"] for turn in turns)
     for turn in turns:
-        turn.update(turn_span_stamps(store.get_spans(turn["turn_key"])))
+        turn.update(turn_span_stamps(spans_by_turn.get(turn["turn_key"]) or []))
 
 
 def evidence_verdict(evidence_runs: Optional[Iterable[Mapping[str, Any]]]) -> dict[str, Any]:
@@ -246,7 +255,11 @@ def annotate_attempt_rows(
             limit=10_000,
         )
         row["turn_count"] = len(turns)
-        stamps = [turn_span_stamps(store.get_spans(turn["turn_key"])) for turn in turns]
+        spans_by_turn = store.spans_for_turns(turn["turn_key"] for turn in turns)
+        stamps = [
+            turn_span_stamps(spans_by_turn.get(turn["turn_key"]) or [])
+            for turn in turns
+        ]
         row["llm_calls_cut_at_limit"] = sum(
             stamp["llm_calls_cut_at_limit"] for stamp in stamps
         )
@@ -267,18 +280,50 @@ def _workspace_segment_verdicts(
     }
 
 
+def _workspace_span_cache(
+    workspace: ObservabilityWorkspace, refs: Iterable[tuple[Any, Any]]
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """``{(store_id, logical_turn_key): spans}`` for many refs, one bulk read
+    per store instead of one `trace` call per ref (fix-tk5).
+
+    Refs missing either half are dropped here rather than raising: the caller
+    already treats an unresolvable ref as "nothing to tally", and a store that
+    a manifest no longer names must not break the rest of the answer.
+    """
+    by_store: dict[str, list[str]] = {}
+    for store_id, key in refs:
+        if store_id and key:
+            by_store.setdefault(str(store_id), []).append(str(key))
+    cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for store_id, keys in by_store.items():
+        for key, spans in workspace.traces(store_id, keys).items():
+            cache[(store_id, key)] = spans
+    return cache
+
+
 def annotate_workspace_attempts(
     workspace: ObservabilityWorkspace,
     rows: list[dict[str, Any]],
     verdict_by_segment: Mapping[str, dict[str, Any]],
 ) -> None:
-    """The workspace twin of `annotate_attempt_rows`, over scoped trace reads."""
+    """The workspace twin of `annotate_attempt_rows`, over scoped trace reads.
+
+    Every ref on every row is read in one pass per store (fix-tk5); the stamps
+    are the ones `trace` would have produced ref by ref."""
+    spans_by_ref = _workspace_span_cache(
+        workspace,
+        (
+            (ref.get("store_id"), ref.get("logical_turn_key"))
+            for row in rows
+            for ref in row.get("turn_refs") or []
+        ),
+    )
     for row in rows:
         total = 0
         costs = []
         for ref in row.get("turn_refs") or []:
             ref.update(turn_span_stamps(
-                workspace.trace(ref["store_id"], ref["logical_turn_key"])
+                spans_by_ref.get((ref["store_id"], ref["logical_turn_key"])) or []
             ))
             total += ref["llm_calls_cut_at_limit"]
             costs.append(ref["llm_cost"])
@@ -294,7 +339,26 @@ def annotate_projected_attempts(
     workspace: ObservabilityWorkspace, rows: list[dict[str, Any]]
 ) -> None:
     """Projected history rows: tally the resolved turns once each, and badge
-    every resolved source with the verdict its own store persisted."""
+    every resolved source with the verdict its own store persisted.
+
+    The spans behind those tallies are read in one pass per store up front
+    (fix-tk5); a projection that resolves the same turn from several sources
+    then costs one lookup, not one query, per mention."""
+
+    def _resolved_turns(row: Mapping[str, Any]) -> Iterator[Any]:
+        yield from row.get("resolved_turns") or []
+        for source in row.get("resolved_sources") or []:
+            yield source.get("resolved_turn")
+
+    spans_by_ref = _workspace_span_cache(
+        workspace,
+        (
+            (turn.get("store_id"), turn.get("logical_turn_key"))
+            for row in rows
+            for turn in _resolved_turns(row)
+            if isinstance(turn, dict)
+        ),
+    )
     for row in rows:
         seen: set[tuple[str, str]] = set()
         total = 0
@@ -308,7 +372,7 @@ def annotate_projected_attempts(
             key = turn.get("logical_turn_key")
             if not store_id or not key:
                 return
-            turn.update(turn_span_stamps(workspace.trace(store_id, key)))
+            turn.update(turn_span_stamps(spans_by_ref.get((store_id, key)) or []))
             if (store_id, key) not in seen:
                 seen.add((store_id, key))
                 total += turn["llm_calls_cut_at_limit"]
@@ -1197,6 +1261,72 @@ def list_workflow_candidates() -> list[dict[str, Any]]:
     return candidates[:_MAX_WF_CANDIDATES]
 
 
+_MANIFEST_PROBE_BYTES = 4096
+_MANIFEST_SCHEMA_RE = re.compile(
+    r'"(?:schema|schema_version)"\s*:\s*"' + re.escape(WORKSPACE_SCHEMA) + r'"'
+)
+
+
+def _declares_workspace_schema(path: str) -> bool:
+    """Whether this file's head declares the v1 workspace manifest schema.
+
+    The picker used to offer every ``*.json`` in the browsed directory, so
+    from a project root it filled with score dumps and trajectory files that
+    cannot be opened (fix-o8s). The cheap, honest discriminator is the one key
+    `ObservabilityWorkspace.load` itself insists on: ``schema`` (or the older
+    ``schema_version``) equal to :data:`WORKSPACE_SCHEMA`.
+
+    At most :data:`_MANIFEST_PROBE_BYTES` are read, so browsing a directory of
+    900 KB result files costs one short read each and never loads one into
+    memory. That prefix is parsed as JSON when it happens to be a whole small
+    document -- which checks the key really is at the *top* level -- and
+    otherwise scanned for the schema declaration, since a truncated prefix
+    cannot be parsed. A manifest whose schema key sits past the probe window
+    reads as "not a manifest": absence of evidence is "no", the same rule the
+    rest of this module's derivations use, and the developer can still type
+    the path.
+
+    Any read error (permissions, a directory racing in, undecodable bytes)
+    answers False rather than raising: the picker must render.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(_MANIFEST_PROBE_BYTES)
+    except OSError:
+        return False
+    try:
+        text = head.decode("utf-8", errors="replace")
+    except Exception:  # pragma: no cover - decode with errors= cannot raise
+        return False
+    try:
+        value = json.loads(text)
+    except ValueError:
+        # Truncated at the probe window (or malformed): fall back to spotting
+        # the schema declaration textually.
+        return bool(_MANIFEST_SCHEMA_RE.search(text))
+    if not isinstance(value, dict):
+        return False
+    return value.get("schema", value.get("schema_version")) == WORKSPACE_SCHEMA
+
+
+def _local_workspace_manifests(base: str, name: str) -> list[dict[str, str]]:
+    """This directory's own ``*.json`` file as a manifest offer, or nothing.
+
+    Offered when it is named ``workspace.json`` -- the well-known name, offered
+    on its name alone so a manifest that fails validation is still reachable
+    and reports why -- or when its head declares the workspace schema, which
+    covers a manifest someone renamed. Everything else is omitted entirely:
+    not offered and not labelled, because a row the picker cannot open is
+    worse than no row (fix-o8s).
+    """
+    if not name.lower().endswith(".json"):
+        return []
+    full = os.path.join(base, name)
+    if name.lower() != "workspace.json" and not _declares_workspace_schema(full):
+        return []
+    return [{"name": name, "label": name, "path": full}]
+
+
 def _nested_workspace_manifests(base: str, name: str) -> list[dict[str, str]]:
     """``workspace.json`` one level under ``base/name``, labelled by that folder.
 
@@ -1230,10 +1360,11 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
     """One level of the local filesystem for the workflow picker: directories
     only, never file contents; each entry flagged when it is a workflow.
 
-    Workspace manifests come from two places: every ``*.json`` in this
-    directory (any of them may be a manifest — the picker cannot tell without
-    opening it, and it does not open it), plus the well-known
-    ``workspace.json`` one level down inside each subdirectory.
+    Workspace manifests come from two places: this directory's own
+    ``workspace.json`` plus any other ``*.json`` here whose head declares the
+    workspace schema (`_local_workspace_manifests`), and the well-known
+    ``workspace.json`` one level down inside each subdirectory. Stray JSON is
+    omitted, never offered-and-broken.
     """
     base = os.path.abspath(dir_path or os.getcwd())
     if not os.path.isdir(base):
@@ -1250,10 +1381,7 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
             continue
         full = os.path.join(base, name)
         if not os.path.isdir(full):
-            if name.lower().endswith(".json"):
-                workspace_manifests.append(
-                    {"name": name, "label": name, "path": full}
-                )
+            workspace_manifests.extend(_local_workspace_manifests(base, name))
             continue
         nested_manifests.extend(_nested_workspace_manifests(base, name))
         is_workflow = _looks_like_workflow(full)

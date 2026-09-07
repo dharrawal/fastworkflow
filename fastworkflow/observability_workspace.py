@@ -15,7 +15,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PureWindowsPath
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from fastworkflow.observability_store import (
     IncompatibleObservabilityDB,
@@ -670,13 +670,12 @@ class ObservabilityWorkspace:
             rows = store.experiment_attempt_rows(local_experiment_id)
         return [dict(row) for row in rows]
 
-    def trace(self, store_id: str, logical_turn_key: str) -> list[dict[str, Any]]:
-        if not store_id:
-            raise UnknownWorkspaceStore(
-                "store_id is required; trace ids are never searched across stores"
-            )
-        with self.registry.open(store_id) as store:
-            spans = store.get_spans(logical_turn_key)
+    def _scope_spans(
+        self, store_id: str, logical_turn_key: str, spans: Iterable[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """One turn's raw span rows, stamped with their workspace scope and
+        with `attributes` decoded. Shared by `trace` and `traces` so the single
+        and bulk readers cannot drift."""
         result = []
         for value in spans:
             span = dict(value)
@@ -688,6 +687,41 @@ class ObservabilityWorkspace:
                 pass
             result.append(span)
         return result
+
+    def trace(self, store_id: str, logical_turn_key: str) -> list[dict[str, Any]]:
+        if not store_id:
+            raise UnknownWorkspaceStore(
+                "store_id is required; trace ids are never searched across stores"
+            )
+        with self.registry.open(store_id) as store:
+            spans = store.get_spans(logical_turn_key)
+        return self._scope_spans(store_id, logical_turn_key, spans)
+
+    def traces(
+        self, store_id: str, logical_turn_keys: Iterable[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """`trace` for many turns of one store: ``{logical_turn_key: spans}``.
+
+        The archived twin of `ObservabilityStore.spans_for_turns` (fix-tk5).
+        Attempt and projected-attempt rows stamp every turn ref they carry;
+        going through `trace` opened the store and issued one query per ref.
+        This opens it once and reads the refs in chunks, answering rows in the
+        same shape and order `trace` would. Every requested key is present in
+        the answer, mapping to ``[]`` when the store holds no spans for it.
+        """
+        if not store_id:
+            raise UnknownWorkspaceStore(
+                "store_id is required; trace ids are never searched across stores"
+            )
+        keys = list(dict.fromkeys(key for key in logical_turn_keys if key))
+        if not keys:
+            return {}
+        with self.registry.open(store_id) as store:
+            spans_by_turn = store.spans_for_turns(keys)
+        return {
+            key: self._scope_spans(store_id, key, spans_by_turn.get(key) or [])
+            for key in keys
+        }
 
     def projected_attempts(
         self,

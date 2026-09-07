@@ -581,6 +581,111 @@ class TestAnnotateTurnRows:
 
 
 # ----------------------------------------------------------------------
+# fix-tk5: the same stamps, from a bounded number of span queries
+# ----------------------------------------------------------------------
+#
+# `annotate_turn_rows` called `get_spans` once per listed turn, so the rail's
+# 500-turn refresh issued ~500 queries. The page's spans now come from one
+# bulk read. The stamps have to be *identical* to what the per-turn path
+# produced, so these compare the two over a many-turn store rather than
+# re-asserting expected values.
+
+
+@pytest.fixture
+def wide_db(workflow_path) -> str:
+    """30 chatbot turns; every third one has an LLM call cut at its cap."""
+    db_path = state_paths.observability_db(workflow_path)
+    store = obs.ObservabilityStore(db_path)
+    conv_id = store.mint_conversation_id("chatbot")
+    t0 = time.time_ns()
+    rows, spans = [], []
+    for index in range(30):
+        key = f"20260907T{index:06d}-wide"
+        rows.append(_turn_row(key, "chatbot", conversation_id=conv_id, ordinal=index))
+        base = t0 + index * 10_000_000
+        spans.append(
+            tracing.Span(
+                span_id=f"{key}-root", trace_id=key, name="fw.turn", kind="internal",
+                channel_id="chatbot", start_ns=base, end_ns=base + 5_000_000,
+                status="ok", attributes={},
+            )
+        )
+        spans.append(
+            _llm_span(
+                f"{key}-llm", key, f"{key}-root", base + 1_000_000,
+                {"prompt_tokens": 10,
+                 "completion_tokens": 512 if index % 3 == 0 else 40,
+                 "total_tokens": 60},
+                {"max_tokens": 512, "model": "test/model"},
+            )
+        )
+    redactor = store._store_redactor()
+    conn = store._connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for row in rows:
+            assert store.upsert_turn_row(conn, row, [], redactor)
+        store.upsert_span_rows(conn, spans, redactor)
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def _stamps_the_old_way(store, turns):
+    """What `annotate_turn_rows` did before fix-tk5: one `get_spans` per turn."""
+    return [
+        run_chatbot_server.turn_span_stamps(store.get_spans(turn["turn_key"]))
+        for turn in turns
+    ]
+
+
+class TestBulkSpanStamping:
+    def test_stamps_are_identical_to_the_per_turn_path(self, wide_db):
+        store = obs.ReadOnlyObservabilityStore(wide_db)
+        turns = store.list_turns(channel_id="chatbot", limit=100)
+        assert len(turns) == 30
+        expected = _stamps_the_old_way(store, turns)
+        annotate_turn_rows(store, turns)
+        for turn, stamp in zip(turns, expected):
+            assert {key: turn[key] for key in stamp} == stamp
+        # Not vacuous: ten of the thirty really were cut at their cap.
+        assert sum(turn["llm_calls_cut_at_limit"] for turn in turns) == 10
+
+    def test_one_bulk_read_and_no_per_turn_read(self, wide_db):
+        store = obs.ReadOnlyObservabilityStore(wide_db)
+        turns = store.list_turns(channel_id="chatbot", limit=100)
+        bulk_calls = []
+        real = store.spans_for_turns
+
+        def counted(keys):
+            bulk_calls.append(1)
+            return real(keys)
+
+        store.spans_for_turns = counted
+        store.get_spans = lambda key: pytest.fail(
+            "a listed page must not read spans one turn at a time"
+        )
+        annotate_turn_rows(store, turns)
+        assert bulk_calls == [1]
+
+    def test_the_turns_route_answers_the_same_tallies(self, wide_db, workflow_path):
+        store = obs.ReadOnlyObservabilityStore(wide_db)
+        turns = store.list_turns(channel_id="chatbot", limit=100)
+        expected = {
+            turn["turn_key"]: stamp["llm_calls_cut_at_limit"]
+            for turn, stamp in zip(turns, _stamps_the_old_way(store, turns))
+        }
+        srv, thread = _serve(wide_db, workflow_path=workflow_path)
+        try:
+            listed = _get_json(srv, "/api/turns?channel=chatbot&limit=100")["turns"]
+        finally:
+            srv.shutdown()
+            thread.join(timeout=5)
+        assert {t["turn_key"]: t["llm_calls_cut_at_limit"] for t in listed} == expected
+
+
+# ----------------------------------------------------------------------
 # The same store, archived, through the read-only workspace
 # ----------------------------------------------------------------------
 

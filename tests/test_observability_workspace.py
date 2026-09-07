@@ -300,6 +300,63 @@ def test_unknown_store_and_unscoped_turn_are_refused(tmp_path):
         workspace.turn("", "turn")
 
 
+def test_bulk_traces_answer_exactly_what_the_per_turn_reader_answers(tmp_path):
+    """`traces` is the archived twin of `spans_for_turns` (fix-tk5).
+
+    Attempt and projected-attempt rows stamp every turn ref they carry; going
+    ref by ref through `trace` opened the store and queried once per ref. The
+    bulk reader must answer the same scoped, attribute-decoded rows, in the
+    same order, and stay just as scoped to one named store.
+    """
+    from fastworkflow import tracing
+
+    source = tmp_path / "bulk-live.sqlite3"
+    store = obs.ObservabilityStore(str(source))
+    store.create_experiment("local", "bulk", declared_tasks=1, declared_attempts=1)
+    keys = [f"turn-{index:02d}" for index in range(12)]
+    spans = [
+        tracing.Span(
+            span_id=f"{key}-{seq}", trace_id=key, name="fw.llm.call", kind="client",
+            channel_id="channel-task", start_ns=1_000 + index * 10 + seq, status="ok",
+            attributes={"call_kwargs": json.dumps({"max_tokens": 8})},
+        )
+        for index, key in enumerate(keys)
+        for seq in range(3)
+    ]
+    redactor = store._store_redactor()
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for key in keys:
+            assert store.upsert_turn_row(
+                conn, _turn_row(key, "local", "task", 1), [], redactor
+            )
+        store.upsert_span_rows(conn, spans, redactor)
+        conn.commit()
+    archived = obs.ObservabilityStore(str(source), migrate=False).archive_to(
+        str(tmp_path / "sealed.sqlite3")
+    )
+    workspace = load_observability_workspace(
+        _manifest(tmp_path, [_store_decl(archived, "sealed")])
+    )
+
+    asked = keys + ["never-recorded"]
+    bulk = workspace.traces("sealed", asked)
+    assert bulk == {key: workspace.trace("sealed", key) for key in asked}
+    # Not vacuous, and the scope/decoding `trace` applies is applied here too.
+    assert all(len(bulk[key]) == 3 for key in keys)
+    assert bulk["never-recorded"] == []
+    first = bulk[keys[0]][0]
+    assert first["store_id"] == "sealed"
+    assert first["logical_turn_key"] == keys[0]
+    assert first["attributes"]["call_kwargs"] == json.dumps({"max_tokens": 8})
+
+    assert workspace.traces("sealed", []) == {}
+    with pytest.raises(UnknownWorkspaceStore, match="required"):
+        workspace.traces("", keys)
+    with pytest.raises(UnknownWorkspaceStore):
+        workspace.traces("missing", keys)
+
+
 def test_projected_attempt_resolution_across_two_stores(tmp_path):
     first = _seed_archive(
         tmp_path,
