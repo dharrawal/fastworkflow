@@ -687,9 +687,12 @@ class TestWorkspaceRoutes:
         assert ui1["evidence"]["problems"] == [PROBLEM]
         assert ui1["llm_calls_cut_at_limit"] == 1
         assert ui1["runtime_snapshot"] == SNAPSHOT
-        assert ui1["turn_refs"] == [
-            {"store_id": "sealed", "logical_turn_key": TURN_CUT, "llm_calls_cut_at_limit": 1}
-        ]
+        # Tier 2 (fix-aou) stamps decision signals and cost on the same refs;
+        # the tier-1 facts are pinned as a subset rather than the whole dict.
+        assert len(ui1["turn_refs"]) == 1
+        assert {
+            "store_id": "sealed", "logical_turn_key": TURN_CUT, "llm_calls_cut_at_limit": 1
+        }.items() <= ui1["turn_refs"][0].items()
         ui2 = by_key[(EXP, 2)]
         assert ui2["llm_calls_cut_at_limit"] == 0
         assert ui2["runtime_snapshot"] is None

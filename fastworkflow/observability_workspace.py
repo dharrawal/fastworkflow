@@ -593,6 +593,38 @@ class ObservabilityWorkspace:
             return []
         return [dict(segment) for segment in experiment.get("evidence_runs") or []]
 
+    def experiment(
+        self, store_id: str, local_experiment_id: str
+    ) -> Optional[dict[str, Any]]:
+        """One store's experiment row with its evidence segments, or None.
+
+        Exactly `ObservabilityStore.get_experiment`, scoped to the named store
+        like every other read here. Exposed so the read-only UI can flatten a
+        segment's provenance (fix-aou) from the columns the archive holds --
+        capture regime, benchmark pin, workflow -- next to the evidence-run
+        records `evidence_runs` already returns.
+        """
+        if not store_id:
+            raise UnknownWorkspaceStore(
+                "store_id is required; experiments are never searched across stores"
+            )
+        with self.registry.open(store_id) as store:
+            experiment = store.get_experiment(local_experiment_id)
+        return dict(experiment) if experiment else None
+
+    def attempts_in_store(
+        self, store_id: str, local_experiment_id: str
+    ) -> list[dict[str, Any]]:
+        """One store's attempt rows for one local experiment, snapshots
+        decoded, without the turn refs `attempts()` resolves per segment."""
+        if not store_id:
+            raise UnknownWorkspaceStore(
+                "store_id is required; experiments are never searched across stores"
+            )
+        with self.registry.open(store_id) as store:
+            rows = store.experiment_attempt_rows(local_experiment_id)
+        return [dict(row) for row in rows]
+
     def trace(self, store_id: str, logical_turn_key: str) -> list[dict[str, Any]]:
         if not store_id:
             raise UnknownWorkspaceStore(

@@ -169,11 +169,10 @@ def count_llm_calls_cut_at_limit(spans: Iterable[Mapping[str, Any]]) -> int:
 def annotate_turn_rows(
     store: ReadOnlyObservabilityStore, turns: list[dict[str, Any]]
 ) -> None:
-    """Stamp each listed turn with its count of calls cut at the limit."""
+    """Stamp each listed turn with its cut-at-limit tally, decision signals
+    and cost roll-up, from one read of its spans (tiers 1 and 2)."""
     for turn in turns:
-        turn["llm_calls_cut_at_limit"] = count_llm_calls_cut_at_limit(
-            store.get_spans(turn["turn_key"])
-        )
+        turn.update(turn_span_stamps(store.get_spans(turn["turn_key"])))
 
 
 def evidence_verdict(evidence_runs: Optional[Iterable[Mapping[str, Any]]]) -> dict[str, Any]:
@@ -247,10 +246,11 @@ def annotate_attempt_rows(
             limit=10_000,
         )
         row["turn_count"] = len(turns)
+        stamps = [turn_span_stamps(store.get_spans(turn["turn_key"])) for turn in turns]
         row["llm_calls_cut_at_limit"] = sum(
-            count_llm_calls_cut_at_limit(store.get_spans(turn["turn_key"]))
-            for turn in turns
+            stamp["llm_calls_cut_at_limit"] for stamp in stamps
         )
+        row["llm_cost"] = merge_cost_rollups(stamp["llm_cost"] for stamp in stamps)
         row["evidence"] = verdict
 
 
@@ -275,14 +275,16 @@ def annotate_workspace_attempts(
     """The workspace twin of `annotate_attempt_rows`, over scoped trace reads."""
     for row in rows:
         total = 0
+        costs = []
         for ref in row.get("turn_refs") or []:
-            count = count_llm_calls_cut_at_limit(
+            ref.update(turn_span_stamps(
                 workspace.trace(ref["store_id"], ref["logical_turn_key"])
-            )
-            ref["llm_calls_cut_at_limit"] = count
-            total += count
+            ))
+            total += ref["llm_calls_cut_at_limit"]
+            costs.append(ref["llm_cost"])
         row["turn_count"] = len(row.get("turn_refs") or [])
         row["llm_calls_cut_at_limit"] = total
+        row["llm_cost"] = merge_cost_rollups(costs)
         row["evidence"] = verdict_by_segment.get(
             row.get("segment_id"), evidence_verdict([])
         )
@@ -296,6 +298,7 @@ def annotate_projected_attempts(
     for row in rows:
         seen: set[tuple[str, str]] = set()
         total = 0
+        costs: list[dict[str, Any]] = []
 
         def tally(turn: Any) -> None:
             nonlocal total
@@ -305,11 +308,11 @@ def annotate_projected_attempts(
             key = turn.get("logical_turn_key")
             if not store_id or not key:
                 return
-            count = count_llm_calls_cut_at_limit(workspace.trace(store_id, key))
-            turn["llm_calls_cut_at_limit"] = count
+            turn.update(turn_span_stamps(workspace.trace(store_id, key)))
             if (store_id, key) not in seen:
                 seen.add((store_id, key))
-                total += count
+                total += turn["llm_calls_cut_at_limit"]
+                costs.append(turn["llm_cost"])
 
         for turn in row.get("resolved_turns") or []:
             tally(turn)
@@ -323,6 +326,586 @@ def annotate_projected_attempts(
                     workspace.evidence_runs(str(source["store_id"]), str(local_id))
                 )
         row["llm_calls_cut_at_limit"] = total
+        row["llm_cost"] = merge_cost_rollups(costs)
+
+
+# ----------------------------------------------------------------------
+# Derived fields for the SPA, tier 2 (fix-aou)
+# ----------------------------------------------------------------------
+#
+# Four more things the debug UI shows that are not columns, derived here from
+# ObservabilityStore reads only [R12] so the workspace's archives render them
+# through the same functions:
+#
+# (a) a turn's execution ledger -- every dispatch, joined on `command_call_id`
+#     between the turn record's `execution_records` refs and the trace's
+#     `fw.command.execute` spans (and the span-less inner hops those spans
+#     file under `child_calls`);
+# (b) the turn's decision signals -- the least confident intent resolution's
+#     top-k margin, whether the user was asked, and the worst consequence
+#     class any dispatch was assessed at -- and the low-confidence filter
+#     they feed;
+# (c) an experiment's provenance, flattened from the evidence-run records,
+#     the experiment row and the attempts' runtime snapshots, plus the
+#     field-by-field difference between two experiments' provenance;
+# (d) cost roll-ups from the `cost` attribute on `fw.llm.call`.
+#
+# Every one of them says "not recorded" for an absence rather than inventing
+# a value: a missing margin is no chip and not a low-confidence turn, and a
+# missing cost is never a zero.
+
+SPAN_COMMAND_EXECUTE = "fw.command.execute"
+SPAN_AGENT_TOOL_CALL = "fw.agent.tool_call"
+SPAN_ASK_USER = "fw.ask_user"
+SPAN_NLU_INTENT = "fw.nlu.intent"
+
+# decision_signals.SignalKind member for the classifier's top-1 minus top-2
+# probability; the polarity table there says higher is more confident.
+SIGNAL_TOPK_MARGIN = "classifier-topk-margin"
+# decision_signals._CONSEQUENCE_ORDER, worst last. Restated as data here so
+# that reading a stored record does not import the capture module.
+CONSEQUENCE_ORDER = ("none", "low", "medium", "high", "critical")
+
+# There is no calibrated threshold on record: decision_signals is capture-only
+# by design (FW-REQ-021 clause 4), and the trained `ambiguous_threshold.json`
+# files bound classifier CONFIDENCE, not the margin. So the filter's default
+# is a viewing aid the UI names as such, and the user may set another.
+LOW_CONFIDENCE_DEFAULT_MARGIN = 0.2
+
+PROVENANCE_NOT_RECORDED = "not recorded"
+
+# The experiment row's own provenance-bearing columns.
+_EXPERIMENT_PROVENANCE_COLUMNS = (
+    "capture_profile",
+    "capture_policy_version",
+    "workflow_name",
+    "benchmark_id",
+    "benchmark_version",
+    "benchmark_digest_sha256",
+)
+# The attempt's stamped runtime snapshot (runtime_readiness) keys that pin
+# what ran; `effective_features` is flattened one level.
+_SNAPSHOT_PROVENANCE_KEYS = (
+    "workflow_fingerprint",
+    "workflow_model_version",
+    "workflow_model_legacy_layout",
+    "workflow_scope_rule_version",
+    "command_surface_count",
+    "capture_profile",
+    "capture_policy_version",
+)
+
+
+def _span_attributes(span: Mapping[str, Any]) -> dict[str, Any]:
+    return _mapping_attr(span.get("attributes")) or {}
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    """A finite float, or None. bool is excluded: True is not a cost of 1."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _text_or_none(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value else None
+
+
+# -- (a) execution ledger ----------------------------------------------------
+
+
+def execution_ledger(
+    record: Any, spans: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """The ordered ledger of every dispatch in one turn.
+
+    Joined on `command_call_id` from two sources that the substrate keeps on
+    purpose in two tiers (turn.py, "Additive turn-level capture"): the turn
+    record's `execution_records` refs (durable skeleton: id, parent, ordinal,
+    span_id) and the trace's `fw.command.execute` spans (best-effort detail:
+    name, context, status, timing, and the `child_calls` ledger of span-less
+    inner hops). A dispatch known to either appears once.
+
+    `status` is the span's own status column, which is what
+    `tracing.status_for_dispatch_exception` wrote: ok, error, or cancelled for
+    a control signal (an ask-user suspension or a cancellation). It is quoted,
+    never restated; a dispatch with no span has no status and says so.
+
+    A resumed turn is one ledger, not a restart: the recorder is per process
+    (workflow_execution_context, fix-ajv.20), so the terminal record lists
+    only the dispatches since the last resume, while the earlier ones persist
+    as spans under the same trace. Rows are ordered by their span's start
+    time, a span-less child directly after its parent, and record-only rows
+    after the timed ones in record order -- so the pre-suspension dispatches
+    come first and `in_record` false tells the reader which rows the record
+    itself no longer lists.
+    """
+    span_list = list(spans)
+    refs: list[dict[str, Any]] = []
+    if isinstance(record, dict):
+        raw = record.get("execution_records")
+        if isinstance(raw, list):
+            refs = [
+                ref
+                for ref in raw
+                if isinstance(ref, dict) and _text_or_none(ref.get("command_call_id"))
+            ]
+    by_span_id: dict[str, Mapping[str, Any]] = {
+        span["span_id"]: span for span in span_list if _text_or_none(span.get("span_id"))
+    }
+
+    entries: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    def entry_for(call_id: str) -> dict[str, Any]:
+        if call_id not in entries:
+            entries[call_id] = {
+                "command_call_id": call_id,
+                "parent_call_id": None,
+                "command_ordinal": None,
+                "span_id": None,
+                "command_name": None,
+                "context": None,
+                "status": None,
+                "success": None,
+                "start_ns": None,
+                "duration_ns": None,
+                "in_record": False,
+                "span_recorded": False,
+                "child_call": False,
+                "asked_user": 0,
+            }
+            order.append(call_id)
+        return entries[call_id]
+
+    def apply_span(entry: dict[str, Any], span: Mapping[str, Any]) -> None:
+        attributes = _span_attributes(span)
+        entry["span_id"] = span.get("span_id")
+        entry["span_recorded"] = True
+        entry["command_name"] = _text_or_none(span.get("command_name")) or entry["command_name"]
+        entry["context"] = _text_or_none(span.get("context")) or entry["context"]
+        entry["status"] = _text_or_none(span.get("status"))
+        if isinstance(attributes.get("success"), bool):
+            entry["success"] = attributes["success"]
+        parent = attributes.get("parent_call_id")
+        if _text_or_none(parent):
+            entry["parent_call_id"] = parent
+        start = _exact_int(span.get("start_ns"))
+        end = _exact_int(span.get("end_ns"))
+        entry["start_ns"] = start
+        entry["duration_ns"] = end - start if start is not None and end is not None else None
+
+    for ref in refs:
+        entry = entry_for(str(ref["command_call_id"]))
+        entry["in_record"] = True
+        if _text_or_none(ref.get("parent_call_id")):
+            entry["parent_call_id"] = ref["parent_call_id"]
+        ordinal = _exact_int(ref.get("command_ordinal"))
+        if ordinal is not None:
+            entry["command_ordinal"] = ordinal
+        if _text_or_none(ref.get("span_id")):
+            entry["span_id"] = ref["span_id"]
+
+    execute_spans = [s for s in span_list if s.get("name") == SPAN_COMMAND_EXECUTE]
+    for span in execute_spans:
+        attributes = _span_attributes(span)
+        call_id = _text_or_none(attributes.get("command_call_id"))
+        if call_id is None:
+            continue
+        entry = entry_for(call_id)
+        if not entry["span_recorded"]:
+            apply_span(entry, span)
+        children = attributes.get("child_calls")
+        for child in children if isinstance(children, list) else []:
+            if not isinstance(child, dict):
+                continue
+            child_id = _text_or_none(child.get("call_id"))
+            if child_id is None:
+                continue
+            child_entry = entry_for(child_id)
+            child_entry["child_call"] = True
+            child_entry["parent_call_id"] = (
+                _text_or_none(child.get("parent_call_id")) or call_id
+            )
+            if _text_or_none(child.get("command_name")):
+                child_entry["command_name"] = child["command_name"]
+    # A ref whose span_id names an execute span that did not carry the id.
+    for entry in entries.values():
+        if entry["span_recorded"] or not entry["span_id"]:
+            continue
+        span = by_span_id.get(entry["span_id"])
+        if span is not None and span.get("name") == SPAN_COMMAND_EXECUTE:
+            apply_span(entry, span)
+
+    # Whether a dispatch produced an ask-user entry: an fw.ask_user span whose
+    # ancestry reaches that dispatch's execute span. One raised outside any
+    # dispatch (the agent loop asking, which is where the trial's all sat) is
+    # counted on the turn instead, never attributed to a row by guesswork.
+    asked_outside = 0
+    for span in span_list:
+        if span.get("name") != SPAN_ASK_USER:
+            continue
+        cursor = span.get("parent_span_id")
+        owner: Optional[str] = None
+        hops = 0
+        while cursor and cursor in by_span_id and hops < 10_000:
+            parent = by_span_id[cursor]
+            if parent.get("name") == SPAN_COMMAND_EXECUTE:
+                owner = _text_or_none(_span_attributes(parent).get("command_call_id"))
+                break
+            cursor = parent.get("parent_span_id")
+            hops += 1
+        if owner is not None and owner in entries:
+            entries[owner]["asked_user"] += 1
+        else:
+            asked_outside += 1
+
+    def start_of(entry: dict[str, Any]) -> Optional[int]:
+        if entry["start_ns"] is not None:
+            return entry["start_ns"]
+        parent = entries.get(entry["parent_call_id"]) if entry["parent_call_id"] else None
+        if parent is not None and parent["start_ns"] is not None:
+            return parent["start_ns"]
+        return None
+
+    def sort_key(call_id: str) -> tuple[Any, ...]:
+        entry = entries[call_id]
+        start = start_of(entry)
+        # A span-less child borrows its parent's start and sorts just after
+        # it; with no timestamp anywhere the record's ordinal is the order.
+        nested = (
+            start is not None
+            and entry["start_ns"] is None
+            and entry["parent_call_id"] is not None
+        )
+        ordinal = entry["command_ordinal"]
+        return (
+            0 if start is not None else 1,
+            start if start is not None else 0,
+            1 if nested else 0,
+            ordinal if ordinal is not None else order.index(call_id),
+        )
+
+    rows = []
+    for position, call_id in enumerate(sorted(order, key=sort_key), start=1):
+        row = dict(entries[call_id])
+        row["position"] = position
+        rows.append(row)
+    return {
+        "rows": rows,
+        "record_rows": len(refs),
+        "span_rows": len(execute_spans),
+        "rows_not_in_record": sum(1 for row in rows if not row["in_record"]),
+        "rows_without_span": sum(1 for row in rows if not row["span_recorded"]),
+        "asked_user_outside_dispatch": asked_outside,
+    }
+
+
+# -- (b) decision signals ------------------------------------------------------
+
+
+def turn_decision_signals(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """The turn's intent-resolution chips, from what the NLU spans recorded.
+
+    `intent_margin_min` is the smallest `classifier-topk-margin` among the
+    turn's `fw.nlu.intent` decisions -- the least confident resolution -- and
+    None when no decision carried one (an exact-prefix match records
+    `signals_absent_reason: deterministic-resolution` and no number, which is
+    not confidence 1.0 and not low confidence either). `asked_user` counts
+    `fw.ask_user` spans. `consequence_max` is the worst `consequence_class`
+    any `fw.command.execute` assessed (falling back to `fw.agent.tool_call`
+    when a trace has no execute spans), None when none was assessed.
+    """
+    margins: list[float] = []
+    intent_decisions = 0
+    decisions_without_margin = 0
+    asked = 0
+    execute_classes: list[str] = []
+    tool_call_classes: list[str] = []
+    for span in spans:
+        name = span.get("name")
+        attributes = _span_attributes(span)
+        if name == SPAN_NLU_INTENT:
+            uncertainty = _mapping_attr(attributes.get("decision_uncertainty"))
+            if uncertainty is None:
+                continue
+            intent_decisions += 1
+            found = False
+            signals = uncertainty.get("signals")
+            for signal in signals if isinstance(signals, list) else []:
+                if not isinstance(signal, dict) or signal.get("kind") != SIGNAL_TOPK_MARGIN:
+                    continue
+                value = _finite_number(signal.get("value"))
+                if value is not None:
+                    margins.append(value)
+                    found = True
+            if not found:
+                decisions_without_margin += 1
+        elif name == SPAN_ASK_USER:
+            asked += 1
+        elif name in (SPAN_COMMAND_EXECUTE, SPAN_AGENT_TOOL_CALL):
+            consequence = _mapping_attr(attributes.get("consequence"))
+            cls = consequence.get("consequence_class") if consequence else None
+            if isinstance(cls, str) and cls in CONSEQUENCE_ORDER:
+                (execute_classes if name == SPAN_COMMAND_EXECUTE else tool_call_classes).append(cls)
+    classes = execute_classes or tool_call_classes
+    return {
+        "intent_margin_min": min(margins) if margins else None,
+        "intent_margin_decisions": len(margins),
+        "intent_decisions": intent_decisions,
+        "intent_decisions_without_margin": decisions_without_margin,
+        "asked_user": asked,
+        "consequence_max": (
+            max(classes, key=CONSEQUENCE_ORDER.index) if classes else None
+        ),
+        "consequence_assessed": len(classes),
+    }
+
+
+def is_low_confidence(signals: Mapping[str, Any], threshold: float) -> bool:
+    """Below the threshold on a RECORDED margin only: no signal, not counted."""
+    margin = _finite_number(signals.get("intent_margin_min"))
+    return margin is not None and margin < threshold
+
+
+# -- (d) cost roll-ups ----------------------------------------------------------
+
+
+def llm_call_cost(span: Mapping[str, Any]) -> Optional[float]:
+    """The `cost` an `fw.llm.call` recorded (dspy_logger copies the DSPy
+    history entry's `cost`), or None when it recorded none. A negative or
+    non-numeric value is not a cost and answers None too."""
+    if span.get("name") != SPAN_LLM_CALL:
+        return None
+    cost = _finite_number(_span_attributes(span).get("cost"))
+    return cost if cost is not None and cost >= 0 else None
+
+
+def cost_rollup(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Sum of recorded costs over the LLM calls, with the unrecorded count
+    beside it. `total` is None -- never 0 -- when no call recorded a cost."""
+    calls = recorded = 0
+    total = 0.0
+    for span in spans:
+        if span.get("name") != SPAN_LLM_CALL:
+            continue
+        calls += 1
+        cost = llm_call_cost(span)
+        if cost is not None:
+            recorded += 1
+            total += cost
+    return {
+        "calls": calls,
+        "recorded": recorded,
+        "unrecorded": calls - recorded,
+        "total": total if recorded else None,
+    }
+
+
+def merge_cost_rollups(rollups: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    calls = recorded = unrecorded = 0
+    total = 0.0
+    for rollup in rollups:
+        calls += int(rollup.get("calls") or 0)
+        recorded += int(rollup.get("recorded") or 0)
+        unrecorded += int(rollup.get("unrecorded") or 0)
+        part = _finite_number(rollup.get("total"))
+        if part is not None:
+            total += part
+    return {
+        "calls": calls,
+        "recorded": recorded,
+        "unrecorded": unrecorded,
+        "total": total if recorded else None,
+    }
+
+
+def turn_span_stamps(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Everything a listed turn is stamped with, from one read of its spans."""
+    span_list = list(spans)
+    return {
+        "llm_calls_cut_at_limit": count_llm_calls_cut_at_limit(span_list),
+        "decision_signals": turn_decision_signals(span_list),
+        "llm_cost": cost_rollup(span_list),
+    }
+
+
+def annotate_turn_detail(turn: dict[str, Any], spans: Iterable[Mapping[str, Any]]) -> None:
+    """The opened turn: its ledger, chips and cost, from the trace the route
+    already reads. Live and workspace routes both call this."""
+    span_list = list(spans)
+    turn["execution_ledger"] = execution_ledger(turn.get("record"), span_list)
+    turn.update(turn_span_stamps(span_list))
+
+
+# -- (c) provenance and comparability -------------------------------------------
+
+
+def _flatten_provenance(prefix: str, value: Any, out: dict[str, Any]) -> None:
+    """Nested provenance maps flatten to dotted keys; scalars and lists stay
+    as they are, so a per-emitter contract version reads as
+    `span_contract_versions.fw.turn: 1`."""
+    if isinstance(value, dict):
+        for key in sorted(value):
+            _flatten_provenance(f"{prefix}.{key}" if prefix else str(key), value[key], out)
+    else:
+        out[prefix] = value
+
+
+def _git_revision_of(record: Mapping[str, Any]) -> Optional[str]:
+    """The engine's source revision, wherever a harness put it in the record.
+
+    The evidence-run record (`EvidenceRun.as_record`) carries the
+    ObservabilityProvenance only; the EngineProvenance with
+    `source_revision` lives in the harness's RuntimeProvenance bundle, which
+    this store never persists. These are the places a record might hold it;
+    none of the trial's records did.
+    """
+    candidates = (
+        record.get("engine"),
+        (record.get("provenance") or {}).get("engine")
+        if isinstance(record.get("provenance"), dict)
+        else None,
+        (record.get("runtime") or {}).get("engine")
+        if isinstance(record.get("runtime"), dict)
+        else None,
+    )
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            for key in ("source_revision", "git_revision"):
+                if _text_or_none(candidate.get(key)):
+                    return candidate[key]
+    for key in ("source_revision", "git_revision"):
+        if _text_or_none(record.get(key)):
+            return record[key]
+    return None
+
+
+def experiment_provenance(
+    detail: Mapping[str, Any], attempts: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """An experiment's provenance, one field per row, keys verbatim.
+
+    Three sources, each named on its field: the experiment row's own columns;
+    the evidence-run records' `observability` block (ObservabilityProvenance:
+    capture policy and span-contract versions, per-emitter versions, DB
+    schema, the FW_OBS_* config in effect); and the attempts' runtime
+    snapshots (workflow fingerprint and model version). A field two segments
+    or two attempts disagree on is reported with every value and where each
+    came from, never collapsed to one. `git_revision` is listed even when
+    nothing recorded it, because its absence is the fact a reader needs.
+    """
+    fields: list[dict[str, Any]] = []
+
+    def add(key: str, source: str, observations: list[tuple[str, Any]]) -> None:
+        recorded = [(where, value) for where, value in observations if value is not None]
+        if not recorded:
+            fields.append(
+                {"key": key, "source": source, "recorded": False, "value": None,
+                 "consistent": True, "values": []}
+            )
+            return
+        distinct: list[Any] = []
+        for _, value in recorded:
+            if value not in distinct:
+                distinct.append(value)
+        fields.append(
+            {
+                "key": key,
+                "source": source,
+                "recorded": True,
+                "value": distinct[0] if len(distinct) == 1 else None,
+                "consistent": len(distinct) == 1,
+                "values": [{"where": where, "value": value} for where, value in recorded],
+            }
+        )
+
+    for column in _EXPERIMENT_PROVENANCE_COLUMNS:
+        add(column, "experiment", [("experiment", detail.get(column))])
+
+    per_key: dict[str, list[tuple[str, Any]]] = {}
+    revisions: list[tuple[str, Any]] = []
+    for segment in detail.get("evidence_runs") or []:
+        record = segment.get("record") if isinstance(segment, dict) else None
+        if not isinstance(record, dict):
+            continue
+        where = f"evidence segment #{segment.get('seq')}"
+        observability = record.get("observability")
+        flat: dict[str, Any] = {}
+        if isinstance(observability, dict):
+            _flatten_provenance("", observability, flat)
+        for key, value in flat.items():
+            per_key.setdefault(key, []).append((where, value))
+        revisions.append((where, _git_revision_of(record)))
+    for key in sorted(per_key):
+        add(key, "evidence_run", per_key[key])
+    add("git_revision", "evidence_run", revisions)
+
+    snapshot_keys: dict[str, list[tuple[str, Any]]] = {}
+    for row in attempts:
+        snapshot = row.get("runtime_snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        where = f"attempt {row.get('task_id')}#{row.get('attempt')}"
+        for key in _SNAPSHOT_PROVENANCE_KEYS:
+            if key in snapshot:
+                snapshot_keys.setdefault(key, []).append((where, snapshot[key]))
+        features = snapshot.get("effective_features")
+        if isinstance(features, dict):
+            for name in sorted(features):
+                snapshot_keys.setdefault(f"effective_features.{name}", []).append(
+                    (where, features[name])
+                )
+    for key in sorted(snapshot_keys):
+        add(key, "runtime_snapshot", snapshot_keys[key])
+
+    return {
+        "fields": fields,
+        "recorded": sum(1 for field in fields if field["recorded"]),
+        "unrecorded": sum(1 for field in fields if not field["recorded"]),
+        "inconsistent": sum(1 for field in fields if not field["consistent"]),
+    }
+
+
+def provenance_differences(
+    treatment: Mapping[str, Any], baseline: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Every provenance field the two experiments do not agree on, verbatim.
+
+    A field recorded on one side and not the other differs; a field recorded
+    on neither does not (there is nothing to quote). A field a side's own
+    segments disagree on is compared as the list of its observed values.
+    """
+
+    def by_key(provenance: Mapping[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+        return {
+            (field["source"], field["key"]): field
+            for field in provenance.get("fields") or []
+        }
+
+    def value_of(field: Optional[Mapping[str, Any]]) -> Any:
+        if field is None or not field.get("recorded"):
+            return None
+        if field.get("consistent"):
+            return field.get("value")
+        return [entry.get("value") for entry in field.get("values") or []]
+
+    left, right = by_key(treatment), by_key(baseline)
+    differences = []
+    for source, key in sorted(set(left) | set(right)):
+        t_value = value_of(left.get((source, key)))
+        b_value = value_of(right.get((source, key)))
+        if t_value is None and b_value is None:
+            continue
+        if t_value == b_value:
+            continue
+        differences.append(
+            {"key": key, "source": source, "treatment": t_value, "baseline": b_value}
+        )
+    return differences
 
 
 def load_index_html() -> bytes:
@@ -1628,6 +2211,20 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     self._error(400, "attempt must be an integer")
                     return
+            # (b) the rail's low-confidence filter: a turn whose least
+            # confident intent decision recorded a top-k margin below this.
+            # Applied to the annotated page, after the store's own filters;
+            # a turn with no recorded margin is never counted.
+            low_confidence_below = None
+            if q("low_confidence_below") is not None:
+                low_confidence_below = _finite_number(
+                    self._float_or_none(q("low_confidence_below"))
+                )
+                if low_confidence_below is None or low_confidence_below < 0:
+                    self._error(
+                        400, "low_confidence_below must be a non-negative number"
+                    )
+                    return
             turns = store.list_turns(
                 channel_id=q("channel"),
                 conversation_id=(
@@ -1650,6 +2247,12 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 offset=self._int(q("offset"), 0),
             )
             annotate_turn_rows(store, turns)
+            if low_confidence_below is not None:
+                turns = [
+                    turn
+                    for turn in turns
+                    if is_low_confidence(turn["decision_signals"], low_confidence_below)
+                ]
             self._send_json({"turns": turns})
         elif path.startswith("/api/turn/"):
             turn_key = path[len("/api/turn/") :]
@@ -1661,6 +2264,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 turn["record"] = json.loads(turn.pop("record_json"))
             except (ValueError, KeyError):
                 turn["record"] = None
+            annotate_turn_detail(turn, store.get_spans(turn_key))
             self._send_json({"turn": turn})
         elif path == "/api/feedback":
             self._send_json(
@@ -1875,6 +2479,15 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                                 segment["store_id"], segment["local_experiment_id"]
                             )
                         )
+                        local = workspace.experiment(
+                            segment["store_id"], segment["local_experiment_id"]
+                        )
+                        segment["provenance"] = experiment_provenance(
+                            local or {},
+                            workspace.attempts_in_store(
+                                segment["store_id"], segment["local_experiment_id"]
+                            ),
+                        )
                     self._send_json({"segments": segments})
                 elif operation == "tasks":
                     self._send_json({"tasks": workspace.tasks(experiment_id)})
@@ -1906,6 +2519,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     if turn is None:
                         self._error(404, "turn not found in the named store")
                         return
+                    annotate_turn_detail(
+                        turn, workspace.trace(store_id, logical_turn_key)
+                    )
                     self._send_json({"turn": turn})
                 else:
                     self._send_json(
@@ -2153,6 +2769,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 self._error(404, "experiment not found")
                 return
             detail["evidence"] = evidence_verdict(detail.get("evidence_runs"))
+            detail["provenance"] = experiment_provenance(
+                detail, store.experiment_attempt_rows(experiment_id)
+            )
             self._send_json({"experiment": detail})
         elif sub == "tasks":
             if store.get_experiment(experiment_id) is None:
@@ -2196,6 +2815,19 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             except ExperimentNotFound as exc:
                 self._error(404, f"experiment not found: {exc.experiment_id}")
                 return
+            # (c) the comparability check rides along on BOTH answers: a
+            # provenance difference is quoted, never a refusal, so the 409 the
+            # store already issues for a differing benchmark pin stays the
+            # only thing that blocks the view.
+            baseline_detail = store.get_experiment(baseline)
+            comparison["provenance_differences"] = provenance_differences(
+                experiment_provenance(
+                    detail, store.experiment_attempt_rows(experiment_id)
+                ),
+                experiment_provenance(
+                    baseline_detail or {}, store.experiment_attempt_rows(baseline)
+                ),
+            )
             # 409, not 200-with-a-flag: an incomparable pair is a refusal, and a
             # client that renders whatever it got would render a comparison of
             # two runs that share no task.
@@ -2296,6 +2928,13 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         if base_type in _HTMLISH_TYPES:
             headers["X-FW-Artifact-Htmlish"] = "1"
         self._send(200, bytes(value), content_type, headers)
+
+    @staticmethod
+    def _float_or_none(value: Optional[str]) -> Optional[float]:
+        try:
+            return float(value) if value is not None else None
+        except ValueError:
+            return None
 
     @staticmethod
     def _int(value: Optional[str], default: Any) -> Any:

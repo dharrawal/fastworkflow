@@ -310,6 +310,32 @@ main { flex: 1; display: flex; min-height: 0; }
 .evidenceSegment, .serverConfig { margin-top: 6px; }
 .evidenceSegment .kv, .serverConfig .kv { grid-template-columns: 210px 1fr; font-size: 12px; }
 .serverConfig pre.json { margin: 0; }
+/* fix-aou (b)/(d): decision-signal and cost chips on turn rows and headers */
+.chipSignal, .chipCost {
+  display: inline-block; font-size: 10px; font-weight: 600; border-radius: 999px;
+  padding: 0 7px; margin-left: 6px; border: 1px solid var(--border);
+  color: var(--muted); vertical-align: 1px; white-space: nowrap;
+}
+.chipSignal.low { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
+.chipSignal.asked { color: var(--bar-human); border-color: var(--bar-human); }
+.chipSignal.consequence { color: var(--bar-command); border-color: var(--bar-command); }
+.chipCost.unrecorded { font-style: italic; }
+.filters .lowConf { display: flex; align-items: center; gap: 6px; font-size: 11px;
+  color: var(--muted); }
+.filters .lowConf input[type=number] { width: 64px; }
+/* fix-aou (a): the turn's execution ledger, one row per dispatch */
+.ledgerWrap { overflow-x: auto; }
+table.ledger { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+table.ledger th, table.ledger td { text-align: left; padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+table.ledger th { color: var(--muted); font-weight: 600; }
+table.ledger tr.child td:first-child { padding-left: 18px; }
+table.ledger tr.openable { cursor: pointer; }
+table.ledger td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* fix-aou (c): provenance folds on the experiment page; differences quoted */
+.provenance, .provDiff { margin-top: 6px; }
+.provenance .kv, .provDiff .kv { grid-template-columns: 260px 1fr; font-size: 12px; }
+.provenance dd.unrecorded { color: var(--muted); font-style: italic; }
 .kv { display: grid; grid-template-columns: 130px 1fr; gap: 3px 12px; margin-top: 8px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
@@ -544,6 +570,11 @@ button.newConv:hover { filter: brightness(1.1); }
       </select>
       <input type="text" id="fCommand" placeholder="command filter">
       <input type="text" id="fContext" placeholder="context filter">
+      <label class="lowConf" title="Shows turns whose least confident intent decision recorded a classifier top-k margin below this value. No calibrated threshold is on record (decision signals are capture-only), so 0.20 is a viewing default, not a policy. A turn with no recorded margin is never counted.">
+        <input type="checkbox" id="fLowConf">
+        low confidence: margin below
+        <input type="number" id="fLowConfMargin" min="0" max="1" step="0.05" value="0.2">
+      </label>
       <button id="experimentsBtn">Experiments</button>
       <button id="benchmarksBtn">Benchmarks</button>
     </div>
@@ -775,12 +806,17 @@ function fmtTokens(tokens) {
   if (!tokens.in && !tokens.out) { return fmtCount(tokens.total) + " tok"; }
   return "tok - " + fmtCount(tokens.in) + " in, " + fmtCount(tokens.out) + " out";
 }
-function fmtCost(duration, tokens) {
-  /* Latency and tokens are the two costs of a level; a level that spent no
+function fmtCost(duration, tokens, cost) {
+  /* Latency, tokens and money are the costs of a level; a level that spent no
      tokens says so by omission rather than by a "0 tok" that reads like a
-     measurement failure. */
+     measurement failure, and a level whose calls recorded no cost says
+     "cost not recorded" rather than nothing (fix-aou (d)). */
+  var parts = duration ? [duration] : [];
   var text = fmtTokens(tokens);
-  return text ? duration + " | " + text : duration;
+  if (text) { parts.push(text); }
+  var money = fmtCostAmount(cost);
+  if (money) { parts.push(money); }
+  return parts.join(" | ");
 }
 function fmtTs(iso) {
   if (!iso) { return "—"; }
@@ -1002,6 +1038,278 @@ function renderServerConfiguration(container, attempt) {
   container.appendChild(det);
 }
 
+/* -- decision-signal chips [fix-aou (b)] --------------------------------- */
+/* `signals` is the server's turn_decision_signals(): the least confident
+   intent decision's classifier top-k margin (null when no decision recorded
+   one -- an exact-prefix match records no number, which is neither confident
+   nor low), how many times the user was asked, and the worst consequence
+   class a dispatch was assessed at. No signal = no chip, and never a filter
+   hit. The threshold is the user's: no calibrated one is on record, because
+   decision_signals is capture-only, so the default below is a viewing aid
+   the rail says as much about. */
+var LOW_CONFIDENCE_DEFAULT_MARGIN = 0.2;
+function lowConfidenceThreshold() {
+  var field = document.getElementById("fLowConfMargin");
+  var value = field ? parseFloat(field.value) : NaN;
+  return isFinite(value) && value >= 0 ? value : LOW_CONFIDENCE_DEFAULT_MARGIN;
+}
+function finiteNumber(value) {
+  return typeof value === "number" && isFinite(value) ? value : null;
+}
+function signalChips(signals) {
+  var chips = [];
+  if (!signals || typeof signals !== "object") { return chips; }
+  var margin = finiteNumber(signals.intent_margin_min);
+  if (margin !== null) {
+    var low = margin < lowConfidenceThreshold();
+    var n = signals.intent_margin_decisions || 0;
+    chips.push(el("span", "chipSignal" + (low ? " low" : ""),
+      (low ? "low confidence · " : "") + "margin " + margin.toFixed(3)
+      + (n > 1 ? " (min of " + n + ")" : "")));
+  }
+  if (signals.asked_user) {
+    chips.push(el("span", "chipSignal asked",
+      "asked the user" + (signals.asked_user > 1 ? " ×" + signals.asked_user : "")));
+  }
+  if (typeof signals.consequence_max === "string" && signals.consequence_max) {
+    var m = signals.consequence_assessed || 0;
+    chips.push(el("span", "chipSignal consequence",
+      "consequence " + signals.consequence_max
+      + (m > 1 ? " (max of " + m + ")" : "")));
+  }
+  return chips;
+}
+function appendSignalChips(parent, signals) {
+  signalChips(signals).forEach(function (chip) { parent.appendChild(chip); });
+}
+
+/* -- cost roll-ups [fix-aou (d)] ------------------------------------------ */
+/* An fw.llm.call's `cost` attribute is what dspy_logger copied from the DSPy
+   history entry (the provider cost as litellm reported it, in USD). A call
+   that recorded none is counted as unrecorded, never as free. */
+function noCost() { return { calls: 0, recorded: 0, unrecorded: 0, total: null }; }
+function spanCost(span) {
+  if (!span || span.name !== "fw.llm.call") { return noCost(); }
+  var value = finiteNumber((span.attributes || {}).cost);
+  if (value === null || value < 0) {
+    return { calls: 1, recorded: 0, unrecorded: 1, total: null };
+  }
+  return { calls: 1, recorded: 1, unrecorded: 0, total: value };
+}
+function addCost(a, b) {
+  var recorded = a.recorded + b.recorded;
+  return {
+    calls: a.calls + b.calls,
+    recorded: recorded,
+    unrecorded: a.unrecorded + b.unrecorded,
+    total: recorded ? (a.total || 0) + (b.total || 0) : null
+  };
+}
+function sumCost(nodes) {
+  return nodes.reduce(function (total, node) {
+    return addCost(total, node.cost || noCost());
+  }, noCost());
+}
+function fmtCostAmount(cost) {
+  /* "" for a level that made no LLM call; "cost not recorded" when calls were
+     made and none recorded a cost; the sum otherwise, with the count of calls
+     it does not cover. Never a zero standing in for unknown. */
+  if (!cost || typeof cost !== "object" || !cost.calls) { return ""; }
+  if (!cost.recorded || finiteNumber(cost.total) === null) { return "cost not recorded"; }
+  var text = "cost " + cost.total.toFixed(4);
+  if (cost.unrecorded) {
+    text += " (" + cost.unrecorded
+      + (cost.unrecorded === 1 ? " call" : " calls") + " not recorded)";
+  }
+  return text;
+}
+function appendCostChip(parent, cost) {
+  var text = fmtCostAmount(cost);
+  if (!text) { return; }
+  parent.appendChild(el("span", "chipCost" + (cost.recorded ? "" : " unrecorded"), text));
+}
+
+/* -- execution ledger [fix-aou (a)] --------------------------------------- */
+/* `ledger` is the server's execution_ledger(): the turn record's
+   execution_records joined on command_call_id with the trace's
+   fw.command.execute spans and the child_calls those spans file. A row's
+   status is the span's own status column -- ok, error, or cancelled for a
+   control signal -- and a row with no span has none and says so. A resumed
+   turn is one ledger: dispatches from before the suspension keep their spans
+   and come first, flagged as no longer listed by the record itself. */
+function renderExecutionLedger(container, turn, openSpan) {
+  var ledger = turn.execution_ledger;
+  if (!ledger || typeof ledger !== "object") {
+    container.appendChild(el("div", "empty", "No execution ledger in this view."));
+    return;
+  }
+  var rows = ledger.rows || [];
+  var summary = rows.length + (rows.length === 1 ? " dispatch" : " dispatches")
+    + " · " + ledger.record_rows + " in the turn record · "
+    + ledger.span_rows + " execute spans";
+  if (ledger.rows_not_in_record) {
+    summary += " · " + ledger.rows_not_in_record + " known only from spans"
+      + (turn.suspended_ms || turn.continuation_of
+        ? " (the record lists only dispatches since the last resume)" : "");
+  }
+  if (ledger.asked_user_outside_dispatch) {
+    summary += " · asked the user " + ledger.asked_user_outside_dispatch
+      + "× outside any dispatch";
+  }
+  container.appendChild(el("div", "sub", summary));
+  if (!rows.length) {
+    container.appendChild(el("div", "empty", "This turn dispatched no command."));
+    return;
+  }
+  var wrap = el("div", "ledgerWrap");
+  var table = el("table", "ledger");
+  var head = el("tr");
+  ["#", "command_call_id", "parent", "command", "context", "status", "duration",
+   "asked user", "recorded in"].forEach(function (h) {
+    head.appendChild(el("th", null, h));
+  });
+  table.appendChild(head);
+  rows.forEach(function (row) {
+    var tr = el("tr", row.parent_call_id ? "child" : null);
+    tr.appendChild(el("td", null, String(row.position)));
+    tr.appendChild(el("td", "mono", row.command_call_id));
+    tr.appendChild(el("td", "mono",
+      row.parent_call_id ? "↳ " + row.parent_call_id.slice(0, 8) : "—"));
+    tr.appendChild(el("td", null,
+      row.command_name ? policedText(row.command_name) : "(not recorded)"));
+    tr.appendChild(el("td", null, row.context ? policedText(row.context) : "—"));
+    var statusText = row.status ? row.status : "no span recorded";
+    if (row.status && row.success === false) { statusText += " · success false"; }
+    tr.appendChild(el("td", null, statusText));
+    tr.appendChild(el("td", null,
+      row.duration_ns === null || row.duration_ns === undefined
+        ? (row.span_recorded ? "open…" : "—") : fmtNs(row.duration_ns)));
+    tr.appendChild(el("td", null,
+      row.asked_user ? "yes" + (row.asked_user > 1 ? " ×" + row.asked_user : "") : "no"));
+    var where = [];
+    if (row.in_record) { where.push("turn record"); }
+    if (row.span_recorded) { where.push("span"); }
+    if (row.child_call) { where.push("parent's child_calls"); }
+    tr.appendChild(el("td", null, where.join(" + ") || "—"));
+    if (row.span_id && openSpan) {
+      tr.classList.add("openable");
+      tr.title = "open this dispatch's span";
+      tr.addEventListener("click", function () { openSpan(row.span_id); });
+    }
+    table.appendChild(tr);
+  });
+  wrap.appendChild(table);
+  container.appendChild(wrap);
+}
+function findSpanPath(node, spanId) {
+  if (node.span && node.span.span_id === spanId) { return [node]; }
+  for (var i = 0; i < node.children.length; i++) {
+    var found = findSpanPath(node.children[i], spanId);
+    if (found) { return [node].concat(found); }
+  }
+  return null;
+}
+function openSpanInTree(spanId) {
+  var root = state.path[0];
+  var path = root ? findSpanPath(root, spanId) : null;
+  if (!path) { return; }
+  state.path = path;
+  renderLevel();
+}
+
+/* -- provenance and comparability [fix-aou (c)] --------------------------- */
+/* `provenance` is the server's experiment_provenance(): one field per row,
+   keys verbatim, each naming its source -- the experiment row, the
+   evidence-run records' observability provenance, or the attempts' runtime
+   snapshots -- with "not recorded" where nothing was, and every observed
+   value listed when segments or attempts disagree. `differences` is
+   provenance_differences(): what the two compared experiments do not agree
+   on, quoted, and never a reason to withhold the comparison. */
+function provenanceValueText(value) {
+  if (value === null || value === undefined) { return "null"; }
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+var PROVENANCE_SOURCE_LABEL = {
+  experiment: "experiment row",
+  evidence_run: "evidence-run record (observability provenance)",
+  runtime_snapshot: "attempt runtime snapshots"
+};
+function renderProvenance(container, provenance, label) {
+  var det = el("details", "provenance");
+  var fields = provenance && provenance.fields ? provenance.fields : [];
+  var recorded = provenance ? provenance.recorded || 0 : 0;
+  var unrecorded = provenance ? provenance.unrecorded || 0 : 0;
+  det.appendChild(el("summary", null, (label || "provenance") + " · "
+    + recorded + " recorded"
+    + (unrecorded ? " · " + unrecorded + " not recorded" : "")
+    + (provenance && provenance.inconsistent
+      ? " · " + provenance.inconsistent + " inconsistent" : "")));
+  if (!fields.length) {
+    det.appendChild(el("div", "sub", "no provenance fields in this view"));
+  }
+  var bySource = {};
+  fields.forEach(function (field) {
+    (bySource[field.source] = bySource[field.source] || []).push(field);
+  });
+  Object.keys(bySource).forEach(function (source) {
+    det.appendChild(el("div", "sub", PROVENANCE_SOURCE_LABEL[source] || source));
+    var kv = el("dl", "kv");
+    bySource[source].forEach(function (field) {
+      kv.appendChild(el("dt", null, field.key));
+      var dd = el("dd");
+      if (!field.recorded) {
+        dd.className = "unrecorded";
+        dd.textContent = "not recorded";
+      } else if (field.consistent) {
+        dd.textContent = provenanceValueText(field.value);
+      } else {
+        dd.appendChild(el("div", null, "differs within this experiment:"));
+        (field.values || []).forEach(function (entry) {
+          dd.appendChild(el("div", null,
+            entry.where + ": " + provenanceValueText(entry.value)));
+        });
+      }
+      kv.appendChild(dd);
+    });
+    det.appendChild(kv);
+  });
+  det.addEventListener("click", function (evt) { evt.stopPropagation(); });
+  container.appendChild(det);
+}
+
+function renderProvenanceDifferences(container, differences) {
+  var box = el("div", "provDiff");
+  if (!differences) {
+    box.appendChild(el("div", "sub",
+      "provenance comparability not checked in this view"));
+    container.appendChild(box);
+    return;
+  }
+  if (!differences.length) {
+    box.appendChild(el("div", "sub",
+      "provenance: no field differs between the two experiments"));
+    container.appendChild(box);
+    return;
+  }
+  var warn = el("div", "nonComparable");
+  warn.appendChild(el("strong", null, "Provenance differs in " + differences.length
+    + (differences.length === 1 ? " field" : " fields")
+    + " (the comparison is shown regardless)."));
+  var kv = el("dl", "kv");
+  differences.forEach(function (d) {
+    kv.appendChild(el("dt", null, d.key + " (" + d.source + ")"));
+    var dd = el("dd");
+    dd.appendChild(el("div", null, "treatment: " + (d.treatment === null || d.treatment === undefined
+      ? "not recorded" : provenanceValueText(d.treatment))));
+    dd.appendChild(el("div", null, "baseline: " + (d.baseline === null || d.baseline === undefined
+      ? "not recorded" : provenanceValueText(d.baseline))));
+    kv.appendChild(dd);
+  });
+  warn.appendChild(kv);
+  box.appendChild(warn);
+  container.appendChild(box);
+}
+
 /* -- header status pill ------------------------------------------------ */
 function setPill(cls, text) {
   var pill = document.getElementById("statusPill");
@@ -1180,6 +1488,12 @@ function turnQuery() {
   /* Server-side substring filter: a match older than the newest page must
      still be found, so filtering cannot happen client-side over one page. */
   if (context) { params.push("context=" + encodeURIComponent(context)); }
+  /* Server-side too, for the same reason: the margin is derived per turn from
+     its spans, and a low-confidence turn older than the newest page must still
+     be found. A turn with no recorded margin never matches. */
+  if (document.getElementById("fLowConf").checked) {
+    params.push("low_confidence_below=" + encodeURIComponent(lowConfidenceThreshold()));
+  }
   return "/api/turns?" + params.join("&");
 }
 
@@ -1197,14 +1511,19 @@ function renderNestedTurns(turns) {
        every row would just crowd out the message. */
     var sub = el("div", "sub", statusTxt + " · " + fmtTs(t.started_at));
     appendTokenLimitChip(sub, t.llm_calls_cut_at_limit);
+    appendSignalChips(sub, t.decision_signals);
+    appendCostChip(sub, t.llm_cost);
     item.appendChild(sub);
     item.addEventListener("click", function () { selectTurn(t.turn_key); });
     list.appendChild(item);
   });
   return list;
 }
-["fStatus", "fSuccess"].forEach(function (id) {
+["fStatus", "fSuccess", "fLowConf"].forEach(function (id) {
   document.getElementById(id).addEventListener("change", refreshConvs);
+});
+document.getElementById("fLowConfMargin").addEventListener("change", function () {
+  if (document.getElementById("fLowConf").checked) { refreshConvs(); }
 });
 ["fCommand", "fContext"].forEach(function (id) {
   document.getElementById(id).addEventListener("keydown", function (e) {
@@ -1437,6 +1756,9 @@ function showExperiment(experimentId) {
     }
     pair("created", exp.created_at);
     card.appendChild(kv);
+    /* Collapsed: what this experiment ran under, keys verbatim, with
+       "not recorded" where the store holds nothing (fix-aou (c)). */
+    renderProvenance(card, exp.provenance, "provenance");
     if (!score.reportable && score.reason_not_reportable) {
       card.appendChild(el("div", "sub", score.reason_not_reportable));
     }
@@ -1508,6 +1830,7 @@ function renderComparison(container, cmp) {
     box.appendChild(el("strong", null, "Not comparable."));
     (cmp.problems || []).forEach(function (p) { box.appendChild(el("div", null, p)); });
     container.appendChild(box);
+    renderProvenanceDifferences(container, cmp.provenance_differences);
     return;
   }
   var kv = el("dl", "kv");
@@ -1530,6 +1853,9 @@ function renderComparison(container, cmp) {
     + "threshold on a noisy quantity. The expectation above is what chance "
     + "alone would produce at these pass rates. It is not a significance test.";
   container.appendChild(note);
+  /* The comparability check: every provenance field the two arms differ on,
+     quoted. It qualifies the comparison above; it does not withhold it. */
+  renderProvenanceDifferences(container, cmp.provenance_differences);
 }
 
 function showExperimentTask(experimentId, taskId, label) {
@@ -1569,6 +1895,7 @@ function showExperimentTask(experimentId, taskId, label) {
         + "  · " + row.channel_id;
       var subLine = el("div", "sub", sub);
       appendTokenLimitChip(subLine, row.llm_calls_cut_at_limit);
+      appendCostChip(subLine, row.llm_cost);
       item.appendChild(subLine);
       /* The attempt row carries the evidence verdict with its stored reasons
          and the collapsed server configuration; the per-segment deltas stay
@@ -2143,12 +2470,16 @@ function scopedTraceHref(storeId, logicalTurnKey) {
     + "&logical_turn_key=" + encodeURIComponent(logicalTurnKey);
 }
 
-function workspaceTurnLink(storeId, logicalTurnKey, label, cutAtLimit) {
+function workspaceTurnLink(storeId, logicalTurnKey, label, cutAtLimit, stamps) {
   var row = el("div", "listItem");
   row.appendChild(el("div", "title", label || logicalTurnKey));
   var sub = el("div", "sub",
     "store " + storeId + " · logical turn key " + logicalTurnKey);
   appendTokenLimitChip(sub, cutAtLimit);
+  if (stamps) {
+    appendSignalChips(sub, stamps.decision_signals);
+    appendCostChip(sub, stamps.llm_cost);
+  }
   row.appendChild(sub);
   row.setAttribute("data-store-id", storeId);
   row.setAttribute("data-logical-turn-key", logicalTurnKey);
@@ -2174,6 +2505,7 @@ function renderWorkspaceAttempt(container, row, provenance) {
   var outcomeLine = el("div", "sub",
     "outcome " + outcome + " · source " + source);
   appendTokenLimitChip(outcomeLine, row.llm_calls_cut_at_limit);
+  appendCostChip(outcomeLine, row.llm_cost);
   box.appendChild(outcomeLine);
   /* Native rows carry their own verdict and stamp; a projected row's come
      from the first source the archive resolved for it. */
@@ -2195,6 +2527,7 @@ function renderWorkspaceAttempt(container, row, provenance) {
       store_id: ref.store_id,
       logical_turn_key: ref.logical_turn_key,
       cut: ref.llm_calls_cut_at_limit,
+      stamps: ref,
       label: provenance === "projected history"
         ? "projected logical turn" : "labelled turn"
     });
@@ -2206,6 +2539,7 @@ function renderWorkspaceAttempt(container, row, provenance) {
         store_id: ref.store_id,
         logical_turn_key: ref.logical_turn_key,
         cut: (sourceRow.resolved_turn || {}).llm_calls_cut_at_limit,
+        stamps: sourceRow.resolved_turn || null,
         label: "projected logical turn"
       });
     }
@@ -2216,6 +2550,7 @@ function renderWorkspaceAttempt(container, row, provenance) {
         store_id: turn.store_id,
         logical_turn_key: turn.logical_turn_key,
         cut: turn.llm_calls_cut_at_limit,
+        stamps: turn,
         label: "projected logical turn"
       });
     }
@@ -2228,7 +2563,8 @@ function renderWorkspaceAttempt(container, row, provenance) {
       ref.store_id,
       ref.logical_turn_key,
       ref.label + " " + (index + 1),
-      ref.cut
+      ref.cut,
+      ref.stamps
     ));
   });
   container.appendChild(box);
@@ -2261,6 +2597,8 @@ function showWorkspaceExperiment(experiment) {
       /* The archive's own evidence verdict for this segment, reasons
          verbatim, writer-health delta folded under it. */
       renderEvidenceVerdict(segBox, segment.evidence);
+      renderProvenance(segBox, segment.provenance,
+        "provenance · segment " + segment.segment_id);
       head.appendChild(segBox);
     });
     d.appendChild(head);
@@ -2498,6 +2836,7 @@ function makeNode(kind, title, opts) {
     children: opts.children || [],
     extent: opts.extent || { start: 0, end: 1, open: false },
     tokens: opts.tokens || noTokens(),
+    cost: opts.cost || noCost(),
     /* calls cut at the token limit inside this level, own span included */
     cut: opts.cut !== undefined ? opts.cut : sumCut(opts.children || []),
     render: opts.render || function () {}
@@ -2613,6 +2952,7 @@ function spanNode(span, kids, byId) {
     children: children,
     extent: spanExtent([span]),
     tokens: addTokens(spanTokens(span), sumTokens(children)),
+    cost: addCost(spanCost(span), sumCost(children)),
     cut: (llmCallCutAtLimit(span) ? 1 : 0) + sumCut(children),
     render: function (container) { renderSpanLevel(container, span, role); }
   });
@@ -2651,6 +2991,7 @@ function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
     children: children,
     extent: spanExtent([span]),
     tokens: sumTokens(children),
+    cost: sumCost(children),
     render: function (container) {
       container.appendChild(el("div", "levelLead",
         "The agent reads the observation from its trajectory, states its " +
@@ -2699,6 +3040,7 @@ function buildRecordedExecutionNode(span, kids, byId, ordinalLabel) {
     children: children,
     extent: spanExtent([span]),
     tokens: sumTokens(children),
+    cost: sumCost(children),
     render: function (container) {
       container.appendChild(el("div", "levelLead",
         "The agent loop: each step turns an observation into reasoning and a " +
@@ -2781,6 +3123,7 @@ function buildStepNode(step, incomingObservation, kids, byId) {
     children: children,
     extent: spanExtent(covered),
     tokens: sumTokens(children),
+    cost: sumCost(children),
     render: function (container) {
       var lead = el("div", "levelLead",
         "The agent reads the observation from its trajectory, states its " +
@@ -2853,6 +3196,7 @@ function buildExecutionNode(spans, kids, byId, ordinalLabel) {
     children: children,
     extent: spanExtent(spans),
     tokens: sumTokens(children),
+    cost: sumCost(children),
     render: function (container) {
       container.appendChild(el("div", "levelLead",
         "The agent loop: each step turns an observation into reasoning and a " +
@@ -2897,6 +3241,7 @@ function buildPlanningNode(spans, kids, byId, ordinalLabel) {
     children: children,
     extent: spanExtent(spans),
     tokens: sumTokens(children),
+    cost: sumCost(children),
     render: function (container) {
       container.appendChild(el("div", "levelLead",
         "The planner turns the user's message into the numbered next steps " +
@@ -2929,6 +3274,7 @@ function buildOtherNode(spans, kids, byId) {
     children: children,
     extent: spanExtent(spans),
     tokens: sumTokens(children),
+    cost: sumCost(children),
     render: function (container) {
       container.appendChild(el("div", "levelLead",
         "Work outside planning and execution — bookkeeping the turn does " +
@@ -2996,12 +3342,14 @@ function buildTurnTree(turn, spans) {
     children: children,
     extent: extent,
     tokens: sumTokens(children),
+    cost: sumCost(children),
     render: function (container) { renderTurnLevel(container, turn); }
   });
 }
 
 function renderTurnLevel(container, turn) {
   container.appendChild(statusBadge(turn));
+  appendSignalChips(container, turn.decision_signals);
   var kv = el("dl", "kv");
   function row(k, v) {
     if (v === null || v === undefined || v === "") { return; }
@@ -3021,6 +3369,7 @@ function renderTurnLevel(container, turn) {
   }
   if (turn.suspended_ms) { row("suspended (human wait)", fmtMs(turn.suspended_ms)); }
   row("failure_reason", policedText(turn.failure_reason));
+  row("LLM cost", fmtCostAmount(turn.llm_cost));
   container.appendChild(kv);
   var um = el("div", "msgBlock");
   um.appendChild(el("span", "lbl", "user message"));
@@ -3086,9 +3435,9 @@ function renderLevel() {
   }
   if (!node.extent.open && node.extent.end > node.extent.start) {
     head.appendChild(el("span", "levelDur", fmtCost(
-      fmtNs(node.extent.end - node.extent.start), node.tokens)));
-  } else if (node.tokens.total) {
-    head.appendChild(el("span", "levelDur", fmtTokens(node.tokens)));
+      fmtNs(node.extent.end - node.extent.start), node.tokens, node.cost)));
+  } else if (node.tokens.total || node.cost.calls) {
+    head.appendChild(el("span", "levelDur", fmtCost("", node.tokens, node.cost)));
   }
   info.appendChild(head);
   node.render(info);
@@ -3104,6 +3453,11 @@ function renderLevel() {
   if (node.kind === "turn") {
     /* Turn level only: the whole recorded turn, expanded, per the design —
        lower levels are about their own slice and should not repeat it. */
+    var ledgerCard = el("div", "card");
+    ledgerCard.appendChild(el("h2", null, "Execution ledger"));
+    renderExecutionLedger(ledgerCard, state.turn, openSpanInTree);
+    d.appendChild(ledgerCard);
+
     var arts = el("div", "card");
     arts.appendChild(el("h2", null, "Artifacts"));
     renderArtifacts(arts, state.turn);
@@ -3138,6 +3492,12 @@ function renderDetail(turn, spans) {
     var note = el("div", "card");
     note.appendChild(el("div", "empty", "No spans recorded for this turn."));
     d.appendChild(note);
+    /* The record's own ledger still stands without spans: rows without a
+       span say so. */
+    var ledgerCard = el("div", "card");
+    ledgerCard.appendChild(el("h2", null, "Execution ledger"));
+    renderExecutionLedger(ledgerCard, turn, null);
+    d.appendChild(ledgerCard);
     return;
   }
   renderLevel();
@@ -3262,8 +3622,8 @@ function renderWaterfall(container, node) {
     track.appendChild(bar);
     rowEl.appendChild(track);
     rowEl.appendChild(el("div", "wfDur", open
-      ? fmtCost("open…", child.tokens)
-      : fmtCost(fmtNs(child.extent.end - child.extent.start), child.tokens)));
+      ? fmtCost("open…", child.tokens, child.cost)
+      : fmtCost(fmtNs(child.extent.end - child.extent.start), child.tokens, child.cost)));
 
     rowEl.addEventListener("click", function () { descend(child); });
     container.appendChild(rowEl);
