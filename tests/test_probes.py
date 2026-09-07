@@ -270,5 +270,62 @@ class TestProbeLoggingFilterMiddleware:
         assert response.status_code == 503  # This confirms the probe failed as expected
 
 
+class TestObservabilityRegimeIsAssertable:
+    """fix-ajv.14: prune suppression is a cross-process contract.
+
+    `suppress_pruning()` is an in-process counter, so a harness that enters it
+    suppresses pruning in the HARNESS and not in the server that is actually
+    writing. `FW_OBS_SUPPRESS_PRUNE` is the only switch that crosses the
+    boundary, and it has to be in the server's environment before it starts,
+    because the recorder prunes once on construction. A harness therefore needs
+    to read the value in effect HERE rather than assume its own environment
+    reached this process.
+    """
+
+    def test_the_regime_is_absent_unless_asked_for(self, app_module):
+        """Probes are frequent; this is opt-in like ?memory."""
+        client = TestClient(app_module.app)
+        app_module.readiness_state.set_ready(True)
+
+        assert "observability" not in client.get("/probes/readyz").json()
+
+    def test_the_regime_reports_suppression_in_effect(self, app_module, monkeypatch):
+        from fastworkflow import observability_store as obs
+
+        client = TestClient(app_module.app)
+        app_module.readiness_state.set_ready(True)
+
+        monkeypatch.setenv(obs.SUPPRESS_PRUNE_VAR, "1")
+        body = client.get("/probes/readyz?observability=true").json()["observability"]
+
+        assert body["pruning_suppressed"] is True
+        assert body["config"][obs.SUPPRESS_PRUNE_VAR] == "1"
+
+    def test_the_regime_reports_suppression_not_in_effect(self, app_module, monkeypatch):
+        """The answer a harness most needs: it asked, and it did NOT take hold."""
+        from fastworkflow import observability_store as obs
+
+        client = TestClient(app_module.app)
+        app_module.readiness_state.set_ready(True)
+
+        monkeypatch.setenv(obs.SUPPRESS_PRUNE_VAR, "0")
+        body = client.get("/probes/readyz?observability=true").json()["observability"]
+
+        assert body["pruning_suppressed"] is False
+
+    def test_the_capture_profile_rides_along(self, app_module):
+        """Two runs under different profiles are not comparable attribute by
+        attribute, so the bundle has to cite the profile the SERVER used."""
+        from fastworkflow import observability_store as obs
+
+        client = TestClient(app_module.app)
+        app_module.readiness_state.set_ready(True)
+
+        body = client.get("/probes/readyz?observability=true").json()["observability"]
+
+        assert obs.CAPTURE_PROFILE_VAR in body["config"]
+        assert "enabled" in body
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

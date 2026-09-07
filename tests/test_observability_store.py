@@ -155,6 +155,64 @@ class TestSchema:
         with pytest.raises(obs.IncompatibleObservabilityDB):
             obs.ObservabilityStore(db_path)  # [R11]
 
+    def test_refuses_older_schema(self, db_path):
+        """Fresh schema (fix-49m.3): a populated store from an older build is
+        refused with a reason, never migrated."""
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.commit()
+        conn.close()
+        with pytest.raises(obs.IncompatibleObservabilityDB) as excinfo:
+            obs.ObservabilityStore(db_path)
+        message = str(excinfo.value)
+        assert f"requires v{obs.SCHEMA_VERSION}" in message
+        assert "carries no migration" in message
+        # Left untouched: the version was not silently rewritten.
+        conn = sqlite3.connect(db_path)
+        try:
+            assert (
+                conn.execute("PRAGMA user_version").fetchone()[0]
+                == obs.SCHEMA_VERSION - 1
+            )
+        finally:
+            conn.close()
+
+    def test_an_empty_file_is_treated_as_fresh(self, db_path):
+        """A file that was only touched has no tables and initialises like a
+        missing one, at the current version and with INCREMENTAL auto_vacuum."""
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        open(db_path, "wb").close()
+        assert os.path.getsize(db_path) == 0
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            assert (
+                conn.execute("PRAGMA user_version").fetchone()[0]
+                == obs.SCHEMA_VERSION
+            )
+            assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+        finally:
+            conn.close()
+
+    def test_read_only_store_refuses_an_older_schema_the_same_way(self, db_path):
+        """The read-only view applies the same rule as the writable store
+        (fix-49m.3 adjustment b): an older store is refused up front with the
+        reason, instead of failing later on a column the reader assumes."""
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.commit()
+        conn.close()
+        with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
+            obs.ReadOnlyObservabilityStore(db_path)
+        # And the current version still opens read-only.
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION}")
+        conn.commit()
+        conn.close()
+        obs.ReadOnlyObservabilityStore(db_path)
+
 
 # ----------------------------------------------------------------------
 # Identity: conversation-id minting [R1] and labels [R15]

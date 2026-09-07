@@ -214,8 +214,8 @@ class TestAdditiveSchema:
         reason a human can act on, and is left untouched (not migrated).
 
         Built with the pre-`fix-bn1` CREATE TABLE statements at user_version 1.
-        The guarded ALTER entries that landed before fix-42b remain in the open
-        path, but a v1 store never reaches them.
+        There is no ALTER/migration path at all any more (fresh schema,
+        fix-49m.3): the CREATE literal is the only creator of every column.
         """
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -259,8 +259,8 @@ class TestAdditiveSchema:
             obs.ObservabilityStore(db_path)
         message = str(excinfo.value)
         assert "schema v1" in message
-        assert "v2" in message
-        assert "does not migrate" in message
+        assert "requires v2" in message
+        assert "carries no migration" in message
 
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row

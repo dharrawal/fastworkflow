@@ -9,11 +9,21 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow import NLUPipelineStage, tracing
 from fastworkflow.cache_matching import cache_match, store_utterance_cache
+from fastworkflow.decision_signals import (
+    DecisionUncertainty,
+    UncertaintySignal,
+    ambiguity_set_size,
+    classifier_confidence,
+    classifier_topk_margin,
+    fuzzy_distance,
+)
 from fastworkflow.kvstore import KVStore
 from fastworkflow.model_pipeline_training import (
-    CommandRouter
+    CommandRouter,
+    GLOBAL_CONTEXT_FOLDER,
 )
 from fastworkflow.nlu_labels import is_escalation, is_non_routable
+from fastworkflow.train.artifact_versioning import VERSIONS_DIRNAME
 
 from fastworkflow.utils.fuzzy_match import find_best_matches
 
@@ -21,6 +31,250 @@ from fastworkflow.utils.fuzzy_match import find_best_matches
 # A low-confidence top-k prediction containing an escalation label remains an
 # ambiguity: prompt with the local command candidates and log that the parent signal
 # was discarded. This is product behaviour, not workflow configuration.
+
+
+# What became of an escalation signal on this prediction. FW-REQ-021 clause 1 asks
+# for a first-class escalation outcome rather than only the list of labels that were
+# thrown away: "no escalation label was predicted" and "we never ran the classifier
+# that could predict one" are different facts, and `escalation_labels_discarded`
+# being absent cannot tell them apart.
+#
+# Only the classifier can produce an escalation label, so every other matching layer
+# reports NOT_EVALUATED rather than ABSENT.
+ESCALATION_OUTCOME_NOT_EVALUATED = "not_evaluated"
+ESCALATION_OUTCOME_ABSENT = "absent"
+# The escalation label won outright: `resolve_fully_qualified_command_name` maps it
+# to None and the CME wildcard command walks the parent chain, which is the signal
+# being acted on.
+ESCALATION_OUTCOME_HONORED = "honored"
+# The classifier ranked an escalation label alongside local candidates and was not
+# confident. The user is prompted with the local candidates only (the ambiguity
+# message filters non-routable labels) and the "try my parent" signal is dropped —
+# GAP-18, recorded here as an outcome instead of inferred from a log line.
+ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY = "suppressed_by_ambiguity"
+
+ESCALATION_OUTCOMES: frozenset[str] = frozenset({
+    ESCALATION_OUTCOME_NOT_EVALUATED,
+    ESCALATION_OUTCOME_ABSENT,
+    ESCALATION_OUTCOME_HONORED,
+    ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY,
+})
+
+# Maximum normalized Levenshtein distance the fuzzy pre-match will accept. Named so
+# the span can record what a distance was compared against — a distance with no
+# threshold beside it cannot be binned by a calibration report. The value is
+# unchanged.
+_FUZZY_PREMATCH_MAX_DISTANCE = 0.3  # Adjust threshold as needed
+
+# Identifies the matcher that produced a fuzzy distance, so a curve drawn from one
+# matcher is not silently continued by another. The name carries the two properties
+# that fix the units: a normalized Levenshtein distance, and `best_window=False`,
+# which scores only the candidate's LEADING len(input) characters. Turning
+# `best_window` on can only lower distances, so it would shift every bin without
+# changing the field name.
+_FUZZY_MATCHER_VERSION = "levenshtein-leading-window/1"
+
+# Reported when the classifier artifacts are not under the R4 versioned layout. A
+# tree that has never been trained under versioning has no version to report, and
+# saying so is better than inventing one that would look comparable across runs.
+_UNVERSIONED_ARTIFACT = "unversioned"
+
+# Reported when the router did not say which model answered. Named rather than
+# defaulted to "tiny", because a signal_version that claims the wrong tier is worse
+# than one that admits it does not know.
+_UNKNOWN_MODEL_TIER = "unknown-tier"
+
+
+def escalation_outcome_of(predictions: list[str]) -> str:
+    """What became of an escalation signal in *predictions*.
+
+    The classifier returns one label when it was confident and its top-k when it was
+    not (``CommandRouter.predict_with_details``), so a lone escalation label is one
+    the runtime acted on — it resolves to ``command_name=None`` and the CME wildcard
+    command walks the parent chain. An escalation label ranked among several is the
+    GAP-18 case: the ambiguity message filters non-routable labels out, so the user
+    sees the local candidates and the "try my parent" signal goes nowhere.
+
+    Reports an outcome, never a decision: the caller stores the result on the span
+    and the resolution path never reads it back.
+    """
+    if not any(is_escalation(prediction) for prediction in predictions):
+        return ESCALATION_OUTCOME_ABSENT
+    if len(predictions) == 1:
+        return ESCALATION_OUTCOME_HONORED
+    return ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY
+
+
+def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str:
+    """Identity of the trained artifact behind a classifier signal.
+
+    `signal_version` exists so that a retrained classifier is distinguishable: a
+    confidence of 0.8 from one artifact is not the same measurement as a
+    confidence of 0.8 from the next, and FW-REQ-021 clause 13 requires thresholds
+    be re-validated when the producing artifact changes.
+
+    Under R4 versioning the per-context entry in ``___command_info`` is a
+    compatibility link into ``___command_info/versions/<version>/<context>``, so one
+    ``realpath`` recovers the published version without importing the trainer's
+    resolver or re-reading its pointer file on every prediction. The ``*`` to
+    ``global`` mapping mirrors ``CommandRouter.__init__``, which does the same
+    substitution before opening the artifacts.
+    """
+    resolved = os.path.realpath(
+        model_artifact_path.replace('*', GLOBAL_CONTEXT_FOLDER)
+    )
+    versions_parent = os.path.dirname(os.path.dirname(resolved))
+    version = (
+        os.path.basename(os.path.dirname(resolved))
+        if os.path.basename(versions_parent) == VERSIONS_DIRNAME
+        else _UNVERSIONED_ARTIFACT
+    )
+    return f"intent-classifier/{version}/{os.path.basename(resolved)}/{model_tier}"
+
+
+def _topk_margin_signals(
+    classifier_details: dict, signal_version: str
+) -> list[UncertaintySignal]:
+    """The gap between the top two label probabilities, as a 0- or 1-item list.
+
+    A list rather than an Optional so the caller has nothing to test. That is not
+    style: `nlu_trace["classifier"]` belongs to `CommandRouter`, and the test
+    doubles that inject labels return it EMPTY on purpose, so the emitter has to
+    tolerate a router that reports no top-k exactly as it tolerates one that
+    reports no `model_tier`. Pairing the kept scores with their own tail yields one
+    pair for two scores and no pair at all for fewer, which gets that tolerance
+    without comparing a captured measurement against anything (arch §17.3).
+
+    The scores are positionally aligned with `topk_labels` and come from the single
+    forward pass `predict_batch` already made, so this is a projection of a number
+    that was computed and thrown away, not a new measurement.
+    """
+    top_two = list(classifier_details.get("topk_scores") or ())[:2]
+    return [
+        classifier_topk_margin(
+            float(first) - float(second), signal_version=signal_version
+        )
+        for first, second in zip(top_two, top_two[1:])
+    ]
+
+
+def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
+    """The §6.6.1 record for the command-identity decision *nlu_trace* describes.
+
+    A pure function of the facts ``_predict_impl`` recorded, and deliberately
+    one-way: it reads the capture bag and writes nothing back, so the resolution
+    path cannot come to depend on what is being measured about it. That is the
+    EXP-003 exit criterion and the architecture §17.3 stop condition — capture
+    only, no threshold, no branch.
+
+    It reads ``matcher_layer``, which is the name of the branch that has already
+    run, not a measurement of it. No confidence, distance, count, or assembled
+    record is read by anything other than ``tracing.end_span``.
+    """
+    matcher_layer = nlu_trace.get("matcher_layer")
+    signals: list[UncertaintySignal] = []
+    signals_absent_reason = None
+    # Every tier that enumerates candidates records how many; the tiers below that
+    # do not enumerate resolved to exactly one command, or to none at all.
+    candidate_count = nlu_trace.get("candidate_count", 1)
+
+    if matcher_layer == "exact_prefix":
+        # An exact command-name match has nothing to be unsure about. Emitting
+        # confidence 1.0 here would enter a calibration curve as a real
+        # measurement of a classifier that never ran.
+        signals_absent_reason = "deterministic-resolution"
+    elif matcher_layer == "clarification_default":
+        # 'what can i do?' is a constant the code substitutes when no matcher
+        # claimed the utterance in a clarification stage. Nothing was measured and
+        # nothing could have been, so this is deterministic in the same sense as an
+        # exact match rather than an uncaptured measurement.
+        signals_absent_reason = "deterministic-resolution"
+    elif matcher_layer == "fuzzy_prematch":
+        signals.extend([
+            fuzzy_distance(
+                nlu_trace["fuzzy_distance"], signal_version=_FUZZY_MATCHER_VERSION
+            ),
+            ambiguity_set_size(candidate_count, signal_version=_FUZZY_MATCHER_VERSION),
+        ])
+    elif matcher_layer == "embedding_cache":
+        # The cosine similarity that decided this is on the span as
+        # `cache_similarity`, but §6.6.1's SignalKind enum has no member for an
+        # embedding similarity, so the structured record genuinely cannot carry it.
+        # "not-instrumented" is the honest report of a decision whose measurement
+        # the contract cannot represent yet.
+        signals_absent_reason = "not-instrumented"
+    elif matcher_layer == "classifier":
+        signal_version = nlu_trace["classifier_signal_version"]
+        signals.append(
+            classifier_confidence(
+                nlu_trace["classifier"]["confidence"], signal_version=signal_version
+            )
+        )
+        # classifier-topk-margin is missing on purpose: `predict_with_details`
+        # returns the winning label's probability and the top-k label NAMES, and
+        # `predict_single_sentence` drops `top_k_scores` from what `predict_batch`
+        # computed. There is no second-best probability to subtract, and inventing
+        # one is worse than its absence.
+        #
+        # Amendment (fix-ajv.12): it no longer is. `predict_single_sentence` now
+        # carries `top_k_scores` through to `predict_with_details`, so the
+        # second-best probability is a fact the same forward pass already produced.
+        # It stays absent when the details dict does not carry it — a stubbed
+        # router, or a record written before this — which is why the helper returns
+        # a list instead of raising on a missing key.
+        signals.extend(
+            _topk_margin_signals(nlu_trace["classifier"], signal_version)
+        )
+        signals.append(
+            ambiguity_set_size(candidate_count, signal_version=signal_version)
+        )
+    else:
+        # No matcher claimed the utterance. The fuzzy pre-match did run and compared
+        # a distance against the threshold, but `find_best_matches` returns
+        # ``([], None)`` above the threshold and discards the value, so the one
+        # measurement taken here is not recoverable at this call site.
+        signals_absent_reason = "not-instrumented"
+        candidate_count = 0
+
+    return DecisionUncertainty(
+        decision_kind="command-identity",
+        signals=tuple(signals),
+        candidate_count=candidate_count,
+        reducible=nlu_trace.get("reducible"),
+        signals_absent_reason=signals_absent_reason,
+    )
+
+
+def _recorded_command_identity_uncertainty(
+    span, nlu_trace: dict
+) -> Optional[dict]:
+    """``command_identity_uncertainty`` in span-attribute form, never raising.
+
+    Skipped entirely when *span* is None. ``start_span`` declines without a sink
+    or an open turn and ``end_span`` then discards its attributes, so assembling a
+    record nobody will store is pure overhead against this slice's declared
+    budget — and it keeps the promise the test doubles in
+    ``test_intent_detection_fuzzy_tie.py`` were written against, that a stubbed
+    classifier's details reach nothing but a span that no-ops.
+
+    ``tracing`` wraps every one of its own calls because a broken recorder must
+    degrade to a log line rather than a failed turn, and this assembly runs just
+    outside that guard, in the caller's frame. Capture that can lose a user's turn
+    is precisely the behavior change Phase 0 exists to avoid.
+
+    A record that violates its own contract is a bug in the recorder, so it is
+    logged loudly and the attribute says what happened rather than going quietly
+    absent — which would read as "this span predates the capture" — or null, which
+    on the parameter-extraction side means "no decision". The pure function above
+    still raises, which is what the tests exercise.
+    """
+    if span is None:
+        return None
+    try:
+        return command_identity_uncertainty(nlu_trace).model_dump(mode="json")
+    except Exception as exc:
+        logger.warning(f"command-identity uncertainty capture failed: {exc!r}")
+        return {"capture_error": type(exc).__name__}
 
 
 class CommandNamePrediction:
@@ -49,6 +303,11 @@ class CommandNamePrediction:
         classifier), the classifier's confidence and threshold when it ran,
         and the candidate set on an ambiguity. Emission never affects the
         prediction: the helpers no-op without a bound host/sink.
+
+        It also carries the §6.6.1 ``DecisionUncertainty`` for the
+        command-identity decision, assembled by ``command_identity_uncertainty``
+        from the facts below. That record is written to the span and read by
+        nothing else (FW-REQ-021 P0: representation only).
         """
         host = tracing.current_host()
         span = tracing.start_span(
@@ -66,6 +325,9 @@ class CommandNamePrediction:
                 command_context_name, command, nlu_pipeline_stage, nlu_trace
             )
         except BaseException:
+            # No DecisionUncertainty here: the prediction did not complete, so
+            # there is no decision to characterise. The raw facts gathered so far
+            # still go out.
             tracing.end_span(
                 host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace
             )
@@ -76,6 +338,9 @@ class CommandNamePrediction:
             status=tracing.STATUS_OK,
             attributes={
                 **nlu_trace,
+                "decision_uncertainty": _recorded_command_identity_uncertainty(
+                    span, nlu_trace
+                ),
                 "command_name": output.command_name,
                 "is_cme_command": output.is_cme_command,
                 "ambiguous": output.error_msg is not None,
@@ -95,6 +360,11 @@ class CommandNamePrediction:
         nlu_trace: dict,
     ) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
+
+        # Set before any matching so the attribute is always present: an absent
+        # escalation outcome would be indistinguishable from "no escalation", and
+        # only the classifier below can produce an escalation label at all.
+        nlu_trace["escalation_outcome"] = ESCALATION_OUTCOME_NOT_EVALUATED
 
         model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
         command_router = CommandRouter(model_artifact_path)
@@ -167,11 +437,20 @@ class CommandNamePrediction:
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
             # No match is ([], None), never (None, None) — len() here is safe.
-            best_matched_commands, _ = find_best_matches(
+            best_matched_commands, best_distance = find_best_matches(
                 command.replace(" ", "_"),
                 command_name_dict.keys(),
-                threshold=0.3  # Adjust threshold as needed
+                threshold=_FUZZY_PREMATCH_MAX_DISTANCE
             )
+            # The distance used to be thrown away with `_` (FW-REQ-021 clause 1:
+            # a signal must not be discarded after its threshold comparison). It
+            # is a DISTANCE, so lower is a better match; the threshold beside it
+            # is a maximum, and `SIGNAL_DOMAINS["fuzzy-score"]` records that
+            # polarity for anyone binning these values. It is None above the
+            # threshold, because `find_best_matches` returns ([], None) there.
+            nlu_trace["fuzzy_distance"] = best_distance
+            nlu_trace["fuzzy_threshold"] = _FUZZY_PREMATCH_MAX_DISTANCE
+            nlu_trace["candidate_count"] = len(best_matched_commands)
             if (
                 len(best_matched_commands) > 1
                 and nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
@@ -195,10 +474,23 @@ class CommandNamePrediction:
 
         if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
             if not command_name:
-                if cache_result := cache_match(self.path, command, modelpipeline, 0.85):
-                    command_name = cache_result
+                # return_details asks for the similarity alongside the label. The
+                # match itself is unchanged — the same threshold, the same winner —
+                # but the number it was compared against is no longer discarded
+                # (FW-REQ-021 clause 1). A hit is a 2-tuple, a miss is still None,
+                # so the walrus test behaves exactly as it did.
+                if cache_result := cache_match(
+                    self.path, command, modelpipeline, 0.85, return_details=True
+                ):
+                    command_name, cache_similarity = cache_result
                     nlu_trace["matcher_layer"] = "embedding_cache"
                     nlu_trace["cache_similarity_threshold"] = 0.85
+                    # A cosine similarity: HIGHER is a better match, the opposite
+                    # of the fuzzy distance above, and the threshold beside it is a
+                    # minimum. Recorded as a plain attribute because §6.6.1's
+                    # SignalKind enum has no member for it.
+                    nlu_trace["cache_similarity"] = float(cache_similarity)
+                    nlu_trace["candidate_count"] = 1
                 else:
                     predictions, classifier_details = (
                         command_router.predict_with_details(command)
@@ -206,6 +498,16 @@ class CommandNamePrediction:
                     # predictions = majority_vote_predictions(command_router, command)
                     nlu_trace["matcher_layer"] = "classifier"
                     nlu_trace["classifier"] = classifier_details
+                    # `.get`, not `[...]`: the details dict belongs to
+                    # `CommandRouter`, and a router that reports no tier must not be
+                    # able to fail a turn from inside the resolution path. The test
+                    # doubles that inject labels return an empty dict on purpose.
+                    nlu_trace["classifier_signal_version"] = _classifier_signal_version(
+                        model_artifact_path,
+                        classifier_details.get("model_tier", _UNKNOWN_MODEL_TIER),
+                    )
+                    nlu_trace["candidate_count"] = len(predictions)
+                    nlu_trace["escalation_outcome"] = escalation_outcome_of(predictions)
 
                     if len(predictions)==1:
                         command_name = predictions[0].split('/')[-1]
@@ -230,6 +532,11 @@ class CommandNamePrediction:
 
                         # Store suggested commands
                         nlu_trace["candidates"] = [str(p) for p in predictions]
+                        # The runtime is about to ask, and the answer resolves this:
+                        # requirements §4.14's reducible uncertainty, recorded where
+                        # the asking happens rather than inferred afterwards from
+                        # the shape of the record.
+                        nlu_trace["reducible"] = True
                         self._store_suggested_commands(self.path, predictions, 1)
                         return CommandNamePrediction.Output(error_msg=error_msg)
 
@@ -239,6 +546,9 @@ class CommandNamePrediction:
         ) and not command_name:
             command_name = "what can i do?"
             nlu_trace["matcher_layer"] = "clarification_default"
+            # The fuzzy pre-match above found nothing and left a count of 0; the
+            # default that replaces it is one command, chosen by the code.
+            nlu_trace["candidate_count"] = 1
 
         fully_qualified_command_name = self.resolve_fully_qualified_command_name(
             command_name, command_name_dict)

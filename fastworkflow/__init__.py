@@ -93,6 +93,19 @@ class CommandOutput(BaseModel):
     command_parameters: Any = None  # typed model in memory; dict in records [A10]
     started_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
+    # Joins this outcome to the span that produced it (arch §12.0 delta 1).
+    # Optional with a default because §12.2 requires CommandOutput stay
+    # compatible: every existing constructor call and every already-serialized
+    # record must keep validating, and both do — an absent key reads as None.
+    # None means "not dispatched through a call-id-stamping path", which is the
+    # honest answer for a hand-built CommandOutput; it never means "no span".
+    command_call_id: Optional[str] = None
+    # [A7] structural marker for an ask_user exchange. Optional with a None
+    # default for the same §12.2 reason as command_call_id: every existing
+    # constructor call and every already-serialized record must keep
+    # validating. None means "written before this field existed" and defers to
+    # the name comparison in `is_ask_user`; True and False are authoritative.
+    ask_user_entry: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -112,7 +125,21 @@ class CommandOutput(BaseModel):
 
     @property
     def is_ask_user(self) -> bool:
-        """True if this entry is an ask_user clarification exchange. [A7]"""
+        """True if this entry is an ask_user clarification exchange. [A7]
+
+        `ask_user_entry` is authoritative when set; the name comparison is the
+        fallback for records serialized before the field existed. It cannot be
+        the primary test any more: since fix-ajv.16 a FAILURE output carries the
+        real routed command name with `success=False`, which is byte-identical
+        to an unanswered question, and root-context command names are
+        UNQUALIFIED — so a workflow defining a root command called `ask_user`
+        would have its failures collected by `complete_ask_user_entry`, which
+        would overwrite the error with the user's answer and mark it successful.
+        The guarantee now rests on a field the framework sets, not on no
+        workflow ever choosing a name. fix-ajv.17.
+        """
+        if self.ask_user_entry is not None:
+            return self.ask_user_entry
         return self.command_name == "ask_user"
 
     @property

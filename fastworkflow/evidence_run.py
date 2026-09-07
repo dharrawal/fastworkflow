@@ -49,40 +49,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastworkflow import observability_store, state_paths, tracing
+from fastworkflow import capture_policy, observability_store, state_paths, tracing
+from fastworkflow.provenance import ObservabilityProvenance
 from fastworkflow.utils.logging import logger
 
 # How often to re-read the persisted health row while waiting for it to advance.
 _HEALTH_POLL_INTERVAL_S = 0.1
-
-
-@dataclass(frozen=True)
-class ObservabilityProvenance:
-    """Minimal provenance record required by the generic experiment harness."""
-
-    enabled: bool
-    capture_profile: str
-    capture_policy_version: str
-    span_contract_version: int
-    span_contract_versions: tuple[int, ...]
-    db_schema_version: int
-    config: dict[str, Any]
-    dspy_history_enabled: Optional[bool] = None
-    evidence_grade: Optional[bool] = None
-
-    def model_dump(self, mode: str = "python") -> dict[str, Any]:
-        del mode
-        return {
-            "enabled": self.enabled,
-            "capture_profile": self.capture_profile,
-            "capture_policy_version": self.capture_policy_version,
-            "span_contract_version": self.span_contract_version,
-            "span_contract_versions": self.span_contract_versions,
-            "db_schema_version": self.db_schema_version,
-            "config": self.config,
-            "dspy_history_enabled": self.dspy_history_enabled,
-            "evidence_grade": self.evidence_grade,
-        }
 
 
 class EvidenceRunInvalid(RuntimeError):
@@ -114,11 +86,9 @@ def capture_observability_provenance(
     return ObservabilityProvenance(
         enabled=observability_store.observability_enabled(default_on=True),
         capture_profile=config[observability_store.CAPTURE_PROFILE_VAR],
-        capture_policy_version="1",
-        span_contract_version=getattr(tracing, "SPAN_CONTRACT_VERSION", 1),
-        span_contract_versions=tuple(
-            getattr(tracing, "span_contract_versions", lambda: (1,))()
-        ),
+        capture_policy_version=capture_policy.CAPTURE_POLICY_VERSION,
+        span_contract_version=tracing.SPAN_CONTRACT_VERSION,
+        span_contract_versions=tracing.span_contract_versions(),
         db_schema_version=observability_store.SCHEMA_VERSION,
         config=config,
         dspy_history_enabled=dspy_history_enabled,

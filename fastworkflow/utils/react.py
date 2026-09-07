@@ -373,7 +373,7 @@ class fastWorkflowReAct(Module):
                 tracing.end_span(
                     host,
                     step_span,
-                    status=tracing.STATUS_CANCELLED,
+                    status=tracing.status_for_dispatch_exception(err),
                     attributes={**step_attributes, "error_type": type(err).__name__},
                 )
                 raise

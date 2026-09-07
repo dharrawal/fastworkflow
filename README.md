@@ -669,6 +669,7 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 | `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup) drops spans/artifacts (turn records are exempt) | Optional | `30` |
 | `FW_OBS_DB_MAX_BYTES` | Size cap; the automatic prune evicts oldest spans first while over it | Optional | `1073741824` (1 GiB) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |
+| `FW_OBS_SUPPRESS_PRUNE` | Withhold the automatic prune. **This is the cross-process contract for a measured run**: the in-process `suppress_pruning()` helper only covers the process that calls it, so when a harness drives a separate server the variable must be in the *server's* environment **before it starts** — the recorder prunes once on construction, so setting it afterwards is too late. Confirm the value took hold with `GET /probes/readyz?observability=true`, which reports `pruning_suppressed`; the server also logs the regime at startup | Optional | `0` |
 
 ### `fastworkflow.passwords.env`
 

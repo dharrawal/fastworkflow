@@ -36,6 +36,7 @@ import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, tracing
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
+from fastworkflow.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
@@ -178,6 +179,14 @@ class WorkflowExecutionContext:
 
         # Turn accumulator state (one logical turn = one key, across suspensions)
         self._turn_outputs: list = []
+        # Bound here and not only in _begin_turn, because _build_turn_result is
+        # reachable on a context that never began a turn in THIS process: resume
+        # continues the same logical turn and deliberately skips _begin_turn
+        # (see _serialize_turn_accumulator). The read at finalize guards on
+        # `is not None`, so an attribute that does not exist made the guard
+        # itself raise AttributeError — a missing binding wearing the costume of
+        # a null check. fix-ajv.20.
+        self._execution_recorder: Optional[ExecutionRecorder] = None
         self._turn_key: Optional[str] = None
         self._turn_started_at: Optional[datetime] = None
         self._turn_user_message: str = ""
@@ -489,6 +498,12 @@ class WorkflowExecutionContext:
             if self._app_workflow is not None and tracing.get_sink(self) is not None:
                 self._turn_context_snapshot = dict(self._app_workflow.context)
 
+        # Turn-scoped execution ledger (arch §12.1). Sink-gated like the other
+        # capture projections: with observability off this must cost nothing.
+        self._execution_recorder = (
+            ExecutionRecorder() if tracing.get_sink(self) is not None else None
+        )
+
         # Open the fw.turn root span (deterministic id [R6]; emitted at open so
         # a suspended turn is visible before — and closable after — a process
         # boundary). Off the stack: children parent to it via the deterministic
@@ -525,11 +540,13 @@ class WorkflowExecutionContext:
         is suspended). Both topologies funnel through here: Topology A via
         _ask_user_tool, Topology B via _note_agent_suspension.
         """
-        attempt = sum(
-            1 for output in self._turn_outputs if output.command_name == "ask_user"
-        )
+        # `is_ask_user`, not the name: this count feeds a DETERMINISTIC span id,
+        # so a failed command called `ask_user` would not just miscount, it
+        # would make two real ask_user spans collide on one id. fix-ajv.17.
+        attempt = sum(1 for output in self._turn_outputs if output.is_ask_user)
         entry = fastworkflow.CommandOutput(
             command_name="ask_user",
+            ask_user_entry=True,
             command_parameters=question,
             command_response=
                 fastworkflow.CommandResponse(response="", success=False),
@@ -566,10 +583,11 @@ class WorkflowExecutionContext:
         """
         for index in range(len(self._turn_outputs) - 1, -1, -1):
             entry = self._turn_outputs[index]
-            if (
-                entry.command_name == "ask_user"
-                and entry.command_response.success is False
-            ):
+            # `is_ask_user`, not the bare name: a failed command that happens
+            # to be called `ask_user` also matches name+unsuccessful, and this
+            # loop would overwrite its error with the user's answer and mark it
+            # successful. fix-ajv.17.
+            if entry.is_ask_user and entry.command_response.success is False:
                 entry.command_response.response = answer
                 entry.command_response.success = True
                 if entry.started_at is not None:
@@ -589,7 +607,7 @@ class WorkflowExecutionContext:
         attempt = sum(
             1
             for output in self._turn_outputs[:entry_index]
-            if output.command_name == "ask_user"
+            if output.is_ask_user
         )
         span = tracing.Span(
             span_id=tracing.deterministic_span_id(
@@ -629,7 +647,7 @@ class WorkflowExecutionContext:
         last = self._turn_outputs[-1] if self._turn_outputs else None
         already_appended = (
             last is not None
-            and last.command_name == "ask_user"
+            and last.is_ask_user
             and last.command_response.success is False
             and last.command_parameters == clarification
         )
@@ -1008,6 +1026,15 @@ class WorkflowExecutionContext:
         self._turn_history_baseline = len(self.conversation_history.messages)
 
         self._turn_key = turn.get("key")
+        # The ledger is per-process and not serialized: the pre-suspension
+        # process kept its own, and those records went durable with its spans.
+        # What this rebuilds is the accumulator for the commands the RESUMED
+        # turn is about to run, so their outcomes can still be joined to their
+        # execution records. Sink-gated exactly as _begin_turn gates it, so
+        # observability-off costs nothing here either. fix-ajv.20.
+        self._execution_recorder = (
+            ExecutionRecorder() if tracing.get_sink(self) is not None else None
+        )
         self._turn_outputs = [
             fastworkflow.CommandOutput.model_validate(o)
             for o in (turn.get("outputs") or [])
@@ -1305,6 +1332,10 @@ class WorkflowExecutionContext:
             (None, None) if self._awaiting_user else self._turn_memory_entry()
         )
 
+        turn_metadata: dict[str, Any] = {}
+        if self._app_workflow is not None:
+            turn_metadata["workflow_folderpath"] = self._app_workflow.folderpath
+
         turn_result = TurnResult(
             turn_output=turn_output,
             channel_id=self._channel_id,
@@ -1323,6 +1354,12 @@ class WorkflowExecutionContext:
             suspended_ms=self._turn_suspended_ms,
             conversation_summary=conversation_summary,
             conversation_traces=conversation_traces,
+            metadata=turn_metadata,
+            execution_records=(
+                self._execution_recorder.records()
+                if self._execution_recorder is not None
+                else ()
+            ),
         )
 
         self._finalize_turn_trace(turn_result)
@@ -1700,11 +1737,7 @@ class WorkflowExecutionContext:
             tracing.end_span(
                 self,
                 span,
-                status=(
-                    tracing.STATUS_AWAITING_USER
-                    if isinstance(exc, (AskUserSuspend, CommandCancelledError))
-                    else tracing.STATUS_ERROR
-                ),
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"attempts": attempts, "error_type": type(exc).__name__},
             )
             raise
@@ -1864,6 +1897,66 @@ class WorkflowExecutionContext:
         return self._finalize_agent_output(original_message, agent_result)
 
     # ------------------------------------------------------------------
+    # Shared capture for the fw.agent.tool_call emission sites
+    # ------------------------------------------------------------------
+    #
+    # _process_message and _process_action both open fw.agent.tool_call and both
+    # owe §12.1.1's shared capture, so the projection lives here once rather than
+    # being written twice and drifting. Everything below is additive recording:
+    # no fastWorkflow control flow reads a context handle or a consequence class,
+    # which is EXP-003's exit criterion and arch §17.3's stop condition.
+    #
+    # Amendment (fix-ajv.8): "here" is now `tracing`, because workflow_agent.py
+    # opens the same span from a third site and owes the same record. These two
+    # methods stay as the WEC-shaped entry points — they supply the app-workflow
+    # fallback that the free functions cannot know about — but the projection
+    # itself is written once, for all three sites.
+
+    def _context_before(
+        self, span, workflow: Optional[fastworkflow.Workflow] = None
+    ) -> Optional[dict]:
+        """The active context handle before a command runs, or None.
+
+        Gated on a span having actually opened, matching the existing
+        attribute-prep rule at this seam: with observability off this must cost
+        nothing.
+        """
+        return tracing.context_before(span, workflow or self._app_workflow)
+
+    def _capture_attributes(
+        self,
+        span,
+        command_output: fastworkflow.CommandOutput,
+        context_before: Optional[dict],
+        workflow: Optional[fastworkflow.Workflow] = None,
+        command_name: Optional[str] = None,
+    ) -> dict:
+        """Call-id, context-before/after and consequence for one command.
+
+        The call id is read off the CommandOutput rather than minted here: the
+        dispatcher that ran the command already stamped it, and minting a second
+        one would produce two ids for one execution and join neither.
+
+        ``command_name`` overrides what the CommandOutput reports, because on the
+        direct-action path it reports nothing: ``CommandExecutor.perform_action``
+        stamps ``workflow_name`` and ``context`` on its result but never
+        ``command_name``, so a direct action's outcome carries "" and the
+        consequence lookup would find no declaration for any command. The Action
+        names what was dispatched, and that is the authoritative identity for
+        that path. Passed in rather than fixed on the CommandOutput because
+        writing it there would change a public shape, which this slice may not
+        do — the empty ``command_name`` on direct-action outcomes is a separate
+        defect.
+        """
+        return tracing.capture_attributes(
+            span,
+            command_output,
+            context_before,
+            workflow or self._app_workflow,
+            command_name=command_name,
+        )
+
+    # ------------------------------------------------------------------
     # Deterministic / assistant mode
     # ------------------------------------------------------------------
 
@@ -1890,18 +1983,19 @@ class WorkflowExecutionContext:
             kind=tracing.KIND_TOOL,
             attributes={"raw_command": message},
         )
+        context_before = self._context_before(span)
 
         invoke_started_at = datetime.now(timezone.utc)
         try:
             command_output = self._CommandExecutor.invoke_command(self, message)
-        except CommandCancelledError:
-            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
-            raise
         except BaseException as exc:
+            # One arm, not two: a separate `except CommandCancelledError` left
+            # AskUserSuspend — the other control signal — falling through to the
+            # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
             tracing.end_span(
                 self,
                 span,
-                status=tracing.STATUS_ERROR,
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"error_type": type(exc).__name__},
             )
             raise
@@ -1932,6 +2026,7 @@ class WorkflowExecutionContext:
             attributes={
                 "response_text": response_text,
                 "success": bool(command_output.success),
+                **self._capture_attributes(span, command_output, context_before),
             },
         )
 
@@ -2011,18 +2106,22 @@ class WorkflowExecutionContext:
             kind=tracing.KIND_TOOL,
             attributes={"raw_command": raw_command},
         )
+        # The direct-action path's only span: CommandExecutor.perform_action
+        # opens none of its own, so this is where §12.1.1's shared capture has
+        # to land for this row of the matrix.
+        context_before = self._context_before(span, workflow)
 
         action_started_at = datetime.now(timezone.utc)
         try:
             command_output = self._CommandExecutor.perform_action(workflow, action)
-        except CommandCancelledError:
-            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
-            raise
         except BaseException as exc:
+            # One arm, not two: a separate `except CommandCancelledError` left
+            # AskUserSuspend — the other control signal — falling through to the
+            # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
             tracing.end_span(
                 self,
                 span,
-                status=tracing.STATUS_ERROR,
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"error_type": type(exc).__name__},
             )
             raise
@@ -2045,7 +2144,20 @@ class WorkflowExecutionContext:
             attributes={
                 "response_text": response_text,
                 "success": bool(command_output.success),
+                **self._capture_attributes(
+                    span,
+                    command_output,
+                    context_before,
+                    workflow,
+                    command_name=action.command_name,
+                ),
             },
+        )
+        record_execution(
+            self._execution_recorder,
+            command_call_id=command_output.command_call_id,
+            parent_call_id=None,
+            span_id=span.span_id if span is not None else None,
         )
 
         if self._command_trace_queue is not None:

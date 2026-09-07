@@ -1003,3 +1003,81 @@ class TestTurnOutput:
         assert "user_message" not in dumped
         assert "started_at" not in dumped
         assert "suspended_ms" not in dumped
+
+
+# ----------------------------------------------------------------------
+# ask_user identity does not rest on a name a workflow could define (fix-ajv.17)
+# ----------------------------------------------------------------------
+
+
+class TestAskUserMarkerIsStructural:
+    """`is_ask_user` was `command_name == "ask_user"`.
+
+    Since fix-ajv.16 a failure output carries the real routed command name with
+    `success=False` — byte-identical to an unanswered question — and root-context
+    command names are UNQUALIFIED. So a workflow defining a root command called
+    `ask_user` made its failures collectible by `complete_ask_user_entry`, which
+    would overwrite the error with the user's answer and mark it successful.
+    """
+
+    def _failed_command_called_ask_user(self):
+        return fastworkflow.CommandOutput(
+            command_name="ask_user",
+            ask_user_entry=False,
+            command_response=fastworkflow.CommandResponse(
+                response="Execution error: RuntimeError('boom')", success=False
+            ),
+        )
+
+    def test_a_failed_command_named_ask_user_is_not_an_ask_user_entry(self):
+        assert self._failed_command_called_ask_user().is_ask_user is False
+
+    def test_a_real_ask_user_entry_still_reads_as_one(self):
+        entry = fastworkflow.CommandOutput(
+            command_name="ask_user",
+            ask_user_entry=True,
+            command_parameters="which order?",
+            command_response=fastworkflow.CommandResponse(response="", success=False),
+        )
+        assert entry.is_ask_user is True
+        assert entry.question == "which order?"
+
+    def test_a_legacy_record_without_the_field_falls_back_to_the_name(self):
+        """§12.2: already-serialized records must keep validating AND reading right."""
+        legacy = fastworkflow.CommandOutput.model_validate(
+            {
+                "command_name": "ask_user",
+                "command_parameters": "which order?",
+                "command_response": {"response": "", "success": False},
+            }
+        )
+        assert legacy.ask_user_entry is None
+        assert legacy.is_ask_user is True
+
+    def test_completing_an_answer_skips_the_failed_lookalike(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        """The concrete harm: the answer must not land on the failure record."""
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        ctx._begin_turn("m")
+        failure = self._failed_command_called_ask_user()
+        ctx.append_turn_output(failure)
+
+        ctx.complete_ask_user_entry("the user's answer")
+
+        assert failure.command_response.response.startswith("Execution error")
+        assert failure.command_response.success is False
+
+    def test_the_lookalike_does_not_inflate_the_ask_user_attempt_counter(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        """The counter feeds a deterministic span id, so miscounting collides ids."""
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        ctx._begin_turn("m")
+        ctx.append_turn_output(self._failed_command_called_ask_user())
+
+        entry = ctx.append_ask_user_entry("which order?")
+
+        assert entry.is_ask_user is True
+        # attempt counted 0 prior ask_user entries, so this is the first one.
+        assert sum(1 for o in ctx._turn_outputs if o.is_ask_user) == 1

@@ -52,6 +52,11 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import state_paths
+from fastworkflow.runtime_manifest import (
+    check_startup_conformance,
+    deployment_env,
+    register_runtime_metadata,
+)
 from fastworkflow.utils.logging import logger
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
@@ -326,6 +331,27 @@ def _log_memory_bounds() -> None:
             f"dspy_policy_owner={owner}"
         )
 
+    # Prune suppression is a CROSS-PROCESS contract and this is the process it
+    # has to hold in: an evidence harness runs elsewhere, its suppress_pruning()
+    # counter is in-process, and SQLiteTraceSink.__init__ prunes on construction
+    # — so the env var has to be set before this server starts or it is already
+    # too late. Reporting the value in effect at startup makes a silent
+    # mis-setting visible at the one moment it can still be corrected.
+    # fix-ajv.14; assertable via GET /probes/readyz?observability=true.
+    try:
+        from fastworkflow import observability_store as _obs
+
+        logger.info(
+            "observability capture regime: "
+            f"enabled={_obs.observability_enabled(default_on=True)}, "
+            f"profile={_obs.observability_config()[_obs.CAPTURE_PROFILE_VAR]}, "
+            f"pruning_suppressed={_obs.pruning_suppressed()} "
+            f"({_obs.SUPPRESS_PRUNE_VAR}="
+            f"{_obs.observability_config()[_obs.SUPPRESS_PRUNE_VAR]!r})"
+        )
+    except Exception as exc:  # never let a log line stop the server
+        logger.warning(f"could not report observability capture regime: {exc!r}")
+
     logger.info(
         "memory bounds active: "
         f"max_live_sessions={session_manager.max_live_sessions} "
@@ -375,6 +401,23 @@ async def lifespan(_app: FastAPI):
         if ARGS.passwords_file_path:
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
+
+        # Startup conformance for the optional workflow runtime manifest
+        # (arch §7.1). Raising here aborts the lifespan, so a nonconformant
+        # manifest or an over-permissive deployment declaration never reaches
+        # readiness — the same reasoning as the session-cap and topic-deadline
+        # checks below: a configuration that would reject traffic should reject
+        # startup instead.
+        # Retained rather than discarded (arch §12.0 delta 4): the effect
+        # contracts validated here are what the per-command ConsequenceAssessment
+        # reads at execution time. Without this the runtime cannot tell a
+        # workflow that declared `read_only` from one that declared nothing.
+        register_runtime_metadata(
+            ARGS.workflow_path,
+            check_startup_conformance(
+                ARGS.workflow_path, env=deployment_env(fastworkflow._env_vars)
+            ),
+        )
 
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
@@ -798,7 +841,9 @@ async def liveness_probe() -> dict:
     },
     tags=["probes"]
 )
-async def readiness_probe(memory: bool = False) -> JSONResponse:
+async def readiness_probe(
+    memory: bool = False, observability: bool = False
+) -> JSONResponse:
     """
     Readiness probe endpoint for Kubernetes.
     
@@ -814,6 +859,16 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
     Pass ``?memory=true`` for retention metrics (DSPy response-cache entries and
     bytes, in-memory conversation turns and bytes). They are off by default
     because computing them walks live objects, and probes are frequent.
+
+    Pass ``?observability=true`` for the capture regime in effect in THIS
+    process, including whether retention pruning is suppressed. An evidence
+    harness drives this server from another process, where
+    ``suppress_pruning()`` — an in-process counter — cannot reach; the only
+    switch that crosses the boundary is ``FW_OBS_SUPPRESS_PRUNE``, and it has
+    to be in this process's environment before it starts, because
+    ``SQLiteTraceSink.__init__`` prunes opportunistically. Exposing the value
+    in effect lets a harness ASSERT that its requirement took hold here rather
+    than hope, and cite the answer in its bundle. fix-ajv.14.
     
     This endpoint is not logged unless it returns a non-200 status code
     to avoid excessive logging from frequent Kubernetes health checks.
@@ -844,6 +899,15 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
             "conversations": server_memory.conversation_memory_metrics(
                 list(session_manager._sessions.values())
             ),
+        }
+
+    if observability:
+        from fastworkflow import observability_store as _obs
+
+        content["observability"] = {
+            "config": _obs.observability_config(),
+            "pruning_suppressed": _obs.pruning_suppressed(),
+            "enabled": _obs.observability_enabled(default_on=True),
         }
 
     if readiness_state.is_ready() and "dspy_memory_policy" not in status_info:
