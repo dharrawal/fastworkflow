@@ -225,7 +225,13 @@ main { flex: 1; display: flex; min-height: 0; }
 .listItem.selected { background: var(--accent-soft); border-left: 3px solid var(--accent); padding-left: 7px; }
 .listItem .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .listItem .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.filters { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.navChildren { padding-left: 14px; border-left: 1px solid var(--border); }
+.navNode > summary { cursor: pointer; padding: 8px 5px; overflow-wrap: anywhere; }
+.navNode.selected > summary { background: rgba(90,140,220,.15); }
+.navNode.conversation > summary { list-style: none; }
+.navNode.conversation > summary::-webkit-details-marker { display: none; }
+.navNode > summary:focus-visible { outline: 2px solid currentColor; }
+
 .empty { color: var(--muted); padding: 16px; font-size: 12px; text-align: center; }
 #detail { flex: 1; overflow-y: auto; padding: 16px 20px; min-width: 0; }
 #reviewPane {
@@ -320,9 +326,6 @@ main { flex: 1; display: flex; min-height: 0; }
 .chipSignal.asked { color: var(--bar-human); border-color: var(--bar-human); }
 .chipSignal.consequence { color: var(--bar-command); border-color: var(--bar-command); }
 .chipCost.unrecorded { font-style: italic; }
-.filters .lowConf { display: flex; align-items: center; gap: 6px; font-size: 11px;
-  color: var(--muted); }
-.filters .lowConf input[type=number] { width: 64px; }
 /* fix-aou (a): the turn's execution ledger, one row per dispatch */
 .ledgerWrap { overflow-x: auto; }
 table.ledger { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
@@ -509,6 +512,7 @@ button.newConv:hover { filter: brightness(1.1); }
   <span id="workspaceChrome"></span>
   <span class="spacer"></span>
   <button id="clearConvsBtn" style="display:none">Clear conversations</button>
+  <button id="benchmarkSetupBtn">Benchmark setup</button>
   <button id="switchWfBtn" style="display:none">Switch workflow</button>
   <button id="refreshBtn" style="display:none">Refresh</button>
 </header>
@@ -554,30 +558,6 @@ button.newConv:hover { filter: brightness(1.1); }
 
 <main id="debugMain">
   <div id="rail">
-    <div class="railSection filters">
-      <select id="fStatus">
-        <option value="">status: any</option>
-        <option value="awaiting_user">awaiting_user</option>
-        <option value="completed">completed</option>
-        <option value="failed">failed</option>
-        <option value="cancelled">cancelled</option>
-        <option value="abandoned">abandoned</option>
-      </select>
-      <select id="fSuccess">
-        <option value="">success: any</option>
-        <option value="1">success</option>
-        <option value="0">failure</option>
-      </select>
-      <input type="text" id="fCommand" placeholder="command filter">
-      <input type="text" id="fContext" placeholder="context filter">
-      <label class="lowConf" title="Shows turns whose least confident intent decision recorded a classifier top-k margin below this value. No calibrated threshold is on record (decision signals are capture-only), so 0.20 is a viewing default, not a policy. A turn with no recorded margin is never counted.">
-        <input type="checkbox" id="fLowConf">
-        low confidence: margin below
-        <input type="number" id="fLowConfMargin" min="0" max="1" step="0.05" value="0.2">
-      </label>
-      <button id="experimentsBtn">Experiments</button>
-      <button id="benchmarksBtn">Benchmarks</button>
-    </div>
     <div id="convList"></div>
   </div>
   <div id="detail"><div class="empty">Select a turn to inspect it.</div></div>
@@ -626,7 +606,15 @@ button.newConv:hover { filter: brightness(1.1); }
 
 var TOKEN = new URLSearchParams(location.search).get("token") || "";
 
+var benchmarkExperimentSource = null;
+function benchmarkEvidencePath(path) {
+  if (benchmarkExperimentSource && /^\/api\/(experiment\/|conversations(?:\?|$)|turns(?:\?|$)|turn\/|spans\/|artifact\/)/.test(path)) {
+    return path + (path.indexOf("?") < 0 ? "?" : "&") + "benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource);
+  }
+  return path;
+}
 function api(path) {
+  path = benchmarkEvidencePath(path);
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
     .then(function (r) {
       /* Read the body even on a failure. Routes that refuse deliberately —
@@ -650,6 +638,7 @@ function api(path) {
    error to report, it is the comparison result saying "these two are not
    comparable, here is why" — so it resolves rather than rejects. */
 function apiAllowing409(path) {
+  path = benchmarkEvidencePath(path);
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
     .then(function (r) {
       return r.json().then(function (data) {
@@ -662,6 +651,7 @@ function apiAllowing409(path) {
     });
 }
 function apiRaw(path) {
+  path = benchmarkEvidencePath(path);
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } });
 }
 function apiPost(path, body) {
@@ -698,6 +688,7 @@ function reviewApi(path, method, body) {
 }
 
 function apiPatch(path, body) {
+  path = benchmarkEvidencePath(path);
   return fetch(path, {
     method: "PATCH",
     headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
@@ -710,6 +701,7 @@ function apiPatch(path, body) {
   });
 }
 function apiPut(path, body) {
+  path = benchmarkEvidencePath(path);
   return fetch(path, {
     method: "PUT",
     headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
@@ -721,12 +713,20 @@ function apiPut(path, body) {
     });
   });
 }
+function analysisText(value) {
+  if (value === null || value === undefined) { return ""; }
+  if (typeof value === "string") { return value; }
+  if (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length) { return ""; }
+  return JSON.stringify(value, null, 2);
+}
+
 function parseAnalysisJson(raw) {
   if (raw === null || raw === undefined || raw === "") { return null; }
   if (typeof raw === "object") { return raw; }
   try { return JSON.parse(raw); } catch (e) { return null; }
 }
 function apiAllowing409(path) {
+  path = benchmarkEvidencePath(path);
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
     .then(function (r) {
       return r.json().then(function (data) {
@@ -1048,11 +1048,7 @@ function renderServerConfiguration(container, attempt) {
    decision_signals is capture-only, so the default below is a viewing aid
    the rail says as much about. */
 var LOW_CONFIDENCE_DEFAULT_MARGIN = 0.2;
-function lowConfidenceThreshold() {
-  var field = document.getElementById("fLowConfMargin");
-  var value = field ? parseFloat(field.value) : NaN;
-  return isFinite(value) && value >= 0 ? value : LOW_CONFIDENCE_DEFAULT_MARGIN;
-}
+function lowConfidenceThreshold() { return LOW_CONFIDENCE_DEFAULT_MARGIN; }
 function finiteNumber(value) {
   return typeof value === "number" && isFinite(value) ? value : null;
 }
@@ -1460,78 +1456,206 @@ function renderConversationGroups(container, byConv, convsByKey) {
   });
 }
 
-function refreshConvs() {
-  var list = document.getElementById("convList");
-  Promise.all([
-    api("/api/conversations?limit=500"),
-    api(turnQuery())
-  ]).then(function (results) {
-    clear(list);
-    var convsByKey = {};
-    (results[0].conversations || []).forEach(function (c) {
-      convsByKey[c.channel_id + ":" + c.conversation_id] = c;
-    });
-    /* Conversations are indexed by turn, never listed on their own: a
-       conversation with no turns in view has nothing to inspect, and a
-       channel with no conversation left has nothing to open. */
-    var channels = groupTurnsByChannel(results[1].turns || []);
-    var everyChannel = Object.keys(channels);
-    var channelIds = everyChannel.filter(function (channelId) {
-      return channelHasConversation(channels[channelId]);
-    });
-    if (!channelIds.length) {
-      list.appendChild(el("div", "empty", everyChannel.length
-        ? "No conversations match the current filters. Channels whose turns all " +
-          "belong to no conversation are hidden."
-        : "No turns match the current filters."));
-      return;
+var conversationRefresh = 0;
+var hierarchyRoot = null;
+var hierarchyScope = null;
+var hierarchyPath = [];
+var hierarchyExpanded = {};
+
+function findHierarchy(predicate) {
+  function walk(node, trail) {
+    var path = trail.concat([node]);
+    if (predicate(node)) { return path; }
+    for (var i = 0; i < node.children.length; i++) {
+      var found = walk(node.children[i], path);
+      if (found) { return found; }
     }
-    channelIds.forEach(function (channelId) {
-      var byConv = channels[channelId];
-      var turnCount = Object.keys(byConv).reduce(function (total, key) {
-        return total + byConv[key].length;
-      }, 0);
-      var convCount = Object.keys(byConv).filter(function (key) {
-        return key !== "none";
-      }).length;
-      var chanGroup = el("details", "chanGroup");
-      chanGroup.open = true;
-      var summary = el("summary");
-      summary.appendChild(document.createTextNode(channelId || "(unnamed channel)"));
-      summary.appendChild(el("div", "chanSub",
-        convCount + (convCount === 1 ? " conversation · " : " conversations · ") +
-        turnCount + (turnCount === 1 ? " turn" : " turns")));
-      chanGroup.appendChild(summary);
-      var convs = el("div", "chanConvs");
-      renderConversationGroups(convs, byConv, convsByKey);
-      chanGroup.appendChild(convs);
-      list.appendChild(chanGroup);
+    return null;
+  }
+  return hierarchyRoot ? walk(hierarchyRoot, []) : null;
+}
+
+function focusHierarchy(predicate) {
+  var path = findHierarchy(predicate);
+  if (!path) { return false; }
+  hierarchyPath = path;
+  path.slice(0, -1).forEach(function (node) { hierarchyExpanded[node.key] = true; });
+  renderHierarchy();
+  return true;
+}
+
+function fillHierarchyCrumbs(container) {
+  clear(container);
+  (hierarchyPath.length ? hierarchyPath : (hierarchyRoot ? [hierarchyRoot] : [])).forEach(function (node, index) {
+    if (index) { container.appendChild(el("span", "sep", "›")); }
+    var button = el("button", null, node.label);
+    button.addEventListener("click", function () {
+      var path = findHierarchy(function (n) { return n.key === node.key; });
+      if (path) { activateHierarchy(path, true); }
     });
-  }).catch(function () {
-    clear(list);
-    list.appendChild(el("div", "empty", "Could not load conversations (API error)."));
+    container.appendChild(button);
   });
 }
 
-function turnQuery() {
-  var params = ["limit=500"];
-  var status = document.getElementById("fStatus").value;
-  var success = document.getElementById("fSuccess").value;
-  var command = document.getElementById("fCommand").value.trim();
-  var context = document.getElementById("fContext").value.trim();
-  if (status) { params.push("status=" + encodeURIComponent(status)); }
-  if (success !== "") { params.push("success=" + success); }
-  if (command) { params.push("command=" + encodeURIComponent(command)); }
-  /* Server-side substring filter: a match older than the newest page must
-     still be found, so filtering cannot happen client-side over one page. */
-  if (context) { params.push("context=" + encodeURIComponent(context)); }
-  /* Server-side too, for the same reason: the margin is derived per turn from
-     its spans, and a low-confidence turn older than the newest page must still
-     be found. A turn with no recorded margin never matches. */
-  if (document.getElementById("fLowConf").checked) {
-    params.push("low_confidence_below=" + encodeURIComponent(lowConfidenceThreshold()));
+function renderHierarchy() {
+  var list = document.getElementById("convList");
+  clear(list);
+  if (!hierarchyRoot) { return; }
+  var visiblePath = hierarchyPath.filter(function (n) { return n.kind !== "turn" && n.kind !== "component"; });
+  var selected = visiblePath.length ? visiblePath[visiblePath.length - 1].key : null;
+  function render(node, trail) {
+    var path = trail.concat([node]);
+    var row = el("details", "navNode" + (node.kind === "conversation" ? " conversation" : "") + (selected === node.key ? " selected" : ""));
+    row.open = node.kind !== "conversation" && !!hierarchyExpanded[node.key];
+    var summary = el("summary", null, node.label);
+    if (node.kind === "turn") { summary.title = node.info.user_message || node.label; }
+    summary.addEventListener("click", function (event) {
+      event.preventDefault();
+      activateHierarchy(path, !hierarchyExpanded[node.key]);
+    });
+    row.appendChild(summary);
+    if (node.kind !== "conversation" && node.children.length) {
+      var children = el("div", "navChildren");
+      node.children.forEach(function (child) { children.appendChild(render(child, path)); });
+      row.appendChild(children);
+    } else if (node.kind !== "conversation" && row.open) {
+      row.appendChild(el("div", "sub", node.kind === "experiment" ? "No conversations recorded yet." : "No child records."));
+    }
+    return row;
   }
-  return "/api/turns?" + params.join("&");
+  hierarchyRoot.children.forEach(function (node) { list.appendChild(render(node, [hierarchyRoot])); });
+  (hierarchyRoot.info.warnings || []).forEach(function (warning) {
+    list.appendChild(el("p", "err", warning));
+  });
+}
+
+function showHierarchyInfo(node) {
+  expNavToken();
+  var d = document.getElementById("detail"); clear(d);
+  /* .crumbs cancels #detail's padding with negative margins so it can sit flush
+     at the top of the pane and stick there; nested inside the card it painted
+     over the heading above it instead. Same placement as renderLevel. */
+  var crumbs = el("nav", "crumbs"); fillHierarchyCrumbs(crumbs); d.appendChild(crumbs);
+  var card = el("div", "card");
+  card.appendChild(el("h2", null, node.label));
+  if (node.kind === "adhoc" || node.kind === "date") {
+    card.appendChild(el("p", "sub", "Conversations recorded outside experiments, grouped by UTC date."));
+  }
+  card.appendChild(el("p", "sub", node.children.length + " " +
+    (node.kind === "conversation" ? "turns" : node.kind === "adhoc" ? "dates" : "child records")));
+  Object.keys(node.info || {}).forEach(function (key) {
+    var value = node.info[key];
+    if (value === null || value === undefined || key === "record_json") { return; }
+    var pair = el("div"); pair.appendChild(el("strong", null, key.replace(/_/g, " ") + ": "));
+    pair.appendChild(el("span", null, typeof value === "object" ? JSON.stringify(value) : String(value)));
+    card.appendChild(pair);
+  });
+  if (node.kind === "conversation") {
+    card.appendChild(el("h3", null, "Turns"));
+    var conversationPath = hierarchyPath.slice();
+    node.children.forEach(function (turn) {
+      var button = el("button", "listItem", turn.label);
+      button.appendChild(el("div", "sub", (turn.info.status || "") + " · " + fmtTs(turn.info.started_at)));
+      button.addEventListener("click", function () { activateHierarchy(conversationPath.concat([turn]), true); });
+      card.appendChild(button);
+    });
+    if (!node.children.length) { card.appendChild(el("p", "empty", "No turns recorded yet.")); }
+  }
+  d.appendChild(card);
+}
+
+function activateHierarchy(path, expanded) {
+  hierarchyPath = path;
+  var node = path[path.length - 1];
+  path.slice(0, -1).forEach(function (n) { hierarchyExpanded[n.key] = true; });
+  hierarchyExpanded[node.key] = expanded;
+  benchmarkExperimentSource = node.source && node.source.benchmark_experiment || null;
+  if (node.source && node.source.store_id) { state.storeId = node.source.store_id; }
+  renderHierarchy();
+  if (node.kind === "component") {
+    expNavToken();
+    state.path = node.tracePath;
+    renderLevel();
+  } else if (node.kind === "turn") {
+    if (node.source && node.source.store_id) { selectWorkspaceTurn(node.source.store_id, node.turn_key); }
+    else { selectTurn(node.turn_key); }
+  } else {
+    state.turnKey = null; state.turn = null; state.path = [];
+    if (node.kind === "root") { showBenchmarks(); }
+    else if (node.kind === "benchmark" && node.benchmark_id) { showBenchmark(node.benchmark_id); }
+    else if (node.kind === "experiment" && !(node.source && node.source.store_id)) {
+      if (node.recorded) { showExperiment(node.experiment_id); }
+      else if (node.registered) { showBenchmarkExperiment(node.experiment_id); }
+      else { showHierarchyInfo(node); }
+    } else { showHierarchyInfo(node); }
+  }
+}
+
+function alignHierarchyTurn(turnKey) {
+  var path = findHierarchy(function (n) {
+    if (n.kind !== "turn" || n.turn_key !== turnKey) { return false; }
+    if (session && session.workspace_mode) { return n.source && n.source.store_id === state.storeId; }
+    return (n.source && n.source.benchmark_experiment || null) === benchmarkExperimentSource;
+  });
+  if (path) {
+    hierarchyPath = path;
+    path.slice(0, -1).forEach(function (n) { hierarchyExpanded[n.key] = true; });
+    renderHierarchy();
+  }
+}
+
+function attachTraceHierarchy() {
+  if (!state.turn || !state.path.length || review.progress) { return; }
+  alignHierarchyTurn(state.turn.turn_key);
+  var turnNode = hierarchyPath[hierarchyPath.length - 1];
+  if (!turnNode || turnNode.kind !== "turn") { return; }
+  function wrap(trace, tracePath) {
+    var path = tracePath.concat([trace]);
+    return {key: turnNode.key + "/" + trace.id, kind: "component", label: trace.title,
+      source: turnNode.source, tracePath: path,
+      children: trace.children.map(function (child) { return wrap(child, path); })};
+  }
+  turnNode.children = state.path[0].children.map(function (child) { return wrap(child, [state.path[0]]); });
+}
+
+function syncTraceHierarchy() {
+  if (review.progress || !state.turn || !state.path.length) { return; }
+  var trace = state.path[state.path.length - 1];
+  if (state.path.length === 1) { alignHierarchyTurn(state.turn.turn_key); }
+  else {
+    var path = findHierarchy(function (n) { return n.kind === "component" && n.tracePath[n.tracePath.length - 1] === trace; });
+    if (path) {
+      hierarchyPath = path;
+      path.slice(0, -1).forEach(function (n) { hierarchyExpanded[n.key] = true; });
+    }
+  }
+  renderHierarchy();
+}
+
+function refreshConvs() {
+  var refresh = ++conversationRefresh;
+  var workflow = session && session.workflow_path;
+  var scope = JSON.stringify([workflow, session && session.workspace]);
+  if (scope !== hierarchyScope) {
+    hierarchyScope = scope; hierarchyRoot = null; hierarchyPath = []; hierarchyExpanded = {};
+  }
+  if (!hierarchyRoot) {
+    var list = document.getElementById("convList"); clear(list);
+    list.appendChild(el("div", "empty", "Loading navigation…"));
+  }
+  return api("/api/navigation").then(function (data) {
+    if (refresh !== conversationRefresh || scope !== JSON.stringify([session && session.workflow_path, session && session.workspace])) { return; }
+    var selected = hierarchyPath.length && hierarchyPath[hierarchyPath.length - 1].key;
+    hierarchyRoot = data.root;
+    hierarchyPath = findHierarchy(function (n) { return n.key === selected; }) || [hierarchyRoot];
+    attachTraceHierarchy();
+    syncTraceHierarchy();
+    renderHierarchy();
+  }).catch(function (error) {
+    if (refresh !== conversationRefresh) { return; }
+    var list = document.getElementById("convList"); clear(list);
+    list.appendChild(el("div", "empty", "Could not load navigation: " + error.message));
+  });
 }
 
 function renderNestedTurns(turns) {
@@ -1556,18 +1680,6 @@ function renderNestedTurns(turns) {
   });
   return list;
 }
-["fStatus", "fSuccess", "fLowConf"].forEach(function (id) {
-  document.getElementById(id).addEventListener("change", refreshConvs);
-});
-document.getElementById("fLowConfMargin").addEventListener("change", function () {
-  if (document.getElementById("fLowConf").checked) { refreshConvs(); }
-});
-["fCommand", "fContext"].forEach(function (id) {
-  document.getElementById(id).addEventListener("keydown", function (e) {
-    if (e.key === "Enter") { refreshConvs(); }
-  });
-});
-
 /* -- the experiment browser (fix-bn1.6) --------------------------------
    experiment -> task -> attempt is the same three-level grouping the rail
    already builds over channel -> conversation -> turn, so this drills down
@@ -1607,6 +1719,7 @@ function expStatusPill(status) {
 }
 
 function showExperiments() {
+  benchmarkExperimentSource = null;
   var nav = expNavToken();
   state.experimentId = null;
   state.experimentTask = null;
@@ -1665,6 +1778,8 @@ function showExperiments() {
 }
 
 function showExperiment(experimentId) {
+  focusHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === experimentId &&
+    (n.source && n.source.benchmark_experiment || null) === benchmarkExperimentSource; });
   var nav = expNavToken();
   state.experimentId = experimentId;
   state.experimentTask = null;
@@ -1737,32 +1852,18 @@ function showExperiment(experimentId) {
 
     card.appendChild(el("h2", null, "Analysis"));
     card.appendChild(el("div", "expReadonly",
-      "Opaque structured observations — not a verdict, score, or hypothesis. "
-      + "Distinct from Notes."));
+      "Record your observations in any format, including free-form text."));
     var analysisArea = el("textarea", "expNotes");
     var parsedAnalysis = parseAnalysisJson(exp.analysis_json);
-    analysisArea.value = parsedAnalysis
-      ? JSON.stringify(parsedAnalysis, null, 2)
-      : "{\n  \n}";
+    analysisArea.value = analysisText(parsedAnalysis);
     card.appendChild(analysisArea);
     var analysisRow = el("div", "diffToolbar");
     var saveAnalysis = el("button", null, "Save analysis");
     var analysisMsg = el("span", "sub", "");
     saveAnalysis.addEventListener("click", function () {
       analysisMsg.textContent = "saving…";
-      var payload;
-      try {
-        payload = JSON.parse(analysisArea.value);
-      } catch (parseErr) {
-        analysisMsg.textContent = "invalid JSON: " + parseErr.message;
-        return;
-      }
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        analysisMsg.textContent = "analysis must be a JSON object";
-        return;
-      }
       apiPut("/api/experiment/" + encodeURIComponent(experimentId) + "/analysis",
-               payload).then(function () {
+               {analysis: analysisArea.value}).then(function () {
         analysisMsg.textContent = "saved";
       }).catch(function (e) { analysisMsg.textContent = e.message; });
     });
@@ -1896,6 +1997,13 @@ function renderComparison(container, cmp) {
 }
 
 function showExperimentTask(experimentId, taskId, label) {
+  var conversationPath = findHierarchy(function (n) { return n.kind === "conversation" &&
+    n.info.task_id === taskId && n.source && n.source.benchmark_experiment === experimentId; });
+  if (conversationPath) {
+    hierarchyPath = conversationPath;
+    conversationPath.forEach(function (n) { hierarchyExpanded[n.key] = true; });
+    renderHierarchy();
+  }
   var nav = expNavToken();
   state.experimentId = experimentId;
   state.experimentTask = taskId;
@@ -2006,248 +2114,191 @@ function openExperimentAttempt(experimentId, taskId, attempt) {
   });
 }
 
-document.getElementById("experimentsBtn").addEventListener("click", showExperiments);
 
+
+/* Benchmark setup: title, optional description, optional task prompts. */
 var benchNav = 0;
-function benchNavToken() { return ++benchNav; }
-function benchNavStale(token) { return token !== benchNav; }
-
+function benchNavToken() { return expNavToken(); }
+function benchNavStale(token) { return expNavStale(token); }
+function benchmarkText(card, label, value, multiline) {
+  var wrapper = el("label", "card"); wrapper.style.display = "block";
+  wrapper.appendChild(el("div", "title", label));
+  var input = el(multiline ? "textarea" : "input", "expNotes");
+  input.setAttribute("aria-label", label); input.value = value || "";
+  wrapper.appendChild(input); card.appendChild(wrapper); return input;
+}
+function benchmarkPrompt(task) {
+  return task.prompt !== undefined ? task.prompt : (task.description || "");
+}
 function showBenchmarks() {
-  var nav = benchNavToken();
-  state.benchmarkId = null;
-  state.benchmarkVersion = null;
-  var d = document.getElementById("detail");
-  clear(d);
-  d.appendChild(el("div", "empty", "loading benchmarks…"));
+  focusHierarchy(function (n) { return n.kind === "root"; });
+  benchmarkExperimentSource = null;
+  var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  d.appendChild(el("h2", null, "Benchmark setup"));
+  if (!(session && session.workspace_mode)) {
+    var create = el("button", "primary", "New benchmark");
+    create.addEventListener("click", function () { editBenchmark(null); }); d.appendChild(create);
+  }
   api("/api/benchmarks").then(function (data) {
     if (benchNavStale(nav)) { return; }
-    clear(d);
-    var card = el("div", "card");
-    expCrumbs(card, [{ label: "Benchmarks" }]);
-    card.appendChild(el("h2", null, "Benchmarks"));
-    card.appendChild(el("div", "sub",
-      "Versioned task corpora under this workflow's benchmarks/ folder. "
-      + "Browse tasks and payloads as opaque JSON — not a task player."));
-    if (session && session.workspace_mode) {
-      /* Say whose folder this is: in workspace mode it is not "this
-         workflow" — there is no live workflow — but the folder the sealed
-         manifest named, read without writing. */
-      card.appendChild(el("div", "sub",
-        "sealed workspace · read from " + session.workspace.workflow_folderpath
-        + " · writes disabled"));
-    }
-    var rows = data.benchmarks || [];
-    if (!rows.length) {
-      card.appendChild(el("div", "empty", "no benchmarks yet"));
-      d.appendChild(card);
-      return;
-    }
-    rows.forEach(function (row) {
-      var item = el("div", "listItem");
-      var title = el("div", "title", row.benchmark_id);
-      item.appendChild(title);
-      var versions = row.versions || [];
-      item.appendChild(el("div", "sub",
-        versions.length + (versions.length === 1 ? " version" : " versions")
-        + (versions.length ? ": " + versions.join(", ") : "")));
-      item.addEventListener("click", function () {
-        showBenchmark(row.benchmark_id);
-      });
-      card.appendChild(item);
+    if (!data.benchmarks.length) { d.appendChild(el("p", "empty", "No benchmarks yet.")); }
+    data.benchmarks.forEach(function (row) {
+      var b = el("button", "listItem", row.title || row.benchmark_id);
+      b.appendChild(el("div", "sub", (row.versions || []).join(", ")));
+      b.addEventListener("click", function () { showBenchmark(row.benchmark_id); }); d.appendChild(b);
     });
-    d.appendChild(card);
-  }).catch(function (e) {
-    if (benchNavStale(nav)) { return; }
-    clear(d);
-    d.appendChild(el("div", "empty", "No benchmarks available: " + e.message));
-  });
+  }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err", e.message)); } });
 }
-
-function showBenchmark(benchmarkId) {
-  var nav = benchNavToken();
-  state.benchmarkId = benchmarkId;
-  state.benchmarkVersion = null;
-  var d = document.getElementById("detail");
-  clear(d);
-  d.appendChild(el("div", "empty", "loading benchmark…"));
-  Promise.all([
-    api("/api/benchmarks/" + encodeURIComponent(benchmarkId)),
-    api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis")
-  ]).then(function (results) {
-    if (benchNavStale(nav)) { return; }
-    var data = results[0];
-    var analysisData = results[1];
-    clear(d);
-    var card = el("div", "card");
-    expCrumbs(card, [
-      { label: "Benchmarks", onClick: showBenchmarks },
-      { label: benchmarkId }
-    ]);
-    card.appendChild(el("h2", null, benchmarkId));
-    var versions = data.versions || [];
-    if (!versions.length) {
-      card.appendChild(el("div", "empty", "no versions recorded"));
-    } else {
-      card.appendChild(el("h2", null, "Versions"));
-      versions.forEach(function (version) {
-        var item = el("div", "listItem");
-        item.appendChild(el("div", "title", version));
-        item.addEventListener("click", function () {
-          showBenchmarkVersion(benchmarkId, version);
-        });
-        card.appendChild(item);
-      });
-    }
-    card.appendChild(el("h2", null, "Analysis"));
-    card.appendChild(el("div", "sub",
-      "Mutable post-hoc observations in analysis.json — excluded from version digests."));
-    var analysisArea = el("textarea", "expNotes");
-    var benchAnalysis = analysisData.analysis;
-    analysisArea.value = benchAnalysis
-      ? JSON.stringify(benchAnalysis, null, 2)
-      : "{\n  \n}";
-    card.appendChild(analysisArea);
-    if (!session || !session.read_only) {
-      var analysisRow = el("div", "diffToolbar");
-      var saveAnalysis = el("button", null, "Save analysis");
-      var analysisMsg = el("span", "sub", "");
-      saveAnalysis.addEventListener("click", function () {
-        analysisMsg.textContent = "saving…";
-        var payload;
-        try {
-          payload = JSON.parse(analysisArea.value);
-        } catch (parseErr) {
-          analysisMsg.textContent = "invalid JSON: " + parseErr.message;
-          return;
-        }
-        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-          analysisMsg.textContent = "analysis must be a JSON object";
-          return;
-        }
-        apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis",
-                 payload).then(function (saved) {
-          if (benchNavStale(nav)) { return; }
-          if (saved.analysis) {
-            analysisArea.value = JSON.stringify(saved.analysis, null, 2);
-          }
-          analysisMsg.textContent = "saved";
-        }).catch(function (e) { analysisMsg.textContent = e.message; });
-      });
-      analysisRow.appendChild(saveAnalysis);
-      analysisRow.appendChild(analysisMsg);
-      card.appendChild(analysisRow);
-      var newBtn = el("button", null, "New version…");
-      newBtn.addEventListener("click", function () {
-        showNewBenchmarkVersion(benchmarkId);
-      });
-      card.appendChild(newBtn);
-    }
-    d.appendChild(card);
-  }).catch(function (e) {
-    if (benchNavStale(nav)) { return; }
-    clear(d);
-    d.appendChild(el("div", "empty", "Could not load benchmark: " + e.message));
-  });
-}
-
-function showBenchmarkVersion(benchmarkId, version) {
-  var nav = benchNavToken();
-  state.benchmarkId = benchmarkId;
-  state.benchmarkVersion = version;
-  var d = document.getElementById("detail");
-  clear(d);
-  d.appendChild(el("div", "empty", "loading version…"));
-  api("/api/benchmarks/" + encodeURIComponent(benchmarkId)
-      + "/versions/" + encodeURIComponent(version)).then(function (data) {
-    if (benchNavStale(nav)) { return; }
-    var manifest = data.version || {};
-    clear(d);
-    var card = el("div", "card");
-    expCrumbs(card, [
-      { label: "Benchmarks", onClick: showBenchmarks },
-      { label: benchmarkId, onClick: function () { showBenchmark(benchmarkId); } },
-      { label: version }
-    ]);
-    card.appendChild(el("h2", null, benchmarkId + " · " + version));
-    card.appendChild(el("div", "sub", manifest.description || ""));
-    if (manifest.digest_sha256) {
-      card.appendChild(el("div", "sub", "digest " + manifest.digest_sha256));
-    }
-    card.appendChild(el("h2", null, "Tasks"));
-    (manifest.tasks || []).forEach(function (task) {
-      var item = el("div", "listItem");
-      item.appendChild(el("div", "title", task.task_id));
-      item.appendChild(el("div", "sub", task.description || ""));
-      var pre = el("pre", "json");
-      pre.textContent = JSON.stringify(task.payload || {}, null, 2);
-      item.appendChild(pre);
-      card.appendChild(item);
-    });
-    if (!(manifest.tasks || []).length) {
-      card.appendChild(el("div", "empty", "no tasks in this version"));
-    }
-    d.appendChild(card);
-  }).catch(function (e) {
-    if (benchNavStale(nav)) { return; }
-    clear(d);
-    d.appendChild(el("div", "empty", "Could not load version: " + e.message));
-  });
-}
-
-function showNewBenchmarkVersion(benchmarkId) {
-  var nav = benchNavToken();
-  state.benchmarkId = benchmarkId;
-  state.benchmarkVersion = null;
-  var d = document.getElementById("detail");
-  clear(d);
-  var card = el("div", "card");
-  expCrumbs(card, [
-    { label: "Benchmarks", onClick: showBenchmarks },
-    { label: benchmarkId, onClick: function () { showBenchmark(benchmarkId); } },
-    { label: "New version" }
-  ]);
-  card.appendChild(el("h2", null, "New version"));
-  card.appendChild(el("div", "sub",
-    "Paste a benchmark spec JSON object. Version files are immutable once written."));
-  var area = el("textarea", "expNotes");
-  area.value = JSON.stringify({
-    benchmark_id: benchmarkId,
-    version: "v2",
-    description: "what this corpus claims to test",
-    tasks: [{
-      task_id: "case-01",
-      description: "human/agent one-liner",
-      payload: {}
-    }]
-  }, null, 2);
-  card.appendChild(area);
-  var saveRow = el("div", "diffToolbar");
-  var save = el("button", "primary", "Write version");
-  var saveMsg = el("span", "sub", "");
+function editBenchmark(current) {
+  var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  expCrumbs(d, [{label: "Benchmark setup", onClick: showBenchmarks}, {label: current ? "Edit benchmark" : "New benchmark"}]);
+  var title = benchmarkText(d, "Title", current && (current.title || current.benchmark_id), false);
+  var description = benchmarkText(d, "Description (optional)", current && current.description, true);
+  var version = benchmarkText(d, "Version", current ? current.version + " — saving assigns the next version" : "v1 (assigned on save)", false);
+  version.readOnly = true;
+  d.appendChild(el("h2", null, "Tasks"));
+  var tasks = el("div"), readers = []; d.appendChild(tasks);
+  function addTask(task) {
+    var card = el("div", "card"), removed = false; tasks.appendChild(card);
+    card.appendChild(el("div", "sub", task.task_id || "Task ID assigned on save"));
+    var prompt = benchmarkText(card, "Task prompt (optional)", benchmarkPrompt(task), true);
+    var remove = el("button", null, "Remove task");
+    remove.addEventListener("click", function () { removed = true; card.remove(); }); card.appendChild(remove);
+    readers.push(function () { return removed ? null : {task_id: task.task_id, prompt: prompt.value}; });
+  }
+  (current ? current.tasks : [{}]).forEach(addTask);
+  var add = el("button", null, "Add task"); add.addEventListener("click", function () { addTask({}); }); d.appendChild(add);
+  var save = el("button", "primary", "Save benchmark"), msg = el("p", "sub");
   save.addEventListener("click", function () {
-    saveMsg.textContent = "writing…";
-    var spec;
-    try {
-      spec = JSON.parse(area.value);
-    } catch (parseErr) {
-      saveMsg.textContent = "invalid JSON: " + parseErr.message;
-      return;
-    }
-    apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/versions", spec)
-      .then(function (data) {
+    save.disabled = true;
+    apiPost("/api/benchmark-setup", {benchmark_id: current && current.benchmark_id,
+      expected_version: current && current.version, title: title.value, description: description.value,
+      tasks: readers.map(function (read) { return read(); }).filter(Boolean)
+    }).then(function (data) {
+      if (!benchNavStale(nav)) {
+        refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmark(data.version.benchmark_id, data.version.version); } });
+      }
+    }).catch(function (e) { msg.textContent = e.message; save.disabled = false; });
+  }); d.appendChild(save); d.appendChild(msg);
+}
+function showBenchmark(benchmarkId, selectedVersion) {
+  focusHierarchy(function (n) { return n.kind === "benchmark" && n.benchmark_id === benchmarkId; });
+  benchmarkExperimentSource = null;
+  var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  api("/api/benchmarks/" + encodeURIComponent(benchmarkId)).then(function (data) {
+    if (benchNavStale(nav)) { return; }
+    var versions = data.versions || [], version = selectedVersion || versions[versions.length - 1];
+    if (!version) { d.appendChild(el("p", "empty", "No benchmark versions found.")); return; }
+    return api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/versions/" + encodeURIComponent(version)).then(function (loaded) {
+      if (benchNavStale(nav)) { return; }
+      var manifest = loaded.version;
+      expCrumbs(d, [{label: "Benchmark setup", onClick: showBenchmarks}, {label: manifest.title || benchmarkId}]);
+      d.appendChild(el("h2", null, manifest.title || benchmarkId));
+      d.appendChild(el("p", null, manifest.description || ""));
+      d.appendChild(el("p", "sub", "Version " + version));
+      if (versions.length > 1) {
+        var select = el("select"); select.setAttribute("aria-label", "View version");
+        versions.forEach(function (v) { var opt = el("option", null, v); opt.value = v; select.appendChild(opt); });
+        select.value = version;
+        select.addEventListener("change", function () { showBenchmark(benchmarkId, select.value); }); d.appendChild(select);
+      }
+      if (!(session && session.workspace_mode)) {
+        var edit = el("button", null, "Edit benchmark");
+        edit.disabled = version !== versions[versions.length - 1];
+        edit.addEventListener("click", function () { editBenchmark(manifest); }); d.appendChild(edit);
+      }
+      d.appendChild(el("h2", null, "Tasks"));
+      manifest.tasks.forEach(function (task) {
+        var card = el("div", "card"); card.appendChild(el("div", "sub", task.task_id));
+        var prompt = el("pre", null, benchmarkPrompt(task) || "No task prompt provided.");
+        prompt.style.whiteSpace = "pre-wrap"; card.appendChild(prompt); d.appendChild(card);
+      });
+      d.appendChild(el("h2", null, "Experiments"));
+      var experimentList = el("div"), msg = el("p", "sub");
+      if (!(session && session.workspace_mode)) {
+        var create = el("button", "primary", "New experiment");
+        create.addEventListener("click", function () {
+          create.disabled = true;
+          apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments", {version: version}).then(function (result) {
+            if (!benchNavStale(nav)) {
+              refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmarkExperiment(result.experiment.experiment_id); } });
+            }
+          }).catch(function (e) { msg.textContent = e.message; create.disabled = false; });
+        }); d.appendChild(create);
+      }
+      d.appendChild(msg); d.appendChild(experimentList);
+      api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments").then(function (result) {
         if (benchNavStale(nav)) { return; }
-        var written = data.version || {};
-        showBenchmarkVersion(benchmarkId, written.version || spec.version);
-      })
-      .catch(function (e) { saveMsg.textContent = e.message; });
-  });
-  saveRow.appendChild(save);
-  saveRow.appendChild(saveMsg);
-  card.appendChild(saveRow);
-  d.appendChild(card);
+        if (result.warning) { experimentList.appendChild(el("p", "err", result.warning)); }
+        if (!result.experiments.length && !result.warning) { experimentList.appendChild(el("p", "empty", "No experiments in this benchmark yet.")); }
+        result.experiments.forEach(function (row) {
+          var b = el("button", "listItem", row.experiment_id + " · " + row.benchmark_version);
+          b.addEventListener("click", function () {
+            if (row.workspace) { showWorkspaceExperiment(row); }
+            else if (row.registered) { showBenchmarkExperiment(row.experiment_id); }
+            else { showExperiment(row.experiment_id); }
+          }); experimentList.appendChild(b);
+        });
+      }).catch(function (e) { if (!benchNavStale(nav)) { experimentList.appendChild(el("p", "err", e.message)); } });
+      var analysis = el("details", "card"); analysis.appendChild(el("summary", null, "Analysis (optional)")); d.appendChild(analysis);
+      analysis.addEventListener("toggle", function () {
+        if (!analysis.open || analysis.dataset.loaded) { return; } analysis.dataset.loaded = "1";
+        api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis").then(function (value) {
+          var area = benchmarkText(analysis, "Analysis", analysisText(value.analysis), true);
+          area.readOnly = !!(session && session.workspace_mode);
+          if (!area.readOnly) {
+            var save = el("button", null, "Save analysis"), note = el("p");
+            save.addEventListener("click", function () {
+              apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis", {analysis: area.value})
+                .then(function () { note.textContent = "Saved"; }).catch(function (e) { note.textContent = e.message; });
+            }); analysis.appendChild(save); analysis.appendChild(note);
+          }
+        }).catch(function (e) { analysis.appendChild(el("p", "err", e.message)); });
+      });
+    });
+  }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err", e.message)); } });
+}
+function showBenchmarkVersion(benchmarkId, version) { showBenchmark(benchmarkId, version); }
+function openBenchmarkExecution(id) {
+  var path = findHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === id; });
+  if (path) { activateHierarchy(path, true); }
+  else { benchmarkExperimentSource = id; showExperiment(id); refreshConvs(); }
 }
 
-document.getElementById("benchmarksBtn").addEventListener("click", showBenchmarks);
+function showBenchmarkExperiment(id) {
+  focusHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === id; });
+  benchmarkExperimentSource = null;
+  var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  api("/api/benchmark-experiments/" + encodeURIComponent(id)).then(function (data) {
+    if (benchNavStale(nav)) { return; }
+    var row = data.experiment, manifest = data.benchmark;
+    expCrumbs(d, [{label: "Benchmark setup", onClick: showBenchmarks},
+      {label: manifest.title || row.benchmark_id, onClick: function () { showBenchmark(row.benchmark_id, row.benchmark_version); }}, {label: id}]);
+    d.appendChild(el("h2", null, "Experiment"));
+    var identifier = benchmarkText(d, "Experiment ID", id, false); identifier.readOnly = true;
+    d.appendChild(el("p", "sub", "Benchmark version " + row.benchmark_version));
+    d.appendChild(el("p", null, data.recorded ? "Execution records available." : "Created. Pass this experiment ID and the task IDs below to the harness."));
+    if (data.warning) { d.appendChild(el("p", "err", data.warning)); }
+    if (data.recorded) {
+      var open = el("button", "primary", "Open execution records");
+      open.addEventListener("click", function () { openBenchmarkExecution(id); }); d.appendChild(open);
+    }
+    manifest.tasks.forEach(function (task) {
+      var card = el("div", "card"); card.appendChild(el("h3", null, task.task_id));
+      card.appendChild(el("p", null, benchmarkPrompt(task) || "No task prompt provided.")); d.appendChild(card);
+    });
+  }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err", e.message)); } });
+}
+function openBenchmarkSetup() {
+  benchmarkExperimentSource = null;
+  if (!session || (!session.workflow_path && !session.workspace_mode)) {
+    setTopMode("picker"); loadPicker();
+    document.getElementById("pickerStatus").textContent = "Choose a workflow, then open Benchmark setup."; return;
+  }
+  setTopMode("debug"); showBenchmarks();
+}
+document.getElementById("benchmarkSetupBtn").addEventListener("click", openBenchmarkSetup);
+
 
 /* -- capability-gated formal review ----------------------------------- */
 function reviewAnswerMap(progress) {
@@ -2682,52 +2733,7 @@ function loadWorkspaceChrome() {
     chrome.className = "visible";
     chrome.textContent = session.workspace.label + " · "
       + session.workspace.store_count + " stores · read-only";
-    var list = document.getElementById("convList");
-    clear(list);
-    var storeHead = el("div", "railSection");
-    storeHead.appendChild(el("label", null, "Evidence stores"));
-    Object.keys(workspaceStores).forEach(function (storeId) {
-      storeHead.appendChild(el("div", "sub", workspaceStoreText(storeId)));
-    });
-    list.appendChild(storeHead);
-    /* The rail is the only way into the catalogue here: the filter row that
-       carries the Benchmarks button is hidden in workspace mode, and it stays
-       hidden — those filters act on a live workflow. The catalogue itself
-       drills down in #detail like everything else. */
-    var catalogue = session.workspace.benchmark_catalogue;
-    var catBox = el("div", "railSection");
-    catBox.appendChild(el("label", null, "Benchmark catalogue"));
-    if (catalogue === "available") {
-      var catItem = el("div", "listItem");
-      catItem.appendChild(el("div", "title", "Browse pinned corpora"));
-      catItem.appendChild(el("div", "sub",
-        "read-only · " + session.workspace.workflow_folderpath));
-      catItem.addEventListener("click", showBenchmarks);
-      catBox.appendChild(catItem);
-    } else if (catalogue === "unavailable") {
-      catBox.appendChild(el("div", "sub",
-        "the workflow folder this workspace names is not on this machine: "
-        + session.workspace.workflow_folderpath));
-    } else {
-      catBox.appendChild(el("div", "sub",
-        "this workspace manifest names no workflow folder"));
-    }
-    list.appendChild(catBox);
-    var experiments = results[1].experiments || [];
-    experiments.forEach(function (experiment) {
-      var item = el("div", "listItem");
-      item.appendChild(el("div", "title",
-        experiment.label || experiment.experiment_id));
-      item.appendChild(el("div", "sub",
-        "logical experiment · " + experiment.experiment_id));
-      item.addEventListener("click", function () {
-        showWorkspaceExperiment(experiment);
-      });
-      list.appendChild(item);
-    });
-    if (!experiments.length) {
-      list.appendChild(el("div", "empty", "No logical experiments declared."));
-    }
+    refreshConvs();
   }).catch(function (e) {
     var d = document.getElementById("detail");
     clear(d);
@@ -2736,11 +2742,14 @@ function loadWorkspaceChrome() {
 }
 
 function selectWorkspaceTurn(storeId, logicalTurnKey) {
+  var detailNav = expNavToken();
+  benchmarkExperimentSource = null;
   var nav = ++workspaceNav;
   /* Clear first: a slow read from another archive must never leave the old
      trace visible under the newly selected store label. */
   state.storeId = storeId;
   state.turnKey = logicalTurnKey;
+  if (!review.progress) { alignHierarchyTurn(logicalTurnKey); }
   state.turn = null;
   state.path = [];
   var d = document.getElementById("detail");
@@ -2772,12 +2781,12 @@ function selectWorkspaceTurn(storeId, logicalTurnKey) {
     ];
   }
   Promise.all(requests).then(function (results) {
-    if (nav !== workspaceNav || state.storeId !== storeId) { return; }
+    if (nav !== workspaceNav || state.storeId !== storeId || expNavStale(detailNav)) { return; }
     var turn = results[0].turn;
     turn.turn_key = turn.logical_turn_key || turn.turn_key;
     renderDetail(turn, results[1].spans || []);
   }).catch(function (e) {
-    if (nav !== workspaceNav || state.storeId !== storeId) { return; }
+    if (nav !== workspaceNav || state.storeId !== storeId || expNavStale(detailNav)) { return; }
     clear(d);
     d.appendChild(el("div", "empty", "Failed to load scoped turn: " + e.message));
   });
@@ -2785,17 +2794,19 @@ function selectWorkspaceTurn(storeId, logicalTurnKey) {
 
 /* -- turn detail ------------------------------------------------------- */
 function selectTurn(turnKey) {
-  expNavToken();   // this view now owns #detail; stale experiment renders bail
+  var nav = expNavToken();   // this view now owns #detail
   state.turnKey = turnKey;
   state.turn = null;
   state.path = [];
-  refreshConvs();
+  alignHierarchyTurn(turnKey);
   Promise.all([
     api("/api/turn/" + encodeURIComponent(turnKey)),
     api("/api/spans/" + encodeURIComponent(turnKey))
   ]).then(function (results) {
+    if (expNavStale(nav)) { return; }
     renderDetail(results[0].turn, results[1].spans || []);
   }).catch(function (e) {
+    if (expNavStale(nav)) { return; }
     var d = document.getElementById("detail");
     clear(d);
     d.appendChild(el("div", "empty", "Failed to load turn: " + e.message));
@@ -3456,32 +3467,78 @@ function renderTurnLevel(container, turn) {
 
 /* -- navigation --------------------------------------------------------- */
 function renderCrumbs() {
-  var bar = el("nav", "crumbs");
-  if (state.turn) {
-    var conv = state.turn.conversation_id === null
-      ? "conversation-less"
-      : "Conversation #" + state.turn.conversation_id;
-    bar.appendChild(el("span", "here", conv));
-  }
-  state.path.forEach(function (node, index) {
-    bar.appendChild(el("span", "sep", "›"));
-    if (index === state.path.length - 1) {
-      bar.appendChild(el("span", "here", node.crumb));
-      return;
-    }
-    var btn = el("button", null, node.crumb);
-    btn.addEventListener("click", function () {
-      state.path = state.path.slice(0, index + 1);
-      renderLevel();
+  if (review.progress) {
+    var reviewBar = el("nav", "crumbs");
+    state.path.forEach(function (node, index) {
+      if (index) { reviewBar.appendChild(el("span", "sep", "›")); }
+      var button = el("button", null, node.crumb);
+      button.addEventListener("click", function () { state.path = state.path.slice(0, index + 1); renderLevel(); });
+      reviewBar.appendChild(button);
     });
-    bar.appendChild(btn);
-  });
+    return reviewBar;
+  }
+  syncTraceHierarchy();
+  var bar = el("nav", "crumbs");
+  fillHierarchyCrumbs(bar);
   return bar;
 }
 
 function descend(node) {
   state.path = state.path.concat([node]);
   renderLevel();
+}
+
+function feedbackAnchor(node) {
+  if (node.kind === "turn") { return []; }
+  var ids = {};
+  function collect(n) {
+    if (n.span && n.span.span_id) { ids[n.span.span_id] = true; }
+    else { n.children.forEach(collect); }
+  }
+  collect(node);
+  return Object.keys(ids).sort();
+}
+
+function renderHumanFeedback(parent, node) {
+  // Formal blinded assignments retain their own capability-gated review UI.
+  if (review.progress) { return; }
+  var ids = feedbackAnchor(node);
+  var card = el("div", "card");
+  card.appendChild(el("h2", null, "Human feedback · " + node.title));
+  parent.appendChild(card);
+  if (node.kind !== "turn" && !ids.length) {
+    card.appendChild(el("p", "sub", "No recorded span identifies this component. Record feedback on the turn."));
+    return;
+  }
+  var path = "/api/human-feedback?turn_key=" + encodeURIComponent(state.turn.turn_key);
+  if (session && session.workspace_mode) { path += "&store_id=" + encodeURIComponent(state.storeId); }
+  else if (benchmarkExperimentSource) { path += "&benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource); }
+  var history = el("div"), area = el("textarea", "expNotes"), note = el("p", "sub", "Loading feedback…");
+  area.placeholder = "What worked, what went wrong, or what should change?";
+  area.setAttribute("aria-label", "Feedback for " + node.title);
+  area.maxLength = 100000;
+  var save = el("button", null, "Save feedback"); save.disabled = true;
+  card.appendChild(history); card.appendChild(area); card.appendChild(save); card.appendChild(note);
+  function show(data) {
+    clear(history);
+    (data.feedback || []).filter(function (row) {
+      return row.target_kind === node.kind && JSON.stringify(row.span_ids) === JSON.stringify(ids);
+    }).forEach(function (row) {
+      history.appendChild(el("div", "sub", row.created_at));
+      history.appendChild(el("pre", "json", row.comment));
+    });
+    area.hidden = save.hidden = !!data.read_only;
+    save.disabled = !!data.read_only;
+    note.textContent = data.read_only ? "Read-only snapshot. Add feedback in the working experiment database." : "Each save adds a timestamped comment.";
+  }
+  api(path).then(show).catch(function (e) { note.textContent = e.message; });
+  save.addEventListener("click", function () {
+    if (!area.value.trim()) { note.textContent = "Enter feedback before saving."; return; }
+    save.disabled = true; note.textContent = "Saving…";
+    apiPost(path, {target_kind: node.kind, span_ids: ids, target_label: node.title, comment: area.value})
+      .then(function (data) { area.value = ""; show(data); note.textContent = "Saved"; })
+      .catch(function (e) { save.disabled = false; note.textContent = e.message; });
+  });
 }
 
 function renderLevel() {
@@ -3513,6 +3570,7 @@ function renderLevel() {
   info.appendChild(head);
   node.render(info);
   d.appendChild(info);
+  renderHumanFeedback(d, node);
 
   if (node.children.length) {
     var wf = el("div", "card");
@@ -3552,6 +3610,7 @@ function levelNoun(node) {
 function renderDetail(turn, spans) {
   state.turn = turn;
   state.path = [buildTurnTree(turn, spans)];
+  attachTraceHierarchy();
   if (!spans.length) {
     var d = document.getElementById("detail");
     clear(d);
@@ -3560,6 +3619,7 @@ function renderDetail(turn, spans) {
     info.appendChild(el("h2", null, policedText(turn.user_message) || "(no message)"));
     renderTurnLevel(info, turn);
     d.appendChild(info);
+    renderHumanFeedback(d, state.path[0]);
     var note = el("div", "card");
     note.appendChild(el("div", "empty", "No spans recorded for this turn."));
     d.appendChild(note);
@@ -3807,6 +3867,7 @@ function renderArtifacts(container, turn) {
 
 /* -- top-level views: picker | chat (test) | debug ---------------------- */
 function setTopMode(mode) {
+  if (mode === "test" || mode === "picker") { benchmarkExperimentSource = null; }
   if (session && session.workspace_mode && mode !== "debug") { mode = "debug"; }
   document.getElementById("pickerMain").className = mode === "picker" ? "visible" : "";
   document.getElementById("debugMain").className = mode === "debug" ? "visible" : "";
@@ -3821,7 +3882,7 @@ function setTopMode(mode) {
     (mode === "test" && tm.connected) ? "" : "none";
   if (mode === "debug") { refreshAll(); }
 }
-document.getElementById("modeDebug").addEventListener("click", function () { setTopMode("debug"); });
+document.getElementById("modeDebug").addEventListener("click", function () { benchmarkExperimentSource = null; setTopMode("debug"); });
 document.getElementById("modeTest").addEventListener("click", function () { setTopMode("test"); });
 document.getElementById("switchWfBtn").addEventListener("click", function () {
   setTopMode("picker");
@@ -4804,7 +4865,6 @@ function applySession() {
     document.getElementById("switchWfBtn").style.display = "none";
     document.getElementById("clearConvsBtn").style.display = "none";
     document.getElementById("advPanel").style.display = "none";
-    document.querySelector(".railSection.filters").style.display = "none";
     setTopMode("debug");
     loadReviewAssignment();
     return;

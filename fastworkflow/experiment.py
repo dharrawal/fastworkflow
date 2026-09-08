@@ -450,6 +450,32 @@ class ExperimentController:
         benchmark_digest_sha256: Optional[str] = None,
         workflow_folderpath: Optional[str] = None,
     ) -> None:
+        # A UI-created identity pins the benchmark even when a driver supplies
+        # only experiment/task IDs. Unregistered experiments keep their API.
+        from fastworkflow import benchmark_setup
+
+        folder = workflow_folderpath or self.workflow_folderpath
+        registration = None
+        if folder:
+            try:
+                registration, manifest = benchmark_setup.experiment_manifest(folder, experiment_id)
+            except KeyError:
+                pass
+        if registration is not None:
+            declarations = list(declarations)
+            if {item[0] for item in declarations} != set(registration["task_ids"]):
+                raise ValueError("declared task IDs must match the registered benchmark version")
+            for supplied, key in ((benchmark_id, "benchmark_id"),
+                                  (benchmark_version, "benchmark_version"),
+                                  (benchmark_digest_sha256, "benchmark_digest_sha256")):
+                if supplied is not None and supplied != registration[key]:
+                    raise ValueError(f"{key} differs from the registered experiment")
+            target = {"db_path": os.path.abspath(self.db_path), "store_id": self.store_identity}
+            if registration.get("store") not in (None, target):
+                raise ValueError("experiment is already bound to another evidence store")
+            benchmark_id = registration["benchmark_id"]
+            benchmark_version = registration["benchmark_version"]
+            benchmark_digest_sha256 = registration["benchmark_digest_sha256"]
         if (
             benchmark_id is not None
             and benchmark_version is not None
@@ -483,6 +509,8 @@ class ExperimentController:
             capture_policy_version=self.capture_policy_version,
         )
         self.store.declare_experiment_attempts(experiment_id, declarations)
+        if registration is not None:
+            benchmark_setup.bind_experiment(folder, experiment_id, self.db_path, self.store_identity)
 
     def start_attempt(
         self,
@@ -760,6 +788,21 @@ class ExperimentHarness:
         self._store = self._controller.store
         self._lock = threading.Lock()
         self._sink: Optional[observability_store.SQLiteTraceSink] = None
+
+    @classmethod
+    def from_benchmark_experiment(cls, workflow_folderpath: str, experiment_id: str, **kwargs):
+        """Attach the UI's experiment ID; pass its task IDs to ``run``.
+
+        Task prompts are optional in setup, so the harness supplies actual
+        messages through ExperimentTask as usual. No model runs here.
+        """
+        from fastworkflow.benchmark_setup import experiment_manifest
+
+        record, _ = experiment_manifest(workflow_folderpath, experiment_id)
+        return cls(workflow_folderpath, experiment_id=experiment_id,
+                   label=record["label"], benchmark_id=record["benchmark_id"],
+                   benchmark_version=record["benchmark_version"],
+                   benchmark_digest_sha256=record["benchmark_digest_sha256"], **kwargs)
 
     # -- the two things that must happen on the main thread ---------------
 

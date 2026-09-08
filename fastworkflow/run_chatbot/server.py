@@ -44,7 +44,8 @@ from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from fastworkflow import state_paths
+from fastworkflow import benchmark_setup, state_paths
+from fastworkflow.experiment_setup import ExperimentSetups, SetupConflict
 from fastworkflow.benchmark_catalog import (
     BenchmarkAlreadyExistsError,
     BenchmarkManifestError,
@@ -2072,16 +2073,27 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 split.path.startswith("/api/review/assignments/")
                 and split.path.endswith("/adjudications")
             )
+            setup_post_path = (
+                split.path == "/api/experiment-setups"
+                or split.path.startswith("/api/experiment-setups/")
+            )
+            benchmark_setup_path = split.path == "/api/benchmark-setup"
+            benchmark_experiment_path = (split.path.startswith("/api/benchmarks/")
+                                         and split.path.endswith("/experiments"))
             benchmark_post_path = split.path == "/api/benchmarks" or (
                 split.path.startswith("/api/benchmarks/")
                 and split.path.endswith("/versions")
             )
             if (
-                not review_answer_path
+                not benchmark_setup_path
+                and not benchmark_experiment_path
+                and not setup_post_path
+                and not review_answer_path
                 and not review_adjudication_path
                 and not benchmark_post_path
                 and split.path
                 not in {
+                "/api/human-feedback",
                 "/api/select_workflow",
                 "/api/select_workspace",
                 "/api/configure_env",
@@ -2104,6 +2116,33 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, TypeError):
                 self._error(400, "invalid JSON body")
+                return
+            if split.path == "/api/human-feedback":
+                if not isinstance(body, dict):
+                    self._error(400, "body must be a JSON object")
+                    return
+                self._handle_human_feedback(query, body)
+                return
+            if benchmark_setup_path or benchmark_experiment_path:
+                folder = self._benchmark_workflow_path(write=True)
+                if folder is None:
+                    return
+                try:
+                    if not isinstance(body, dict):
+                        raise ValueError("body must be an object")
+                    if benchmark_setup_path:
+                        self._send_json({"version": benchmark_setup.save_benchmark(folder, body)}, status=201)
+                    else:
+                        benchmark_id = unquote(split.path[len("/api/benchmarks/"):-len("/experiments")])
+                        record = benchmark_setup.create_experiment(folder, benchmark_id, body.get("version"))
+                        self._send_json({"experiment": record}, status=201)
+                except benchmark_setup.BenchmarkSetupConflict as exc:
+                    self._error(409, str(exc))
+                except (BenchmarkManifestError, ValueError, TypeError) as exc:
+                    self._error(400, str(exc))
+                return
+            if setup_post_path:
+                self._handle_setup(split.path, body=body, write=True)
                 return
             if review_answer_path or review_adjudication_path:
                 if not isinstance(body, dict):
@@ -2329,6 +2368,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 self._refuse_write()
                 return
             query = parse_qs(split.query)
+            if query.get("benchmark_experiment"):
+                self._error(403, "benchmark execution drilldown is read-only")
+                return
             if not self._host_origin_allowed():
                 self._error(403, "forbidden: host/origin not allowed")
                 return
@@ -2362,11 +2404,42 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
     # -- API endpoints ---------------------------------------------------
 
     def _handle_api(self, path: str, query: dict[str, list[str]]) -> None:
-        # Per-request read-only store [R12]; None while the DB does not exist
-        # yet (test-mode cold start) — serve empty views, never an error.
-        store = self.chatbot.open_store()
+        # Authoring and navigation do not depend on execution evidence. In
+        # particular, an incompatible selected store must not trap the user
+        # by breaking session loading and the workflow picker.
         q = lambda name: query.get(name, [None])[0]  # noqa: E731
+        if path == "/api/navigation":
+            self._handle_navigation()
+            return
+        if path == "/api/human-feedback":
+            self._handle_human_feedback(query)
+            return
+        if path.startswith("/api/benchmark-experiments/"):
+            self._handle_benchmark_registration(unquote(path[len("/api/benchmark-experiments/"):]))
+            return
+        if path == "/api/session":
+            self._send_json({"session": self.chatbot.session_payload()})
+            return
+        if path == "/api/workflows":
+            self._send_json({"workflows": list_workflow_candidates()})
+            return
+        if path == "/api/browse":
+            self._send_json(browse_directories(q("dir") or ""))
+            return
+        if path == "/api/experiment-setups" or path.startswith("/api/experiment-setups/"):
+            self._handle_setup(path)
+            return
+        if path == "/api/benchmarks" or path.startswith("/api/benchmarks/"):
+            self._handle_benchmarks(path)
+            return
 
+        # Per-request read-only store; never migrate incompatible evidence.
+        try:
+            source = q("benchmark_experiment")
+            store = self._registered_store(source) if source else self.chatbot.open_store()
+        except (IncompatibleObservabilityDB, ValueError, KeyError) as exc:
+            self._error(409, str(exc))
+            return
         if path.startswith("/api/review/assignments/"):
             self._handle_review_assignment(path)
         elif path == "/api/workspace" or path.startswith("/api/workspace/"):
@@ -2404,14 +2477,6 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     "db_size_bytes": store.db_size_bytes() if store else 0,
                 }
             )
-        elif path == "/api/session":
-            self._send_json({"session": self.chatbot.session_payload()})
-        elif path == "/api/workflows":
-            self._send_json({"workflows": list_workflow_candidates()})
-        elif path == "/api/browse":
-            self._send_json(browse_directories(q("dir") or ""))
-        elif path == "/api/benchmarks" or path.startswith("/api/benchmarks/"):
-            self._handle_benchmarks(path)
         elif store is None:
             if path == "/api/health":
                 self._send_json(
@@ -2782,6 +2847,58 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         except WorkspaceBusyError as exc:
             self._error(503, str(exc))
 
+    def _handle_setup(self, path, *, body=None, write=False):
+        # Setup reviews are live workflow authoring records, never sealed evidence.
+        if self.chatbot.workspace is not None:
+            self._error(
+                403,
+                "Select a live workflow to review experiment setups; sealed workspaces are read-only",
+            )
+            return
+        workflow_path = self.chatbot.workflow_path
+        if not workflow_path:
+            self._error(409, "Select a workflow before reviewing experiment setups")
+            return
+        setups = ExperimentSetups(workflow_path)
+        rest = path[len("/api/experiment-setups") :].strip("/")
+        parts = rest.split("/") if rest else []
+        try:
+            if write and not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+            if not parts:
+                if write:
+                    result = setups.save(body.get("spec"), body.get("expected_revision"))
+                    self._send_json({"setup": result}, status=201)
+                else:
+                    self._send_json({"setups": setups.list()})
+            elif len(parts) == 1 and not write:
+                self._send_json({"setup": setups.get(unquote(parts[0]))})
+            elif len(parts) == 2 and parts[1] == "decisions" and write:
+                result = setups.decide(
+                    unquote(parts[0]),
+                    body.get("revision"),
+                    body.get("digest"),
+                    body.get("decision"),
+                    body.get("reviewer"),
+                    body.get("comment", ""),
+                )
+                self._send_json({"setup": result}, status=201)
+            elif len(parts) == 2 and parts[1] == "export" and not write:
+                current = setups.get(unquote(parts[0]))
+                self._send_json(
+                    setups.approved(
+                        current["setup_id"], current["revision"], current["digest"]
+                    )
+                )
+            else:
+                self._error(404, "not found")
+        except SetupConflict as exc:
+            self._error(409, str(exc))
+        except KeyError:
+            self._error(404, "setup not found")
+        except (ValueError, TypeError) as exc:
+            self._error(400, str(exc))
+
     def _benchmark_workflow_path(self, *, write: bool = False) -> Optional[str]:
         """Workflow folder for versioned benchmark corpus files.
 
@@ -2826,6 +2943,166 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             return None
         return workflow_path
 
+    def _handle_navigation(self):
+        from .navigation import build_navigation, read_source
+        benchmarks, registrations, sources, warnings = [], [], [], []
+        folder = self.chatbot.workflow_path
+        workspace = self.chatbot.workspace
+        if workspace is not None:
+            folder = workspace.summary().get("workflow_folderpath")
+        if folder and os.path.isdir(folder):
+            for bid in list_benchmarks(folder):
+                versions = list_versions(folder, bid)
+                row = {"benchmark_id": bid, "versions": versions}
+                if versions:
+                    try:
+                        row.update(load_version(folder, bid, versions[-1]))
+                    except BenchmarkManifestError as exc:
+                        warnings.append(str(exc))
+                benchmarks.append(row)
+                if workspace is None:
+                    registrations.extend(benchmark_setup.registered_experiments(folder, bid))
+        if workspace is not None:
+            for descriptor in workspace.stores():
+                sid = descriptor["store_id"]
+                with workspace.registry.open(sid) as store:
+                    sources.append(read_source(store, {"store_id": sid}))
+            self._send_json({"root": build_navigation(benchmarks, [], sources, warnings)})
+            return
+        try:
+            store = self.chatbot.open_store()
+            if store:
+                sources.append({"store": store, "source": None})
+        except (IncompatibleObservabilityDB, OSError, sqlite3.Error) as exc:
+            warnings.append(str(exc))
+        for record in registrations:
+            if not record.get("store"):
+                continue
+            try:
+                store = self._registered_store(record["experiment_id"])
+                sources.append({"store": store,
+                    "source": {"benchmark_experiment": record["experiment_id"]},
+                    "experiment_id": record["experiment_id"]})
+            except (ValueError, KeyError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
+                record["warning"] = str(exc)
+        self._send_json({"root": build_navigation(benchmarks, registrations, sources, warnings)})
+
+    def _handle_human_feedback(self, query, body=None):
+        """Owner-authenticated annotations in the selected evidence database."""
+        q = lambda key: (query.get(key) or [None])[0]
+        writing = body is not None
+        if writing and not isinstance(body, dict):
+            self._error(400, "body must be a JSON object")
+            return
+        turn_key = q("turn_key")
+        if not turn_key:
+            self._error(400, "turn_key is required")
+            return
+        try:
+            workspace = self.chatbot.workspace
+            if workspace is not None:
+                if writing:
+                    self._error(403, "workspace evidence is read-only; annotate the working database")
+                    return
+                with workspace.registry.open(q("store_id") or "") as store:
+                    if store.get_turn(turn_key) is None:
+                        self._error(404, "turn not found")
+                        return
+                    self._send_json({"feedback": store.list_human_feedback(turn_key), "read_only": True})
+                return
+            source = q("benchmark_experiment")
+            store = self._registered_store(source) if source else self.chatbot.open_store()
+            turn = store.get_turn(turn_key) if store else None
+            if turn is None:
+                self._error(404, "turn not found")
+                return
+            if source and turn.get("experiment_id") != source:
+                self._error(400, "turn does not belong to the selected experiment")
+                return
+            if writing:
+                if set(body) != {"target_kind", "span_ids", "target_label", "comment"}:
+                    raise ValueError("provide target_kind, span_ids, target_label and comment")
+                ObservabilityStore.open_for_annotation(store.db_path).add_human_feedback(turn_key, **body)
+            self._send_json({"feedback": store.list_human_feedback(turn_key), "read_only": False},
+                            status=201 if writing else 200)
+        except (IncompatibleObservabilityDB, UnknownWorkspaceStore) as exc:
+            self._error(409, str(exc))
+        except (ValueError, TypeError, KeyError) as exc:
+            self._error(400, str(exc))
+
+    def _registered_store(self, experiment_id):
+        if self.chatbot.workspace is not None or not self.chatbot.workflow_path:
+            raise ValueError("registered experiments require a selected live workflow")
+        record = benchmark_setup.load_experiment(self.chatbot.workflow_path, experiment_id)
+        target = record.get("store")
+        if not target:
+            raise ValueError("experiment has not started")
+        store = ReadOnlyObservabilityStore(target["db_path"])
+        if store.store_identity() != target["store_id"]:
+            raise ValueError("registered experiment evidence store identity changed")
+        detail = store.get_experiment(experiment_id)
+        if not detail or any(detail.get(key) != record[key] for key in
+                ("benchmark_id", "benchmark_version", "benchmark_digest_sha256")):
+            raise ValueError("recorded experiment does not match its benchmark registration")
+        return store
+
+    def _handle_benchmark_registration(self, experiment_id):
+        folder = self._benchmark_workflow_path()
+        if folder is None:
+            return
+        try:
+            record, manifest = benchmark_setup.experiment_manifest(folder, experiment_id)
+        except KeyError:
+            self._error(404, "experiment not found")
+            return
+        except (ValueError, BenchmarkManifestError) as exc:
+            self._error(409, str(exc))
+            return
+        recorded, warning = False, None
+        if record.get("store"):
+            try:
+                self._registered_store(experiment_id)
+                recorded = True
+            except (ValueError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
+                warning = str(exc)
+        self._send_json({"experiment": record, "benchmark": manifest,
+                         "recorded": recorded, "warning": warning})
+
+    def _benchmark_experiments(self, benchmark_id):
+        folder = self._benchmark_workflow_path()
+        if folder is None:
+            return
+        rows, warning = [], None
+        if self.chatbot.workspace is not None:
+            workspace = self.chatbot.workspace
+            for logical in workspace.experiments():
+                matches = [workspace.experiment(segment["store_id"], segment["local_experiment_id"])
+                           for segment in workspace.segments(logical["experiment_id"])]
+                versions = sorted({row["benchmark_version"] for row in matches
+                                   if row and row.get("benchmark_id") == benchmark_id})
+                if versions:
+                    rows.append(dict(logical, benchmark_version=", ".join(versions), workspace=True))
+        else:
+            registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
+            rows = [dict(row, registered=True, status="registered") for row in registrations]
+            try:
+                store = self.chatbot.open_store()
+                if store:
+                    offset = 0
+                    while True:
+                        batch = store.list_experiments(limit=200, offset=offset)
+                        for row in batch:
+                            if row.get("benchmark_id") == benchmark_id:
+                                if any(r["experiment_id"] == row["experiment_id"] for r in rows):
+                                    continue
+                                rows.append(row)
+                        if len(batch) < 200:
+                            break
+                        offset += len(batch)
+            except IncompatibleObservabilityDB as exc:
+                warning = "Recorded experiments are unavailable in the selected evidence store: " + str(exc)
+        self._send_json({"experiments": rows, "warning": warning})
+
     def _handle_benchmarks(self, path: str) -> None:
         """Read workflow-local benchmark catalogs from ``<workflow>/benchmarks/``."""
         workflow_path = self._benchmark_workflow_path(write=False)
@@ -2840,6 +3117,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                         "versions": list_versions(workflow_path, benchmark_id),
                     }
                 )
+            for row in payload:
+                if row["versions"]:
+                    try:
+                        manifest = load_version(workflow_path, row["benchmark_id"], row["versions"][-1])
+                        if "title" in manifest:
+                            row["title"] = manifest["title"]
+                    except BenchmarkManifestError:
+                        pass
             self._send_json({"benchmarks": payload})
             return
 
@@ -2856,6 +3141,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     "versions": list_versions(workflow_path, benchmark_id),
                 }
             )
+            return
+        if tail == "experiments":
+            self._benchmark_experiments(benchmark_id)
             return
         if tail == "analysis":
             try:
@@ -2936,9 +3224,6 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._error(400, str(exc))
             return
-        if not isinstance(payload, dict):
-            self._error(400, "analysis must be a JSON object")
-            return
         try:
             written = write_analysis(workflow_path, benchmark_id, payload)
         except BenchmarkManifestError as exc:
@@ -2947,7 +3232,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"benchmark_id": benchmark_id, "analysis": written})
 
     def _handle_experiment_analysis_put(self, path: str, body: dict[str, Any]) -> None:
-        """``PUT /api/experiment/<id>/analysis`` — opaque JSON, not notes."""
+        """Update analysis: free-form text or a JSON-native structured value."""
         if self.chatbot.workspace is not None:
             self._error(
                 403,
@@ -2959,7 +3244,15 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         if not experiment_id:
             self._error(404, "not found")
             return
-        store = self.chatbot.open_store()
+        source = (parse_qs(urlsplit(self.path).query).get("benchmark_experiment") or [None])[0]
+        if source and source != experiment_id:
+            self._error(400, "experiment does not match selected evidence source")
+            return
+        try:
+            store = self._registered_store(source) if source else self.chatbot.open_store()
+        except (ValueError, KeyError, IncompatibleObservabilityDB) as exc:
+            self._error(409, str(exc))
+            return
         if store is None or not store.has_feature(FEATURE_EXPERIMENTS_V1):
             self._error(404, "this database predates experiment recording")
             return
@@ -2968,12 +3261,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._error(400, str(exc))
             return
-        if analysis is not None and not isinstance(analysis, dict):
-            self._error(400, "analysis must be a JSON object")
-            return
         try:
             ObservabilityStore.open_for_annotation(
-                self.chatbot.db_path
+                store.db_path
             ).update_experiment_analysis(experiment_id, analysis)
         except ExperimentNotFound:
             self._error(404, "experiment not found")

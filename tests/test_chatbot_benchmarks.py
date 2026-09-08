@@ -392,12 +392,13 @@ class TestExperimentAnalysisApi:
 class TestSpaSurface:
     def test_benchmark_browser_ships(self):
         page = run_chatbot_server.load_index_html()
-        assert b"benchmarksBtn" in page
+        assert b'id="benchmarksBtn"' not in page
+        assert b'id="hierarchyCrumbs"' not in page
         assert b"showBenchmarks" in page
         assert b"showBenchmarkVersion" in page
         assert b"/api/benchmarks" in page
         assert b"/analysis" in page
         assert b"Save analysis" in page
-        assert b"not a verdict" in page
+        assert b"free-form text" in page
         assert b"benchmark digest" in page
         assert b"innerHTML" not in page

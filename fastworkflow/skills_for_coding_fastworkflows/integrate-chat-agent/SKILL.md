@@ -10,6 +10,20 @@ description: >-
 
 # Integrate a fastWorkflow Chat Agent
 
+## Improve the integrated workflow
+
+Use `fastworkflow run_chatbot` as the developer workbench for the application workflow. In an
+existing session, inspect **benchmark → experiment → conversation** (or ad-hoc conversations by
+UTC date) on the left, and turns/components on the right. The right breadcrumb retains the full
+path. Add component-level **Human feedback** to record what should improve.
+
+For repeatable verification, use [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md)
+to author benchmarks and task prompts and create experiment identities. The UI does not execute
+those tasks: connect an application runner using the experiment and task IDs. Use
+[debug-workflow-conversations](../debug-workflow-conversations/SKILL.md) for diagnosis and
+[optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md) to verify changes
+against recorded outcomes. Human annotations do not automatically update the agent or train models.
+
 ## Mission
 
 > Your mission is to integrate agentic chat UI within the application's UI that allows natural

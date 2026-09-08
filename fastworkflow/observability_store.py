@@ -66,7 +66,9 @@ from fastworkflow.utils.logging import logger
 # v3 (fix-qe2): experiment_attempts.runtime_snapshot_json -- the binding
 # server's credential-free runtime snapshot, stamped at claim time. Create-time
 # column only; a v2 store is refused on open like every older one.
-SCHEMA_VERSION = 3
+# v4 (fix-aw5): human feedback and its evidence anchors live in this DB.
+# Fresh schema only, with no migration of previously recorded evidence.
+SCHEMA_VERSION = 4
 
 # Which capture profile this deployment records under (arch §12.0 delta 3).
 # Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
@@ -1280,6 +1282,18 @@ _SCHEMA_STATEMENTS = [
     """CREATE TABLE IF NOT EXISTS feedback (
         turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL,
         updated_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS human_feedback (
+        feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_key TEXT NOT NULL REFERENCES turns(turn_key),
+        target_kind TEXT NOT NULL, span_ids_json TEXT NOT NULL,
+        target_label TEXT NOT NULL, comment TEXT NOT NULL,
+        created_at TEXT NOT NULL)""",
+    """CREATE INDEX IF NOT EXISTS idx_human_feedback_turn
+        ON human_feedback(turn_key, feedback_id)""",
+    """CREATE TRIGGER IF NOT EXISTS delete_turn_human_feedback
+        AFTER DELETE ON turns BEGIN
+        DELETE FROM human_feedback WHERE turn_key=OLD.turn_key;
+        END""",
     """CREATE TABLE IF NOT EXISTS spans (
         span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL,
         parent_span_id TEXT, name TEXT NOT NULL,
@@ -2663,6 +2677,54 @@ class ObservabilityStore:
 
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
+    def list_human_feedback(self, turn_key: str) -> list[dict[str, Any]]:
+        """Human annotations, separate from agent-memory feedback in this DB."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM human_feedback WHERE turn_key=? ORDER BY feedback_id",
+                (turn_key,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["span_ids"] = json.loads(value.pop("span_ids_json"))
+            result.append(value)
+        return result
+
+    def add_human_feedback(self, turn_key: str, *, target_kind: str,
+                           span_ids: list[str], target_label: str,
+                           comment: str) -> None:
+        """Append a human comment after validating its recorded evidence anchor."""
+        if not isinstance(turn_key, str) or not turn_key:
+            raise ValueError("turn_key is required")
+        if target_kind not in ("turn", "phase", "step", "span"):
+            raise ValueError("invalid feedback target kind")
+        if (not isinstance(span_ids, list) or len(span_ids) > 10000
+                or any(not isinstance(v, str) or not v for v in span_ids)):
+            raise ValueError("span_ids must be a list of recorded span IDs")
+        ids = sorted(set(span_ids))
+        if (target_kind == "turn" and ids) or (target_kind != "turn" and not ids):
+            raise ValueError("component feedback requires spans; turn feedback has none")
+        if not isinstance(comment, str) or not comment.strip() or len(comment) > 100000:
+            raise ValueError("feedback must contain text (at most 100000 characters)")
+        if not isinstance(target_label, str) or not target_label or len(target_label) > 1000:
+            raise ValueError("target_label is required (at most 1000 characters)")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM turns WHERE turn_key=?", (turn_key,)).fetchone() is None:
+                raise ValueError("turn not found")
+            recorded = {r[0] for r in conn.execute(
+                "SELECT span_id FROM spans WHERE trace_id=?", (turn_key,))}
+            if not set(ids).issubset(recorded):
+                raise ValueError("feedback spans must belong to the selected turn")
+            conn.execute(
+                "INSERT INTO human_feedback "
+                "(turn_key,target_kind,span_ids_json,target_label,comment,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (turn_key, target_kind, json.dumps(ids), self._scrub(target_label),
+                 self._scrub(comment), _utcnow_iso()),
+            )
+
     def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
         with self._connect() as conn:
             row = conn.execute(
@@ -3597,11 +3659,12 @@ class ObservabilityStore:
         )
 
     def update_experiment_analysis(
-        self, experiment_id: str, analysis: Optional[dict[str, Any]]
+        self, experiment_id: str, analysis: Any
     ) -> None:
         """Freely editable opaque JSON, distinct from `notes` and `hypothesis`."""
-        if analysis is not None and not isinstance(analysis, dict):
-            raise ValueError("analysis must be a JSON object or None")
+        from .benchmark_catalog import _require_json_native
+
+        _require_json_native(analysis, "analysis")
         if analysis is None:
             stored: Optional[str] = None
         else:

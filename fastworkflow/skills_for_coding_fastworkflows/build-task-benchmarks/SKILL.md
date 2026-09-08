@@ -19,7 +19,8 @@ can get a job done, because a job is many commands in sequence, and everything t
 sequences hard — navigation, handles passed between turns, the context a turn lands in — is
 exactly what a per-command test removes.
 
-Build the benchmark in two tiers. Never skip the first one.
+For a long-task reliability study, build the benchmark in two tiers: establish the short
+conversation blocks before composing longer tasks.
 
 | Tier | Shape | Answers |
 |---|---|---|
@@ -31,6 +32,20 @@ library tier 2 is assembled from. That is what makes a tier-2 failure attributab
 independently green, so a step that only fails at length is a length problem, not a command
 problem. If you write tier 2 first you will spend your time debugging whether the command or the
 chain is broken.
+
+## Publish and inspect these tasks
+
+This skill designs multi-turn content; its conversation/step dataclasses are driver conventions,
+not the native benchmark schema. For a small regression, keep the task as short as the behavior
+requires; the length ladder below is for testing long-task reliability, not a requirement for
+creating every benchmark.
+
+Use [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md) to publish tasks under
+`benchmarks/`, preserve task IDs, create a version-pinned experiment, and map content into the
+runner. `run_chatbot` lists tasks in benchmark/experiment details and shows recorded conversations
+under experiments. Inspect turns and steps on the right and attach human feedback to the relevant
+component. Use [optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md) to
+turn those findings into a paired comparison. Runtime success alone does not grade business outcomes.
 
 ## Tier 1 — conversations as unit tests
 

@@ -123,20 +123,19 @@ def _validate_tasks(raw: Any, field: str = "tasks") -> list[dict[str, Any]]:
         if task_id in seen:
             raise BenchmarkManifestError(f"duplicate task_id {task_id!r}")
         seen.add(task_id)
-        description = _required_text(
-            item.get("description"), f"{item_field}.description"
-        )
+        description = item.get("description", "")
+        if not isinstance(description, str):
+            raise BenchmarkManifestError(f"{item_field}.description must be text")
         payload = item.get("payload")
         if not isinstance(payload, dict):
             raise BenchmarkManifestError(f"{item_field}.payload must be a JSON object")
         _require_json_native(payload, f"{item_field}.payload")
-        tasks.append(
-            {
-                "task_id": task_id,
-                "description": description,
-                "payload": payload,
-            }
-        )
+        task = {"task_id": task_id, "description": description, "payload": payload}
+        if "prompt" in item:
+            if not isinstance(item["prompt"], str):
+                raise BenchmarkManifestError(f"{item_field}.prompt must be text")
+            task["prompt"] = item["prompt"]
+        tasks.append(task)
     return tasks
 
 
@@ -164,15 +163,20 @@ def _validate_manifest(
         raise BenchmarkManifestError(
             f"version {version!r} does not match expected {expected_version!r}"
         )
-    description = _required_text(data.get("description"), "description")
+    description = data.get("description", "")
+    if not isinstance(description, str):
+        raise BenchmarkManifestError("description must be text")
     tasks = _validate_tasks(data.get("tasks"))
-    return {
+    result = {
         "schema": SCHEMA,
         "benchmark_id": benchmark_id,
         "version": version,
         "description": description,
         "tasks": tasks,
     }
+    if "title" in data:
+        result["title"] = _required_text(data["title"], "title")
+    return result
 
 
 def _analysis_path(
@@ -314,7 +318,7 @@ def load_version(
 def load_analysis(
     workflow_folderpath: str | Path,
     benchmark_id: str,
-) -> dict[str, Any] | None:
+) -> Any:
     """Load mutable benchmark analysis, or None when no file exists."""
 
     safe_benchmark_id = _safe_segment(benchmark_id, "benchmark_id")
@@ -328,26 +332,23 @@ def load_analysis(
         raise BenchmarkManifestError(
             f"analysis file is not valid JSON: {exc}"
         ) from exc
-    if not isinstance(raw, dict):
-        raise BenchmarkManifestError("analysis file must be a JSON object")
+    _require_json_native(raw, "analysis")
     return raw
 
 
 def write_analysis(
     workflow_folderpath: str | Path,
     benchmark_id: str,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
+    payload: Any,
+) -> Any:
     """Write or overwrite mutable benchmark analysis in canonical JSON form."""
 
-    if not isinstance(payload, dict):
-        raise BenchmarkManifestError("analysis payload must be a JSON object")
     _require_json_native(payload, "payload")
     safe_benchmark_id = _safe_segment(benchmark_id, "benchmark_id")
     path = _analysis_path(workflow_folderpath, safe_benchmark_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(_canonical_json(payload))
-    return dict(payload)
+    return payload
 
 
 def write_version(workflow_folderpath: str | Path, spec: dict[str, Any]) -> dict[str, Any]:
@@ -364,6 +365,7 @@ def write_version(workflow_folderpath: str | Path, spec: dict[str, Any]) -> dict
             "version": version,
             "description": spec.get("description"),
             "tasks": spec.get("tasks"),
+            **({"title": spec["title"]} if "title" in spec else {}),
         },
         expected_benchmark_id=benchmark_id,
         expected_version=version,
@@ -375,7 +377,11 @@ def write_version(workflow_folderpath: str | Path, spec: dict[str, Any]) -> dict
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     file_bytes = _canonical_json(manifest)
-    path.write_bytes(file_bytes)
+    try:
+        with path.open("xb") as stream:
+            stream.write(file_bytes)
+    except FileExistsError as exc:
+        raise BenchmarkAlreadyExistsError(f"benchmark version already exists: {path}") from exc
     result = dict(manifest)
     result["digest_sha256"] = _sha256_bytes(file_bytes)
     return result
