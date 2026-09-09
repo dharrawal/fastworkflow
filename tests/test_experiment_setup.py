@@ -20,12 +20,8 @@ from tests.test_chatbot_benchmarks import _request, workspace_server  # noqa: F4
 def spec():
     return {
         "schema": SCHEMA,
-        "setup_id": "population-test",
-        "label": "Population completion",
-        "hypothesis": "A cursor prevents skipped items",
-        "control": "fixed-control-sha",
-        "change": "Use deterministic item selection",
-        "operator_policy": "Answer scope once",
+        "experiment_id": "population-test",
+        "description": "A cursor prevents skipped items",
         "model_routes": {"agent": "provider/pinned-model"},
         "configuration": {"workflow_fingerprint": "sha256:fixed", "cursor": True},
         "budgets": {"turn_seconds": 120},
@@ -55,7 +51,7 @@ def spec():
 
 def approve(store, row):
     return store.decide(
-        row["setup_id"], row["revision"], row["digest"], "approved", "Human A"
+        row["experiment_id"], row["revision"], row["digest"], "approved", "Human A"
     )
 
 
@@ -71,10 +67,10 @@ def test_revision_approval_history_and_export(tmp_path):
     store = ExperimentSetups(tmp_path)
     initial = store.save(spec(), 0)
     with pytest.raises(SetupConflict):
-        store.approved(initial["setup_id"], 1, initial["digest"])
+        store.approved(initial["experiment_id"], 1, initial["digest"])
     approved = approve(store, initial)
     assert approved["status"] == "approved"
-    assert store.approved(initial["setup_id"], 1, initial["digest"])["spec"] == spec()
+    assert store.approved(initial["experiment_id"], 1, initial["digest"])["spec"] == spec()
     updated = spec()
     updated["tasks"][0]["input"] = "changed input"
     second = store.save(updated, 1)
@@ -85,10 +81,10 @@ def test_revision_approval_history_and_export(tmp_path):
     with pytest.raises(SetupConflict):
         approve(store, initial)
     with pytest.raises(SetupConflict):
-        store.approved(initial["setup_id"], 1, initial["digest"])
+        store.approved(initial["experiment_id"], 1, initial["digest"])
     approve(store, second)
     store.decide(
-        second["setup_id"],
+        second["experiment_id"],
         2,
         second["digest"],
         "changes_requested",
@@ -96,17 +92,17 @@ def test_revision_approval_history_and_export(tmp_path):
         "Evidence is incomplete",
     )
     with pytest.raises(SetupConflict):
-        store.approved(second["setup_id"], 2, second["digest"])
-    assert len(store.get(second["setup_id"])["decisions"]) == 3
+        store.approved(second["experiment_id"], 2, second["digest"])
+    assert len(store.get(second["experiment_id"])["decisions"]) == 3
 
 
 def test_parallel_edits_cannot_overwrite(tmp_path):
     store = ExperimentSetups(tmp_path)
     store.save(spec(), 0)
 
-    def edit(label):
+    def edit(description):
         changed = spec()
-        changed["label"] = label
+        changed["description"] = description
         try:
             return store.save(changed, 1)["revision"]
         except SetupConflict:
@@ -126,7 +122,7 @@ def test_parallel_edits_cannot_overwrite(tmp_path):
         ("model_routes", {}),
         ("configuration", {"x": float("nan")}),
         ("budgets", {"x": (1, 2)}),
-        ("setup_id", "../escape"),
+        ("experiment_id", "../escape"),
         ("estimated_cost", {"currency": "USD", "low": 10, "high": 1, "basis": "wrong"}),
     ],
 )
@@ -136,6 +132,18 @@ def test_invalid_setup_rejected_before_write(tmp_path, field, value):
     with pytest.raises(ValueError):
         ExperimentSetups(tmp_path).save(data, 0)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_description_is_optional_and_the_ui_frame_fields_are_absent(tmp_path):
+    data = spec()
+    data["description"] = ""
+    row = ExperimentSetups(tmp_path).save(data, 0)
+    assert row["spec"]["description"] == ""
+    assert "control" not in row["spec"]
+    data = spec()
+    data["description"] = 7
+    with pytest.raises(ValueError, match="description"):
+        ExperimentSetups(tmp_path).save(data, 0)
 
 
 def test_task_evidence_and_unique_identity_required(tmp_path):
@@ -187,7 +195,7 @@ def test_http_before_first_run_auth_revision_and_export(setup_server):
     status, saved = _request(server, path, "POST", body)
     assert status == 201
     row = saved["setup"]
-    detail = path + "/" + row["setup_id"]
+    detail = path + "/" + row["experiment_id"]
     assert _request(server, detail)[1]["setup"]["spec"] == spec()
     assert _request(server, detail + "/export")[0] == 409
     decision = {
@@ -209,7 +217,7 @@ def test_http_before_first_run_auth_revision_and_export(setup_server):
     assert _request(server, detail + "/export")[1]["spec"] == spec()
     assert _request(server, path, "POST", body)[0] == 409
     body["expected_revision"] = 1
-    body["spec"]["hypothesis"] = "Revised hypothesis"
+    body["spec"]["description"] = "Revised description"
     assert _request(server, path, "POST", body)[0] == 201
     assert _request(server, detail + "/decisions", "POST", decision)[0] == 409
     assert _request(server, detail + "/export")[0] == 409
@@ -270,7 +278,7 @@ def test_navigation_and_setup_ignore_incompatible_evidence(
     assert _request(server, "/api/experiment-setups")[0] == 200
     body = {"spec": spec(), "expected_revision": 0}
     assert _request(server, "/api/experiment-setups", "POST", body)[0] == 201
-    assert _request(server, "/api/experiment-setups/" + spec()["setup_id"])[0] == 200
+    assert _request(server, "/api/experiment-setups/" + spec()["experiment_id"])[0] == 200
     status, data = _request(server, "/api/turns")
     assert status == 409
     assert "schema" in data["error"].lower()

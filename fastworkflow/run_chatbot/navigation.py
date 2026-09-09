@@ -60,7 +60,9 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
             branches[bid] = _node('benchmark', bid or 'Experiments without a benchmark', bid,
                                   benchmark_id=row.get('benchmark_id'), info={})
             root['children'].append(branches[bid])
-        node = _node('experiment', (row.get('label') or eid) + (' · ' + eid if row.get('label') and row['label'] != eid else ''),
+        # The node's text is the author's optional description, carried for the
+        # detail pane; the rail and the crumbs name an experiment by its id.
+        node = _node('experiment', row.get('description') or '',
                      source, eid, experiment_id=eid, source=source, registered=registered,
                      recorded=row.get('status') != 'registered', info=row)
         branches[bid]['children'].append(node)
@@ -82,7 +84,7 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
             node = experiment(row, source, bool(restricted))
             node['recorded'] = True
             node['info'] = row
-            node['label'] = (row.get('label') or row['experiment_id']) + (' · ' + row['experiment_id'] if row.get('label') and row['label'] != row['experiment_id'] else '')
+            node['label'] = row.get('description') or ''
         conv_rows = spec['conversations']
         conv_index = {(c['channel_id'], c['conversation_id']): c for c in conv_rows}
         turns = spec['turns']

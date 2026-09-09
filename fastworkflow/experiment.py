@@ -18,10 +18,10 @@ case, not a special case.
 
 **Four things this gets right that are easy to get wrong:**
 
-1. **Pre-registration.** The experiment row, with its hypothesis, is written
-   before the first task runs. A prediction recorded afterwards is not a
-   prediction, and `hypothesis` is write-once at the store so it cannot become
-   one later.
+1. **Pre-registration.** The experiment row, with its declared task and attempt
+   counts, is written before the first task runs. A denominator recorded
+   afterwards is one fitted to whatever survived, which is the failure a
+   declaration exists to prevent.
 2. **Independence.** One channel, one `Workflow`, one `WorkflowExecutionContext`
    per attempt (`[XR18]`). A shared channel would serialise the run and share
    one `ask_user` pending slot; a shared `workflow_id_str` would hand every
@@ -435,13 +435,12 @@ class ExperimentController:
     def create_experiment(
         self,
         experiment_id: str,
-        label: str,
+        description: str,
         *,
         declared_tasks: int,
         declared_attempts: int,
         declarations: Iterable[tuple[str, int, str]],
         required_evidence_segments: int = 0,
-        hypothesis: Optional[str] = None,
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
         workflow_name: Optional[str] = None,
@@ -492,13 +491,16 @@ class ExperimentController:
                     loaded["digest_sha256"],
                     benchmark_digest_sha256,
                 )
+        # Reserve the registration before writing evidence. Deletion uses the
+        # same setup lock; a deleted ID is refused and a bound ID is protected.
+        if registration is not None:
+            benchmark_setup.bind_experiment(folder, experiment_id, self.db_path, self.store_identity)
         self.store.create_experiment(
             experiment_id,
-            label,
+            description,
             declared_tasks=declared_tasks,
             declared_attempts=declared_attempts,
             required_evidence_segments=required_evidence_segments,
-            hypothesis=hypothesis,
             arm=arm,
             baseline_experiment_id=baseline_experiment_id,
             workflow_name=workflow_name,
@@ -509,8 +511,6 @@ class ExperimentController:
             capture_policy_version=self.capture_policy_version,
         )
         self.store.declare_experiment_attempts(experiment_id, declarations)
-        if registration is not None:
-            benchmark_setup.bind_experiment(folder, experiment_id, self.db_path, self.store_identity)
 
     def start_attempt(
         self,
@@ -730,20 +730,19 @@ class ExperimentHarness:
 
     Usage::
 
-        harness = ExperimentHarness(workflow_folderpath, label="tau2 hard set",
-                                    hypothesis="insight #7 lifts pass^3")
+        harness = ExperimentHarness(workflow_folderpath,
+                                    description="tau2 hard set, insight #7")
         result = harness.run(tasks, attempts=3, grader=my_grader)
 
     One harness, one experiment. Reuse across experiments is not supported and
-    is not wanted: the pre-registration is per-run.
+    is not wanted: the declaration is per-run.
     """
 
     def __init__(
         self,
         workflow_folderpath: str,
         *,
-        label: str,
-        hypothesis: Optional[str] = None,
+        description: str = "",
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
         experiment_id: Optional[str] = None,
@@ -757,8 +756,7 @@ class ExperimentHarness:
         install_memory_policy: bool = False,
     ) -> None:
         self.workflow_folderpath = workflow_folderpath
-        self.label = label
-        self.hypothesis = hypothesis
+        self.description = description
         self.arm = arm
         self.baseline_experiment_id = baseline_experiment_id
         self.benchmark_id = benchmark_id
@@ -799,8 +797,11 @@ class ExperimentHarness:
         from fastworkflow.benchmark_setup import experiment_manifest
 
         record, _ = experiment_manifest(workflow_folderpath, experiment_id)
+        # The registration's description is a default, not an override: a runner
+        # that names its own run wins over what setup recorded.
+        kwargs.setdefault("description", record["description"])
         return cls(workflow_folderpath, experiment_id=experiment_id,
-                   label=record["label"], benchmark_id=record["benchmark_id"],
+                   benchmark_id=record["benchmark_id"],
                    benchmark_version=record["benchmark_version"],
                    benchmark_digest_sha256=record["benchmark_digest_sha256"], **kwargs)
 
@@ -928,7 +929,7 @@ class ExperimentHarness:
     ) -> dict[str, Any]:
         """Run every task `attempts` times as one experiment.
 
-        The experiment row is created FIRST, with its hypothesis, before any
+        The experiment row is created FIRST, with its declaration, before any
         task executes. Everything else runs inside `evidence_run()`, so the run
         gets zero-drop assertion, prune suppression, archival and provenance —
         and an invalid verdict from it makes the experiment invalid.
@@ -953,12 +954,11 @@ class ExperimentHarness:
         ]
         self._controller.create_experiment(
             self.experiment_id,
-            self.label,
+            self.description,
             declared_tasks=len(task_list),
             declared_attempts=attempts,
             declarations=declarations,
             required_evidence_segments=1,
-            hypothesis=self.hypothesis,
             arm=self.arm,
             baseline_experiment_id=self.baseline_experiment_id,
             workflow_name=os.path.basename(

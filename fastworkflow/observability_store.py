@@ -56,7 +56,7 @@ from fastworkflow import runtime_manifest, state_paths, tracing
 from fastworkflow.utils.logging import logger
 
 # v2 (fix-42b): experiments.benchmark_id / benchmark_version /
-# benchmark_digest_sha256 / analysis_json live in the CREATE TABLE literal
+# benchmark_digest_sha256 live in the CREATE TABLE literal
 # only. Stores created before them are refused on open, not migrated.
 #
 # Fresh schema (fix-49m.3): the `_SCHEMA_STATEMENTS` literal is the ONLY
@@ -767,22 +767,6 @@ class CaptureRegimeChanged(ValueError):
         )
 
 
-class HypothesisIsWriteOnce(ValueError):
-    """A stored hypothesis was rewritten to a different value (`[XR12]`).
-
-    One mutable description (`notes`) beside one immutable one is what makes the
-    immutable one mean anything: a pre-registered prediction that can be revised
-    after the outcome is not a pre-registration.
-    """
-
-    def __init__(self, experiment_id: str) -> None:
-        self.experiment_id = experiment_id
-        super().__init__(
-            f"experiment {experiment_id!r} already has a hypothesis; it is "
-            "write-once by design. Record the revision in `notes` instead."
-        )
-
-
 class PartialBenchmarkPin(ValueError):
     """A benchmark pin requires id, version, and digest together."""
 
@@ -1319,10 +1303,8 @@ _SCHEMA_STATEMENTS = [
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS experiments (
         experiment_id TEXT PRIMARY KEY,
-        label TEXT NOT NULL,
-        hypothesis TEXT,
+        description TEXT NOT NULL,
         notes TEXT,
-        analysis_json TEXT,
         arm TEXT,
         baseline_experiment_id TEXT,
         status TEXT NOT NULL,
@@ -1501,8 +1483,8 @@ class ObservabilityStore:
                         f"{self.db_path} has schema v{found}; this build requires "
                         f"v{SCHEMA_VERSION} and carries no migration (fresh "
                         "observability schema, fix-49m.3; experiments."
-                        "benchmark_id, benchmark_version, benchmark_digest_sha256, "
-                        "analysis_json and experiment_attempts."
+                        "benchmark_id, benchmark_version, benchmark_digest_sha256 "
+                        "and experiment_attempts."
                         "runtime_snapshot_json are create-time columns). Move or "
                         "delete the file and its -wal/-shm sidecars to start a "
                         f"new store, or open it read-only with a v{found} build."
@@ -2911,8 +2893,8 @@ class ObservabilityStore:
     # The precedent is `set_diagnostic` plus `_POLICY_EXEMPT_TURN_COLUMNS`, not
     # `spans.channel_id`'s erasure argument. These rows are not evidence ABOUT a
     # tenant; they are the record of whether the evidence may be used at all --
-    # an `EvidenceRun`'s valid/problems, an attempt's outcome, a pre-registered
-    # hypothesis. Withholding them reduces nothing a tenant would care about and
+    # an `EvidenceRun`'s valid/problems, an attempt's outcome, an experiment's
+    # declaration. Withholding them reduces nothing a tenant would care about and
     # makes the bundle uninterpretable under exactly the profile an
     # evidence-grade run uses, since `opaque-payload` and `user-text` both map to
     # `omit` there. The claim that makes this safe is a DATAFLOW claim and is
@@ -2999,12 +2981,11 @@ class ObservabilityStore:
     def create_experiment(
         self,
         experiment_id: str,
-        label: str,
+        description: str,
         *,
         declared_tasks: int,
         declared_attempts: int,
         required_evidence_segments: int = 0,
-        hypothesis: Optional[str] = None,
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
         workflow_name: Optional[str] = None,
@@ -3022,13 +3003,16 @@ class ObservabilityStore:
         `EvidenceRun` exists to prevent one layer down.
 
         Re-creating an existing experiment is how a resume re-attaches. The
-        `DO UPDATE` set deliberately excludes `hypothesis`, `status`,
-        `invalid_reason` and `invalid_detail`: a resume must not be able to
-        launder a rewritten prediction or an `invalid` verdict back to
-        `running` (`[XR12]`).
+        `DO UPDATE` set deliberately excludes `status`, `invalid_reason` and
+        `invalid_detail`: a resume must not be able to launder an `invalid`
+        verdict back to `running`.
         """
-        if not experiment_id or not label:
-            raise ValueError("experiment_id and label are required")
+        if not experiment_id:
+            raise ValueError("experiment_id is required")
+        if not isinstance(description, str):
+            # Optional free text, not a name: empty is a run whose author wrote
+            # nothing, which is not an error.
+            raise ValueError("description must be text")
         declared_tasks = int(declared_tasks)
         declared_attempts = int(declared_attempts)
         required_evidence_segments = int(required_evidence_segments)
@@ -3096,17 +3080,17 @@ class ObservabilityStore:
                         raise BenchmarkPinIsWriteOnce(experiment_id)
             conn.execute(
                 """INSERT INTO experiments
-                   (experiment_id, label, hypothesis, notes, arm,
+                   (experiment_id, description, notes, arm,
                     baseline_experiment_id, status, invalid_reason,
                     invalid_detail, declared_tasks, declared_attempts,
                     required_evidence_segments, benchmark_id, benchmark_version,
                     benchmark_digest_sha256, workflow_name, capture_profile,
                     capture_policy_version,
                     created_at, completed_at)
-                   VALUES (?, ?, ?, NULL, ?, ?, 'running', NULL, NULL,
+                   VALUES (?, ?, NULL, ?, ?, 'running', NULL, NULL,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                    ON CONFLICT(experiment_id) DO UPDATE SET
-                     label=excluded.label,
+                     description=excluded.description,
                      arm=excluded.arm,
                      baseline_experiment_id=excluded.baseline_experiment_id,
                      -- The denominator is rewritable only while the experiment
@@ -3114,8 +3098,8 @@ class ObservabilityStore:
                      -- score has been computed against the declaration, and
                      -- changing the declaration afterwards silently restates
                      -- every number already reported from it -- the same
-                     -- after-the-fact rewrite `hypothesis` is write-once to
-                     -- prevent, one field over.
+                     -- after-the-fact rewrite the write-once benchmark pin
+                     -- below exists to prevent, one field over.
                      declared_tasks=CASE WHEN experiments.status='running'
                        THEN excluded.declared_tasks ELSE experiments.declared_tasks END,
                      declared_attempts=CASE WHEN experiments.status='running'
@@ -3137,8 +3121,7 @@ class ObservabilityStore:
                      workflow_name=excluded.workflow_name""",
                 (
                     experiment_id,
-                    self._scrub(label),
-                    self._scrub(hypothesis),
+                    self._scrub(description),
                     self._scrub(arm),
                     baseline_experiment_id,
                     declared_tasks,
@@ -3622,64 +3605,11 @@ class ObservabilityStore:
             )
         return True
 
-    def set_experiment_hypothesis(self, experiment_id: str, hypothesis: str) -> None:
-        """Write-once (`[XR12]`), enforced here and nowhere else.
-
-        The single enforcement point, the `apply_label_txn` shape. A UI-only
-        guard would be a guard against honest mistakes, and the failure this
-        must prevent -- rewriting a prediction after seeing the outcome -- is
-        not an honest mistake. `non-NULL -> different` and `non-NULL -> NULL`
-        are both refused; an identical rewrite is an idempotent success, the
-        `upsert_turn_row` precedent.
-        """
-        scrubbed = self._scrub(hypothesis)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT hypothesis FROM experiments WHERE experiment_id=?",
-                (experiment_id,),
-            ).fetchone()
-            if row is None:
-                raise ExperimentNotFound(experiment_id)
-            stored = row["hypothesis"]
-            if stored is not None and stored != scrubbed:
-                raise HypothesisIsWriteOnce(experiment_id)
-            conn.execute(
-                "UPDATE experiments SET hypothesis=? WHERE experiment_id=?",
-                (scrubbed, experiment_id),
-            )
-            conn.commit()
-
     def update_experiment_notes(self, experiment_id: str, notes: Optional[str]) -> None:
-        """Freely editable, by design and by contrast with `hypothesis`."""
+        """Freely editable, like `description` and unlike the write-once pin."""
         self._update_experiment(
             "UPDATE experiments SET notes=? WHERE experiment_id=?",
             (self._scrub(notes), experiment_id),
-            experiment_id,
-        )
-
-    def update_experiment_analysis(
-        self, experiment_id: str, analysis: Any
-    ) -> None:
-        """Freely editable opaque JSON, distinct from `notes` and `hypothesis`."""
-        from .benchmark_catalog import _require_json_native
-
-        _require_json_native(analysis, "analysis")
-        if analysis is None:
-            stored: Optional[str] = None
-        else:
-            stored = (
-                json.dumps(
-                    _sanitize_json_value(analysis),
-                    sort_keys=True,
-                    indent=2,
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-        self._update_experiment(
-            "UPDATE experiments SET analysis_json=? WHERE experiment_id=?",
-            (stored, experiment_id),
             experiment_id,
         )
 
@@ -4324,9 +4254,8 @@ class ObservabilityStore:
         """Close an experiment. The STORE decides `complete` (`[XR14]`).
 
         The caller may request completion or force `invalid`; it may not assert
-        completeness. `set_experiment_hypothesis` makes the strictly weaker
-        pre-registration invariant store-enforced for exactly this reason, and a
-        headline score rests on this one.
+        completeness. A headline score rests on this verdict, so the store owns
+        it rather than trusting a caller's word for it.
 
         `complete` requires all three: every declared (task, attempt) pair
         finished with an outcome, no outcome of `incomplete`, and no evidence
@@ -4601,7 +4530,7 @@ class ObservabilityStore:
             params.append(arm)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = (
-            "SELECT e.experiment_id, e.label, e.status, e.arm, "
+            "SELECT e.experiment_id, e.description, e.status, e.arm, "
             "e.baseline_experiment_id, e.declared_tasks, e.declared_attempts, "
             "e.invalid_reason, e.workflow_name, e.capture_profile, "
             "e.benchmark_id, e.benchmark_version, e.benchmark_digest_sha256, "
@@ -4921,7 +4850,7 @@ class ObservabilityStore:
             return None
         with self._connect() as conn:
             row = conn.execute(
-                """SELECT t.experiment_id, t.task_id, t.attempt, e.label, e.status
+                """SELECT t.experiment_id, t.task_id, t.attempt, e.description, e.status
                      FROM turns t LEFT JOIN experiments e
                        ON e.experiment_id = t.experiment_id
                     WHERE t.turn_key=? AND t.experiment_id IS NOT NULL""",

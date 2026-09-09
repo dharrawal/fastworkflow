@@ -21,6 +21,26 @@ scoring section was rewritten around the finding that the derived pass predicate
 of revision 1 scores a tau2 retail attempt as a pass whether or not the task was
 accomplished.
 
+**Amendment, 2026-09-08 (owner decision, `fix-1ay`).** `hypothesis` is
+**withdrawn**, and with it the write-once half of `[XR12]`: the column, the
+`set_experiment_hypothesis` writer, `HypothesisIsWriteOnce`, the harness and
+controller keyword, the `PATCH` 409 and the read-only block in the studio are
+all gone. `label` takes its place as the experiment's one piece of author prose
+— free text, optional, and editable through the studio only while the
+registration is still unbound — and is **renamed `description`**, which is what
+it now is. Everything §7.3 says about **terminal `invalid`** stands unchanged;
+only the pre-registration half was removed.
+
+`SCHEMA_VERSION` was deliberately **not** bumped, on the owner's instruction.
+The one live store (`~/.local/state/fastworkflow/workflows/ido_workflow/
+observability.sqlite3`) was rewritten in place on 2026-09-08: `label`
+became `description` and `hypothesis` was dropped; later the same day
+`analysis_json` was dropped too, leaving `notes` as the one post-run
+annotation. Frozen collection stores
+under `evaluation/collections/` are provenance, not compatibility, and
+were left as written. `_ensure_schema` carries no rename or drop; a store
+that still has the old columns is not opened by this build.
+
 ---
 
 ## 0. What does not exist
@@ -246,8 +266,7 @@ Concretely — and this is **two halves, not one**, which revision 1 got wrong:
 -- 1. the container
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id          TEXT PRIMARY KEY,      -- 'exp-<32 hex>'
-    label                  TEXT NOT NULL,
-    hypothesis             TEXT,                  -- WRITE-ONCE [XR12]
+    description            TEXT NOT NULL,         -- author prose, optional (amendment)
     notes                  TEXT,                  -- freely editable
     arm                    TEXT,                  -- 'baseline' | 'treatment' | NULL
     baseline_experiment_id TEXT,
@@ -615,7 +634,7 @@ must fail the run *before* any task executes.
 ### 7.2 Methods
 
 ```
-create_experiment(experiment_id, label, *, declared_tasks, declared_attempts,
+create_experiment(experiment_id, description, *, declared_tasks, declared_attempts,
                   hypothesis=None, arm=None, baseline_experiment_id=None,
                   workflow_name=None) -> None            # status='running'
 record_evidence_segment(experiment_id, seq, evidence_run_id, record: dict) -> None
@@ -649,6 +668,10 @@ subclasses it) so the chatbot's read-only handle serves them without a writable
 handle ever existing — `[DR53]`'s posture.
 
 ### 7.3 Write-once `hypothesis`, terminal `invalid` `[XR12]`
+
+> **Withdrawn in part, 2026-09-08:** the `hypothesis` half of this section no
+> longer describes the code (see the amendment at the head of this document).
+> The terminal-`invalid` half below is current.
 
 One enforcement point, one transaction, the `apply_label_txn` shape:
 
@@ -968,7 +991,7 @@ shipped (`[DR55]`). The experiment surface never uses that word:
 
 | Route | Returns |
 |---|---|
-| `GET /api/experiments` | list: `experiment_id`, `label`, `status`, `arm`, `baseline_experiment_id`, declared vs finished attempt counts, `invalid_reason`, `capture_profile`, `created_at`. **No score**: computing one per row would be a query per experiment, and `status` plus the two counts already say whether a score exists and whether it is reportable. `/score` serves the number for one experiment. |
+| `GET /api/experiments` | list: `experiment_id`, `description`, `status`, `arm`, `baseline_experiment_id`, declared vs finished attempt counts, `invalid_reason`, `capture_profile`, `created_at`. **No score**: computing one per row would be a query per experiment, and `status` plus the two counts already say whether a score exists and whether it is reportable. `/score` serves the number for one experiment. |
 | `GET /api/experiment/<id>` | detail: `hypothesis`, `notes`, `arm`, `baseline_experiment_id`, every evidence segment with its `valid`/`problems`, `invalid_reason`/`invalid_detail` |
 | `GET /api/experiment/<id>/tasks` | one row per `task_id` with its attempts' outcomes |
 | `GET /api/experiment/<id>/attempts?task=<task_id>` | one row per attempt: `outcome`, `outcome_source`, `reward`, `restarts`, `channel_id`, `conversation_id`, timestamps. **Not turn keys**: those come from `GET /api/turns?experiment=&task=&attempt=`, which is the shipped route the UI already drills through, rather than a second projection of the same rows. |

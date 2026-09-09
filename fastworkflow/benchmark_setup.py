@@ -30,6 +30,11 @@ class BenchmarkSetupConflict(ValueError):
     pass
 
 
+class ExperimentDeleted(BenchmarkSetupConflict):
+    """A deleted registration must never fall back to an unregistered run."""
+
+
+
 @contextmanager
 def _lock(workflow_path):
     # The project targets Unix; flock coordinates HTTP threads and harness processes.
@@ -120,15 +125,24 @@ def _registration_path(workflow_path, experiment_id):
     return benchmarks_root(workflow_path) / ".experiments" / f"{experiment_id}.json"
 
 
-def create_experiment(workflow_path, benchmark_id, version):
+def create_experiment(workflow_path, benchmark_id, version, description=""):
+    """Mint an experiment identity; the description is the author's, optional.
+
+    Creation stays one click: the description is free text the author may fill
+    in later through `update_experiment_description`, for as long as the
+    registration has not been handed to a runner. Copying the benchmark title
+    in as a default would put a description on every experiment nobody wrote.
+    """
     manifest = load_version(workflow_path, benchmark_id, version)
+    if not isinstance(description, str):
+        raise ValueError("description must be text")
     experiment_id = f"exp-{uuid.uuid4().hex}"
     record = {
         "experiment_id": experiment_id,
         "benchmark_id": benchmark_id,
         "benchmark_version": version,
         "benchmark_digest_sha256": manifest["digest_sha256"],
-        "label": manifest.get("title", benchmark_id),
+        "description": description.strip(),
         "task_ids": [task["task_id"] for task in manifest["tasks"]],
         "created_at": datetime.now(timezone.utc).isoformat(),
         "store": None,
@@ -138,11 +152,36 @@ def create_experiment(workflow_path, benchmark_id, version):
     return record
 
 
+def update_experiment_description(workflow_path, experiment_id, description):
+    """Edit the description while the registration is still the only record.
+
+    Refused once a runner has bound the registration: from that point the
+    description the run declared lives in its evidence store, and a
+    registration edited afterwards would disagree with a store nothing here
+    can write.
+    """
+    if not isinstance(description, str):
+        raise ValueError("description must be text")
+    with _lock(workflow_path):
+        record = load_experiment(workflow_path, experiment_id)
+        if record.get("store") is not None:
+            raise BenchmarkSetupConflict(
+                "This experiment has been handed to a runner; its description "
+                "is now part of the recorded run."
+            )
+        record["description"] = description.strip()
+        _atomic_json(_registration_path(workflow_path, experiment_id), record)
+        return record
+
+
 def load_experiment(workflow_path, experiment_id):
     path = _registration_path(workflow_path, experiment_id)
-    if not path.is_file():
+    try:
+        record = json.loads(path.read_text())
+    except FileNotFoundError:
+        if (path.parent / ".deleted" / path.name).is_file():
+            raise ExperimentDeleted("This experiment was deleted. Create a new experiment.")
         raise KeyError(experiment_id)
-    record = json.loads(path.read_text())
     if record.get("experiment_id") != experiment_id:
         raise ValueError("experiment registration identity mismatch")
     return record
@@ -152,10 +191,12 @@ def registered_experiments(workflow_path, benchmark_id):
     root = benchmarks_root(workflow_path) / ".experiments"
     if not root.is_dir():
         return []
-    rows = [
-        load_experiment(workflow_path, path.stem)
-        for path in sorted(root.glob("*.json"))
-    ]
+    rows = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            rows.append(load_experiment(workflow_path, path.stem))
+        except (KeyError, ExperimentDeleted):
+            continue  # A deletion can complete between enumeration and read.
     return [row for row in rows if row["benchmark_id"] == benchmark_id]
 
 
@@ -181,3 +222,22 @@ def bind_experiment(workflow_path, experiment_id, db_path, store_id):
             )
         record["store"] = target
         _atomic_json(_registration_path(workflow_path, experiment_id), record)
+
+
+def delete_empty_experiment(workflow_path, experiment_id):
+    """Remove an unused registration, serialized against a runner's store binding.
+
+    A tombstone prevents delayed runners from treating a deleted ID as a new,
+    unregistered experiment. No evidence database or benchmark version is touched.
+    """
+    with _lock(workflow_path):
+        record = load_experiment(workflow_path, experiment_id)
+        if record.get("store") is not None:
+            raise BenchmarkSetupConflict(
+                "This experiment has been handed to a runner and cannot be deleted."
+            )
+        path = _registration_path(workflow_path, experiment_id)
+        deleted = path.parent / ".deleted" / path.name
+        deleted.parent.mkdir(exist_ok=True)
+        os.replace(path, deleted)
+        return record

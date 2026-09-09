@@ -308,7 +308,6 @@ def seeded_db(workflow_path) -> str:
     controller.create_experiment(
         EXP, "ui tier 1", declared_tasks=1, declared_attempts=2,
         declarations=[(TASK, 1, "job-1"), (TASK, 2, "job-2")],
-        hypothesis="the UI shows what the store recorded",
     )
     claims = {}
     for attempt, snapshot in ((1, SNAPSHOT), (2, None)):

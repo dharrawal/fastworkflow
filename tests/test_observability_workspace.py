@@ -76,7 +76,6 @@ def _seed_archive(
         f"label-{experiment_id}",
         declared_tasks=1,
         declared_attempts=1,
-        hypothesis="workspace projection works",
     )
     store.start_attempt(experiment_id, task_id, 1, f"channel-{task_id}")
     store.finish_attempt(

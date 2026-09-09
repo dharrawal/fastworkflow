@@ -120,57 +120,18 @@ class TestBenchmarkAnalysis:
             write_analysis(workflow, "smoke", {"bindings": (1, 2)})
 
 
-class TestExperimentAnalysis:
-    def test_analysis_and_notes_do_not_overwrite_each_other(self, store):
-        store.create_experiment(
-            "exp-1", "label", declared_tasks=1, declared_attempts=1
-        )
-        store.update_experiment_notes("exp-1", "review notes")
-        store.update_experiment_analysis(
-            "exp-1", {"findings": ["latency spike on t0"]}
-        )
-
-        experiment = store.get_experiment("exp-1")
-        assert experiment["notes"] == "review notes"
-        assert json.loads(experiment["analysis_json"]) == {
-            "findings": ["latency spike on t0"],
-        }
-
-        store.update_experiment_notes("exp-1", "revised notes")
-        store.update_experiment_analysis("exp-1", {"findings": ["updated"]})
-
-        experiment = store.get_experiment("exp-1")
-        assert experiment["notes"] == "revised notes"
-        assert json.loads(experiment["analysis_json"]) == {"findings": ["updated"]}
-
-    def test_clearing_analysis_leaves_notes(self, store):
-        store.create_experiment(
-            "exp-1", "label", declared_tasks=1, declared_attempts=1
-        )
-        store.update_experiment_notes("exp-1", "keep me")
-        store.update_experiment_analysis("exp-1", {"x": 1})
-
-        store.update_experiment_analysis("exp-1", None)
-
-        experiment = store.get_experiment("exp-1")
-        assert experiment["notes"] == "keep me"
-        assert experiment["analysis_json"] is None
-
-    def test_experiment_scores_ignore_analysis(self, store):
+class TestExperimentNotes:
+    def test_notes_do_not_change_scores(self, store):
         _seed_complete(store)
-        store.update_experiment_analysis(
-            "exp-1",
-            {"conclusions": ["would change scores if counted"]},
-        )
+        store.update_experiment_notes("exp-1", "would change scores if counted")
 
         score = store.experiment_scores("exp-1")
 
         assert score["reportable"] is True
         assert score["pass_at_1"] == pytest.approx(1.0)
-        assert "analysis_json" not in score
-        assert "analysis" not in score
+        assert "notes" not in score
 
-    def test_read_only_store_refuses_analysis_update(self, tmp_path, monkeypatch):
+    def test_read_only_store_refuses_notes_update(self, tmp_path, monkeypatch):
         monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
         db_path = str(tmp_path / "observability.sqlite3")
         live = obs.ObservabilityStore(db_path)
@@ -180,11 +141,4 @@ class TestExperimentAnalysis:
 
         readonly = obs.ReadOnlyObservabilityStore(db_path)
         with pytest.raises(sqlite3.OperationalError):
-            readonly.update_experiment_analysis("exp-1", {"x": 1})
-
-    def test_non_object_analysis_refused(self, store):
-        store.create_experiment(
-            "exp-1", "label", declared_tasks=1, declared_attempts=1
-        )
-        with pytest.raises(ValueError, match="JSON object"):
-            store.update_experiment_analysis("exp-1", ["not", "an", "object"])
+            readonly.update_experiment_notes("exp-1", "x")

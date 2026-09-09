@@ -96,13 +96,9 @@ def test_workspace_feedback_cannot_mutate_archive(workspace_server):
     assert hashlib.sha256(descriptor.path.read_bytes()).hexdigest() == before
 
 
-@pytest.mark.parametrize('value', ['Free-form notes\n**Markdown** is fine.', '', ['observations'], False, 12, None])
-def test_freeform_experiment_analysis(experiment_server, value):
+def test_experiment_analysis_route_is_gone(experiment_server):
     server, store = experiment_server
-    status, data = _request(server, '/api/experiment/exp-1/analysis', 'PUT', {'analysis': value})
-    assert status == 200
-    raw = data['experiment']['analysis_json']
-    assert (json.loads(raw) if raw is not None else None) == value
+    assert _request(server, '/api/experiment/exp-1/analysis', 'PUT', {'analysis': 'x'})[0] == 405
     assert store.get_experiment('exp-1')['notes'] == 'original notes'
 
 
@@ -133,10 +129,3 @@ assert.deepEqual(feedbackAnchor({kind:'phase',children:[b,a,a]}), ['a','b']);
 assert.deepEqual(feedbackAnchor({kind:'step',span:{span_id:'step'},children:[a,b]}), ['step']);
 '''
     subprocess.run([node, '-e', funcs + checks], check=True, capture_output=True, text=True)
-
-
-@pytest.mark.parametrize('value', [float('nan'), ('coerced',), {1: 'non-string key'}])
-def test_analysis_rejects_non_json_native_values(experiment_server, value):
-    _server, store = experiment_server
-    with pytest.raises(ValueError):
-        store.update_experiment_analysis('exp-1', value)

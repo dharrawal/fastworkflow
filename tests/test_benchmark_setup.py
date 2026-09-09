@@ -218,11 +218,10 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
                "comment": "Check the final answer against the task prompt."}
     assert _request(server, feedback_path, "POST", comment)[0] == 201
     assert store.list_human_feedback("registered-turn")[0]["comment"] == comment["comment"]
-    analysis_path = "/api/experiment/" + experiment_id + "/analysis" + suffix
-    assert _request(server, analysis_path, "PUT", {"analysis": "Free-form review"})[0] == 200
-    assert json.loads(store.get_experiment(experiment_id)["analysis_json"]) == "Free-form review"
+    assert _request(server, "/api/experiment/" + experiment_id + "/analysis" + suffix,
+                    "PUT", {"analysis": "Free-form review"})[0] == 405
     assert _request(server, "/api/experiment/" + second + "/analysis" + suffix,
-                    "PUT", {"analysis": "wrong target"})[0] == 400
+                    "PUT", {"analysis": "wrong target"})[0] == 405
     # Ordinary conversation browsing stays independent of the registration.
     default = obs.ObservabilityStore(str(tmp_path / "default.sqlite3"))
     _write_turn(default, _turn_row("plain-turn", "chatbot"))
@@ -305,3 +304,130 @@ def test_harness_factory_preserves_registered_identity(tmp_path, monkeypatch):
     assert harness.experiment_id == record["experiment_id"]
     assert harness.benchmark_version == "v1"
     assert harness.benchmark_digest_sha256 == manifest["digest_sha256"]
+
+
+def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(setup_server, tmp_path):
+    server, folder = setup_server
+    benchmark = create(folder)
+    record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+    eid = record["experiment_id"]
+    path = "/api/benchmark-experiments/" + eid
+    before = (folder / "benchmarks" / benchmark["benchmark_id"] / "v1.json").read_bytes()
+    assert _request(server, path)[1]["can_delete"] is True
+    assert _request(server, path, "DELETE", token=None)[0] == 401
+    assert setup.load_experiment(folder, eid)["store"] is None
+    status, result = _request(server, path, "DELETE")
+    assert status == 200 and result["deleted"] == eid
+    assert setup.registered_experiments(folder, benchmark["benchmark_id"]) == []
+    assert _request(server, path)[0] == 404
+    assert _request(server, path, "DELETE")[0] == 404
+    assert (folder / "benchmarks" / benchmark["benchmark_id"] / "v1.json").read_bytes() == before
+    store = obs.ObservabilityStore(str(tmp_path / "stale-runner.sqlite3"))
+    controller = ExperimentController(store.db_path, store.store_identity(), external=False,
+                                      workflow_folderpath=str(folder))
+    with pytest.raises(setup.ExperimentDeleted):
+        controller.create_experiment(eid, "Late runner", declared_tasks=2, declared_attempts=1,
+            declarations=[(task_id, 1, "channel-" + task_id) for task_id in record["task_ids"]])
+    assert store.get_experiment(eid) is None
+    assert store.experiment_attempt_declarations(eid) == []
+
+
+def test_delete_refuses_bound_experiment_even_if_store_unavailable(setup_server, tmp_path):
+    server, folder = setup_server
+    benchmark = create(folder)
+    record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+    eid = record["experiment_id"]
+    setup.bind_experiment(folder, eid, str(tmp_path / "not-present.sqlite3"), "recorded-store")
+    path = "/api/benchmark-experiments/" + eid
+    assert _request(server, path)[1]["can_delete"] is False
+    assert _request(server, path, "DELETE")[0] == 409
+    assert setup.load_experiment(folder, eid)["store"]["store_id"] == "recorded-store"
+
+
+def test_description_is_optional_free_text_the_author_owns(setup_server, tmp_path):
+    """The description is the author's: absent by default, editable until
+    a runner claims the registration, and carried into the recorded run."""
+    server, folder = setup_server
+    benchmark = create(folder)
+    assert setup.create_experiment(folder, benchmark["benchmark_id"], "v1")["description"] == ""
+    created = setup.create_experiment(
+        folder, benchmark["benchmark_id"], "v1", "  Does insight #7 lift pass^3?  "
+    )
+    eid = created["experiment_id"]
+    assert created["description"] == "Does insight #7 lift pass^3?"
+    path = "/api/benchmark-experiments/" + eid
+    assert _request(server, path, "PATCH", {"description": "Rewritten by its author"})[0] == 200
+    assert setup.load_experiment(folder, eid)["description"] == "Rewritten by its author"
+    assert _request(server, path, "PATCH", {"notes": "x"})[0] == 400
+    assert _request(server, path, "PATCH", {"description": 7})[0] == 400
+    assert _request(server, path, "PATCH", {"description": "x"}, token=None)[0] == 401
+    assert _request(server, "/api/benchmark-experiments/missing", "PATCH",
+                    {"description": "x"})[0] == 404
+    # The harness reads the description off the registration, so the run it
+    # records carries what the author wrote rather than the benchmark's title.
+    store = obs.ObservabilityStore(str(tmp_path / "described.sqlite3"))
+    controller = ExperimentController(store.db_path, store.store_identity(), external=False,
+                                      workflow_folderpath=str(folder))
+    controller.create_experiment(
+        eid, setup.load_experiment(folder, eid)["description"], declared_tasks=2, declared_attempts=1,
+        declarations=[(task_id, 1, "channel-" + task_id) for task_id in created["task_ids"]])
+    assert store.get_experiment(eid)["description"] == "Rewritten by its author"
+    # Bound now: the description belongs to the recorded run, not to setup.
+    assert _request(server, path, "PATCH", {"description": "too late"})[0] == 409
+    assert setup.load_experiment(folder, eid)["description"] == "Rewritten by its author"
+
+
+def test_http_creation_accepts_the_authors_description(setup_server):
+    server, folder = setup_server
+    benchmark = create(folder)
+    path = "/api/benchmarks/" + benchmark["benchmark_id"] + "/experiments"
+    status, data = _request(server, path, "POST", {"version": "v1", "description": "Trial run"})
+    assert status == 201 and data["experiment"]["description"] == "Trial run"
+    assert _request(server, path, "POST", {"version": "v1"})[1]["experiment"]["description"] == ""
+    assert _request(server, path, "POST", {"version": "v1", "description": 7})[0] == 400
+
+
+def test_delete_workspace_and_unrelated_routes_refused(workspace_server):
+    server, _folder, _before = workspace_server
+    assert _request(server, "/api/benchmark-experiments/empty", "DELETE")[0] == 403
+    assert _request(server, "/api/benchmark-experiments/empty", "PATCH", {"description": "x"})[0] == 403
+    assert _request(server, "/api/turn/turn", "DELETE")[0] == 405
+
+
+def test_delete_and_runner_binding_are_serialized(tmp_path):
+    from threading import Barrier
+    benchmark = create(tmp_path)
+    for _ in range(8):
+        record = setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
+        eid = record["experiment_id"]
+        store = obs.ObservabilityStore(str(tmp_path / (eid + ".sqlite3")))
+        controller = ExperimentController(store.db_path, store.store_identity(), external=False,
+                                          workflow_folderpath=str(tmp_path))
+        barrier = Barrier(2)
+        def start():
+            barrier.wait()
+            try:
+                controller.create_experiment(eid, "Race", declared_tasks=2, declared_attempts=1,
+                    declarations=[(task_id, 1, "channel-" + task_id) for task_id in record["task_ids"]])
+                return "started"
+            except setup.ExperimentDeleted:
+                return "deleted"
+        def delete():
+            barrier.wait()
+            try:
+                setup.delete_empty_experiment(tmp_path, eid)
+                return "deleted"
+            except setup.BenchmarkSetupConflict:
+                return "protected"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            launch = pool.submit(start)
+            removal = pool.submit(delete)
+            outcome = (launch.result(), removal.result())
+        assert outcome in (("started", "protected"), ("deleted", "deleted"))
+        if outcome[0] == "started":
+            assert store.get_experiment(eid) is not None
+            assert setup.load_experiment(tmp_path, eid)["store"] is not None
+        else:
+            assert store.get_experiment(eid) is None
+            with pytest.raises(setup.ExperimentDeleted):
+                setup.load_experiment(tmp_path, eid)

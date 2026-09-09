@@ -220,7 +220,7 @@ def test_recreate_without_pin_keeps_stored_pin(db_path):
     store.create_experiment("exp-1", "label-2", declared_tasks=1, declared_attempts=1)
 
     experiment = store.get_experiment("exp-1")
-    assert experiment["label"] == "label-2"
+    assert experiment["description"] == "label-2"
     assert experiment["benchmark_id"] == pin["benchmark_id"]
     assert experiment["benchmark_version"] == pin["benchmark_version"]
     assert experiment["benchmark_digest_sha256"] == pin["benchmark_digest_sha256"]
@@ -362,7 +362,7 @@ def test_harness_run_forwards_benchmark_pin_to_create_experiment(
     )
     harness = ExperimentHarness(
         str(workflow),
-        label="label",
+        description="label",
         experiment_id="exp-harness",
         benchmark_id="smoke",
         benchmark_version="v1",
@@ -374,7 +374,7 @@ def test_harness_run_forwards_benchmark_pin_to_create_experiment(
         captured["kwargs"] = kwargs
         harness._controller.store.create_experiment(
             harness.experiment_id,
-            harness.label,
+            harness.description,
             declared_tasks=kwargs["declared_tasks"],
             declared_attempts=kwargs["declared_attempts"],
             benchmark_id=kwargs.get("benchmark_id"),

@@ -128,9 +128,10 @@ not business-success grades. Missing cost/usage is unknown, not zero. Use record
 usage/cost without summing parent duration/cost rollups again. A completion equal to `max_tokens`
 is a cutoff clue, not by itself proof that the answer is incomplete.
 
-Write per-run conclusions in **experiment analysis** and cross-run synthesis in **benchmark
-analysis**. Both can hold prose or structured JSON; they do not compute scores. Include evidence
-identifiers, the change, observed differences, counterexamples and limitations. Recommend adoption,
-revision or another investigation based on those observations; retain the original recordings.
+Write per-run conclusions in **experiment notes** and cross-run synthesis in **benchmark
+analysis**. Benchmark analysis can hold prose or structured JSON; notes are free text. They do
+not compute scores. Include evidence identifiers, the change, observed differences, counterexamples
+and limitations. Recommend adoption, revision or another investigation based on those observations;
+retain the original recordings.
 The handoff should distinguish locally tested changes from measured improvements and identify any
 pending execution or human rating explicitly.

@@ -324,34 +324,17 @@ class TestBenchmarkAnalysisApi:
         assert "JSON object" in data["error"]
 
 
-class TestExperimentAnalysisApi:
-    def test_put_get_analysis_leaves_notes_unchanged(self, experiment_server):
+class TestExperimentNotesApi:
+    def test_put_analysis_is_refused(self, experiment_server):
         server, store = experiment_server
-        payload = {"findings": ["no regressions"]}
-        status, data = _request(
+        status, _data = _request(
             server,
             "/api/experiment/exp-1/analysis",
             method="PUT",
-            body=payload,
+            body={"findings": ["no regressions"]},
         )
-        assert status == 200
-        assert json.loads(data["experiment"]["analysis_json"]) == payload
-        assert data["experiment"]["notes"] == "original notes"
-
-        experiment = store.get_experiment("exp-1")
-        assert experiment["notes"] == "original notes"
-        assert json.loads(experiment["analysis_json"]) == payload
-
-    def test_wrapped_analysis_body(self, experiment_server):
-        server, store = experiment_server
-        status, data = _request(
-            server,
-            "/api/experiment/exp-1/analysis",
-            method="PUT",
-            body={"analysis": {"wrapped": True}},
-        )
-        assert status == 200
-        assert json.loads(data["experiment"]["analysis_json"]) == {"wrapped": True}
+        assert status == 405
+        assert "analysis_json" not in store.get_experiment("exp-1")
         assert store.get_experiment("exp-1")["notes"] == "original notes"
 
     def test_put_analysis_refused_in_workspace_mode(self, workspace_server):
@@ -362,19 +345,8 @@ class TestExperimentAnalysisApi:
             method="PUT",
             body={"x": 1},
         )
-        assert status == 403
+        assert status == 405
         assert "read-only" in data["error"]
-
-    def test_non_object_analysis_refused(self, experiment_server):
-        server, _store = experiment_server
-        status, data = _request(
-            server,
-            "/api/experiment/exp-1/analysis",
-            method="PUT",
-            body=["not", "an", "object"],
-        )
-        assert status == 400
-        assert "JSON object" in data["error"]
 
     def test_patch_notes_does_not_accept_analysis(self, experiment_server):
         server, store = experiment_server
@@ -385,7 +357,7 @@ class TestExperimentAnalysisApi:
             body={"notes": "updated", "analysis": {"ignored": True}},
         )
         assert status == 400
-        assert "PUT" in data["error"]
+        assert "notes" in data["error"]
         assert store.get_experiment("exp-1")["notes"] == "original notes"
 
 
@@ -399,6 +371,8 @@ class TestSpaSurface:
         assert b"/api/benchmarks" in page
         assert b"/analysis" in page
         assert b"Save analysis" in page
-        assert b"free-form text" in page
-        assert b"benchmark digest" in page
+        assert b"Save notes" in page
+        # The detail API retains the digest; the concise experiment Result
+        # does not expose raw provenance metadata.
+        assert b"benchmark digest" not in page
         assert b"innerHTML" not in page

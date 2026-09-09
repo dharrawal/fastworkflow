@@ -647,7 +647,6 @@ def seeded_db(workflow_path) -> str:
     controller.create_experiment(
         EXP, "ui tier 2", declared_tasks=1, declared_attempts=2,
         declarations=[(TASK, 1, "job-1"), (TASK, 2, "job-2")],
-        hypothesis="the UI shows what the store recorded",
     )
     claims = {}
     for attempt, snapshot in ((1, SNAPSHOT_1), (2, SNAPSHOT_2)):
@@ -981,12 +980,11 @@ class TestPage:
         assert b'"no span recorded"' in page
         assert b"the record lists only dispatches since the last resume" in page
         assert b"function openSpanInTree(spanId)" in page
-        # (b) chips, the rail filter and its stated default
+        # (b) decision chips remain; hierarchy navigation replaced the sidebar filters
         assert b"function signalChips(signals)" in page
         assert b"var LOW_CONFIDENCE_DEFAULT_MARGIN = 0.2" in page
-        assert b'id="fLowConf"' in page and b'id="fLowConfMargin"' in page
-        assert b"low_confidence_below=" in page
-        assert b"0.20 is a viewing default, not a policy" in page
+        assert b'id="fLowConf"' not in page and b'id="fLowConfMargin"' not in page
+        assert b'id="convList"' in page
         assert b"appendSignalChips(sub, t.decision_signals)" in page          # rail rows
         assert b"appendSignalChips(container, turn.decision_signals)" in page # turn header
         assert b"appendSignalChips(sub, stamps.decision_signals)" in page     # workspace links
@@ -994,7 +992,9 @@ class TestPage:
         # (c) the collapsed provenance fold and the comparability check
         assert b"function renderProvenance(container, provenance, label)" in page
         assert b"function renderProvenanceDifferences(container, differences)" in page
-        assert b'renderProvenance(card, exp.provenance, "provenance")' in page
+        # Experiment detail stays concise; provenance remains available to the
+        # API, workspace segments, and baseline comparison diagnostics.
+        assert b'renderProvenance(card, exp.provenance, "provenance")' not in page
         assert b"renderProvenance(segBox, segment.provenance," in page
         assert page.count(b"renderProvenanceDifferences(container, cmp.provenance_differences)") == 2
         assert b'"not recorded"' in page

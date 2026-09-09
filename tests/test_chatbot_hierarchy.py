@@ -10,6 +10,7 @@ from fastworkflow import benchmark_setup as setup
 from fastworkflow import observability_store as obs
 from fastworkflow.experiment import ExperimentController
 from fastworkflow.run_chatbot.navigation import build_navigation
+from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests.test_chatbot_benchmarks import _request, experiment_server, workflow_dir, workspace_server
 from tests.test_observability_workspace import _turn_row
 
@@ -40,6 +41,8 @@ def hierarchy_server(experiment_server, tmp_path):
     eid = registration['experiment_id']
     controller.create_experiment(eid, 'Recorded experiment', declared_tasks=1, declared_attempts=1,
         declarations=[(registration['task_ids'][0], 1, 'registered')])
+    store.record_evidence_segment(eid, 1, 'evr-recorded',
+        {'valid': True, 'problems': [], 'writer_health_delta': {'records_dropped': 0}})
     add_turn(store, 'experiment-turn', eid=eid, channel='registered')
     with store._connect() as conn:
         conn.execute("INSERT INTO spans(span_id,trace_id,name,kind,start_ns,end_ns,status,attributes) VALUES(?,?,?,?,?,?,?,?)",
@@ -84,6 +87,18 @@ def test_navigation_workspace_is_scoped(workspace_server):
     assert status == 200
     turns = [n for n in walk(data['root']) if n['kind'] == 'turn']
     assert turns and all(n['source'].get('store_id') for n in turns)
+
+
+def test_page_separates_navigation_into_tabs():
+    page = run_chatbot_server.load_index_html()
+    assert b'id="navConversations"' in page
+    assert b'id="navBenchmarks"' in page
+    assert b'id="navDistillations"' in page
+    assert b'var navigationSelection = {conversations: null, benchmarks: null, distillations: null};' in page
+    assert b'function setNavigationTab(tab, restoreDetail)' in page
+    assert b"Distillations are coming soon" in page
+    assert b"Benchmarks &amp; conversations" not in page
+    assert b">WORKSPACE<" not in page
 
 
 def test_incompatible_default_does_not_hide_registered_experiment(hierarchy_server, tmp_path):

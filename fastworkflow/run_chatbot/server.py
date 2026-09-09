@@ -59,7 +59,6 @@ from fastworkflow.benchmark_catalog import (
 from fastworkflow.observability_store import (
     FEATURE_EXPERIMENTS_V1,
     ExperimentNotFound,
-    HypothesisIsWriteOnce,
     IncompatibleObservabilityDB,
     ObservabilityStore,
     ReadOnlyObservabilityStore,
@@ -1867,6 +1866,12 @@ class ChatbotServer:
             self.server_proc = None
 
 
+# The one sentence that explains an unreadable evidence store, shared by the
+# two payloads that report it: the navigation warning band -- the sidebar is
+# where a reader meets the failure -- and the /experiments payload.
+STORE_UNAVAILABLE = "Recorded experiments are unavailable in the selected evidence store: "
+
+
 class _ChatbotRequestHandler(BaseHTTPRequestHandler):
     """Token-gated request handler. Observability queries are GET-only;
     explicit control-plane POSTs select a workflow, configure env, start
@@ -2134,7 +2139,10 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                         self._send_json({"version": benchmark_setup.save_benchmark(folder, body)}, status=201)
                     else:
                         benchmark_id = unquote(split.path[len("/api/benchmarks/"):-len("/experiments")])
-                        record = benchmark_setup.create_experiment(folder, benchmark_id, body.get("version"))
+                        record = benchmark_setup.create_experiment(
+                            folder, benchmark_id, body.get("version"),
+                            body.get("description", ""),
+                        )
                         self._send_json({"experiment": record}, status=201)
                 except benchmark_setup.BenchmarkSetupConflict as exc:
                     self._error(409, str(exc))
@@ -2310,18 +2318,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 pass
 
     def do_PUT(self) -> None:  # noqa: N802
-        """Admitted PUTs: benchmark and experiment opaque analysis JSON."""
+        """Admitted PUT: the benchmark's sibling analysis file."""
         try:
             split = urlsplit(self.path)
             benchmark_analysis_path = (
                 split.path.startswith("/api/benchmarks/")
                 and split.path.endswith("/analysis")
             )
-            experiment_analysis_path = (
-                split.path.startswith("/api/experiment/")
-                and split.path.endswith("/analysis")
-            )
-            if not benchmark_analysis_path and not experiment_analysis_path:
+            if not benchmark_analysis_path:
                 self._refuse_write()
                 return
             query = parse_qs(split.query)
@@ -2340,10 +2344,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 self._error(400, "body must be a JSON object")
                 return
-            if benchmark_analysis_path:
-                self._handle_benchmark_analysis_put(split.path, body)
-                return
-            self._handle_experiment_analysis_put(split.path, body)
+            self._handle_benchmark_analysis_put(split.path, body)
         except BrokenPipeError:
             pass
         except Exception as exc:
@@ -2352,10 +2353,44 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    do_DELETE = _refuse_write  # noqa: N815
+    def do_DELETE(self) -> None:  # noqa: N802
+        try:
+            split = urlsplit(self.path)
+            prefix = "/api/benchmark-experiments/"
+            if not split.path.startswith(prefix):
+                self._refuse_write()
+                return
+            query = parse_qs(split.query)
+            if not self._host_origin_allowed():
+                self._error(403, "forbidden: host/origin not allowed")
+                return
+            if not self._token_valid(query):
+                self._error(401, "unauthorized: missing or invalid token")
+                return
+            folder = self._benchmark_workflow_path(write=True)
+            if folder is None:
+                return
+            experiment_id = unquote(split.path[len(prefix):])
+            try:
+                record = benchmark_setup.delete_empty_experiment(folder, experiment_id)
+            except (KeyError, benchmark_setup.ExperimentDeleted):
+                self._error(404, "experiment not found")
+                return
+            except benchmark_setup.BenchmarkSetupConflict as exc:
+                self._error(409, str(exc))
+                return
+            except (ValueError, TypeError) as exc:
+                self._error(400, str(exc))
+                return
+            self._send_json({"deleted": experiment_id, "benchmark_id": record["benchmark_id"]})
+        except BrokenPipeError:
+            pass
+        except Exception:
+            self._error(500, "Could not delete this experiment. Refresh and try again.")
 
     def do_PATCH(self) -> None:  # noqa: N802
-        """The one admitted PATCH: an experiment's notes (`fix-bn1.5`).
+        """Two admitted PATCHes: an experiment's notes (`fix-bn1.5`), and the
+        author's description on a registration a runner has not claimed yet.
 
         The Host/Origin and bearer-token gates are applied per verb method with
         no shared chokepoint -- `_handle_get` and `do_POST` each run their own --
@@ -2364,7 +2399,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         """
         try:
             split = urlsplit(self.path)
-            if not split.path.startswith("/api/experiment/"):
+            registration_path = split.path.startswith("/api/benchmark-experiments/")
+            if not split.path.startswith("/api/experiment/") and not registration_path:
                 self._refuse_write()
                 return
             query = parse_qs(split.query)
@@ -2391,6 +2427,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     403,
                     "workspace mode is read-only; experiment notes cannot be changed",
                 )
+                return
+            if registration_path:
+                self._handle_registration_patch(split.path, body)
                 return
             self._handle_experiment_patch(split.path, body)
         except BrokenPipeError:
@@ -2887,7 +2926,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 current = setups.get(unquote(parts[0]))
                 self._send_json(
                     setups.approved(
-                        current["setup_id"], current["revision"], current["digest"]
+                        current["experiment_id"], current["revision"], current["digest"]
                     )
                 )
             else:
@@ -2974,7 +3013,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             if store:
                 sources.append({"store": store, "source": None})
         except (IncompatibleObservabilityDB, OSError, sqlite3.Error) as exc:
-            warnings.append(str(exc))
+            warnings.append(STORE_UNAVAILABLE + str(exc))
         for record in registrations:
             if not record.get("store"):
                 continue
@@ -3052,7 +3091,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             record, manifest = benchmark_setup.experiment_manifest(folder, experiment_id)
-        except KeyError:
+        except (KeyError, benchmark_setup.ExperimentDeleted):
             self._error(404, "experiment not found")
             return
         except (ValueError, BenchmarkManifestError) as exc:
@@ -3066,7 +3105,41 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             except (ValueError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
                 warning = str(exc)
         self._send_json({"experiment": record, "benchmark": manifest,
-                         "recorded": recorded, "warning": warning})
+                         "recorded": recorded, "warning": warning,
+                         "can_delete": record.get("store") is None and self.chatbot.workspace is None})
+
+    def _handle_registration_patch(self, path: str, body: dict[str, Any]) -> None:
+        """`PATCH /api/benchmark-experiments/<id>` -- the author's description.
+
+        The registration file is setup data, not evidence, and this route can
+        only reach one whose runner has not claimed it:
+        `update_experiment_description` refuses a bound registration under the
+        same lock the binding takes.
+        """
+        experiment_id = unquote(path[len("/api/benchmark-experiments/"):]).rstrip("/")
+        if not experiment_id:
+            self._error(404, "not found")
+            return
+        if "description" not in body:
+            self._error(400, 'nothing to patch: send {"description": "..."}')
+            return
+        folder = self._benchmark_workflow_path(write=True)
+        if folder is None:
+            return
+        try:
+            record = benchmark_setup.update_experiment_description(
+                folder, experiment_id, body.get("description")
+            )
+        except (KeyError, benchmark_setup.ExperimentDeleted):
+            self._error(404, "experiment not found")
+            return
+        except benchmark_setup.BenchmarkSetupConflict as exc:
+            self._error(409, str(exc))
+            return
+        except (ValueError, TypeError) as exc:
+            self._error(400, str(exc))
+            return
+        self._send_json({"experiment": record})
 
     def _benchmark_experiments(self, benchmark_id):
         folder = self._benchmark_workflow_path()
@@ -3100,7 +3173,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                             break
                         offset += len(batch)
             except IncompatibleObservabilityDB as exc:
-                warning = "Recorded experiments are unavailable in the selected evidence store: " + str(exc)
+                warning = STORE_UNAVAILABLE + str(exc)
         self._send_json({"experiments": rows, "warning": warning})
 
     def _handle_benchmarks(self, path: str) -> None:
@@ -3231,51 +3304,6 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"benchmark_id": benchmark_id, "analysis": written})
 
-    def _handle_experiment_analysis_put(self, path: str, body: dict[str, Any]) -> None:
-        """Update analysis: free-form text or a JSON-native structured value."""
-        if self.chatbot.workspace is not None:
-            self._error(
-                403,
-                "workspace mode is read-only; experiment analysis cannot be changed",
-            )
-            return
-        encoded_id = path[len("/api/experiment/") : -len("/analysis")].rstrip("/")
-        experiment_id = unquote(encoded_id)
-        if not experiment_id:
-            self._error(404, "not found")
-            return
-        source = (parse_qs(urlsplit(self.path).query).get("benchmark_experiment") or [None])[0]
-        if source and source != experiment_id:
-            self._error(400, "experiment does not match selected evidence source")
-            return
-        try:
-            store = self._registered_store(source) if source else self.chatbot.open_store()
-        except (ValueError, KeyError, IncompatibleObservabilityDB) as exc:
-            self._error(409, str(exc))
-            return
-        if store is None or not store.has_feature(FEATURE_EXPERIMENTS_V1):
-            self._error(404, "this database predates experiment recording")
-            return
-        try:
-            analysis = self._analysis_payload_from_body(body)
-        except ValueError as exc:
-            self._error(400, str(exc))
-            return
-        try:
-            ObservabilityStore.open_for_annotation(
-                store.db_path
-            ).update_experiment_analysis(experiment_id, analysis)
-        except ExperimentNotFound:
-            self._error(404, "experiment not found")
-            return
-        except ValueError as exc:
-            self._error(400, str(exc))
-            return
-        except (OSError, sqlite3.Error) as exc:
-            self._error(500, f"could not update analysis: {type(exc).__name__}")
-            return
-        self._send_json({"experiment": store.get_experiment(experiment_id)})
-
     def _handle_experiments(
         self,
         store: ReadOnlyObservabilityStore,
@@ -3401,10 +3429,6 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         observability data stays read-only over HTTP" (studio design §3.4, the
         access-control section), and `notes` is an annotation column that cannot
         alter any span, turn, artifact, attempt outcome or score.
-
-        `hypothesis` is refused with 409 and a reason, never a 500: it is
-        write-once by design, and the first person to hit a 500 here would file
-        it as a bug rather than read it as a contract.
         """
         rest = path[len("/api/experiment/") :]
         # partition, not split-and-discard: the GET side validates its sub-path
@@ -3420,19 +3444,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         if store is None or not store.has_feature(FEATURE_EXPERIMENTS_V1):
             self._error(404, "this database predates experiment recording")
             return
-        if "hypothesis" in body:
-            self._error(
-                409,
-                "hypothesis is write-once and is fixed at experiment creation: "
-                "a prediction that can be revised after seeing the outcome is "
-                "not a pre-registration. Record the revision in notes instead.",
-            )
-            return
         if "analysis" in body:
-            self._error(
-                400,
-                "analysis is updated via PUT /api/experiment/<id>/analysis",
-            )
+            self._error(400, "analysis is not a field of an experiment; use notes")
             return
         if "notes" not in body:
             self._error(400, 'nothing to patch: send {"notes": "..."}')
@@ -3450,9 +3463,6 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             ).update_experiment_notes(experiment_id, notes)
         except ExperimentNotFound:
             self._error(404, "experiment not found")
-            return
-        except HypothesisIsWriteOnce as exc:
-            self._error(409, str(exc))
             return
         except (OSError, sqlite3.Error) as exc:
             self._error(500, f"could not update notes: {type(exc).__name__}")

@@ -33,7 +33,7 @@ DDL to recreate or upgrade an evidence database.
 | `turns` | `turn_key`, channel/conversation, ordinal, lifecycle status, command success, failure reason, answer, `record_json`, experiment/task/attempt labels |
 | `spans` | `span_id`, `trace_id = turn_key`, `parent_span_id`, name/kind, command/context, start/end, status, JSON `attributes` |
 | `artifacts` | `artifact_id`, turn/span anchor, content type, byte size/digest, `inline_value`, capture error |
-| `experiments` | Experiment identity, hypothesis, notes, benchmark pin, capture regime, status, analysis |
+| `experiments` | Experiment identity, description, notes, benchmark pin, capture regime, status |
 | `experiment_attempts` | `(experiment_id, task_id, attempt)`, channel, outcome/lifecycle evidence, `runtime_snapshot_json` |
 | `human_feedback` | Append-only timestamped comments anchored to a turn or component spans |
 | `feedback` | Agent-memory feedback; not the human annotation table |

@@ -493,6 +493,248 @@ button.newConv:hover { filter: brightness(1.1); }
   .chatMsg { animation: rise .15s ease-out; }
   @keyframes rise { from { transform: translateY(4px); opacity: .4; } }
 }
+/* Workbench design: quiet surfaces, readable evidence, deliberate action hierarchy. */
+:root {
+  color-scheme: light;
+  --bg: #f5f6f3; --panel: #fff; --border: #dce3df; --text: #1e302b;
+  --muted: #5b7068; --accent: #146957; --accent-ink: #105a49;
+  --accent-soft: #e5f2ec; --on-accent: #fff; --code-bg: #f0f3f1;
+  --ok: #18724a; --ok-soft: #eaf5ee; --fail: #b3363e; --fail-soft: #fceef0;
+  --shadow: 0 2px 6px #18382a04, 0 12px 32px #18382a04;
+  --rail-bg: #eef2ee; --focus-ring: #27856b; --detail-pad: 32px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111b18; --panel: #192621; --border: #32433c; --text: #e3eee8;
+    --muted: #a3b8ac; --accent: #83d7b6; --accent-ink: #a0e2c6;
+    --accent-soft: #253e32; --on-accent: #10291e; --code-bg: #14201b;
+    --ok: #91dcac; --ok-soft: #21382a; --fail: #f59ea5; --fail-soft: #3b272c;
+    --rail-bg: #14201b; --focus-ring: #83d7b6; --shadow: 0 8px 28px #0002;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111b18; --panel: #192621; --border: #32433c; --text: #e3eee8;
+  --muted: #a3b8ac; --accent: #83d7b6; --accent-ink: #a0e2c6;
+  --accent-soft: #253e32; --on-accent: #10291e; --code-bg: #14201b;
+  --ok: #91dcac; --ok-soft: #21382a; --fail: #f59ea5; --fail-soft: #3b272c;
+  --rail-bg: #14201b; --focus-ring: #83d7b6; --shadow: 0 8px 28px #0002;
+}
+body { font: 14px/1.6 "Inter", "Segoe UI Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+button, input, textarea, select { transition: border-color .15s, background-color .15s, box-shadow .15s; }
+button { min-height: 36px; padding: 7px 13px; border-radius: 9px; font-weight: 550; }
+button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+button.primary { box-shadow: 0 2px 3px #15372a12; }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex="0"]:focus-visible {
+  outline: 3px solid var(--focus-ring); outline-offset: 3px;
+}
+button[aria-busy="true"] { cursor: progress; }
+button[aria-busy="true"]::after { content: "…"; margin-left: 6px; }
+button.danger { color: var(--fail); border-color: var(--border); background: transparent; }
+button.danger:hover:not(:disabled) { background: var(--fail-soft); border-color: var(--fail); }
+button.ghost { background: transparent; border-color: transparent; box-shadow: none; }
+header { min-height: 76px; padding: 14px 24px; gap: 16px; flex-wrap: wrap; }
+header h1 { font-size: 17px; letter-spacing: -.035em; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+header h1::before { content: "f"; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; color: var(--on-accent); background: var(--accent); font-size: 23px; font-weight: 750; }
+header .meta { max-width: 240px; }
+.modeTabs { padding: 4px; gap: 3px; background: var(--bg); border-color: transparent; border-radius: 11px; }
+.modeTabs button { border-radius: 7px; background: transparent; min-width: 66px; }
+.modeTabs button.active { background: var(--panel); color: var(--accent-ink); box-shadow: 0 1px 4px #16382a14; }
+header > button { font-size: 12px; }
+#clearConvsBtn { color: var(--muted); background: transparent; }
+#rail { width: 340px; min-width: 280px; background: var(--rail-bg); }
+.railHeading { padding: 25px 22px 16px; display: flex; flex-direction: column; gap: 4px; }
+.eyebrow { color: var(--accent-ink); text-transform: uppercase; font-size: 10px; font-weight: 750; letter-spacing: .13em; }
+.railHeading strong { font-size: 18px; letter-spacing: -.02em; }
+.railHeading .sub { font-size: 12px; color: var(--muted); }
+.railTabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 12px; border-bottom: 1px solid var(--border); }
+.railTabs button { min-width: 0; padding: 8px 4px; border-color: transparent; background: transparent; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.railTabs button:hover:not(:disabled) { background: var(--panel); }
+.railTabs button.active { color: var(--accent-ink); background: var(--panel); border-color: var(--border); box-shadow: 0 1px 4px #16382a0d; }
+#convList { padding: 0 12px 24px; scrollbar-width: thin; }
+.navNode { margin: 3px 0; }
+.navNode > summary { list-style: none; display: flex; align-items: flex-start; gap: 8px; border-radius: 9px; padding: 10px 11px; line-height: 1.45; font-size: 13px; color: var(--muted); }
+.navNode > summary::-webkit-details-marker { display: none; }
+.navNode > summary::before { content: "›"; font-size: 16px; line-height: 20px; width: 10px; flex: 0 0 10px; transition: transform .15s; }
+.navNode[open] > summary::before { transform: rotate(90deg); }
+.navNode[data-kind="turn"] > summary::before { content: "·"; }
+.navNode[data-kind="benchmark"] > summary { font-weight: 650; color: var(--text); }
+.navNode > summary:hover { background: var(--panel); color: var(--text); }
+.navNode.selected > summary { color: var(--accent-ink); background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); font-weight: 600; }
+.navLabel { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.navCount { font-size: 10px; font-variant-numeric: tabular-nums; padding: 1px 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; }
+.navChildren { margin-left: 15px; padding-left: 7px; }
+.navNode > .sub { padding: 6px 16px 12px; font-size: 12px; color: var(--muted); }
+#detail { padding: var(--detail-pad); scroll-padding-top: 78px; scrollbar-width: thin; }
+#detail > * { max-width: 1180px; margin-left: auto; margin-right: auto; }
+#detail .crumbs { margin: calc(-1 * var(--detail-pad)) calc(-1 * var(--detail-pad)) 28px; max-width: none; top: calc(-1 * var(--detail-pad)); padding: 14px var(--detail-pad); background: var(--bg); gap: 3px; border-bottom: 1px solid var(--border); }
+#detail .card > .crumbs { position: static; margin: 0 0 20px; padding: 0 0 12px; background: transparent; }
+.crumbs button { min-height: 28px; text-decoration: none; font-size: 12px; padding: 3px 6px; }
+.crumbs button:last-child, .crumbs .here { color: var(--text); font-weight: 650; }
+.card { border-radius: 14px; padding: 22px; margin-bottom: 20px; box-shadow: var(--shadow); }
+.card h2 { font-size: 12px; letter-spacing: .06em; margin-bottom: 12px; }
+h1, h2, h3 { line-height: 1.3; }
+#detail h1, #detail > h2, .pageTitle { font-size: clamp(23px, 2.4vw, 30px); font-weight: 650; letter-spacing: -.035em; margin: 0 0 12px; overflow-wrap: anywhere; }
+#detail .levelHead h2, #detail > .card:first-child h2 { font-size: 22px; letter-spacing: -.025em; text-transform: none; color: var(--text); }
+.levelHead { flex-wrap: wrap; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.levelHead h2 { margin: 0; flex: 1; }
+.levelHead h2.oneLine { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.levelDur { background: var(--bg); padding: 6px 10px; border-radius: 8px; font-size: 12px; }
+.pageHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.pageHead .intro { max-width: 720px; }
+.pageHead h1 { margin-top: 8px !important; }
+.pageHead p { margin: 8px 0 0; color: var(--muted); max-width: 68ch; }
+.actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pageHead .actions { flex-shrink: 0; padding-top: 22px; }
+.sectionHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 30px 0 14px; }
+.sectionHead h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+.count { color: var(--muted); font-weight: 400; margin-left: 8px; }
+.summaryStrip { display: flex; gap: 36px; flex-wrap: wrap; padding: 18px 22px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 24px; }
+.summaryStrip strong { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.03em; }
+.summaryStrip span { color: var(--muted); font-size: 12px; }
+.recordGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(290px, 100%), 1fr)); gap: 14px; }
+.recordCard { text-align: left; width: 100%; padding: 21px; border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); }
+.recordCard strong { display: block; font-size: 17px; letter-spacing: -.015em; color: var(--text); margin: 8px 0; }
+.recordCard .sub { display: block; white-space: normal; color: var(--muted); font-size: 12px; }
+.recordCard .eyebrow { display: flex; justify-content: space-between; }
+.recordCard .arrow { color: var(--accent-ink); font-size: 18px; }
+#detail button.listItem { display: block; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 10px; margin: 8px 0; padding: 14px 16px; }
+.taskCard { display: flex; gap: 16px; align-items: flex-start; }
+.taskNumber { width: 30px; height: 30px; display: grid; place-items: center; flex: 0 0 30px; background: var(--accent-soft); color: var(--accent-ink); border-radius: 8px; font-size: 12px; font-weight: 650; }
+.taskBody { flex: 1; min-width: 0; }
+.taskBody p { margin: 8px 0 0; white-space: pre-wrap; }
+.recordId { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+.formField { display: block; margin-bottom: 20px; }
+.formField > .title { font-size: 12px; font-weight: 650; margin-bottom: 7px; }
+.formField input, .formField textarea, textarea.expNotes { display: block; width: 100%; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); color: var(--text); padding: 11px 13px; font: inherit; line-height: 1.55; }
+.formField textarea, textarea.expNotes { min-height: 100px; resize: vertical; }
+.formField input { min-height: 44px; }
+.formField input[readonly] { background: var(--bg); color: var(--muted); }
+.formField textarea:focus, .formField input:focus, textarea.expNotes:focus { border-color: var(--accent); }
+.formActions { position: sticky; bottom: -32px; display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--border); padding: 16px 0; background: var(--bg); margin-top: 16px; z-index: 2; }
+.formActions .primary { margin-left: auto; }
+.statusCard { display: flex; align-items: flex-start; gap: 16px; background: var(--accent-soft); border: 1px solid var(--border); border-radius: 13px; padding: 22px; margin-bottom: 22px; }
+.statusCard strong { display: block; color: var(--accent-ink); }
+.statusCard p { margin: 6px 0 0; color: var(--muted); }
+.statusSymbol { flex: 0 0 32px; font-size: 26px; line-height: 32px; color: var(--accent-ink); }
+.empty { padding: 32px 24px; font-size: 13px; }
+.emptyState { padding: 44px 30px; text-align: center; border: 1px dashed var(--border); border-radius: 14px; background: var(--panel); }
+.emptyState strong { font-size: 18px; display: block; margin-bottom: 8px; }
+.emptyState p { margin: 0 auto 20px; color: var(--muted); max-width: 48ch; }
+.err { color: var(--fail); overflow-wrap: anywhere; }
+.fieldError { padding: 10px 13px; border-left: 3px solid var(--fail); background: var(--fail-soft); border-radius: 4px; }
+.fieldError:empty { display: none; }
+pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.65; }
+.kv { gap: 9px 18px; }
+.wfRow { border-radius: 7px; min-height: 42px; }
+.wfRow:hover { background: var(--accent-soft); }
+.feedbackCard { border-top: 3px solid var(--accent); }
+.feedbackCard > h2 { color: var(--accent-ink); }
+.feedbackCard textarea { margin: 12px 0; }
+#pickerMain { background: radial-gradient(ellipse at top, var(--accent-soft), transparent 65%); padding: 52px 24px; }
+#pickerCard { max-width: 980px; border-radius: 20px; padding: 36px; }
+#pickerCard h2 { font-size: 29px; letter-spacing: -.04em; margin-bottom: 12px; }
+.wfItem { padding: 13px; border-radius: 11px; }
+#chatArea { min-width: 0; }
+#chatLog { padding: 30px max(24px, calc((100% - 1000px) / 2)); }
+.chatMsg .bubble { padding: 15px 19px; font-size: 14px; line-height: 1.7; border-radius: 16px; }
+#composer { padding: 18px max(24px, calc((100% - 1000px) / 2)); }
+#composer input { min-width: 0; border-radius: 12px; padding: 13px 18px; }
+#composer button { border-radius: 12px; }
+#composerHint { text-align: center; padding-bottom: 16px; }
+/* Centered under the header band. --notice-top is the band's measured bottom
+   edge (see placeNotices); the fallback is the header's min-height, used only
+   for the instant before the first measurement. */
+#noticeStack { position: fixed; top: calc(var(--notice-top, 76px) + 12px); left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; flex-direction: column; gap: 10px; width: min(420px, calc(100vw - 32px)); pointer-events: none; }
+.notice { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 12px; background: var(--panel); box-shadow: 0 8px 36px #10291e24; pointer-events: auto; }
+.notice.error { border-left-color: var(--fail); }
+/* The fade-out only paints under the transition added below; removal is on a
+   timer either way, so a reduced-motion reader still gets the notice cleared. */
+.notice.leaving { opacity: 0; }
+.noticeIcon { font-size: 18px; color: var(--accent-ink); }
+.notice.error .noticeIcon { color: var(--fail); }
+.noticeText { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.noticeText strong { display: block; font-size: 13px; }
+.noticeText span { color: var(--muted); font-size: 12px; }
+.notice button { padding: 0; width: 28px; min-height: 28px; background: transparent; border: none; }
+#confirmDialog { width: min(440px, calc(100vw - 32px)); border: 1px solid var(--border); border-radius: 18px; padding: 28px; color: var(--text); background: var(--panel); box-shadow: 0 24px 80px #0004; }
+#confirmDialog::backdrop { background: #0b201b66; backdrop-filter: blur(3px); }
+#confirmDialog h2 { font-size: 22px; letter-spacing: -.03em; margin: 0 0 12px; }
+#confirmDialog p { color: var(--muted); margin-bottom: 24px; }
+#confirmDialog .actions { justify-content: flex-end; }
+#confirmDialog .danger { background: var(--fail); color: var(--panel); border-color: var(--fail); }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+#detail [data-view-heading]:focus { outline: none; }
+#detail [data-view-heading]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 5px; border-radius: 4px; }
+@media (prefers-reduced-motion: no-preference) {
+  /* On .notice rather than .notice.leaving so a hover mid-fade eases back to
+     full opacity instead of snapping. Errors fade over their whole 6s. */
+  .notice { animation: noticeIn .22s ease-out; transition: opacity 1.5s ease-in; }
+  .notice.error { transition-duration: 6s; }
+  .viewArrival { animation: viewArrival .24s ease-out; }
+  @keyframes noticeIn { from { opacity: 0; transform: translateY(10px); } }
+  @keyframes viewArrival { from { opacity: .45; transform: translateY(5px); } }
+}
+@media (max-width: 1050px) {
+  header { gap: 10px; padding: 12px 16px; }
+  header .meta { display: none; }
+  #rail { width: 310px; min-width: 280px; }
+  :root { --detail-pad: 24px; }
+  .pageHead { flex-wrap: wrap; gap: 10px; }
+  .pageHead .actions { padding-top: 0; }
+}
+@media (max-width: 700px) {
+  :root { --detail-pad: 18px; }
+  header { gap: 8px; }
+  header h1 { font-size: 15px; margin-right: auto; }
+  header .spacer { display: none; }
+  header > button { font-size: 11px; }
+  #statusPill { max-width: 150px; overflow: hidden; }
+  #debugMain.visible { flex-direction: column; overflow-y: auto; }
+  #rail { width: 100%; min-width: 0; max-height: 250px; flex: 0 0 auto; border-right: none; border-bottom: 1px solid var(--border); }
+  .railTabs { padding: 8px 12px; }
+  #detail { overflow: visible; flex: 1 0 auto; }
+  #detail .crumbs { position: static; }
+  .card { padding: 18px; }
+  .levelHead { display: block; }
+  .levelDur { display: inline-block; margin: 10px 0 0; }
+  .kv, .provenance .kv, .provDiff .kv, .serverConfig .kv { grid-template-columns: 1fr; }
+  #reviewPane { width: 100%; min-width: 0; border-left: none; }
+  .summaryStrip { gap: 24px; }
+  #noticeStack { top: calc(var(--notice-top, 60px) + 8px); }
+  #pickerCard { padding: 24px 18px; }
+  .pickerCol { min-width: 0; }
+  .formActions { bottom: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+
+.headerActions { display: flex; align-items: center; gap: 8px; }
+.headerActions > button { font-size: 12px; }
+.headerTools { position: relative; }
+.headerTools > summary { list-style: none; border: 1px solid var(--border); padding: 7px 12px; border-radius: 9px; font-size: 12px; font-weight: 550; color: var(--text); }
+.headerTools > summary::after { content: "⌄"; padding-left: 8px; }
+.headerTools > summary::-webkit-details-marker { display: none; }
+.toolMenu { position: absolute; right: 0; top: calc(100% + 10px); width: 220px; padding: 10px; display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); background: var(--panel); z-index: 50; }
+.toolMenu button { text-align: left; width: 100%; }
+.toolMenu label { font-size: 11px; color: var(--muted); padding: 8px 4px 0; }
+.toolMenu select { width: 100%; min-height: 36px; }
+.navMeta { display: block; font-size: 10px; font-weight: 400; color: var(--muted); padding-top: 3px; }
+.turnMetadata { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 12px; }
+.turnMetadata summary { font-size: 12px; }
+.card .sectionHead { margin-top: 0; }
+.card .sectionHead h2 { font-size: 16px; text-transform: none; letter-spacing: -.01em; color: var(--text); margin: 0; }
+.msgBlock { padding: 14px 16px; border-radius: 10px; margin-top: 14px; }
+@media (max-width: 700px) {
+  .headerActions { width: 100%; justify-content: space-between; }
+  header > .pill { display: none; }
+  .headerActions > button { padding: 7px 10px; }
+  .wfRow { grid-template-columns: minmax(74px, 1fr) minmax(40px, 1fr) minmax(64px, 1fr); }
+}
 </style>
 </head>
 <body>
@@ -502,8 +744,8 @@ button.newConv:hover { filter: brightness(1.1); }
   <button class="dismiss" id="healthDismiss">Dismiss</button>
 </div>
 <header>
-  <h1>fastWorkflow Chatbot</h1>
-  <nav class="modeTabs">
+  <h1>fastWorkflow</h1>
+  <nav class="modeTabs" aria-label="Workbench mode">
     <button id="modeTest" class="active">Chat</button>
     <button id="modeDebug">Debug</button>
   </nav>
@@ -511,10 +753,19 @@ button.newConv:hover { filter: brightness(1.1); }
   <span class="meta" id="metaLine"></span>
   <span id="workspaceChrome"></span>
   <span class="spacer"></span>
-  <button id="clearConvsBtn" style="display:none">Clear conversations</button>
-  <button id="benchmarkSetupBtn">Benchmark setup</button>
-  <button id="switchWfBtn" style="display:none">Switch workflow</button>
-  <button id="refreshBtn" style="display:none">Refresh</button>
+  <div class="headerActions">
+    <button id="benchmarkSetupBtn" class="primary">Benchmark setup</button>
+    <button id="switchWfBtn" style="display:none">Switch workflow</button>
+    <details class="headerTools" id="workspaceTools">
+      <summary>Tools</summary>
+      <div class="toolMenu">
+        <button id="refreshBtn" style="display:none">Refresh</button>
+        <button id="clearConvsBtn" style="display:none">Clear conversations</button>
+        <label for="themeSelect">Appearance</label>
+        <select id="themeSelect"><option value="auto">System theme</option><option value="light">Light</option><option value="dark">Dark</option></select>
+      </div>
+    </details>
+  </div>
 </header>
 
 <main id="pickerMain">
@@ -557,10 +808,15 @@ button.newConv:hover { filter: brightness(1.1); }
 </main>
 
 <main id="debugMain">
-  <div id="rail">
+  <div id="rail" role="navigation" aria-label="Benchmark and conversation navigation">
+    <div class="railTabs" role="tablist" aria-label="Debug records">
+      <button id="navConversations" class="active" role="tab" aria-selected="true" aria-controls="convList">Conversations</button>
+      <button id="navBenchmarks" role="tab" aria-selected="false" aria-controls="convList" tabindex="-1">Benchmarks</button>
+      <button id="navDistillations" role="tab" aria-selected="false" aria-controls="convList" tabindex="-1">Distillations</button>
+    </div>
     <div id="convList"></div>
   </div>
-  <div id="detail"><div class="empty">Select a turn to inspect it.</div></div>
+  <div id="detail" role="region" aria-label="Selected record"><div class="emptyState"><strong>Explore a conversation</strong><p>Select a conversation on the left to revisit its turns and inspect what happened.</p></div></div>
   <aside id="reviewPane" aria-label="Review questions"></aside>
 </main>
 
@@ -597,6 +853,12 @@ button.newConv:hover { filter: brightness(1.1); }
       command deterministically (no agent). Every turn is inspectable in the Debug tab.</div>
   </div>
 </section>
+<div id="noticeStack" aria-label="Notifications"></div>
+<dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmDescription">
+  <h2 id="confirmTitle">Delete this empty experiment?</h2>
+  <p id="confirmDescription">This removes the unused experiment. Its benchmark and tasks will stay in place. Create a new experiment if you need it again.</p>
+  <div class="actions"><button id="cancelDelete" autofocus>Keep experiment</button><button id="confirmDelete" class="danger">Delete experiment</button></div>
+</dialog>
 <script>
 "use strict";
 /* All record-derived text is rendered via textContent — never via markup
@@ -654,18 +916,7 @@ function apiRaw(path) {
   path = benchmarkEvidencePath(path);
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } });
 }
-function apiPost(path, body) {
-  return fetch(path, {
-    method: "POST",
-    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
-    body: JSON.stringify(body || {})
-  }).then(function (r) {
-    return r.json().then(function (data) {
-      if (!r.ok) { throw new Error(data && data.error ? data.error : ("API " + path + " -> " + r.status)); }
-      return data;
-    });
-  });
-}
+function apiPost(path, body) { return mutationRequest(path, "POST", body); }
 
 function reviewApi(path, method, body) {
   return fetch(path, {
@@ -687,32 +938,9 @@ function reviewApi(path, method, body) {
   });
 }
 
-function apiPatch(path, body) {
-  path = benchmarkEvidencePath(path);
-  return fetch(path, {
-    method: "PATCH",
-    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
-    body: JSON.stringify(body || {})
-  }).then(function (r) {
-    return r.json().then(function (data) {
-      if (!r.ok) { throw new Error(data && data.error ? data.error : ("API " + path + " -> " + r.status)); }
-      return data;
-    });
-  });
-}
-function apiPut(path, body) {
-  path = benchmarkEvidencePath(path);
-  return fetch(path, {
-    method: "PUT",
-    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
-    body: JSON.stringify(body || {})
-  }).then(function (r) {
-    return r.json().then(function (data) {
-      if (!r.ok) { throw new Error(data && data.error ? data.error : ("API " + path + " -> " + r.status)); }
-      return data;
-    });
-  });
-}
+function apiPatch(path, body) { return mutationRequest(benchmarkEvidencePath(path), "PATCH", body); }
+function apiPut(path, body) { return mutationRequest(benchmarkEvidencePath(path), "PUT", body); }
+
 function analysisText(value) {
   if (value === null || value === undefined) { return ""; }
   if (typeof value === "string") { return value; }
@@ -720,11 +948,6 @@ function analysisText(value) {
   return JSON.stringify(value, null, 2);
 }
 
-function parseAnalysisJson(raw) {
-  if (raw === null || raw === undefined || raw === "") { return null; }
-  if (typeof raw === "object") { return raw; }
-  try { return JSON.parse(raw); } catch (e) { return null; }
-}
 function apiAllowing409(path) {
   path = benchmarkEvidencePath(path);
   return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
@@ -745,7 +968,188 @@ function el(tag, cls, text) {
   if (text !== undefined && text !== null) { node.textContent = String(text); }
   return node;
 }
-function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+function clear(node) {
+  if (node.id === "detail") { detailAttentionPending = true; node.scrollTop = 0; node.setAttribute("aria-busy", "true"); }
+  while (node.firstChild) { node.removeChild(node.firstChild); }
+}
+
+/* Theme preference is local to this browser; no remote fonts or assets. */
+var themeSelect = document.getElementById("themeSelect");
+function setTheme(value) {
+  if (value === "auto") { document.documentElement.removeAttribute("data-theme"); }
+  else { document.documentElement.dataset.theme = value; }
+}
+try { themeSelect.value = localStorage.getItem("fw-theme") || "auto"; } catch (error) {}
+setTheme(themeSelect.value);
+themeSelect.addEventListener("change", function () {
+  setTheme(themeSelect.value); try { localStorage.setItem("fw-theme", themeSelect.value); } catch (error) {}
+});
+document.addEventListener("click", function (event) {
+  var menu = document.getElementById("workspaceTools");
+  if (!menu.contains(event.target)) { menu.open = false; }
+});
+document.addEventListener("keydown", function (event) {
+  var menu = document.getElementById("workspaceTools");
+  if (event.key === "Escape" && menu.open) { menu.open = false; menu.querySelector("summary").focus(); }
+});
+
+/* Shared action feedback. Notifications never move focus; the destination view does. */
+var lastActionButton = null;
+document.addEventListener("click", function (event) {
+  lastActionButton = event.target.closest ? event.target.closest("button") : null;
+}, true);
+/* The band's bottom edge moves: the header wraps at narrow widths and
+   #healthBanner sits above it, appearing and disappearing. Measuring it keeps
+   the notices tucked under the band instead of over it or adrift below it. */
+var noticeBand = document.querySelector("header");
+var noticeBanner = document.getElementById("healthBanner");
+function placeNotices() {
+  /* offsetHeight, not getBoundingClientRect().bottom: the rect is measured
+     against the viewport, so a scrolled document would place the notices off
+     the top of the screen. A hidden banner contributes 0. */
+  document.documentElement.style.setProperty(
+    "--notice-top", (noticeBanner.offsetHeight + noticeBand.offsetHeight) + "px");
+}
+if (window.ResizeObserver) {
+  var bandObserver = new ResizeObserver(placeNotices);
+  bandObserver.observe(noticeBand);
+  bandObserver.observe(noticeBanner);
+}
+window.addEventListener("resize", placeNotices);
+placeNotices();
+function showNotice(message, kind, detail) {
+  var stack = document.getElementById("noticeStack");
+  var notice = el("div", "notice" + (kind === "error" ? " error" : ""));
+  notice.setAttribute("role", kind === "error" ? "alert" : "status");
+  var icon = el("span", "noticeIcon", kind === "error" ? "!" : "✓"); icon.setAttribute("aria-hidden", "true");
+  notice.appendChild(icon);
+  var text = el("div", "noticeText"); text.appendChild(el("strong", null, message));
+  if (detail) { text.appendChild(el("span", null, detail)); } notice.appendChild(text);
+  var dismiss = el("button", null, "×"); dismiss.setAttribute("aria-label", "Dismiss notification");
+  notice.appendChild(dismiss); stack.appendChild(notice);
+  /* Two phases: the notice sits at full opacity for `dwell`, then fades for
+     `fade` and is removed. The removal is a timer, not a transitionend, because
+     prefers-reduced-motion disables the transition and the event never fires. */
+  var dwell = kind === "error" ? 6000 : 3000, fade = kind === "error" ? 6000 : 1500;
+  var timer, remaining = dwell, started, running = false, fading = false;
+  function remove() { clearTimeout(timer); notice.remove(); }
+  function beginFade() { running = false; fading = true; notice.classList.add("leaving"); timer = setTimeout(remove, fade); }
+  /* A hover that arrives mid-fade restores the notice and re-arms the full
+     dwell: the reader who reached for it gets the whole message back, not the
+     tail of a fade that was already half gone. */
+  function pause() {
+    if (fading) { clearTimeout(timer); fading = false; notice.classList.remove("leaving"); remaining = dwell; return; }
+    if (!running) { return; }
+    running = false; clearTimeout(timer); remaining = Math.max(0, remaining - (Date.now() - started));
+  }
+  function resume() { if (running || fading) { return; } running = true; started = Date.now(); timer = setTimeout(beginFade, remaining); }
+  notice.addEventListener("mouseenter", pause);
+  notice.addEventListener("mouseleave", function () { if (!notice.contains(document.activeElement)) { resume(); } });
+  notice.addEventListener("focusin", pause);
+  notice.addEventListener("focusout", function (event) { if (!notice.contains(event.relatedTarget)) { resume(); } });
+  dismiss.addEventListener("click", remove); notice.dismissNotice = remove; resume();
+  while (stack.children.length > 4) { stack.firstElementChild.dismissNotice(); }
+}
+function actionSuccess(path, method) {
+  if (method === "DELETE") { return "Empty experiment deleted"; }
+  if (path.indexOf("/human-feedback") >= 0) { return "Feedback saved"; }
+  if (path.indexOf("/analysis") >= 0) { return "Analysis saved"; }
+  if (path === "/api/benchmark-setup") { return "Benchmark version saved"; }
+  if (/\/benchmarks\/.*\/experiments$/.test(path)) { return "Experiment created"; }
+  if (path === "/api/select_workflow") { return "Workflow selected"; }
+  if (path === "/api/select_workspace") { return "Workspace opened"; }
+  if (path === "/api/train") { return "Training requested"; }
+  if (path === "/api/configure_env") { return "Environment files saved"; }
+  if (path === "/api/clear_conversations") { return "Conversations cleared"; }
+  if (method === "PATCH") { return "Notes saved"; }
+  return "Changes saved";
+}
+function mutationRequest(path, method, body) {
+  var button = lastActionButton;
+  if (button && button.isConnected) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
+  var options = {method: method, headers: {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"}};
+  if (method !== "DELETE") { options.body = JSON.stringify(body || {}); }
+  return fetch(path, options).then(function (response) {
+    return response.json().catch(function () { return {}; }).then(function (data) {
+      if (!response.ok) { throw new Error(data.error || "Request failed (" + response.status + "). Please try again."); }
+      showNotice(actionSuccess(path, method));
+      return data;
+    });
+  }).catch(function (error) {
+    showNotice("Could not complete the action", "error", error.message);
+    throw error;
+  }).finally(function () {
+    if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
+  });
+}
+function apiDelete(path) { return mutationRequest(path, "DELETE"); }
+
+function confirmEmptyDeletion(opener) {
+  opener = opener || document.activeElement;
+  var dialog = document.getElementById("confirmDialog");
+  return new Promise(function (resolve) {
+    function finish(value) {
+      dialog.removeEventListener("close", onClose);
+      dialog.removeEventListener("cancel", onCancel);
+      document.getElementById("confirmDelete").removeEventListener("click", onDelete);
+      document.getElementById("cancelDelete").removeEventListener("click", onCancel);
+      if (dialog.close) { dialog.close(); } else { dialog.removeAttribute("open"); }
+      if (opener && opener.isConnected) { opener.focus({preventScroll: true}); }
+      resolve(value);
+    }
+    function onDelete() { finish(true); }
+    function onCancel(event) { if (event) { event.preventDefault(); } finish(false); }
+    function onClose() { finish(false); }
+    dialog.addEventListener("close", onClose); dialog.addEventListener("cancel", onCancel);
+    document.getElementById("confirmDelete").addEventListener("click", onDelete);
+    document.getElementById("cancelDelete").addEventListener("click", onCancel);
+    if (dialog.showModal) { dialog.showModal(); } else { dialog.setAttribute("open", ""); }
+    document.getElementById("cancelDelete").focus();
+  });
+}
+
+/* Focus once per replacement, not when comments, polling or analysis arrive. */
+var detailAttentionPending = false;
+var detailObserver = new MutationObserver(function () {
+  if (!detailAttentionPending) { return; }
+  var detail = document.getElementById("detail");
+  var target = detail.querySelector("[data-autofocus], h1, h2, .err");
+  if (!target) { return; }
+  detailAttentionPending = false; detail.removeAttribute("aria-busy");
+  var active = document.activeElement;
+  if (active && active.isConnected && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) && active !== target) { return; }
+  if (!target.matches("input, textarea, select")) { target.tabIndex = -1; target.setAttribute("data-view-heading", ""); }
+  if (!document.getElementById("debugMain").classList.contains("visible")) { return; }
+  target.focus({preventScroll: true});
+  if (window.matchMedia && window.matchMedia("(max-width: 700px)").matches && target.scrollIntoView) {
+    detail.scrollIntoView({block: "start", behavior: "instant"});
+  }
+  target.classList.remove("viewArrival"); void target.offsetWidth; target.classList.add("viewArrival");
+});
+detailObserver.observe(document.getElementById("detail"), {childList: true, subtree: true});
+function pageHeader(container, eyebrow, title, description) {
+  var header = el("div", "pageHead"), intro = el("div", "intro");
+  intro.appendChild(el("div", "eyebrow", eyebrow)); intro.appendChild(el("h1", null, title));
+  if (description) { intro.appendChild(el("p", null, description)); }
+  header.appendChild(intro); var actions = el("div", "actions"); header.appendChild(actions);
+  container.appendChild(header); return actions;
+}
+function sectionHeader(container, title, count) {
+  var head = el("div", "sectionHead"), label = el("h2", null, title);
+  if (count !== undefined) { label.appendChild(el("span", "count", count)); }
+  head.appendChild(label); container.appendChild(head); return head;
+}
+function emptyState(container, title, message) {
+  var box = el("div", "emptyState"); box.appendChild(el("strong", null, title));
+  box.appendChild(el("p", null, message)); container.appendChild(box); return box;
+}
+function taskPreview(container, task, index) {
+  var card = el("div", "card taskCard"), body = el("div", "taskBody");
+  card.appendChild(el("span", "taskNumber", String(index + 1).padStart(2, "0")));
+  body.appendChild(el("div", "recordId", task.task_id));
+  body.appendChild(el("p", null, benchmarkPrompt(task) || "No prompt yet. Your runner supplies the task input."));
+  card.appendChild(body); container.appendChild(card);
+}
 
 /* -- state ------------------------------------------------------------- */
 var state = {
@@ -1190,6 +1594,10 @@ function renderExecutionLedger(container, turn, openSpan) {
     if (row.span_id && openSpan) {
       tr.classList.add("openable");
       tr.title = "open this dispatch's span";
+      tr.tabIndex = 0;
+      tr.addEventListener("keydown", function (event) {
+        if (event.target === tr && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openSpan(row.span_id); }
+      });
       tr.addEventListener("click", function () { openSpan(row.span_id); });
     }
     table.appendChild(tr);
@@ -1461,6 +1869,78 @@ var hierarchyRoot = null;
 var hierarchyScope = null;
 var hierarchyPath = [];
 var hierarchyExpanded = {};
+var navigationTab = "conversations";
+var navigationSelection = {conversations: null, benchmarks: null, distillations: null};
+
+function hierarchyTab(path) {
+  for (var i = 0; i < path.length; i++) {
+    if (path[i].kind === "adhoc" || path[i].kind === "date") { return "conversations"; }
+  }
+  return "benchmarks";
+}
+
+function setNavigationTabButtons(tab) {
+  [
+    ["conversations", "navConversations"],
+    ["benchmarks", "navBenchmarks"],
+    ["distillations", "navDistillations"]
+  ].forEach(function (item) {
+    var active = item[0] === tab;
+    var button = document.getElementById(item[1]);
+    button.className = active ? "active" : "";
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    button.tabIndex = active ? 0 : -1;
+  });
+}
+
+function tabNodes(tab) {
+  if (!hierarchyRoot || tab === "distillations") { return []; }
+  if (tab === "conversations") {
+    var adhoc = hierarchyRoot.children.find(function (node) { return node.kind === "adhoc"; });
+    return adhoc ? adhoc.children : [];
+  }
+  return hierarchyRoot.children.filter(function (node) { return node.kind !== "adhoc"; });
+}
+
+function showNavigationTabEmpty() {
+  expNavToken();
+  state.turnKey = null;
+  state.turn = null;
+  state.path = [];
+  var d = document.getElementById("detail");
+  clear(d);
+  var nodes = tabNodes(navigationTab);
+  if (navigationTab === "distillations") {
+    emptyState(d, "Distillations are coming soon", "This space will collect reusable insights distilled from your workflow records.");
+  } else if (navigationTab === "conversations") {
+    emptyState(d, nodes.length ? "Explore a conversation" : "No conversations yet",
+      nodes.length
+        ? "Select a conversation on the left to revisit its turns and inspect what happened."
+        : "Start chatting with your workflow and its ad-hoc conversations will appear here.");
+  } else {
+    emptyState(d, nodes.length ? "Explore a benchmark" : "No benchmarks yet",
+      nodes.length
+        ? "Select a benchmark on the left to review its tasks, experiments, and results."
+        : "Create a benchmark to start measuring repeatable workflow tasks.");
+  }
+}
+
+function setNavigationTab(tab, restoreDetail) {
+  navigationTab = tab;
+  setNavigationTabButtons(tab);
+  var selected = navigationSelection[tab];
+  hierarchyPath = selected
+    ? (findHierarchy(function (node) { return node.key === selected; }) || [])
+    : [];
+  renderHierarchy();
+  if (restoreDetail === false) { return; }
+  if (hierarchyPath.length) {
+    var node = hierarchyPath[hierarchyPath.length - 1];
+    activateHierarchy(hierarchyPath, !!hierarchyExpanded[node.key]);
+  } else {
+    showNavigationTabEmpty();
+  }
+}
 
 function findHierarchy(predicate) {
   function walk(node, trail) {
@@ -1478,17 +1958,47 @@ function findHierarchy(predicate) {
 function focusHierarchy(predicate) {
   var path = findHierarchy(predicate);
   if (!path) { return false; }
+  navigationTab = hierarchyTab(path);
+  navigationSelection[navigationTab] = path[path.length - 1].key;
+  setNavigationTabButtons(navigationTab);
   hierarchyPath = path;
   path.slice(0, -1).forEach(function (node) { hierarchyExpanded[node.key] = true; });
   renderHierarchy();
   return true;
 }
 
+function hierarchyLabel(node) {
+  /* An experiment node carries the author's free-text description, which belongs
+     on its page and not in a rail row: here it is named by its id, the one
+     thing that identifies it at a glance and always fits. */
+  if (node.kind === "experiment" && node.experiment_id) {
+    return "Experiment · " + node.experiment_id.slice(-8);
+  }
+  return node.label;
+}
+
+function navSnippet(text, words) {
+  /* The rail and the crumbs are for orientation, not reading: three words is
+     enough to recognise a record, and the full text stays as the tooltip. */
+  var limit = words || 3;
+  var flat = String(text === null || text === undefined ? "" : text)
+    .replace(/\s+/g, " ").trim();
+  /* Slug-cased labels ("roster-walk-davis-and-sons-plc") carry their words on
+     hyphens and underscores instead of spaces, so those break a word too —
+     splitting on spaces alone left those rows at full length. */
+  var parts = flat.match(/[^\s\-_]+[\s\-_]?/g) || [];
+  var snippet = parts.length <= limit ? flat
+    : parts.slice(0, limit).join("").replace(/[\s\-_]+$/, "") + " …";
+  /* A label can also be one long unbroken token, which no word count trims. */
+  return snippet.length > 34 ? snippet.slice(0, 33) + "…" : snippet;
+}
+
 function fillHierarchyCrumbs(container) {
   clear(container);
   (hierarchyPath.length ? hierarchyPath : (hierarchyRoot ? [hierarchyRoot] : [])).forEach(function (node, index) {
     if (index) { container.appendChild(el("span", "sep", "›")); }
-    var button = el("button", null, node.label);
+    var button = el("button", null, navSnippet(hierarchyLabel(node)));
+    button.title = node.label;
     button.addEventListener("click", function () {
       var path = findHierarchy(function (n) { return n.key === node.key; });
       if (path) { activateHierarchy(path, true); }
@@ -1501,29 +2011,53 @@ function renderHierarchy() {
   var list = document.getElementById("convList");
   clear(list);
   if (!hierarchyRoot) { return; }
-  var visiblePath = hierarchyPath.filter(function (n) { return n.kind !== "turn" && n.kind !== "component"; });
+  var visiblePath = hierarchyPath.filter(function (n) { return n.kind !== "component"; });
   var selected = visiblePath.length ? visiblePath[visiblePath.length - 1].key : null;
   function render(node, trail) {
     var path = trail.concat([node]);
+    /* The rail stops at the turn: a turn's children are trace components,
+       which the right pane already walks with its own breadcrumb. */
+    var leaf = node.kind === "turn";
     var row = el("details", "navNode" + (node.kind === "conversation" ? " conversation" : "") + (selected === node.key ? " selected" : ""));
-    row.open = node.kind !== "conversation" && !!hierarchyExpanded[node.key];
-    var summary = el("summary", null, node.label);
+    row.open = !leaf && !!hierarchyExpanded[node.key];
+    row.dataset.kind = node.kind;
+    var summary = el("summary");
+    var navLabel = navSnippet(hierarchyLabel(node));
+    summary.title = node.label || hierarchyLabel(node);
+    var labelNode = el("span", "navLabel", navLabel);
+    if (node.kind === "experiment" && node.experiment_id) {
+      row.dataset.experimentId = node.experiment_id;
+    }
+    summary.appendChild(labelNode);
+    if (node.children.length && !leaf) {
+      var count = el("span", "navCount", node.children.length); count.setAttribute("aria-hidden", "true"); summary.appendChild(count);
+    }
+    if (selected === node.key) { summary.setAttribute("aria-current", "page"); }
     if (node.kind === "turn") { summary.title = node.info.user_message || node.label; }
     summary.addEventListener("click", function (event) {
       event.preventDefault();
       activateHierarchy(path, !hierarchyExpanded[node.key]);
     });
     row.appendChild(summary);
-    if (node.kind !== "conversation" && node.children.length) {
+    if (!leaf && node.children.length) {
       var children = el("div", "navChildren");
       node.children.forEach(function (child) { children.appendChild(render(child, path)); });
       row.appendChild(children);
-    } else if (node.kind !== "conversation" && row.open) {
-      row.appendChild(el("div", "sub", node.kind === "experiment" ? "No conversations recorded yet." : "No child records."));
+    } else if (!leaf && row.open) {
+      row.appendChild(el("div", "sub", node.kind === "experiment" ? "No conversations recorded yet." :
+        node.kind === "conversation" ? "No turns recorded yet." : "No child records."));
     }
     return row;
   }
-  hierarchyRoot.children.forEach(function (node) { list.appendChild(render(node, [hierarchyRoot])); });
+  if (navigationTab === "conversations") {
+    var adhoc = hierarchyRoot.children.find(function (node) { return node.kind === "adhoc"; });
+    if (adhoc) {
+      adhoc.children.forEach(function (node) { list.appendChild(render(node, [hierarchyRoot, adhoc])); });
+    }
+  } else if (navigationTab === "benchmarks") {
+    hierarchyRoot.children.filter(function (node) { return node.kind !== "adhoc"; })
+      .forEach(function (node) { list.appendChild(render(node, [hierarchyRoot])); });
+  }
   (hierarchyRoot.info.warnings || []).forEach(function (warning) {
     list.appendChild(el("p", "err", warning));
   });
@@ -1565,6 +2099,11 @@ function showHierarchyInfo(node) {
 }
 
 function activateHierarchy(path, expanded) {
+  navigationTab = hierarchyTab(path);
+  var visibleSelection = path.filter(function (node) { return node.kind !== "component"; });
+  navigationSelection[navigationTab] =
+    visibleSelection.length ? visibleSelection[visibleSelection.length - 1].key : null;
+  setNavigationTabButtons(navigationTab);
   hierarchyPath = path;
   var node = path[path.length - 1];
   path.slice(0, -1).forEach(function (n) { hierarchyExpanded[n.key] = true; });
@@ -1598,6 +2137,9 @@ function alignHierarchyTurn(turnKey) {
     return (n.source && n.source.benchmark_experiment || null) === benchmarkExperimentSource;
   });
   if (path) {
+    navigationTab = hierarchyTab(path);
+    navigationSelection[navigationTab] = path[path.length - 1].key;
+    setNavigationTabButtons(navigationTab);
     hierarchyPath = path;
     path.slice(0, -1).forEach(function (n) { hierarchyExpanded[n.key] = true; });
     renderHierarchy();
@@ -1632,12 +2174,13 @@ function syncTraceHierarchy() {
   renderHierarchy();
 }
 
-function refreshConvs() {
+function refreshConvs(reportFailure) {
   var refresh = ++conversationRefresh;
   var workflow = session && session.workflow_path;
   var scope = JSON.stringify([workflow, session && session.workspace]);
   if (scope !== hierarchyScope) {
     hierarchyScope = scope; hierarchyRoot = null; hierarchyPath = []; hierarchyExpanded = {};
+    navigationSelection = {conversations: null, benchmarks: null, distillations: null};
   }
   if (!hierarchyRoot) {
     var list = document.getElementById("convList"); clear(list);
@@ -1645,18 +2188,32 @@ function refreshConvs() {
   }
   return api("/api/navigation").then(function (data) {
     if (refresh !== conversationRefresh || scope !== JSON.stringify([session && session.workflow_path, session && session.workspace])) { return; }
-    var selected = hierarchyPath.length && hierarchyPath[hierarchyPath.length - 1].key;
     hierarchyRoot = data.root;
-    hierarchyPath = findHierarchy(function (n) { return n.key === selected; }) || [hierarchyRoot];
+    var selected = navigationSelection[navigationTab];
+    hierarchyPath = selected
+      ? (findHierarchy(function (n) { return n.key === selected; }) || [])
+      : [];
     attachTraceHierarchy();
     syncTraceHierarchy();
     renderHierarchy();
+    if (!hierarchyPath.length) { showNavigationTabEmpty(); }
   }).catch(function (error) {
     if (refresh !== conversationRefresh) { return; }
     var list = document.getElementById("convList"); clear(list);
     list.appendChild(el("div", "empty", "Could not load navigation: " + error.message));
+    if (reportFailure === true) { throw error; }
   });
 }
+
+document.getElementById("navConversations").addEventListener("click", function () {
+  setNavigationTab("conversations");
+});
+document.getElementById("navBenchmarks").addEventListener("click", function () {
+  setNavigationTab("benchmarks");
+});
+document.getElementById("navDistillations").addEventListener("click", function () {
+  setNavigationTab("distillations");
+});
 
 function renderNestedTurns(turns) {
   var list = el("div", "convTurns");
@@ -1754,10 +2311,11 @@ function showExperiments() {
     rows.forEach(function (row) {
       var item = el("div", "listItem");
       var title = el("div", "title");
-      title.appendChild(el("span", null, row.label + "  "));
+      title.appendChild(el("span", null, "Experiment · " + row.experiment_id.slice(-8) + "  "));
       title.appendChild(expStatusPill(row.status));
       if (row.arm) { title.appendChild(el("span", null, "  [" + row.arm + "]")); }
       item.appendChild(title);
+      if (row.description) { item.appendChild(el("div", "sub", row.description)); }
       var declared = row.declared_tasks + "×" + row.declared_attempts;
       var sub = declared + " declared, " + row.attempts_finished + " finished"
         + (row.invalid_reason ? "  — " + row.invalid_reason : "")
@@ -1797,10 +2355,18 @@ function showExperiment(experimentId) {
     var tasks = results[2].tasks || [];
     clear(d);
     var card = el("div", "card");
-    expCrumbs(card, [
+    /* Named by its id, described by its label: the label is free text the
+       author may or may not have written, and a page whose heading is a
+       paragraph (or blank) is no longer a heading. */
+    var expName = "Experiment · " + experimentId.slice(-8);
+    expCrumbs(d, [
       { label: "Experiments", onClick: showExperiments },
-      { label: exp.label }
+      { label: expName }
     ]);
+    pageHeader(d, "RECORDED EXPERIMENT", expName,
+      exp.description
+        ? ("Description: " + exp.description)
+        : "Review outcomes, follow the evidence, and capture what you learn.");
 
     /* An invalid experiment first, and loudly. A run whose turns were dropped
        or erased has an unreconstructable denominator; showing its label beside
@@ -1823,19 +2389,11 @@ function showExperiment(experimentId) {
     verdictLine.appendChild(evidenceBadge(exp.evidence));
     card.appendChild(verdictLine);
 
-    card.appendChild(el("h2", null, "Hypothesis"));
-    card.appendChild(el("div", null, exp.hypothesis || "— none recorded —"));
-    /* Read-only, with the reason attached. Without it the first person to try
-       editing this files a bug against what is deliberate. */
-    card.appendChild(el("div", "expReadonly",
-      "Read-only. The hypothesis is write-once, fixed before the run started: " +
-      "a prediction that can be revised after seeing the outcome is not a " +
-      "pre-registration. Record revisions in Notes."));
-
-    card.appendChild(el("h2", null, "Notes"));
+    var annotations = el("details", "card");
+    annotations.appendChild(el("summary", null, "Notes"));
     var notes = el("textarea", "expNotes");
     notes.value = exp.notes || "";
-    card.appendChild(notes);
+    annotations.appendChild(notes);
     var saveRow = el("div", "diffToolbar");
     var save = el("button", null, "Save notes");
     var saveMsg = el("span", "sub", "");
@@ -1848,28 +2406,8 @@ function showExperiment(experimentId) {
     });
     saveRow.appendChild(save);
     saveRow.appendChild(saveMsg);
-    card.appendChild(saveRow);
-
-    card.appendChild(el("h2", null, "Analysis"));
-    card.appendChild(el("div", "expReadonly",
-      "Record your observations in any format, including free-form text."));
-    var analysisArea = el("textarea", "expNotes");
-    var parsedAnalysis = parseAnalysisJson(exp.analysis_json);
-    analysisArea.value = analysisText(parsedAnalysis);
-    card.appendChild(analysisArea);
-    var analysisRow = el("div", "diffToolbar");
-    var saveAnalysis = el("button", null, "Save analysis");
-    var analysisMsg = el("span", "sub", "");
-    saveAnalysis.addEventListener("click", function () {
-      analysisMsg.textContent = "saving…";
-      apiPut("/api/experiment/" + encodeURIComponent(experimentId) + "/analysis",
-               {analysis: analysisArea.value}).then(function () {
-        analysisMsg.textContent = "saved";
-      }).catch(function (e) { analysisMsg.textContent = e.message; });
-    });
-    analysisRow.appendChild(saveAnalysis);
-    analysisRow.appendChild(analysisMsg);
-    card.appendChild(analysisRow);
+    annotations.appendChild(saveRow);
+    card.appendChild(annotations);
 
     card.appendChild(el("h2", null, "Result"));
     var kv = el("dl", "kv");
@@ -1884,19 +2422,11 @@ function showExperiment(experimentId) {
     pair("pass^" + exp.declared_attempts,
          score.reportable ? score.pass_at_k.toFixed(3) : "not reportable");
     pair("verdict sources", (score.outcome_sources || []).join(", "));
-    pair("arm", exp.arm);
-    pair("baseline", exp.baseline_experiment_id);
-    pair("capture profile", exp.capture_profile);
-    pair("workflow", exp.workflow_name);
-    if (exp.benchmark_id) {
-      pair("benchmark", exp.benchmark_id + "@" + (exp.benchmark_version || "?"));
-      pair("benchmark digest", exp.benchmark_digest_sha256);
-    }
-    pair("created", exp.created_at);
     card.appendChild(kv);
     /* Collapsed: what this experiment ran under, keys verbatim, with
        "not recorded" where the store holds nothing (fix-aou (c)). */
-    renderProvenance(card, exp.provenance, "provenance");
+    /* The API retains provenance for agents and diagnostics; the ordinary
+       experiment page omits the specialist field dump. */
     if (!score.reportable && score.reason_not_reportable) {
       card.appendChild(el("div", "sub", score.reason_not_reportable));
     }
@@ -1932,10 +2462,14 @@ function showExperiment(experimentId) {
         });
     }
 
-    card.appendChild(el("h2", null, "Evidence runs"));
     /* The verdict, its stored reasons verbatim, and each segment's
        writer-health delta folded under it. */
-    renderEvidenceVerdict(card, exp.evidence);
+    /* A valid verdict is already visible beside the experiment status. Keep
+       the detailed section for states that need investigation. */
+    if (!exp.evidence || exp.evidence.state !== "valid") {
+      card.appendChild(el("h2", null, "Evidence runs"));
+      renderEvidenceVerdict(card, exp.evidence);
+    }
 
     card.appendChild(el("h2", null, "Tasks"));
     if (!tasks.length) {
@@ -1949,7 +2483,7 @@ function showExperiment(experimentId) {
       item.appendChild(el("div", "sub",
         outcomes.join(", ") + (task.passed_all ? "  — all passed" : "")));
       item.addEventListener("click", function () {
-        showExperimentTask(experimentId, task.task_id, exp.label);
+        showExperimentTask(experimentId, task.task_id, expName);
       });
       card.appendChild(item);
     });
@@ -2017,9 +2551,9 @@ function showExperimentTask(experimentId, taskId, label) {
     var card = el("div", "card");
     expCrumbs(card, [
       { label: "Experiments", onClick: showExperiments },
-      /* the experiment's LABEL, matching the parent view; the id is the
-         fallback for a deep link that has no label in hand */
-      { label: label || experimentId,
+      /* the experiment's NAME, matching the parent view; a deep link that has
+         no name in hand builds the same one out of the id */
+      { label: label || ("Experiment · " + experimentId.slice(-8)),
         onClick: function () { showExperiment(experimentId); } },
       { label: taskId }
     ]);
@@ -2121,10 +2655,11 @@ var benchNav = 0;
 function benchNavToken() { return expNavToken(); }
 function benchNavStale(token) { return expNavStale(token); }
 function benchmarkText(card, label, value, multiline) {
-  var wrapper = el("label", "card"); wrapper.style.display = "block";
+  var wrapper = el("label", "formField");
   wrapper.appendChild(el("div", "title", label));
   var input = el(multiline ? "textarea" : "input", "expNotes");
   input.setAttribute("aria-label", label); input.value = value || "";
+  if (!multiline) { input.type = "text"; } else { input.rows = 3; }
   wrapper.appendChild(input); card.appendChild(wrapper); return input;
 }
 function benchmarkPrompt(task) {
@@ -2134,129 +2669,153 @@ function showBenchmarks() {
   focusHierarchy(function (n) { return n.kind === "root"; });
   benchmarkExperimentSource = null;
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
-  d.appendChild(el("h2", null, "Benchmark setup"));
+  var actions = pageHeader(d, "BENCHMARK LIBRARY", "Build confidence in every change", "Define repeatable tasks, compare experiments, and turn observations into better workflows.");
   if (!(session && session.workspace_mode)) {
     var create = el("button", "primary", "New benchmark");
-    create.addEventListener("click", function () { editBenchmark(null); }); d.appendChild(create);
+    create.addEventListener("click", function () { editBenchmark(null); }); actions.appendChild(create);
   }
+  var list = el("div", "recordGrid"); d.appendChild(list);
   api("/api/benchmarks").then(function (data) {
     if (benchNavStale(nav)) { return; }
-    if (!data.benchmarks.length) { d.appendChild(el("p", "empty", "No benchmarks yet.")); }
+    if (!data.benchmarks.length) { emptyState(d, "Start with one real task", "Create a benchmark for something your users need to do. Add a prompt, then create an experiment when you are ready to test."); }
     data.benchmarks.forEach(function (row) {
-      var b = el("button", "listItem", row.title || row.benchmark_id);
-      b.appendChild(el("div", "sub", (row.versions || []).join(", ")));
-      b.addEventListener("click", function () { showBenchmark(row.benchmark_id); }); d.appendChild(b);
+      var b = el("button", "recordCard");
+      var top = el("span", "eyebrow", "BENCHMARK"); top.appendChild(el("span", "arrow", "↗")); b.appendChild(top);
+      b.appendChild(el("strong", null, row.title || row.benchmark_id));
+      b.appendChild(el("span", "sub", (row.versions || []).length + " versions · " + ((row.versions || []).slice(-1)[0] || "No version")));
+      b.addEventListener("click", function () { showBenchmark(row.benchmark_id); }); list.appendChild(b);
     });
-  }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err", e.message)); } });
+  }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err fieldError", e.message)); } });
 }
 function editBenchmark(current) {
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
-  expCrumbs(d, [{label: "Benchmark setup", onClick: showBenchmarks}, {label: current ? "Edit benchmark" : "New benchmark"}]);
-  var title = benchmarkText(d, "Title", current && (current.title || current.benchmark_id), false);
-  var description = benchmarkText(d, "Description (optional)", current && current.description, true);
-  var version = benchmarkText(d, "Version", current ? current.version + " — saving assigns the next version" : "v1 (assigned on save)", false);
-  version.readOnly = true;
-  d.appendChild(el("h2", null, "Tasks"));
+  expCrumbs(d, [{label: "Benchmarks", onClick: showBenchmarks}, {label: current ? "Edit benchmark" : "New benchmark"}]);
+  pageHeader(d, "BENCHMARK SETUP", current ? "Refine your benchmark" : "What should your workflow do?", "Describe the work you want to test. Each task keeps its own identity across experiments.");
+  var form = el("div", "card"); d.appendChild(form);
+  var title = benchmarkText(form, "Title", current && (current.title || current.benchmark_id), false); title.setAttribute("data-autofocus", ""); title.placeholder = "e.g. Customer support essentials";
+  var description = benchmarkText(form, "Description (optional)", current && current.description, true); description.placeholder = "What does this benchmark help you evaluate?";
+  form.appendChild(el("div", "sub", current ? "Saving creates the next version after " + current.version + ". Existing experiments keep their original tasks." : "Version v1 and task IDs are assigned when you save."));
+  sectionHeader(d, "Tasks");
   var tasks = el("div"), readers = []; d.appendChild(tasks);
-  function addTask(task) {
-    var card = el("div", "card"), removed = false; tasks.appendChild(card);
-    card.appendChild(el("div", "sub", task.task_id || "Task ID assigned on save"));
-    var prompt = benchmarkText(card, "Task prompt (optional)", benchmarkPrompt(task), true);
-    var remove = el("button", null, "Remove task");
-    remove.addEventListener("click", function () { removed = true; card.remove(); }); card.appendChild(remove);
+  var add = el("button", null, "+ Add task");
+  function addTask(task, focus) {
+    var card = el("div", "card taskCard"), removed = false, body = el("div", "taskBody"); tasks.appendChild(card);
+    card.appendChild(el("span", "taskNumber", String(readers.length + 1).padStart(2, "0")));
+    card.appendChild(body);
+    body.appendChild(el("div", "recordId", task.task_id || "New task · ID assigned on save"));
+    var prompt = benchmarkText(body, "Task prompt (optional)", benchmarkPrompt(task), true); prompt.placeholder = "Write what a user would ask your workflow…";
+    var remove = el("button", "ghost danger", "Remove task");
+    remove.addEventListener("click", function () {
+      removed = true; card.remove();
+      var next = tasks.querySelector("textarea"); (next || add).focus();
+      showNotice("Task removed from this draft", null, "Save the benchmark to publish your changes.");
+    }); body.appendChild(remove);
     readers.push(function () { return removed ? null : {task_id: task.task_id, prompt: prompt.value}; });
+    if (focus) { prompt.focus(); if (card.scrollIntoView) { card.scrollIntoView({block: "nearest"}); } }
   }
-  (current ? current.tasks : [{}]).forEach(addTask);
-  var add = el("button", null, "Add task"); add.addEventListener("click", function () { addTask({}); }); d.appendChild(add);
-  var save = el("button", "primary", "Save benchmark"), msg = el("p", "sub");
+  (current ? current.tasks : [{}]).forEach(function (task) { addTask(task, false); });
+  add.addEventListener("click", function () { addTask({}, true); });
+  var toolbar = el("div", "formActions"), save = el("button", "primary", "Save benchmark"), msg = el("p", "err fieldError");
+  msg.setAttribute("role", "alert"); d.appendChild(msg);
+  toolbar.appendChild(add);
+  var cancel = el("button", "ghost", "Cancel"); cancel.addEventListener("click", function () { if (current) { showBenchmark(current.benchmark_id); } else { showBenchmarks(); } }); toolbar.appendChild(cancel);
   save.addEventListener("click", function () {
-    save.disabled = true;
+    var draftTasks = readers.map(function (read) { return read(); }).filter(Boolean);
+    if (!title.value.trim() || !draftTasks.length) {
+      msg.textContent = !title.value.trim() ? "Give your benchmark a title." : "Add at least one task to save this benchmark.";
+      showNotice("Check your benchmark", "error", msg.textContent); (!title.value.trim() ? title : add).focus(); return;
+    }
+    msg.textContent = "";
     apiPost("/api/benchmark-setup", {benchmark_id: current && current.benchmark_id,
-      expected_version: current && current.version, title: title.value, description: description.value,
-      tasks: readers.map(function (read) { return read(); }).filter(Boolean)
+      expected_version: current && current.version, title: title.value, description: description.value, tasks: draftTasks
     }).then(function (data) {
       if (!benchNavStale(nav)) {
         refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmark(data.version.benchmark_id, data.version.version); } });
       }
-    }).catch(function (e) { msg.textContent = e.message; save.disabled = false; });
-  }); d.appendChild(save); d.appendChild(msg);
+    }).catch(function (e) { msg.textContent = e.message; });
+  }); toolbar.appendChild(save); d.appendChild(toolbar);
 }
 function showBenchmark(benchmarkId, selectedVersion) {
   focusHierarchy(function (n) { return n.kind === "benchmark" && n.benchmark_id === benchmarkId; });
   benchmarkExperimentSource = null;
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  d.appendChild(el("div", "empty", "Loading benchmark…"));
   api("/api/benchmarks/" + encodeURIComponent(benchmarkId)).then(function (data) {
     if (benchNavStale(nav)) { return; }
     var versions = data.versions || [], version = selectedVersion || versions[versions.length - 1];
-    if (!version) { d.appendChild(el("p", "empty", "No benchmark versions found.")); return; }
+    if (!version) { clear(d); emptyState(d, "No versions yet", "Save a benchmark version to begin."); return; }
     return api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/versions/" + encodeURIComponent(version)).then(function (loaded) {
       if (benchNavStale(nav)) { return; }
-      var manifest = loaded.version;
-      expCrumbs(d, [{label: "Benchmark setup", onClick: showBenchmarks}, {label: manifest.title || benchmarkId}]);
-      d.appendChild(el("h2", null, manifest.title || benchmarkId));
-      d.appendChild(el("p", null, manifest.description || ""));
-      d.appendChild(el("p", "sub", "Version " + version));
+      clear(d); var manifest = loaded.version;
+      expCrumbs(d, [{label: "Benchmarks", onClick: showBenchmarks}, {label: manifest.title || benchmarkId}]);
+      var actions = pageHeader(d, "BENCHMARK · " + version, manifest.title || benchmarkId, manifest.description || "A repeatable set of tasks for your workflow.");
       if (versions.length > 1) {
         var select = el("select"); select.setAttribute("aria-label", "View version");
-        versions.forEach(function (v) { var opt = el("option", null, v); opt.value = v; select.appendChild(opt); });
-        select.value = version;
-        select.addEventListener("change", function () { showBenchmark(benchmarkId, select.value); }); d.appendChild(select);
+        versions.forEach(function (v) { var opt = el("option", null, v); opt.value = v; select.appendChild(opt); }); select.value = version;
+        select.addEventListener("change", function () { showBenchmark(benchmarkId, select.value); }); actions.appendChild(select);
       }
       if (!(session && session.workspace_mode)) {
-        var edit = el("button", null, "Edit benchmark");
-        edit.disabled = version !== versions[versions.length - 1];
-        edit.addEventListener("click", function () { editBenchmark(manifest); }); d.appendChild(edit);
+        var edit = el("button", null, "Edit benchmark"); edit.disabled = version !== versions[versions.length - 1];
+        edit.title = edit.disabled ? "Select the latest version to edit" : "Save changes as a new version";
+        edit.addEventListener("click", function () { editBenchmark(manifest); }); actions.appendChild(edit);
       }
-      d.appendChild(el("h2", null, "Tasks"));
-      manifest.tasks.forEach(function (task) {
-        var card = el("div", "card"); card.appendChild(el("div", "sub", task.task_id));
-        var prompt = el("pre", null, benchmarkPrompt(task) || "No task prompt provided.");
-        prompt.style.whiteSpace = "pre-wrap"; card.appendChild(prompt); d.appendChild(card);
-      });
-      d.appendChild(el("h2", null, "Experiments"));
-      var experimentList = el("div"), msg = el("p", "sub");
+      var strip = el("div", "summaryStrip");
+      [[manifest.tasks.length, "Tasks in this version"], [version, "Selected version"], [versions.length, "Published versions"]].forEach(function (item) {
+        var stat = el("div"); stat.appendChild(el("strong", null, item[0])); stat.appendChild(el("span", null, item[1])); strip.appendChild(stat);
+      }); d.appendChild(strip);
+      var experimentsHead = sectionHeader(d, "Experiments"), experimentList = el("div", "recordGrid"), msg = el("p", "err fieldError"); msg.setAttribute("role", "alert");
       if (!(session && session.workspace_mode)) {
         var create = el("button", "primary", "New experiment");
         create.addEventListener("click", function () {
-          create.disabled = true;
           apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments", {version: version}).then(function (result) {
             if (!benchNavStale(nav)) {
               refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmarkExperiment(result.experiment.experiment_id); } });
             }
-          }).catch(function (e) { msg.textContent = e.message; create.disabled = false; });
-        }); d.appendChild(create);
+          }).catch(function (e) { msg.textContent = e.message; });
+        }); experimentsHead.appendChild(create);
       }
       d.appendChild(msg); d.appendChild(experimentList);
+      experimentList.appendChild(el("div", "empty", "Loading experiments…"));
       api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments").then(function (result) {
         if (benchNavStale(nav)) { return; }
-        if (result.warning) { experimentList.appendChild(el("p", "err", result.warning)); }
-        if (!result.experiments.length && !result.warning) { experimentList.appendChild(el("p", "empty", "No experiments in this benchmark yet.")); }
-        result.experiments.forEach(function (row) {
-          var b = el("button", "listItem", row.experiment_id + " · " + row.benchmark_version);
-          b.addEventListener("click", function () {
-            if (row.workspace) { showWorkspaceExperiment(row); }
-            else if (row.registered) { showBenchmarkExperiment(row.experiment_id); }
-            else { showExperiment(row.experiment_id); }
-          }); experimentList.appendChild(b);
+        clear(experimentList);
+        /* An unreadable evidence store is a workspace-wide condition, so the
+           sidebar's warning band (/api/navigation) is the one place that says
+           so; repeating it over the cards told the reader nothing new. */
+        if (!result.experiments.length) { emptyState(experimentList, "Ready for your first experiment", "Create an experiment to reserve the task IDs for a run. Your runner records the results here."); }
+        result.experiments.forEach(function (row, index) {
+          var b = el("button", "recordCard"), top = el("span", "eyebrow", row.benchmark_version || version);
+          top.appendChild(el("span", "arrow", "↗")); b.appendChild(top);
+          var recordedPath = findHierarchy(function (node) { return node.kind === "experiment" && node.experiment_id === row.experiment_id && node.recorded; });
+          var recordedNode = recordedPath && recordedPath[recordedPath.length - 1];
+          var described = recordedNode ? recordedNode.label : row.description;
+          b.appendChild(el("strong", null, "Experiment " + (index + 1)));
+          if (described) { b.appendChild(el("span", "sub", described)); }
+          b.appendChild(el("span", "sub", recordedPath || !row.registered ? "Execution recorded" : row.store ? "Execution registered" : "Not yet run"));
+          b.appendChild(el("span", "recordId", row.experiment_id));
+          b.addEventListener("click", function () { openBenchmarkRecord(row); }); experimentList.appendChild(b);
         });
       }).catch(function (e) { if (!benchNavStale(nav)) { experimentList.appendChild(el("p", "err", e.message)); } });
+      sectionHeader(d, "Tasks", manifest.tasks.length);
+      manifest.tasks.forEach(function (task, index) { taskPreview(d, task, index); });
       var analysis = el("details", "card"); analysis.appendChild(el("summary", null, "Analysis (optional)")); d.appendChild(analysis);
       analysis.addEventListener("toggle", function () {
         if (!analysis.open || analysis.dataset.loaded) { return; } analysis.dataset.loaded = "1";
         api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis").then(function (value) {
+          if (benchNavStale(nav)) { return; }
           var area = benchmarkText(analysis, "Analysis", analysisText(value.analysis), true);
           area.readOnly = !!(session && session.workspace_mode);
           if (!area.readOnly) {
-            var save = el("button", null, "Save analysis"), note = el("p");
+            var save = el("button", null, "Save analysis"), note = el("p", "err fieldError");
             save.addEventListener("click", function () {
               apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis", {analysis: area.value})
-                .then(function () { note.textContent = "Saved"; }).catch(function (e) { note.textContent = e.message; });
+                .then(function () { note.textContent = ""; }).catch(function (e) { note.textContent = e.message; });
             }); analysis.appendChild(save); analysis.appendChild(note);
           }
-        }).catch(function (e) { analysis.appendChild(el("p", "err", e.message)); });
+        }).catch(function (e) { analysis.dataset.loaded = ""; analysis.appendChild(el("p", "err", e.message)); });
       });
     });
-  }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err", e.message)); } });
+  }).catch(function (e) { if (!benchNavStale(nav)) { clear(d); d.appendChild(el("p", "err fieldError", e.message)); } });
 }
 function showBenchmarkVersion(benchmarkId, version) { showBenchmark(benchmarkId, version); }
 function openBenchmarkExecution(id) {
@@ -2265,29 +2824,89 @@ function openBenchmarkExecution(id) {
   else { benchmarkExperimentSource = id; showExperiment(id); refreshConvs(); }
 }
 
+/* One experiment, one page, whichever route the reader took. The rail opens an
+   experiment through activateHierarchy, which reads `recorded` off the node and
+   opens a finished run's results; the benchmark's cards used to branch on
+   registration alone, so the same recorded run showed its results from the rail
+   and its pre-run handoff page from the card. Both now dispatch on the node.
+   Registration state is the fallback for an experiment the navigation holds no
+   node for -- an evidence store it could not open, or a run recorded since the
+   last refresh. */
+function openBenchmarkRecord(row) {
+  if (row.workspace) { showWorkspaceExperiment(row); return; }
+  var path = findHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === row.experiment_id; });
+  if (path) { activateHierarchy(path, true); }
+  else if (row.registered) { showBenchmarkExperiment(row.experiment_id); }
+  else { benchmarkExperimentSource = null; showExperiment(row.experiment_id); }
+}
+
 function showBenchmarkExperiment(id) {
   focusHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === id; });
   benchmarkExperimentSource = null;
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  d.appendChild(el("div", "empty", "Loading experiment…"));
   api("/api/benchmark-experiments/" + encodeURIComponent(id)).then(function (data) {
     if (benchNavStale(nav)) { return; }
-    var row = data.experiment, manifest = data.benchmark;
-    expCrumbs(d, [{label: "Benchmark setup", onClick: showBenchmarks},
-      {label: manifest.title || row.benchmark_id, onClick: function () { showBenchmark(row.benchmark_id, row.benchmark_version); }}, {label: id}]);
-    d.appendChild(el("h2", null, "Experiment"));
-    var identifier = benchmarkText(d, "Experiment ID", id, false); identifier.readOnly = true;
-    d.appendChild(el("p", "sub", "Benchmark version " + row.benchmark_version));
-    d.appendChild(el("p", null, data.recorded ? "Execution records available." : "Created. Pass this experiment ID and the task IDs below to the harness."));
-    if (data.warning) { d.appendChild(el("p", "err", data.warning)); }
+    clear(d); var row = data.experiment, manifest = data.benchmark;
+    expCrumbs(d, [{label: "Benchmarks", onClick: showBenchmarks},
+      {label: manifest.title || row.benchmark_id, onClick: function () { showBenchmark(row.benchmark_id, row.benchmark_version); }}, {label: "Experiment"}]);
+    var actions = pageHeader(d, "EXPERIMENT · " + row.benchmark_version, manifest.title || row.benchmark_id, "A dedicated run of this benchmark, with " + manifest.tasks.length + " tasks ready to track.");
+    if (data.can_delete) {
+      var remove = el("button", "danger", "Delete empty experiment");
+      remove.addEventListener("click", function () {
+        confirmEmptyDeletion(remove).then(function (confirmed) {
+          if (!confirmed || benchNavStale(nav)) { return; }
+          lastActionButton = remove;
+          apiDelete("/api/benchmark-experiments/" + encodeURIComponent(id)).then(function () {
+            if (benchNavStale(nav)) { return; }
+            refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmark(row.benchmark_id, row.benchmark_version); } });
+          }).catch(function (e) { error.textContent = e.message; });
+        });
+      }); actions.appendChild(remove);
+    }
+    var status = el("div", "statusCard"), content = el("div");
+    status.appendChild(el("span", "statusSymbol", data.recorded ? "✓" : "↗"));
+    content.appendChild(el("strong", null, data.recorded ? "Your execution records are ready" : row.store ? "Execution registered" : "Ready for a run"));
+    content.appendChild(el("p", null, data.recorded ? "Explore conversations, inspect decisions, and leave feedback on what should improve." : "Pass this experiment ID and the task IDs below to your runner. Creating an experiment does not execute tasks."));
+    status.appendChild(content); d.appendChild(status);
+    var error = el("p", "err fieldError", data.warning || ""); error.setAttribute("role", "alert"); d.appendChild(error);
     if (data.recorded) {
       var open = el("button", "primary", "Open execution records");
-      open.addEventListener("click", function () { openBenchmarkExecution(id); }); d.appendChild(open);
+      open.addEventListener("click", function () { openBenchmarkExecution(id); }); actions.appendChild(open);
     }
-    manifest.tasks.forEach(function (task) {
-      var card = el("div", "card"); card.appendChild(el("h3", null, task.task_id));
-      card.appendChild(el("p", null, benchmarkPrompt(task) || "No task prompt provided.")); d.appendChild(card);
-    });
-  }).catch(function (e) { if (!benchNavStale(nav)) { d.appendChild(el("p", "err", e.message)); } });
+    var note = el("div", "card");
+    sectionHeader(note, "Description");
+    var description = benchmarkText(note, "Description (optional)", row.description || "", true);
+    description.placeholder = "What are you trying to find out with this run?";
+    /* Editable only until a runner claims the registration: after that the
+       description the run declared belongs to its evidence store, which this
+       page cannot write. */
+    if (row.store || (session && session.workspace_mode)) {
+      description.readOnly = true;
+      note.appendChild(el("p", "sub", "This experiment has been handed to a runner; its description is part of the recorded run."));
+    } else {
+      var saveNote = el("button", null, "Save description"), noteMsg = el("p", "sub", "Saved with the registration, and recorded with the run.");
+      saveNote.addEventListener("click", function () {
+        noteMsg.textContent = "saving…";
+        apiPatch("/api/benchmark-experiments/" + encodeURIComponent(id), {description: description.value})
+          .then(function (result) { row.description = result.experiment.description; noteMsg.textContent = "saved"; refreshConvs(); })
+          .catch(function (e) { noteMsg.textContent = e.message; });
+      });
+      note.appendChild(saveNote); note.appendChild(noteMsg);
+    }
+    d.appendChild(note);
+    var identity = el("div", "card"), idActions = sectionHeader(identity, "Runner handoff");
+    var identifier = benchmarkText(identity, "Experiment ID", id, false); identifier.readOnly = true;
+    var copy = el("button", null, "Copy experiment ID");
+    copy.addEventListener("click", function () {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(id).then(function () { showNotice("Experiment ID copied"); })
+          .catch(function () { identifier.focus(); identifier.select(); showNotice("Select and copy the experiment ID", "error", "Clipboard access is unavailable. Use your keyboard copy shortcut."); });
+      } else { identifier.focus(); identifier.select(); showNotice("Experiment ID selected", null, "Use your keyboard copy shortcut."); }
+    }); idActions.appendChild(copy); d.appendChild(identity);
+    sectionHeader(d, "Tasks", manifest.tasks.length);
+    manifest.tasks.forEach(function (task, index) { taskPreview(d, task, index); });
+  }).catch(function (e) { if (!benchNavStale(nav)) { clear(d); d.appendChild(el("p", "err fieldError", e.message)); } });
 }
 function openBenchmarkSetup() {
   benchmarkExperimentSource = null;
@@ -3452,7 +4071,7 @@ function renderTurnLevel(container, turn) {
   if (turn.suspended_ms) { row("suspended (human wait)", fmtMs(turn.suspended_ms)); }
   row("failure_reason", policedText(turn.failure_reason));
   row("LLM cost", fmtCostAmount(turn.llm_cost));
-  container.appendChild(kv);
+
   var um = el("div", "msgBlock");
   um.appendChild(el("span", "lbl", "user message"));
   appendPoliced(um, turn.user_message || "");
@@ -3463,6 +4082,8 @@ function renderTurnLevel(container, turn) {
     appendPoliced(ans, turn.answer);
     container.appendChild(ans);
   }
+  var metadata = el("details", "turnMetadata"); metadata.appendChild(el("summary", null, "Turn details & timing"));
+  metadata.appendChild(kv); container.appendChild(metadata);
 }
 
 /* -- navigation --------------------------------------------------------- */
@@ -3503,8 +4124,11 @@ function renderHumanFeedback(parent, node) {
   // Formal blinded assignments retain their own capability-gated review UI.
   if (review.progress) { return; }
   var ids = feedbackAnchor(node);
-  var card = el("div", "card");
-  card.appendChild(el("h2", null, "Human feedback · " + node.title));
+  var card = el("div", "card feedbackCard");
+  /* Just the field name: the level this feedback is anchored to is named in
+     the heading at the top of the same page, and for a turn the qualifier was
+     the user message printed a few blocks above. */
+  card.appendChild(el("h2", null, "Human feedback"));
   parent.appendChild(card);
   if (node.kind !== "turn" && !ids.length) {
     card.appendChild(el("p", "sub", "No recorded span identifies this component. Record feedback on the turn."));
@@ -3556,7 +4180,17 @@ function renderLevel() {
   /* The heading carries the qualifier (tool name, step count) that the parent
      chart shows as muted secondary text, so arriving at a level reads the
      same as the row you clicked to get here. */
-  head.appendChild(el("h2", null, node.title + (node.detail ? " · " + node.detail : "")));
+  var headingText = node.title + (node.detail ? " · " + node.detail : "");
+  if (node.kind === "turn") {
+    /* A turn's title is the whole user message, which is printed in full a few
+       lines below; the heading only has to identify the turn, so it stays on
+       one line and keeps the full text as its tooltip. */
+    var turnHead = el("h2", "oneLine", headSnippet(headingText));
+    turnHead.title = headingText;
+    head.appendChild(turnHead);
+  } else {
+    head.appendChild(el("h2", null, headingText));
+  }
   if (node.cut) {
     head.appendChild(tokenLimitChip(
       node.span && node.span.name === "fw.llm.call" ? undefined : node.cut));
@@ -3570,7 +4204,6 @@ function renderLevel() {
   info.appendChild(head);
   node.render(info);
   d.appendChild(info);
-  renderHumanFeedback(d, node);
 
   if (node.children.length) {
     var wf = el("div", "card");
@@ -3578,6 +4211,7 @@ function renderLevel() {
     renderWaterfall(wf, node);
     d.appendChild(wf);
   }
+  renderHumanFeedback(d, node);
 
   if (node.kind === "turn") {
     /* Turn level only: the whole recorded turn, expanded, per the design —
@@ -3598,6 +4232,16 @@ function renderLevel() {
       pretty(state.turn.record === null ? "(unparseable record_json)" : state.turn.record)));
     d.appendChild(raw);
   }
+}
+
+function headSnippet(text, max) {
+  /* Collapse the message to one flowing line and cut it on a word boundary so
+     the heading never wraps even before the CSS ellipsis kicks in. */
+  var limit = max || 80;
+  var flat = String(text).replace(/\s+/g, " ").trim();
+  if (flat.length <= limit) { return flat; }
+  var cut = flat.slice(0, limit).replace(/\s+\S*$/, "");
+  return (cut || flat.slice(0, limit)) + "…";
 }
 
 function levelNoun(node) {
@@ -3729,6 +4373,11 @@ function renderWaterfall(container, node) {
 
   node.children.forEach(function (child) {
     var rowEl = el("div", "wfRow");
+    rowEl.tabIndex = 0; rowEl.setAttribute("role", "button");
+    rowEl.setAttribute("aria-label", "Inspect " + child.title + (child.detail ? " · " + child.detail : ""));
+    rowEl.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); descend(child); }
+    });
     var name = el("div", "wfName", child.title + " ");
     if (child.detail) { name.appendChild(el("span", "cmd", "· " + child.detail)); }
     if (child.status === "error") { name.appendChild(el("span", "cmd", " · ERROR")); }
@@ -4784,16 +5433,19 @@ document.getElementById("chatInput").addEventListener("keydown", function (e) {
 
 document.getElementById("newConvBtn").addEventListener("click", function () {
   if (!tm.connected || tm.busy) { return; }
+  var button = this; button.disabled = true; button.setAttribute("aria-busy", "true");
   tmFetch("/new_conversation", {})
     .then(function (r) {
       if (!r.ok) { throw new Error("HTTP " + r.status); }
       tm.activeConversationId = null;
       tmClearLog();
       tmBubble("system", "New conversation started (the previous one was saved and titled).");
+      showNotice("New conversation started"); document.getElementById("chatInput").focus();
     })
     .catch(function (err) {
       tmBubble("system", "Could not start a new conversation: " + err.message);
-    });
+      showNotice("Could not start a conversation", "error", err.message);
+    }).finally(function () { button.disabled = false; button.removeAttribute("aria-busy"); });
 });
 
 /* -- deep link: chat → debug mode filtered to one turn ------------------ */
@@ -4828,7 +5480,13 @@ function refreshAll() {
   refreshHealth();
   refreshConvs();
 }
-document.getElementById("refreshBtn").addEventListener("click", refreshAll);
+document.getElementById("refreshBtn").addEventListener("click", function () {
+  var button = this; button.disabled = true; button.setAttribute("aria-busy", "true");
+  refreshMeta(); refreshHealth();
+  refreshConvs(true).then(function () { showNotice("Navigation refreshed"); })
+    .catch(function (error) { showNotice("Could not refresh", "error", error.message); })
+    .finally(function () { button.disabled = false; button.removeAttribute("aria-busy"); });
+});
 document.getElementById("clearConvsBtn").addEventListener("click", function () {
   if (!window.confirm(
       "Clear every recorded conversation and turn for this workflow? This cannot be undone.")) {

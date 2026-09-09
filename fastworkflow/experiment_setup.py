@@ -49,13 +49,16 @@ def validate_setup(spec):
     _json_native(spec)
     if not isinstance(spec, dict) or spec.get("schema") != SCHEMA:
         raise ValueError(f"schema must be {SCHEMA}")
-    _text(spec.get("setup_id"), "setup_id")
+    _text(spec.get("experiment_id"), "experiment_id")
     if not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", str(spec.get("setup_id", ""))
+        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", str(spec.get("experiment_id", ""))
     ):
-        raise ValueError("setup_id must be a simple identifier (up to 120 characters)")
-    for name in ("label", "hypothesis", "control", "change", "operator_policy"):
-        _text(spec.get(name), name)
+        raise ValueError("experiment_id must be a simple identifier (up to 120 characters)")
+    # Same optional prose the studio stores on the experiment: a string, empty
+    # if the author wrote nothing. `control`/`change`/`operator_policy` were
+    # a parallel frame the UI never collected and are not carried into the run.
+    if not isinstance(spec.get("description", ""), str):
+        raise ValueError("description must be text")
     for name in ("configuration", "model_routes", "budgets"):
         if not isinstance(spec.get(name), dict) or not spec[name]:
             raise ValueError(f"{name} must be a non-empty object")
@@ -117,11 +120,11 @@ class ExperimentSetups:
             conn = sqlite3.connect(self.path, timeout=15)
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS revisions (
-                    setup_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                    experiment_id TEXT NOT NULL, revision INTEGER NOT NULL,
                     digest TEXT NOT NULL, spec TEXT NOT NULL, created_at TEXT NOT NULL,
-                    PRIMARY KEY (setup_id, revision));
+                    PRIMARY KEY (experiment_id, revision));
                 CREATE TABLE IF NOT EXISTS decisions (
-                    decision_id INTEGER PRIMARY KEY, setup_id TEXT NOT NULL,
+                    decision_id INTEGER PRIMARY KEY, experiment_id TEXT NOT NULL,
                     revision INTEGER NOT NULL, digest TEXT NOT NULL,
                     decision TEXT NOT NULL, reviewer TEXT NOT NULL,
                     comment TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -142,13 +145,13 @@ class ExperimentSetups:
         finally:
             conn.close()
 
-    def _read(self, conn, setup_id):
+    def _read(self, conn, experiment_id):
         rows = conn.execute(
-            "SELECT * FROM revisions WHERE setup_id=? ORDER BY revision DESC",
-            (setup_id,),
+            "SELECT * FROM revisions WHERE experiment_id=? ORDER BY revision DESC",
+            (experiment_id,),
         ).fetchall()
         if not rows:
-            raise KeyError(setup_id)
+            raise KeyError(experiment_id)
         revisions = []
         for row in rows:
             item = dict(row)
@@ -160,8 +163,8 @@ class ExperimentSetups:
         decisions = [
             dict(row)
             for row in conn.execute(
-                "SELECT * FROM decisions WHERE setup_id=? ORDER BY decision_id DESC",
-                (setup_id,),
+                "SELECT * FROM decisions WHERE experiment_id=? ORDER BY decision_id DESC",
+                (experiment_id,),
             )
         ]
         latest = next(
@@ -175,11 +178,11 @@ class ExperimentSetups:
             decisions=decisions,
         )
 
-    def get(self, setup_id):
+    def get(self, experiment_id):
         if not self.path.exists():
-            raise KeyError(setup_id)
+            raise KeyError(experiment_id)
         with self._connect() as conn:
-            return self._read(conn, setup_id)
+            return self._read(conn, experiment_id)
 
     def list(self):
         if not self.path.exists():
@@ -188,10 +191,10 @@ class ExperimentSetups:
             ids = [
                 row[0]
                 for row in conn.execute(
-                    "SELECT DISTINCT setup_id FROM revisions ORDER BY setup_id"
+                    "SELECT DISTINCT experiment_id FROM revisions ORDER BY experiment_id"
                 )
             ]
-            return [self._read(conn, setup_id) for setup_id in ids]
+            return [self._read(conn, experiment_id) for experiment_id in ids]
 
     def save(self, spec, expected_revision):
         digest = setup_digest(spec)
@@ -199,8 +202,8 @@ class ExperimentSetups:
             raise ValueError("expected_revision must be a non-negative integer")
         with self._connect(write=True) as conn:
             row = conn.execute(
-                "SELECT MAX(revision) FROM revisions WHERE setup_id=?",
-                (spec["setup_id"],),
+                "SELECT MAX(revision) FROM revisions WHERE experiment_id=?",
+                (spec["experiment_id"],),
             ).fetchone()
             current = row[0] or 0
             if current != expected_revision:
@@ -208,16 +211,16 @@ class ExperimentSetups:
             conn.execute(
                 "INSERT INTO revisions VALUES (?,?,?,?,?)",
                 (
-                    spec["setup_id"],
+                    spec["experiment_id"],
                     current + 1,
                     digest,
                     json.dumps(spec, allow_nan=False),
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
-            return self._read(conn, spec["setup_id"])
+            return self._read(conn, spec["experiment_id"])
 
-    def decide(self, setup_id, revision, digest, decision, reviewer, comment=""):
+    def decide(self, experiment_id, revision, digest, decision, reviewer, comment=""):
         if type(revision) is not int or revision < 1:
             raise ValueError("revision must be a positive integer")
         if decision not in ("approved", "changes_requested"):
@@ -228,17 +231,17 @@ class ExperimentSetups:
         if decision == "changes_requested":
             _text(comment, "reason for changes")
         if not self.path.exists():
-            raise KeyError(setup_id)
+            raise KeyError(experiment_id)
         with self._connect(write=True) as conn:
-            current = self._read(conn, setup_id)
+            current = self._read(conn, experiment_id)
             if current["revision"] != revision or current["digest"] != digest:
                 raise SetupConflict(
                     "setup changed; reload and review the current revision"
                 )
             conn.execute(
-                "INSERT INTO decisions (setup_id,revision,digest,decision,reviewer,comment,created_at) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO decisions (experiment_id,revision,digest,decision,reviewer,comment,created_at) VALUES (?,?,?,?,?,?,?)",
                 (
-                    setup_id,
+                    experiment_id,
                     revision,
                     digest,
                     decision,
@@ -247,15 +250,15 @@ class ExperimentSetups:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
-            return self._read(conn, setup_id)
+            return self._read(conn, experiment_id)
 
-    def approved(self, setup_id, revision, digest):
+    def approved(self, experiment_id, revision, digest):
         """Driver handoff: validate an exact, currently approved revision.
 
         Runners must separately bind these inputs/configuration to execution.
         This is a review receipt, never permission to invoke a model or backend.
         """
-        current = self.get(setup_id)
+        current = self.get(experiment_id)
         if (
             current["revision"] != revision
             or current["digest"] != digest
@@ -264,5 +267,5 @@ class ExperimentSetups:
             raise SetupConflict("this exact setup revision is not currently approved")
         return {
             key: current[key]
-            for key in ("setup_id", "revision", "digest", "spec", "review")
+            for key in ("experiment_id", "revision", "digest", "spec", "review")
         }

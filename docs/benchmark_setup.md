@@ -9,6 +9,14 @@ experiment keeps the exact benchmark version it was created against.
 Open a benchmark to see its tasks and experiments across versions. **New
 experiment** returns a unique experiment ID for the displayed version. It does
 not execute tasks. Copy that ID and the displayed task IDs into your harness.
+
+An experiment is named by its ID everywhere it is listed — in the left tree, the
+breadcrumbs and its own heading. Its **description** is optional free text you
+write on the experiment page, and it is editable for as long as no runner has
+claimed the registration; a harness started through
+`from_benchmark_experiment` records whatever the description said at that point.
+Once the experiment is bound to an evidence store the description belongs to the
+recorded run and the page shows it read-only.
 Recorded experiments drill down through tasks, attempts and turns. Analysis is
 optional and collapsed by default. Historical runs without a benchmark pin
 remain in the ordinary Experiments/conversation views; they are not guessed into
@@ -55,7 +63,9 @@ HTTP authoring uses the existing localhost/session authentication:
 
 - `POST /api/benchmark-setup`: `{title, description?, tasks:[{prompt?}]}`.
   Edits also include `benchmark_id`, `expected_version`, and existing task IDs.
-- `POST /api/benchmarks/<id>/experiments`: `{version}` → unique experiment ID.
+- `POST /api/benchmarks/<id>/experiments`: `{version, description?}` → unique experiment ID.
+- `PATCH /api/benchmark-experiments/<id>`: `{description}` → the author's description,
+  refused with 409 once a runner has bound the registration.
 - `GET /api/benchmarks/<id>/experiments`: registered and recorded experiments.
 - `GET /api/benchmark-experiments/<id>`: registration, pinned tasks and execution availability.
 
@@ -108,3 +118,19 @@ The tree preserves source identity, including when conversation IDs repeat in
 different evidence stores. Sidebar filters and the old Experiments/Benchmarks
 buttons have been removed. Use the header's Benchmark setup action to create a
 benchmark and select benchmark nodes to review or edit their definitions.
+
+
+## Delete an unused experiment
+
+An experiment that has not been handed to a runner offers **Delete empty experiment** on
+its overview. Confirm the deletion to return to its benchmark; the benchmark version and
+tasks remain unchanged. Once a runner binds an evidence store, deletion is refused even if
+that store is temporarily unavailable. Deletion and runner binding are serialized, and a
+retired identity cannot be reused by a delayed runner. Workspace snapshots remain read-only.
+The authenticated API is `DELETE /api/benchmark-experiments/<id>`.
+
+Actions report success or failure in dismissible notifications. They disappear automatically
+and pause while hovered or focused; form errors remain beside the action. Navigation brings
+keyboard focus to the new view heading, adding a task focuses its prompt, and reduced-motion
+preferences disable transitions. The responsive layout keeps the left tree at conversations
+and preserves complete right-pane breadcrumbs.

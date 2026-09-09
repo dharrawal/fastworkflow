@@ -50,7 +50,6 @@ def _create(
             for task_id in task_ids
             for attempt in range(1, attempts + 1)
         ],
-        hypothesis="immutable hypothesis",
     )
 
 

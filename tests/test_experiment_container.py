@@ -174,7 +174,6 @@ def _seed(store, experiment_id, tasks, attempts, outcomes, declared=None):
         f"label-{experiment_id}",
         declared_tasks=declared[0] if declared else tasks,
         declared_attempts=declared[1] if declared else attempts,
-        hypothesis="h",
     )
     for task_index in range(tasks):
         task_id = f"t{task_index}"
@@ -434,49 +433,29 @@ class TestAdditiveSchema:
 
 
 # ----------------------------------------------------------------------
-# `[XR12]`: write-once hypothesis, terminal invalid — at the STORE
+# `[XR12]`: terminal invalid — at the STORE
 # ----------------------------------------------------------------------
 
 
-class TestWriteOnceHypothesis:
-    def test_a_differing_rewrite_is_refused_at_the_store(self, store):
+class TestExperimentDescription:
+    def test_the_description_is_free_text_a_recreate_may_revise(self, store):
         store.create_experiment(
-            "exp-1", "L", declared_tasks=1, declared_attempts=1, hypothesis="first"
+            "exp-1", "first", declared_tasks=1, declared_attempts=1
         )
-        with pytest.raises(obs.HypothesisIsWriteOnce):
-            store.set_experiment_hypothesis("exp-1", "second")
-        assert store.get_experiment("exp-1")["hypothesis"] == "first"
+        store.create_experiment(
+            "exp-1", "second", declared_tasks=1, declared_attempts=1
+        )
+        assert store.get_experiment("exp-1")["description"] == "second"
 
-    def test_an_identical_rewrite_is_idempotent(self, store):
-        store.create_experiment(
-            "exp-1", "L", declared_tasks=1, declared_attempts=1, hypothesis="first"
-        )
-        store.set_experiment_hypothesis("exp-1", "first")
-        assert store.get_experiment("exp-1")["hypothesis"] == "first"
+    def test_an_unwritten_description_is_empty_not_an_error(self, store):
+        store.create_experiment("exp-1", "", declared_tasks=1, declared_attempts=1)
+        assert store.get_experiment("exp-1")["description"] == ""
 
-    def test_erasing_a_hypothesis_is_refused(self, store):
-        store.create_experiment(
-            "exp-1", "L", declared_tasks=1, declared_attempts=1, hypothesis="first"
-        )
-        with pytest.raises(obs.HypothesisIsWriteOnce):
-            store.set_experiment_hypothesis("exp-1", None)
-
-    def test_a_late_hypothesis_is_allowed_on_an_experiment_created_without_one(
-        self, store
-    ):
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
-        store.set_experiment_hypothesis("exp-1", "arrived later")
-        assert store.get_experiment("exp-1")["hypothesis"] == "arrived later"
-
-    def test_recreate_cannot_launder_a_rewrite_through_the_upsert(self, store):
-        store.create_experiment(
-            "exp-1", "L", declared_tasks=1, declared_attempts=1, hypothesis="first"
-        )
-        store.create_experiment(
-            "exp-1", "L2", declared_tasks=1, declared_attempts=1, hypothesis="second"
-        )
-        assert store.get_experiment("exp-1")["hypothesis"] == "first"
-        assert store.get_experiment("exp-1")["label"] == "L2"
+    def test_a_non_string_description_is_refused(self, store):
+        with pytest.raises(ValueError):
+            store.create_experiment(
+                "exp-1", None, declared_tasks=1, declared_attempts=1
+            )
 
 
 class TestInvalidIsTerminal:
@@ -547,7 +526,7 @@ class TestInvalidIsTerminal:
             "exp-1", "L2", declared_tasks=1, declared_attempts=1,
             capture_profile="debug", capture_policy_version="1",
         )
-        assert store.get_experiment("exp-1")["label"] == "L2"
+        assert store.get_experiment("exp-1")["description"] == "L2"
 
     def test_a_write_to_a_missing_experiment_raises(self, store):
         with pytest.raises(obs.ExperimentNotFound):
@@ -962,7 +941,6 @@ class TestCapturePolicy:
             f"label {self._SECRET}",
             declared_tasks=1,
             declared_attempts=1,
-            hypothesis=f"hypothesis {self._SECRET}",
         )
         store.update_experiment_notes("exp-1", f"notes {self._SECRET}")
         experiment = store.get_experiment("exp-1")
@@ -970,8 +948,8 @@ class TestCapturePolicy:
         assert self._SECRET not in blob
         # ...but the prose is otherwise intact and readable, which is the whole
         # point of scrub-only: a digest badge here would make an evidence-grade
-        # bundle's own pre-registration unreadable.
-        assert experiment["hypothesis"].startswith("hypothesis ")
+        # bundle's own declaration unreadable.
+        assert experiment["description"].startswith("label ")
         assert experiment["notes"].startswith("notes ")
 
     def test_the_evidence_segment_record_is_scrubbed(self, store):
@@ -1039,8 +1017,7 @@ class TestCapturePolicy:
             CommandExecutor, "invoke_command", classmethod(exploding)
         )
         harness = ExperimentHarness(
-            todo_workflow_path, label=f"L {self._SECRET}",
-            hypothesis=f"H {self._SECRET}", run_as_agent=False,
+            todo_workflow_path, description=f"L {self._SECRET}", run_as_agent=False,
         )
         harness.run(
             [ExperimentTask(task_id="t0", messages=["add milk"])],
@@ -1072,7 +1049,6 @@ class TestCapturePolicy:
         forbidden = {"turn_result", "turn_output", "command_output", "workflow", "record_json"}
         for name in (
             "create_experiment",
-            "set_experiment_hypothesis",
             "update_experiment_notes",
             "start_attempt",
             "finish_attempt",
@@ -1130,7 +1106,7 @@ class TestHarness:
         )
         tasks = [ExperimentTask(task_id=f"t{i}", messages=["add milk"]) for i in range(4)]
         harness = ExperimentHarness(
-            todo_workflow_path, label="concurrency", hypothesis="h",
+            todo_workflow_path, description="concurrency",
             run_as_agent=False, max_workers=4,
         )
         result = harness.run(tasks, attempts=1, grader=lambda run: ("pass", "g", 1.0, None))
@@ -1148,7 +1124,7 @@ class TestHarness:
     ):
         """Task independence: two attempts must not see each other's context."""
         harness = ExperimentHarness(
-            todo_workflow_path, label="independence", hypothesis="h",
+            todo_workflow_path, description="independence",
             run_as_agent=False, max_workers=2,
         )
         result = harness.run(
@@ -1186,13 +1162,12 @@ class TestHarness:
             state_paths.observability_db(todo_workflow_path)
         )
         harness = ExperimentHarness(
-            todo_workflow_path, label="crash", hypothesis="h", run_as_agent=False
+            todo_workflow_path, description="crash", run_as_agent=False
         )
         tasks = [ExperimentTask(task_id=f"t{i}", messages=["add milk"]) for i in range(2)]
         store.create_experiment(
             harness.experiment_id, "crash", declared_tasks=2, declared_attempts=1,
-            hypothesis="h",
-        )
+            )
         harness._prepare_process()
         harness._run_attempt(tasks[0], 1, lambda run: ("pass", "g", 1.0, None))
         # ...and the process dies here, before task 1 and before completion.
@@ -1214,12 +1189,11 @@ class TestHarness:
         )
         tasks = [ExperimentTask(task_id=f"t{i}", messages=["add milk"]) for i in range(2)]
         harness = ExperimentHarness(
-            todo_workflow_path, label="resume", hypothesis="h", run_as_agent=False
+            todo_workflow_path, description="resume", run_as_agent=False
         )
         store.create_experiment(
             harness.experiment_id, "resume", declared_tasks=2, declared_attempts=1,
-            hypothesis="h",
-        )
+            )
         harness._prepare_process()
         harness._run_attempt(tasks[0], 1, lambda run: ("pass", "g", 1.0, None))
         harness._run_attempt(tasks[1], 1, lambda run: ("pass", "g", 1.0, None))
@@ -1235,7 +1209,7 @@ class TestHarness:
         assert store.list_turns(experiment_id=harness.experiment_id, task_id="t1")
 
         resumed = ExperimentHarness(
-            todo_workflow_path, label="resume", experiment_id=harness.experiment_id,
+            todo_workflow_path, description="resume", experiment_id=harness.experiment_id,
             run_as_agent=False,
         )
         result = resumed.resume(tasks, grader=lambda run: ("pass", "g", 1.0, None))
@@ -1258,7 +1232,7 @@ class TestHarness:
             return ("pass", "g", 1.0, None)
 
         harness = ExperimentHarness(
-            todo_workflow_path, label="grader", hypothesis="h", run_as_agent=False
+            todo_workflow_path, description="grader", run_as_agent=False
         )
         tasks = [ExperimentTask(task_id=f"t{i}", messages=["add milk"]) for i in range(3)]
         result = harness.run(tasks, attempts=1, grader=flaky)
@@ -1279,7 +1253,7 @@ class TestHarness:
     ):
         """`[XR16]`: a run whose cache posture is unrecorded is uninterpretable."""
         harness = ExperimentHarness(
-            todo_workflow_path, label="evidence", hypothesis="h", run_as_agent=False
+            todo_workflow_path, description="evidence", run_as_agent=False
         )
         harness.run(
             [ExperimentTask(task_id="t0", messages=["add milk"])],
@@ -1329,7 +1303,7 @@ class TestHarness:
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
         fastworkflow.init({"LLM_AGENT": "m/x", "LITELLM_API_KEY_AGENT": "secret"})
         harness = ExperimentHarness(
-            todo_workflow_path, label="env", run_as_agent=False
+            todo_workflow_path, description="env", run_as_agent=False
         )
         harness._prepare_process()
         assert fastworkflow.get_env_var("LLM_AGENT") == "m/x"
@@ -1341,7 +1315,7 @@ class TestHarness:
     ):
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
         harness = ExperimentHarness(
-            todo_workflow_path, label="dupes", run_as_agent=False
+            todo_workflow_path, description="dupes", run_as_agent=False
         )
         with pytest.raises(ValueError):
             harness.run(
@@ -1370,7 +1344,7 @@ class TestHarness:
         """
         bundle = tmp_path / "bundle"
         harness = ExperimentHarness(
-            todo_workflow_path, label="archived", hypothesis="h",
+            todo_workflow_path, description="archived",
             run_as_agent=False, archive_dir=str(bundle),
         )
         result = harness.run(
@@ -1427,7 +1401,7 @@ class TestHarness:
         of that check; it is the only thing that makes it pass for a reason.
         """
         harness = ExperimentHarness(
-            todo_workflow_path, label="stable", hypothesis="h", run_as_agent=False
+            todo_workflow_path, description="stable", run_as_agent=False
         )
         harness.run(
             [ExperimentTask(task_id="t0", messages=["add milk"])],
@@ -1796,13 +1770,13 @@ class TestReadApi:
         assert status == 200
         assert data["experiment"]["notes"] == "reviewed 2026-08-29"
 
-    def test_patch_refuses_the_hypothesis_with_409_not_500(self, experiment_server):
+    def test_patch_refuses_a_body_with_nothing_to_patch(self, experiment_server):
         status, data = _request(
             experiment_server, "/api/experiment/exp-a", method="PATCH",
-            body={"hypothesis": "rewritten"},
+            body={"description": "rewritten"},
         )
-        assert status == 409
-        assert "write-once" in data["error"]
+        assert status == 400
+        assert "notes" in data["error"]
 
     def test_patch_is_gated_like_every_other_verb(self, experiment_server):
         """The gates are applied per verb method, with no shared chokepoint."""
@@ -1905,7 +1879,7 @@ class TestCrossLink:
         labels = store.experiment_labels_for_turn("tk-in")
         assert labels["experiment_id"] == "exp-1"
         assert labels["task_id"] == "t0" and labels["attempt"] == 1
-        assert labels["label"] == "L"
+        assert labels["description"] == "L"
         assert store.experiment_labels_for_turn("tk-out") is None
 
 
@@ -1947,9 +1921,9 @@ class TestSpaSurface:
         # ...and a derived verdict must be labelled as not-a-judgement (§8.1).
         assert b"derived, not graded" in page
         assert b"not a judgement that the task was accomplished" in page
-        # The hypothesis is read-only with the reason attached, so the first
-        # person who tries to edit it does not file it as a bug.
-        assert b"write-once" in page
+        # An experiment is named by its id: its label is the author's optional
+        # description, which may be a paragraph or may be absent entirely.
+        assert b'"Experiment \xc2\xb7 " + experimentId.slice(-8)' in page
         # [R22] and the packaging rules still hold.
         assert b"innerHTML" not in page
         assert b"https://" not in page

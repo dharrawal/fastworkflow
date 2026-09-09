@@ -37,12 +37,15 @@ for task in manifest["tasks"]:
 
 harness = ExperimentHarness.from_benchmark_experiment(
     workflow_folderpath, experiment_id,
-    hypothesis="Declaring the lookup producer reduces missing-order-ID questions",
     max_workers=1,
 )
 # grade_attempt is the application's outcome checker (see Grader in experiment.py).
 result = harness.run(tasks, attempts=1, grader=grade_attempt)
 ```
+
+`from_benchmark_experiment` carries the registration's `description` — the optional prose its
+author wrote in the studio — into the recorded experiment. Pass `description=` explicitly to
+override it.
 
 `ExperimentTask.messages` is an in-process harness input, not a native benchmark manifest field.
 Multi-turn or conditional-response drivers should map their own payload to it or use their existing
@@ -89,7 +92,8 @@ required spec fields are:
 
 | Fields | Content |
 |---|---|
-| `setup_id`, `label`, `hypothesis`, `control`, `change`, `operator_policy` | Nonempty strings; setup ID is a simple identifier |
+| `experiment_id` | Nonempty simple identifier (up to 120 characters); same name as the studio experiment |
+| `description` | Optional free-text string; empty if the author wrote nothing |
 | `configuration`, `model_routes`, `budgets` | Nonempty JSON objects describing the intended execution |
 | `estimated_cost` | `currency`, `basis`, and nonnegative `low`/`high` with `high >= low` |
 | `repetitions` | Positive integer |
@@ -102,7 +106,7 @@ input/configuration consistent explicitly.
 
 Saving edits requires the revision read and creates a new revision needing review. Decisions
 (`approved` or `changes_requested`) name an exact revision and digest. Use
-`approved(setup_id, revision, digest)` to retrieve an exact current review receipt for a driver
+`approved(experiment_id, revision, digest)` to retrieve an exact current review receipt for a driver
 that supports this check. The reviewer name is self-declared; a receipt is not authenticated
 execution authority and does not prove the runner used the settings. Do not record the owner's
 approval on their behalf or treat a review receipt as permission for additional paid calls.
@@ -119,7 +123,7 @@ programmatic UI requests. URL-encode IDs. These are `run_chatbot` APIs, not `/in
 | Read registration and pinned tasks | `GET /api/benchmark-experiments/<experiment_id>` |
 | Read version | `GET /api/benchmarks/<benchmark_id>/versions/<version>` |
 | Read/write benchmark analysis | `GET` / `PUT /api/benchmarks/<benchmark_id>/analysis`; PUT body `{"analysis": value}` |
-| Read/write experiment analysis | `GET /api/experiment/<experiment_id>` / `PUT /api/experiment/<experiment_id>/analysis` |
+| Read/write experiment notes | `GET /api/experiment/<experiment_id>` / `PATCH /api/experiment/<experiment_id>` with `{"notes": "..."}` |
 
 For execution reads/writes against a registered experiment's store, preserve
 `benchmark_experiment=<experiment_id>` source selection. For workspace reads use the appropriate
