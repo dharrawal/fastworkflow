@@ -379,6 +379,8 @@ Use **Clear conversations** in Debug mode for an explicit, confirmed reset. It r
 
 To turn recording off entirely, set `FW_OBSERVABILITY=0`.
 
+Phase 0 capture/tracing overhead (bead `fix-49m.2`, not a CI gate) was measured with a stubbed LM on hello-world `add_two_numbers` turns, observability on, no network: command-gap p50 **+0.7%** and turn-wall p50 **+1.6%** vs fork `9904df5` (change 4 `5b1e85e` in between). Reports and method: https://gist.github.com/dharrawal/2e123360ace2e948a138c52ce9f00601
+
 ---
 
 ## Production deployment
