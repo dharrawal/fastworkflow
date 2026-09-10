@@ -1,0 +1,61 @@
+{
+  "schema": "exp028-answer-rating-v1",
+  "assignment_id": "assignment-exp028",
+  "blinded": true,
+  "rater_slots": ["human-a", "human-b"],
+  "adjudicator_slots": ["adjudicator-a"],
+  "questions": [
+    {"id": "presented", "prompt": "Presented", "type": "single-select", "vocabulary": ["yes", "no"]},
+    {"id": "not_presented", "prompt": "Not presented", "type": "single-select", "vocabulary": ["yes", "no"]},
+    {"id": "overclaimed", "prompt": "Overclaimed", "type": "single-select", "vocabulary": ["yes", "no"]},
+    {"id": "not_decidable", "prompt": "Not decidable", "type": "single-select", "vocabulary": ["yes", "no"]}
+  ],
+  "rows": [
+    {
+      "row_id": "answer-1",
+      "turn_ref": {"turn_key": "turn-answer-1"},
+      "human_attestations": [
+        {
+          "rater": "human-a",
+          "presented": [
+            {"revision": 1, "answer": "no", "created_at": "2026-09-04T02:01:00+00:00"},
+            {"revision": 2, "answer": "yes", "created_at": "2026-09-04T02:02:00+00:00"}
+          ],
+          "not_presented": [
+            {"revision": 1, "answer": "no", "created_at": "2026-09-04T02:00:00+00:00"}
+          ],
+          "overclaimed": [],
+          "not_decidable": []
+        },
+        {
+          "rater": "human-b",
+          "presented": [],
+          "not_presented": [],
+          "overclaimed": [
+            {"revision": 1, "answer": "yes", "created_at": "2026-09-04T02:04:00+00:00"}
+          ],
+          "not_decidable": [
+            {"revision": 1, "answer": "no", "created_at": "2026-09-04T02:03:00+00:00"}
+          ]
+        }
+      ],
+      "adjudicator_attestations": [
+        {
+          "adjudicator": "adjudicator-a",
+          "provenance": {"rater_slots": ["human-a", "human-b"]},
+          "presented": [
+            {"revision": 1, "answer": "yes", "created_at": "2026-09-04T02:06:00+00:00"}
+          ],
+          "not_presented": [],
+          "overclaimed": [
+            {"revision": 1, "answer": "no", "created_at": "2026-09-04T02:05:00+00:00"}
+          ],
+          "not_decidable": []
+        }
+      ]
+    }
+  ],
+  "unanswered": [
+    {"row_id": "answer-1", "rater_slot_id": "human-a", "question_id": "overclaimed"}
+  ]
+}

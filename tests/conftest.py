@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+import fastworkflow
+
 # Add the project root to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -19,6 +21,15 @@ if project_root not in sys.path:
 
 # Set up environment for tests
 os.environ.setdefault("PYTEST_RUNNING", "1")
+
+
+@pytest.fixture(autouse=True, scope="module")
+def restore_fastworkflow_environment():
+    """Prevent module-scoped fastworkflow.init calls leaking into later modules."""
+    previous = dict(fastworkflow._env_vars)
+    yield
+    fastworkflow._env_vars.clear()
+    fastworkflow._env_vars.update(previous)
 
 
 @pytest.fixture(autouse=True, scope="function")

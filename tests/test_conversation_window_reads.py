@@ -29,7 +29,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 
 # Big enough that reading an excluded turn would be obvious in memory terms, small
 # enough to keep the test fast. Production payloads are ~450 KB.

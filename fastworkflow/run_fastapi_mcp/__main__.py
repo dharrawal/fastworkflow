@@ -52,6 +52,12 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import state_paths
+from fastworkflow.experiment.readiness import runtime_readiness_snapshot
+from fastworkflow.runtime_manifest import (
+    check_startup_conformance,
+    deployment_env,
+    register_runtime_metadata,
+)
 from fastworkflow.utils.logging import logger
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
@@ -83,7 +89,8 @@ from .utils import (
     GenerateMCPTokenRequest,
     run_process_message_with_trace_stream,
     get_session_from_jwt,
-    ensure_user_runtime_exists
+    ensure_user_runtime_exists,
+    refuse_registered_token_reissue,
 )
 from .turns import (
     TurnRegistry,
@@ -118,7 +125,9 @@ from fastworkflow.conversation_labeling import (
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
 )
-from fastworkflow.observability_store import ObservabilityStore
+from fastworkflow.observability.store import ObservabilityStore
+from fastworkflow.observability.store import get_observability_sink
+from fastworkflow.experiment.runner import experiment_store_readiness
 
  
 # ============================================================================
@@ -183,6 +192,7 @@ class ReadinessState:
     
     def __init__(self):
         self._is_ready = False
+        self._experiment_store_readiness: dict[str, str] | None = None
         # Debug attributes - do not control readiness, used for diagnostics
         self._is_initialized = False
         self._workflow_path_valid = False
@@ -198,6 +208,12 @@ class ReadinessState:
     def set_workflow_path_valid(self, value: bool = True):
         """Mark workflow path as validated (for debugging/diagnostics)."""
         self._workflow_path_valid = value
+
+    def set_experiment_store_readiness(
+        self, value: dict[str, str] | None
+    ) -> None:
+        """Publish the exact store identity external controllers must target."""
+        self._experiment_store_readiness = value
     
     def is_ready(self) -> bool:
         """Check if the application is ready to serve traffic."""
@@ -210,6 +226,9 @@ class ReadinessState:
             "fastworkflow_initialized": self._is_initialized,
             "workflow_path_valid": self._workflow_path_valid
         }
+
+    def get_experiment_store_readiness(self) -> dict[str, str] | None:
+        return self._experiment_store_readiness
 
 
 # Global readiness state
@@ -313,6 +332,27 @@ def _log_memory_bounds() -> None:
             f"dspy_policy_owner={owner}"
         )
 
+    # Prune suppression is a CROSS-PROCESS contract and this is the process it
+    # has to hold in: an evidence harness runs elsewhere, its suppress_pruning()
+    # counter is in-process, and SQLiteTraceSink.__init__ prunes on construction
+    # — so the env var has to be set before this server starts or it is already
+    # too late. Reporting the value in effect at startup makes a silent
+    # mis-setting visible at the one moment it can still be corrected.
+    # fix-ajv.14; assertable via GET /probes/readyz?observability=true.
+    try:
+        from fastworkflow.observability import store as _obs
+
+        logger.info(
+            "observability capture regime: "
+            f"enabled={_obs.observability_enabled(default_on=True)}, "
+            f"profile={_obs.observability_config()[_obs.CAPTURE_PROFILE_VAR]}, "
+            f"pruning_suppressed={_obs.pruning_suppressed()} "
+            f"({_obs.SUPPRESS_PRUNE_VAR}="
+            f"{_obs.observability_config()[_obs.SUPPRESS_PRUNE_VAR]!r})"
+        )
+    except Exception as exc:  # never let a log line stop the server
+        logger.warning(f"could not report observability capture regime: {exc!r}")
+
     logger.info(
         "memory bounds active: "
         f"max_live_sessions={session_manager.max_live_sessions} "
@@ -363,6 +403,23 @@ async def lifespan(_app: FastAPI):
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
 
+        # Startup conformance for the optional workflow runtime manifest
+        # (arch §7.1). Raising here aborts the lifespan, so a nonconformant
+        # manifest or an over-permissive deployment declaration never reaches
+        # readiness — the same reasoning as the session-cap and topic-deadline
+        # checks below: a configuration that would reject traffic should reject
+        # startup instead.
+        # Retained rather than discarded (arch §12.0 delta 4): the effect
+        # contracts validated here are what the per-command ConsequenceAssessment
+        # reads at execution time. Without this the runtime cannot tell a
+        # workflow that declared `read_only` from one that declared nothing.
+        register_runtime_metadata(
+            ARGS.workflow_path,
+            check_startup_conformance(
+                ARGS.workflow_path, env=deployment_env(fastworkflow._env_vars)
+            ),
+        )
+
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
         # and checkpoint trees are namespaced under this workflow's state dir.
@@ -405,6 +462,13 @@ async def lifespan(_app: FastAPI):
         else:
             logger.warning(f"Workflow path not valid or not found: {ARGS.workflow_path}")
             readiness_state.set_workflow_path_valid(False)
+
+        trace_sink = get_observability_sink(ARGS.workflow_path)
+        readiness_state.set_experiment_store_readiness(
+            experiment_store_readiness(trace_sink.store.db_path)
+            if trace_sink is not None
+            else None
+        )
 
     async def wait_for_active_turns_to_complete(max_wait_seconds: int) -> list[str]:
         """Close admission, then drain. Returns the channels still busy at the deadline.
@@ -778,7 +842,9 @@ async def liveness_probe() -> dict:
     },
     tags=["probes"]
 )
-async def readiness_probe(memory: bool = False) -> JSONResponse:
+async def readiness_probe(
+    memory: bool = False, observability: bool = False, runtime: bool = False
+) -> JSONResponse:
     """
     Readiness probe endpoint for Kubernetes.
     
@@ -794,6 +860,24 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
     Pass ``?memory=true`` for retention metrics (DSPy response-cache entries and
     bytes, in-memory conversation turns and bytes). They are off by default
     because computing them walks live objects, and probes are frequent.
+
+    Pass ``?observability=true`` for the capture regime in effect in THIS
+    process, including whether retention pruning is suppressed. An evidence
+    harness drives this server from another process, where
+    ``suppress_pruning()`` — an in-process counter — cannot reach; the only
+    switch that crosses the boundary is ``FW_OBS_SUPPRESS_PRUNE``, and it has
+    to be in this process's environment before it starts, because
+    ``SQLiteTraceSink.__init__`` prunes opportunistically. Exposing the value
+    in effect lets a harness ASSERT that its requirement took hold here rather
+    than hope, and cite the answer in its bundle. fix-ajv.14.
+
+    Pass ``?runtime=true`` for the credential-free snapshot of the effective
+    runtime in this process (fix-qe2): the feature vector and manifest
+    fingerprint registered at startup, the trained model version, the served
+    command count, the capture regime and the pid. This is what an experiment
+    driver asserts against before admitting a paid request, and what the
+    server stamps on an attempt when it binds (`runtime_snapshot_json`). An
+    invalid runtime configuration makes the pod not ready.
     
     This endpoint is not logged unless it returns a non-200 status code
     to avoid excessive logging from frequent Kubernetes health checks.
@@ -809,7 +893,13 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
     if drift:
         status_info["dspy_memory_policy"] = f"drifted: {drift}"
 
-    content: dict[str, Any] = {"status": "ready", "checks": status_info}
+    content: dict[str, Any] = {
+        "status": "ready",
+        "checks": status_info,
+        "experiment_store_readiness": (
+            readiness_state.get_experiment_store_readiness()
+        ),
+    }
     if memory:
         content["memory"] = {
             "live_sessions": len(session_manager._sessions),
@@ -820,7 +910,34 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
             ),
         }
 
-    if readiness_state.is_ready() and "dspy_memory_policy" not in status_info:
+    if observability:
+        from fastworkflow.observability import store as _obs
+
+        content["observability"] = {
+            "config": _obs.observability_config(),
+            "pruning_suppressed": _obs.pruning_suppressed(),
+            "enabled": _obs.observability_enabled(default_on=True),
+        }
+
+    if runtime:
+        try:
+            runtime_snapshot = runtime_readiness_snapshot(ARGS.workflow_path)
+        except Exception as exc:
+            # Never a traceback or message here: the probe is unauthenticated
+            # and an exception text can carry a path.
+            runtime_snapshot = {
+                "configuration_valid": False,
+                "error_type": type(exc).__name__,
+            }
+        content["runtime"] = runtime_snapshot
+        if not runtime_snapshot["configuration_valid"]:
+            status_info["runtime_configuration"] = "invalid"
+
+    if (
+        readiness_state.is_ready()
+        and "dspy_memory_policy" not in status_info
+        and "runtime_configuration" not in status_info
+    ):
         return JSONResponse(status_code=status.HTTP_200_OK, content=content)
 
     content["status"] = "not_ready"
@@ -988,7 +1105,7 @@ def _observability_store():
     runtimes already attach (``_create_channel_runtime``), so reads go against
     exactly the DB the sink writes.
     """
-    from fastworkflow.observability_store import get_observability_sink
+    from fastworkflow.observability.store import get_observability_sink
 
     sink = get_observability_sink(ARGS.workflow_path)
     return sink.store if sink is not None else None
@@ -1260,6 +1377,15 @@ async def initialize(
         # Check if user already has an active session
         async with session_manager.leased_session(channel_id) as existing_runtime:
             if existing_runtime:
+                refuse_registered_token_reissue(existing_runtime)
+                if request.experiment_bootstrap is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "an experiment bootstrap cannot bind an existing "
+                            "session"
+                        ),
+                    )
                 logger.info(f"Session for channel_id {channel_id} already exists, generating new tokens")
                 if startup_turn_key := (
                     existing_runtime.startup_turn_key
@@ -1310,7 +1436,8 @@ async def initialize(
             startup_command=None,
             startup_action=None,
             run_startup=False,
-            stream_format=(request.stream_format if request.stream_format in ("ndjson", "sse") else "ndjson")
+            stream_format=(request.stream_format if request.stream_format in ("ndjson", "sse") else "ndjson"),
+            experiment_bootstrap=request.experiment_bootstrap,
         )
 
         # No startup requested — just return tokens.

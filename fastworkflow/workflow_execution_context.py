@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import time
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, tracing
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
+from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
@@ -163,11 +165,28 @@ class WorkflowExecutionContext:
         self._channel_id: Optional[str] = None
         self._conversation_id: Optional[int] = None
         self._embedder_owns_conversations: bool = False
+        # The experiment container's labels, bound beside channel/conversation
+        # identity and stamped onto every TurnResult this context produces
+        # (`fix-bn1`, `[XR17]`). None on every ordinary turn.
+        self._experiment_id: Optional[str] = None
+        self._task_id: Optional[str] = None
+        self._attempt: Optional[int] = None
+        self._claim_epoch: Optional[int] = None
+        self._server_incarnation: Optional[str] = None
+        self._experiment_claim_store: Any = None
         self._trace_span_stack: list[tracing.Span] = []
         self._turn_root_span: Optional[tracing.Span] = None
 
         # Turn accumulator state (one logical turn = one key, across suspensions)
         self._turn_outputs: list = []
+        # Bound here and not only in _begin_turn, because _build_turn_result is
+        # reachable on a context that never began a turn in THIS process: resume
+        # continues the same logical turn and deliberately skips _begin_turn
+        # (see _serialize_turn_accumulator). The read at finalize guards on
+        # `is not None`, so an attribute that does not exist made the guard
+        # itself raise AttributeError — a missing binding wearing the costume of
+        # a null check. fix-ajv.20.
+        self._execution_recorder: Optional[ExecutionRecorder] = None
         self._turn_key: Optional[str] = None
         self._turn_started_at: Optional[datetime] = None
         self._turn_user_message: str = ""
@@ -235,6 +254,9 @@ class WorkflowExecutionContext:
         channel_id: Optional[str] = None,
         conversation_id: Optional[int] = None,
         embedder_owns_conversations: Optional[bool] = None,
+        experiment_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        attempt: Optional[int] = None,
     ) -> None:
         """Bind channel/conversation identity BEFORE the turn [R1].
 
@@ -251,12 +273,105 @@ class WorkflowExecutionContext:
         a floor-less id that can alias a legacy conversation and split the
         session across two ids once the chokepoint's own mint succeeds.
         """
+        # Validate FIRST, mutate second: a rejected experiment triple must not
+        # leave the context half-bound with a new channel_id and the old labels.
+        if experiment_id is not None or task_id is not None or attempt is not None:
+            self._bind_experiment_labels(experiment_id, task_id, attempt)
         if channel_id is not None:
             self._channel_id = channel_id
         if conversation_id is not None:
             self._conversation_id = conversation_id
         if embedder_owns_conversations is not None:
             self._embedder_owns_conversations = embedder_owns_conversations
+
+    def bind_experiment_claim(self, claim: dict[str, Any], store: Any) -> None:
+        """Bind only a store-issued claim, never caller-supplied raw labels."""
+        store.validate_attempt_claim(claim)
+        self._validate_experiment_labels(
+            claim.get("experiment_id"), claim.get("task_id"), claim.get("attempt")
+        )
+        if not claim.get("epoch") or not claim.get("server_incarnation"):
+            raise ValueError("an experiment claim needs epoch and server_incarnation")
+        self._experiment_id = claim["experiment_id"]
+        self._task_id = claim["task_id"]
+        self._attempt = int(claim["attempt"])
+        self._claim_epoch = int(claim["epoch"])
+        self._server_incarnation = claim["server_incarnation"]
+        self._experiment_claim_store = store
+        self._channel_id = claim["channel_id"]
+        self._conversation_id = int(claim["conversation_id"])
+
+    @property
+    def observability_experiment_claim(self) -> dict[str, Any]:
+        if self._experiment_id is None:
+            return {}
+        return {
+            "experiment_id": self._experiment_id,
+            "task_id": self._task_id,
+            "attempt": self._attempt,
+            "epoch": self._claim_epoch,
+            "server_incarnation": self._server_incarnation,
+        }
+
+    def assert_experiment_claim_current(self) -> None:
+        """Fence turn admission and each registered command dispatch."""
+        if self._experiment_id is None:
+            return
+        # The in-process ExperimentHarness predates registered external
+        # channels and remains compatible. A registered binding always carries
+        # both fields and can never degrade to this legacy/internal path.
+        if self._claim_epoch is None and self._server_incarnation is None:
+            return
+        if self._claim_epoch is None or self._server_incarnation is None:
+            raise RuntimeError("experiment claim fencing metadata is incomplete")
+        if self._experiment_claim_store is not None:
+            self._experiment_claim_store.validate_attempt_claim(
+                self.observability_experiment_claim
+            )
+
+    def _bind_experiment_labels(
+        self,
+        experiment_id: Optional[str],
+        task_id: Optional[str],
+        attempt: Optional[int],
+    ) -> None:
+        """Validate and bind the experiment triple (`fix-bn1` `[XR17]`).
+
+        All three or none. A turn labelled with an experiment but no task
+        belongs to an experiment and to no task: it contributes to a numerator
+        and to no denominator, and every GROUP BY in the scoring layer is
+        silently wrong. Refusing here is the only cheap place to catch it.
+
+        The `isinstance(attempt, int)` check is load-bearing and not decorative.
+        SQLite's INTEGER is a type AFFINITY, not a constraint -- a string bound
+        to it that cannot be losslessly converted is stored as TEXT -- so the
+        column's declared type protects nothing on its own. This is what makes
+        `attempt` safe to leave unpoliced (`[XR7]`).
+        """
+        resolved = self._validate_experiment_labels(
+            experiment_id if experiment_id is not None else self._experiment_id,
+            task_id if task_id is not None else self._task_id,
+            attempt if attempt is not None else self._attempt,
+        )
+        self._experiment_id, self._task_id, self._attempt = resolved
+
+    @staticmethod
+    def _validate_experiment_labels(
+        experiment_id: Optional[str],
+        task_id: Optional[str],
+        attempt: Optional[int],
+    ) -> tuple[str, str, int]:
+        """Check the triple and return it. Pure: assigns nothing."""
+        if not experiment_id or not task_id:
+            raise ValueError(
+                "an experiment binding needs both experiment_id and task_id; "
+                f"got experiment_id={experiment_id!r}, task_id={task_id!r}"
+            )
+        if isinstance(attempt, bool) or not isinstance(attempt, int):
+            raise ValueError(f"attempt must be an int, got {type(attempt).__name__}")
+        if attempt <= 0:
+            raise ValueError(f"attempt must be positive, got {attempt}")
+        return experiment_id, task_id, attempt
 
     def _ensure_observability_conversation(self) -> None:
         """Mint a conversation id when no embedder bound one.
@@ -287,7 +402,22 @@ class WorkflowExecutionContext:
             return
         try:
             # Mint against the channel the sink files this turn's row under.
-            self._conversation_id = store.mint_conversation_id(self._channel_id or "")
+            self._conversation_id = store.mint_conversation_id(
+                self._channel_id or "",
+                experiment_id=self._experiment_id,
+                task_id=self._task_id,
+                attempt=self._attempt,
+            )
+        except sqlite3.IntegrityError:
+            # NOT swallowed. `idx_conv_experiment_attempt` is UNIQUE precisely so
+            # that a second conversation under one (experiment, task, attempt)
+            # is refused, and degrading that refusal to a conversation-less turn
+            # would defeat the invariant silently: the attempt would keep running
+            # and its turns would land outside any conversation, which is exactly
+            # the unreconstructable state the index exists to prevent. An
+            # ordinary turn cannot reach this arm -- the index is partial on
+            # experiment_id IS NOT NULL.
+            raise
         except Exception as exc:
             logger.warning(
                 f"Could not mint a conversation id ({type(exc).__name__}: {exc}); "
@@ -334,6 +464,7 @@ class WorkflowExecutionContext:
         Never called while awaiting_user — a message during suspension is the
         resume answer and continues the same logical turn [A30.2].
         """
+        self.assert_experiment_claim_current()
         self._ensure_observability_conversation()
         self._turn_outputs = []
         self._turn_key = mint_turn_key()
@@ -366,6 +497,12 @@ class WorkflowExecutionContext:
         with contextlib.suppress(Exception):
             if self._app_workflow is not None and tracing.get_sink(self) is not None:
                 self._turn_context_snapshot = dict(self._app_workflow.context)
+
+        # Turn-scoped execution ledger (arch §12.1). Sink-gated like the other
+        # capture projections: with observability off this must cost nothing.
+        self._execution_recorder = (
+            ExecutionRecorder() if tracing.get_sink(self) is not None else None
+        )
 
         # Open the fw.turn root span (deterministic id [R6]; emitted at open so
         # a suspended turn is visible before — and closable after — a process
@@ -403,11 +540,13 @@ class WorkflowExecutionContext:
         is suspended). Both topologies funnel through here: Topology A via
         _ask_user_tool, Topology B via _note_agent_suspension.
         """
-        attempt = sum(
-            1 for output in self._turn_outputs if output.command_name == "ask_user"
-        )
+        # `is_ask_user`, not the name: this count feeds a DETERMINISTIC span id,
+        # so a failed command called `ask_user` would not just miscount, it
+        # would make two real ask_user spans collide on one id. fix-ajv.17.
+        attempt = sum(1 for output in self._turn_outputs if output.is_ask_user)
         entry = fastworkflow.CommandOutput(
             command_name="ask_user",
+            ask_user_entry=True,
             command_parameters=question,
             command_response=
                 fastworkflow.CommandResponse(response="", success=False),
@@ -444,10 +583,11 @@ class WorkflowExecutionContext:
         """
         for index in range(len(self._turn_outputs) - 1, -1, -1):
             entry = self._turn_outputs[index]
-            if (
-                entry.command_name == "ask_user"
-                and entry.command_response.success is False
-            ):
+            # `is_ask_user`, not the bare name: a failed command that happens
+            # to be called `ask_user` also matches name+unsuccessful, and this
+            # loop would overwrite its error with the user's answer and mark it
+            # successful. fix-ajv.17.
+            if entry.is_ask_user and entry.command_response.success is False:
                 entry.command_response.response = answer
                 entry.command_response.success = True
                 if entry.started_at is not None:
@@ -467,7 +607,7 @@ class WorkflowExecutionContext:
         attempt = sum(
             1
             for output in self._turn_outputs[:entry_index]
-            if output.command_name == "ask_user"
+            if output.is_ask_user
         )
         span = tracing.Span(
             span_id=tracing.deterministic_span_id(
@@ -480,6 +620,11 @@ class WorkflowExecutionContext:
             channel_id=self._channel_id,
             command_name="ask_user",
             start_ns=tracing.datetime_to_ns(entry.started_at) or 0,
+            experiment_id=self._experiment_id,
+            task_id=self._task_id,
+            attempt=self._attempt,
+            claim_epoch=self._claim_epoch,
+            server_incarnation=self._server_incarnation,
         )
         tracing.end_span(
             self,
@@ -502,7 +647,7 @@ class WorkflowExecutionContext:
         last = self._turn_outputs[-1] if self._turn_outputs else None
         already_appended = (
             last is not None
-            and last.command_name == "ask_user"
+            and last.is_ask_user
             and last.command_response.success is False
             and last.command_parameters == clarification
         )
@@ -768,6 +913,17 @@ class WorkflowExecutionContext:
                 self.conversation_history
             ),
             "last_completed_turn_key": self._last_completed_turn_key,
+            # The experiment labels ride the suspension blob for the same
+            # reason channel_id does: a turn suspended on ask_user and resumed
+            # in another process must land in the same attempt, and the labels
+            # are the only thing that says which one. Absent on every state
+            # written before fix-bn1, which `apply_serialized_state` reads as
+            # "not part of an experiment".
+            "experiment_id": self._experiment_id,
+            "task_id": self._task_id,
+            "attempt": self._attempt,
+            "claim_epoch": self._claim_epoch,
+            "server_incarnation": self._server_incarnation,
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -785,6 +941,16 @@ class WorkflowExecutionContext:
         found = state.get("schema_version", 0)
         if found != SCHEMA_VERSION:
             raise IncompatibleSessionState(found)
+        # Validated up here with the version check, not applied halfway down:
+        # this method's contract is "raises having applied nothing", and a
+        # malformed experiment triple must not be the one exception that leaves
+        # a half-restored context behind.
+        if state.get("experiment_id") is not None:
+            self._validate_experiment_labels(
+                state.get("experiment_id"), state.get("task_id"), state.get("attempt")
+            )
+            if bool(state.get("claim_epoch")) != bool(state.get("server_incarnation")):
+                raise IncompatibleSessionState(found)
 
         self._awaiting_user = bool(state.get("awaiting_user"))
         self._suspended_user_message = state.get("suspended_user_message")
@@ -796,6 +962,19 @@ class WorkflowExecutionContext:
         # Absent from blobs written before ruling I3 landed; a missing key just
         # means feedback has no turn to attach to until the next turn completes.
         self._last_completed_turn_key = state.get("last_completed_turn_key")
+        # Absent from blobs written before fix-bn1, which reads as "not part of
+        # an experiment". Restored through the same validating chokepoint the
+        # live binding uses, so a hand-edited blob cannot smuggle a partial
+        # triple past `[XR17]`.
+        if state.get("experiment_id") is not None:
+            self._bind_experiment_labels(
+                state.get("experiment_id"),
+                state.get("task_id"),
+                state.get("attempt"),
+            )
+            if state.get("claim_epoch") is not None:
+                self._claim_epoch = int(state["claim_epoch"])
+                self._server_incarnation = state["server_incarnation"]
 
         if turns := state.get("conversation_history_turns") or []:
             from fastworkflow.conversation_history_io import restore_history_from_turns
@@ -847,6 +1026,15 @@ class WorkflowExecutionContext:
         self._turn_history_baseline = len(self.conversation_history.messages)
 
         self._turn_key = turn.get("key")
+        # The ledger is per-process and not serialized: the pre-suspension
+        # process kept its own, and those records went durable with its spans.
+        # What this rebuilds is the accumulator for the commands the RESUMED
+        # turn is about to run, so their outcomes can still be joined to their
+        # execution records. Sink-gated exactly as _begin_turn gates it, so
+        # observability-off costs nothing here either. fix-ajv.20.
+        self._execution_recorder = (
+            ExecutionRecorder() if tracing.get_sink(self) is not None else None
+        )
         self._turn_outputs = [
             fastworkflow.CommandOutput.model_validate(o)
             for o in (turn.get("outputs") or [])
@@ -1069,6 +1257,7 @@ class WorkflowExecutionContext:
     @dspy_logger.observe_dspy_calls
     def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
         """Shared message dispatch for _execute_message()/process_turn()."""
+        self.assert_experiment_claim_current()
         if self._app_workflow is None:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before executing a message"
@@ -1143,10 +1332,19 @@ class WorkflowExecutionContext:
             (None, None) if self._awaiting_user else self._turn_memory_entry()
         )
 
+        turn_metadata: dict[str, Any] = {}
+        if self._app_workflow is not None:
+            turn_metadata["workflow_folderpath"] = self._app_workflow.folderpath
+
         turn_result = TurnResult(
             turn_output=turn_output,
             channel_id=self._channel_id,
             conversation_id=self._conversation_id,
+            experiment_id=self._experiment_id,
+            task_id=self._task_id,
+            attempt=self._attempt,
+            claim_epoch=self._claim_epoch,
+            server_incarnation=self._server_incarnation,
             user_message=self._turn_user_message,
             refined_user_message=self._turn_refined_message,
             entry_workflow_name=self._turn_entry_workflow_name,
@@ -1156,6 +1354,12 @@ class WorkflowExecutionContext:
             suspended_ms=self._turn_suspended_ms,
             conversation_summary=conversation_summary,
             conversation_traces=conversation_traces,
+            metadata=turn_metadata,
+            execution_records=(
+                self._execution_recorder.records()
+                if self._execution_recorder is not None
+                else ()
+            ),
         )
 
         self._finalize_turn_trace(turn_result)
@@ -1267,6 +1471,11 @@ class WorkflowExecutionContext:
                     "conversation_id": self._conversation_id,
                     "user_message": tracing.cap_attr_value(self._turn_user_message),
                 },
+                experiment_id=self._experiment_id,
+                task_id=self._task_id,
+                attempt=self._attempt,
+                claim_epoch=self._claim_epoch,
+                server_incarnation=self._server_incarnation,
             )
             self._turn_root_span = root
 
@@ -1337,6 +1546,7 @@ class WorkflowExecutionContext:
         self._build_turn_result(command_output)
 
     def process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
+        self.assert_experiment_claim_current()
         if self._app_workflow is None:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before process_action()"
@@ -1527,11 +1737,7 @@ class WorkflowExecutionContext:
             tracing.end_span(
                 self,
                 span,
-                status=(
-                    tracing.STATUS_AWAITING_USER
-                    if isinstance(exc, (AskUserSuspend, CommandCancelledError))
-                    else tracing.STATUS_ERROR
-                ),
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"attempts": attempts, "error_type": type(exc).__name__},
             )
             raise
@@ -1691,6 +1897,66 @@ class WorkflowExecutionContext:
         return self._finalize_agent_output(original_message, agent_result)
 
     # ------------------------------------------------------------------
+    # Shared capture for the fw.agent.tool_call emission sites
+    # ------------------------------------------------------------------
+    #
+    # _process_message and _process_action both open fw.agent.tool_call and both
+    # owe §12.1.1's shared capture, so the projection lives here once rather than
+    # being written twice and drifting. Everything below is additive recording:
+    # no fastWorkflow control flow reads a context handle or a consequence class,
+    # which is EXP-003's exit criterion and arch §17.3's stop condition.
+    #
+    # Amendment (fix-ajv.8): "here" is now `tracing`, because workflow_agent.py
+    # opens the same span from a third site and owes the same record. These two
+    # methods stay as the WEC-shaped entry points — they supply the app-workflow
+    # fallback that the free functions cannot know about — but the projection
+    # itself is written once, for all three sites.
+
+    def _context_before(
+        self, span, workflow: Optional[fastworkflow.Workflow] = None
+    ) -> Optional[dict]:
+        """The active context handle before a command runs, or None.
+
+        Gated on a span having actually opened, matching the existing
+        attribute-prep rule at this seam: with observability off this must cost
+        nothing.
+        """
+        return tracing.context_before(span, workflow or self._app_workflow)
+
+    def _capture_attributes(
+        self,
+        span,
+        command_output: fastworkflow.CommandOutput,
+        context_before: Optional[dict],
+        workflow: Optional[fastworkflow.Workflow] = None,
+        command_name: Optional[str] = None,
+    ) -> dict:
+        """Call-id, context-before/after and consequence for one command.
+
+        The call id is read off the CommandOutput rather than minted here: the
+        dispatcher that ran the command already stamped it, and minting a second
+        one would produce two ids for one execution and join neither.
+
+        ``command_name`` overrides what the CommandOutput reports, because on the
+        direct-action path it reports nothing: ``CommandExecutor.perform_action``
+        stamps ``workflow_name`` and ``context`` on its result but never
+        ``command_name``, so a direct action's outcome carries "" and the
+        consequence lookup would find no declaration for any command. The Action
+        names what was dispatched, and that is the authoritative identity for
+        that path. Passed in rather than fixed on the CommandOutput because
+        writing it there would change a public shape, which this slice may not
+        do — the empty ``command_name`` on direct-action outcomes is a separate
+        defect.
+        """
+        return tracing.capture_attributes(
+            span,
+            command_output,
+            context_before,
+            workflow or self._app_workflow,
+            command_name=command_name,
+        )
+
+    # ------------------------------------------------------------------
     # Deterministic / assistant mode
     # ------------------------------------------------------------------
 
@@ -1717,18 +1983,19 @@ class WorkflowExecutionContext:
             kind=tracing.KIND_TOOL,
             attributes={"raw_command": message},
         )
+        context_before = self._context_before(span)
 
         invoke_started_at = datetime.now(timezone.utc)
         try:
             command_output = self._CommandExecutor.invoke_command(self, message)
-        except CommandCancelledError:
-            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
-            raise
         except BaseException as exc:
+            # One arm, not two: a separate `except CommandCancelledError` left
+            # AskUserSuspend — the other control signal — falling through to the
+            # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
             tracing.end_span(
                 self,
                 span,
-                status=tracing.STATUS_ERROR,
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"error_type": type(exc).__name__},
             )
             raise
@@ -1759,6 +2026,7 @@ class WorkflowExecutionContext:
             attributes={
                 "response_text": response_text,
                 "success": bool(command_output.success),
+                **self._capture_attributes(span, command_output, context_before),
             },
         )
 
@@ -1838,18 +2106,22 @@ class WorkflowExecutionContext:
             kind=tracing.KIND_TOOL,
             attributes={"raw_command": raw_command},
         )
+        # The direct-action path's only span: CommandExecutor.perform_action
+        # opens none of its own, so this is where §12.1.1's shared capture has
+        # to land for this row of the matrix.
+        context_before = self._context_before(span, workflow)
 
         action_started_at = datetime.now(timezone.utc)
         try:
             command_output = self._CommandExecutor.perform_action(workflow, action)
-        except CommandCancelledError:
-            tracing.end_span(self, span, status=tracing.STATUS_CANCELLED)
-            raise
         except BaseException as exc:
+            # One arm, not two: a separate `except CommandCancelledError` left
+            # AskUserSuspend — the other control signal — falling through to the
+            # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
             tracing.end_span(
                 self,
                 span,
-                status=tracing.STATUS_ERROR,
+                status=tracing.status_for_dispatch_exception(exc),
                 attributes={"error_type": type(exc).__name__},
             )
             raise
@@ -1872,7 +2144,20 @@ class WorkflowExecutionContext:
             attributes={
                 "response_text": response_text,
                 "success": bool(command_output.success),
+                **self._capture_attributes(
+                    span,
+                    command_output,
+                    context_before,
+                    workflow,
+                    command_name=action.command_name,
+                ),
             },
+        )
+        record_execution(
+            self._execution_recorder,
+            command_call_id=command_output.command_call_id,
+            parent_call_id=None,
+            span_id=span.span_id if span is not None else None,
         )
 
         if self._command_trace_queue is not None:

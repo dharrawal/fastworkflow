@@ -35,10 +35,15 @@ def todo_workflow_path() -> str:
 
 
 @pytest.fixture
-def initialized_fastworkflow():
+def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
     from fastworkflow.command_routing import RoutingRegistry
 
+    monkeypatch.setattr(
+        WorkflowExecutionContext,
+        "_agent_dspy_context",
+        lambda self: (SimpleNamespace(model="test-model"), None),
+    )
     RoutingRegistry.clear_registry()
     yield
     RoutingRegistry.clear_registry()
@@ -770,7 +775,7 @@ class TestIdentityPlumbing:
     ):
         """FastAPI and the CLI bind an id; code embedding the core directly has
         no layer that would, and its turns must still group somewhere [R17]."""
-        from fastworkflow.observability_store import SQLiteTraceSink
+        from fastworkflow.observability.store import SQLiteTraceSink
 
         sink = SQLiteTraceSink(str(tmp_path / "observability.sqlite3"))
         try:
@@ -790,7 +795,7 @@ class TestIdentityPlumbing:
     def test_a_bound_conversation_id_is_never_replaced(
         self, initialized_fastworkflow, tmp_path
     ):
-        from fastworkflow.observability_store import SQLiteTraceSink
+        from fastworkflow.observability.store import SQLiteTraceSink
 
         sink = SQLiteTraceSink(str(tmp_path / "observability.sqlite3"))
         try:
@@ -950,7 +955,7 @@ class TestEmbedderOwnedConversationSuppression:
         """Ruling C2: an embedder whose chokepoint mints with the legacy floor
         declares ownership; the WEC must NOT floor-lessly self-mint on its
         degraded path (which would alias legacy ids and split the session)."""
-        from fastworkflow.observability_store import SQLiteTraceSink
+        from fastworkflow.observability.store import SQLiteTraceSink
 
         sink = SQLiteTraceSink(str(tmp_path / "observability.sqlite3"))
         try:

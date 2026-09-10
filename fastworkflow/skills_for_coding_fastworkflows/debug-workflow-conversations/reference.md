@@ -1,9 +1,10 @@
 # observability.sqlite3 — the read contract
 
 Reference for `debug-workflow-conversations` (see SKILL.md for the triage
-method). Everything here is the shipped contract for READING a workflow's
-conversation logs; schema version is `PRAGMA user_version = 1` and readers
-must refuse a database with a higher version.
+method). The current source uses `SCHEMA_VERSION = 4` in `observability/store.py`.
+Readers check compatibility; older evidence is not migrated by this version. Preserve it and
+use its writer's framework version. Inspect `PRAGMA user_version` read-only when diagnosing a
+mismatch, rather than forcing a version number or adding columns.
 
 ## Location and safe access
 
@@ -11,7 +12,7 @@ must refuse a database with a higher version.
 from fastworkflow import state_paths
 db_path = state_paths.observability_db("<workflow_folder>")
 
-from fastworkflow.observability_store import ReadOnlyObservabilityStore
+from fastworkflow.observability.store import ReadOnlyObservabilityStore
 store = ReadOnlyObservabilityStore(db_path)   # mode=ro; cannot create/migrate/write
 ```
 
@@ -21,62 +22,28 @@ while the workflow runs. **Never** open it writable to inspect it —
 `ObservabilityStore` (no `ReadOnly` prefix) is the writer and creates/probes
 the file on construction.
 
-## Schema (v1)
+## Relevant tables and joins
 
-```sql
-CREATE TABLE conversations (
-  channel_id TEXT NOT NULL, conversation_id INTEGER NOT NULL,
-  topic TEXT, summary TEXT, status TEXT, next_ordinal INTEGER,
-  started_at TEXT, last_turn_at TEXT, updated_at TEXT,
-  PRIMARY KEY (channel_id, conversation_id));
+Use the installed `observability/store.py` for the exact schema; this is a navigation map, not
+DDL to recreate or upgrade an evidence database.
 
-CREATE TABLE conversation_counters (          -- id minting; never read for debugging
-  channel_id TEXT PRIMARY KEY, next_id INTEGER NOT NULL);
+| Table | Read purpose and identity |
+|---|---|
+| `conversations` | `(channel_id, conversation_id)`, topic, timestamps, experiment/task/attempt labels |
+| `turns` | `turn_key`, channel/conversation, ordinal, lifecycle status, command success, failure reason, answer, `record_json`, experiment/task/attempt labels |
+| `spans` | `span_id`, `trace_id = turn_key`, `parent_span_id`, name/kind, command/context, start/end, status, JSON `attributes` |
+| `artifacts` | `artifact_id`, turn/span anchor, content type, byte size/digest, `inline_value`, capture error |
+| `experiments` | Experiment identity, description, notes, benchmark pin, capture regime, status |
+| `experiment_attempts` | `(experiment_id, task_id, attempt)`, channel, outcome/lifecycle evidence, `runtime_snapshot_json` |
+| `human_feedback` | Append-only timestamped comments anchored to a turn or component spans |
+| `feedback` | Agent-memory feedback; not the human annotation table |
+| `train_runs` | Training metadata and `metrics_json` |
+| `diagnostics` | Writer health and store/capture markers |
 
-CREATE TABLE turns (
-  turn_key TEXT PRIMARY KEY,                  -- logical turn key = spans.trace_id
-  channel_id TEXT NOT NULL, conversation_id INTEGER, ordinal INTEGER,
-  user_message TEXT NOT NULL, refined_user_message TEXT,
-  entry_workflow_name TEXT, entry_context TEXT,
-  status TEXT NOT NULL,                       -- completed|failed|awaiting_user|cancelled|abandoned
-  success INTEGER NOT NULL,                   -- 1 = every command in the turn succeeded
-  failure_reason TEXT, answer TEXT,
-  conversation_summary TEXT, conversation_traces TEXT,
-  started_at TEXT, completed_at TEXT, suspended_ms INTEGER,
-  continuation_of TEXT, record_version INTEGER NOT NULL,
-  record_json TEXT NOT NULL);                 -- full TurnResult (see below)
-
-CREATE TABLE feedback (
-  turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL, updated_at TEXT NOT NULL);
-
-CREATE TABLE spans (
-  span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL,   -- trace_id = turn_key
-  parent_span_id TEXT, name TEXT NOT NULL,
-  kind TEXT NOT NULL,                         -- internal|llm|human_wait|tool
-  channel_id TEXT, command_name TEXT, context TEXT,
-  start_ns INTEGER NOT NULL, end_ns INTEGER,  -- epoch ns; end_ns NULL = still open
-  status TEXT NOT NULL,                       -- open|ok|error|cancelled|awaiting_user
-  attributes TEXT NOT NULL);                  -- JSON object
-
-CREATE TABLE artifacts (
-  artifact_id TEXT PRIMARY KEY, turn_key TEXT NOT NULL, channel_id TEXT,
-  span_id TEXT, key TEXT NOT NULL, content_type TEXT,
-  size_bytes INTEGER, sha256 TEXT, inline_value BLOB, error TEXT);
-
-CREATE TABLE train_runs (
-  run_id TEXT PRIMARY KEY, workflow_fingerprint TEXT, started_at TEXT,
-  completed_at TEXT, metrics_json TEXT NOT NULL);
-
-CREATE TABLE diagnostics (                    -- writer health, schema markers
-  key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
-```
-
-Indexes exist on `spans(trace_id)`, `spans(command_name)` (partial — only
-rows with a command_name),
-`turns(channel_id, conversation_id, ordinal)`, `turns(status)`,
-`artifacts(turn_key)`. `turn_key` is
-`YYYYMMDDTHHMMSS.ffffffZ-<12hex>` — lexicographic order is chronological
-order, so `ORDER BY turn_key` sorts by time.
+Use `(store_id, turn_key)` when combining sources, and retain channel identity when looking up a
+conversation. Parse `record_json` and span `attributes` as JSON. `end_ns IS NULL` means a span
+has not closed, not zero duration. Turns reference immutable catalog tasks by their experiment
+labels; the catalog corpus itself lives under the workflow's `benchmarks/` directory.
 
 ## Span catalog
 
@@ -205,12 +172,16 @@ The full internal `TurnResult`, post-redaction:
 
 | Method | Returns |
 |---|---|
-| `list_turns(channel_id=, conversation_id=, status=, success=, command_name=, context=, limit=, offset=)` | Turn rows newest-first, without `record_json` (`context` is a substring match; `command_name` matches via spans) |
+| `list_turns(channel_id=, conversation_id=, status=, success=, command_name=, context=, experiment_id=, task_id=, attempt=, limit=, offset=)` | Turn rows newest-first, without `record_json` (`context` is a substring match; `command_name` matches via spans) |
 | `get_turn(turn_key)` | The full row incl. `record_json` (parse it yourself) |
 | `get_spans(...)` | Span rows for one turn, ordered by `start_ns` (`attributes` is a JSON string). Pass the turn key POSITIONALLY — the parameter is named `trace_id` |
 | `list_conversations(channel_id=, limit=, offset=)` / `list_channels()` | Navigation |
 | `get_artifact(artifact_id)` | Offloaded artifact row (`inline_value` is bytes) |
 | `list_train_runs(limit=)` | Training-run metrics rows, newest first (`metrics_json`) |
+| `list_human_feedback(turn_key)` | All component and turn comments, oldest first; decoded `span_ids`, plus parsed `went_wrong` / `worked` / `should_change` |
+| `get_feedback(turn_key)` / `list_feedback(channel_id=, limit=)` | Separate agent-memory feedback |
+| `get_experiment(experiment_id)` / `experiment_attempt_rows(experiment_id, task_id=)` | Pin/configuration and attempt records; attempt `runtime_snapshot` is decoded or null |
+| `store_identity()` / `capture_regime()` | Evidence source and capture profile/policy identity |
 | `writer_health()` | The writer's drop/error counters — read this before trusting span completeness |
 | `db_size_bytes()` | File + WAL size |
 
@@ -263,6 +234,12 @@ WHERE name='fw.turn' AND trace_id=:turn_key AND end_ns IS NOT NULL;
 
 ## Trust notes
 
+- Capture profile/policy can withhold inputs, outputs or attributes. Inspect `capture_regime()`
+  and recorded envelopes; missing or withheld text is not proof the runtime lacked that data.
+- `call_kwargs` is flat: the completion cap is `call_kwargs.max_tokens`. Some mapping attributes
+  can be JSON strings; decode them before reading fields. Compare usage, output and request limits
+  together; a cap match alone is not a task-failure verdict.
+
 - All persisted text passed the redaction pass (credential shapes + loaded
   secret env values become `[REDACTED]`).
 - Turn records are near-lossless; spans are best-effort under load — check
@@ -270,3 +247,41 @@ WHERE name='fw.turn' AND trace_id=:turn_key AND end_ns IS NOT NULL;
   before reading absence as evidence.
 - `--generate_insights` CLI turns contain teacher AND student passes in one
   trace (duplicate-looking tool calls are expected there).
+
+## Human feedback
+
+In the working `run_chatbot` session, **Save feedback** appends a comment; it does not edit the
+turn, train a model or alter scores. The UI anchors a component using its recorded span IDs.
+Supported `target_kind` values are `turn`, `phase`, `step`, `span`:
+
+- A turn anchor has `span_ids=[]`.
+- Other anchors require at least one span belonging to that turn. For grouping nodes the UI
+  gathers the component's recorded spans. Do not invent IDs or use labels as unique anchors.
+- If there is no recorded span, annotate the turn instead.
+- Each row includes `feedback_id`, `turn_key`, `target_kind`, decoded `span_ids`, `target_label`,
+  `comment` and `created_at`. Comments are credential-scrubbed and retained chronologically.
+
+```python
+import json
+from fastworkflow.observability.store import ReadOnlyObservabilityStore
+
+store = ReadOnlyObservabilityStore(db_path)
+turn = store.get_turn(turn_key)
+spans = {row["span_id"]: row for row in store.get_spans(turn_key)}
+for comment in store.list_human_feedback(turn_key):
+    anchors = [spans[span_id] for span_id in comment["span_ids"] if span_id in spans]
+    # Inspect anchors and json.loads(anchor["attributes"]) alongside the original comment.
+```
+
+For authorized annotation automation, the UI endpoint is
+`POST /api/human-feedback?turn_key=<encoded-key>` with exactly
+`{"target_kind":"turn","span_ids":[],"target_label":"Turn","comment":"..."}`.
+GET on the same path returns all comments for the turn. Preserve the UI's authentication and
+source selection: add `benchmark_experiment=<id>` for a registered experiment's bound working
+store, or `store_id=<id>` for workspace reads. Workspace POST is refused; annotate the working
+database. The server uses the narrow `ObservabilityStore.open_for_annotation` path internally;
+it is not a reason to open a writer during analysis.
+
+The `feedback` table and `/api/feedback` read routes instead expose conversation-memory feedback.
+Formal human review assignments have separate rubric/capability controls. Neither should be
+substituted for developer comments or vice versa.

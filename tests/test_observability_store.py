@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import inspect
 import sqlite3
 import stat
 import time
@@ -22,7 +23,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus, tracing
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -33,10 +34,15 @@ def todo_workflow_path() -> str:
 
 
 @pytest.fixture
-def initialized_fastworkflow():
+def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
     from fastworkflow.command_routing import RoutingRegistry
 
+    monkeypatch.setattr(
+        WorkflowExecutionContext,
+        "_agent_dspy_context",
+        lambda self: (SimpleNamespace(model="test-model"), None),
+    )
     RoutingRegistry.clear_registry()
     yield
     RoutingRegistry.clear_registry()
@@ -114,7 +120,10 @@ class TestSchema:
         store = obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert (
+                conn.execute("PRAGMA user_version").fetchone()[0]
+                == obs.SCHEMA_VERSION
+            )
             # 2 = INCREMENTAL [R12], set at creation before any table
             assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
             tables = {
@@ -151,6 +160,104 @@ class TestSchema:
         conn.close()
         with pytest.raises(obs.IncompatibleObservabilityDB):
             obs.ObservabilityStore(db_path)  # [R11]
+
+    def test_refuses_older_schema(self, db_path):
+        """Fresh schema (fix-49m.3): a populated store from an older build is
+        refused with a reason, never migrated."""
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.commit()
+        conn.close()
+        with pytest.raises(obs.IncompatibleObservabilityDB) as excinfo:
+            obs.ObservabilityStore(db_path)
+        message = str(excinfo.value)
+        assert f"requires v{obs.SCHEMA_VERSION}" in message
+        assert "carries no migration" in message
+        # Left untouched: the version was not silently rewritten.
+        conn = sqlite3.connect(db_path)
+        try:
+            assert (
+                conn.execute("PRAGMA user_version").fetchone()[0]
+                == obs.SCHEMA_VERSION - 1
+            )
+        finally:
+            conn.close()
+
+    def test_an_empty_file_is_treated_as_fresh(self, db_path):
+        """A file that was only touched has no tables and initialises like a
+        missing one, at the current version and with INCREMENTAL auto_vacuum."""
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        open(db_path, "wb").close()
+        assert os.path.getsize(db_path) == 0
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            assert (
+                conn.execute("PRAGMA user_version").fetchone()[0]
+                == obs.SCHEMA_VERSION
+            )
+            assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+        finally:
+            conn.close()
+
+    def test_a_current_store_loads_its_features_from_the_marker_row(self, db_path):
+        """The `schema_features` row is the only source (fix-9zb).
+
+        Under the fresh-schema rule every DB that reaches `_load_features` is at
+        SCHEMA_VERSION and was created from the literal schema with its markers
+        written in the same transaction, so the row is always there — writable
+        and read-only view alike.
+        """
+        store = obs.ObservabilityStore(db_path)
+        assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1)
+        assert store.has_feature(obs.FEATURE_EXPERIMENT_LIFECYCLE_V1)
+        assert obs.ReadOnlyObservabilityStore(db_path)._features == store._features
+
+    def test_features_are_empty_when_the_marker_row_is_missing(self, db_path):
+        """No column sniffing: absent means "no features", not "go and look".
+
+        A v3 DB whose marker row was deleted still has every experiments column,
+        so the old fallback would have re-derived the markers from
+        `PRAGMA table_info`. That dual-shape reader is what the fresh-schema rule
+        forbids, so the answer is now the honest empty set.
+        """
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DELETE FROM diagnostics WHERE key='schema_features'")
+            conn.commit()
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
+        finally:
+            conn.close()
+        assert "experiment_id" in columns  # the sniff would have found this
+        assert obs.ReadOnlyObservabilityStore(db_path)._features == frozenset()
+
+    def test_no_column_sniffing_remains_in_load_features(self):
+        """Pinned by source: a future edit must not reintroduce the fallback."""
+        source = inspect.getsource(obs.ObservabilityStore._load_features)
+        assert "PRAGMA table_info" not in source
+        assert "schema_features" in source
+
+    def test_read_only_store_refuses_an_older_schema_the_same_way(self, db_path):
+        """The read-only view applies the same rule as the writable store
+        (fix-49m.3 adjustment b): an older store is refused up front with the
+        reason, instead of failing later on a column the reader assumes."""
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.commit()
+        conn.close()
+        with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
+            obs.ReadOnlyObservabilityStore(db_path)
+        # And the current version still opens read-only.
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION}")
+        conn.commit()
+        conn.close()
+        obs.ReadOnlyObservabilityStore(db_path)
 
 
 # ----------------------------------------------------------------------
@@ -570,6 +677,114 @@ class TestWriterDiscipline:
         sink.emit_span(
             tracing.Span(span_id="late", trace_id="t", name="fw.turn", start_ns=1, status="open")
         )
+
+
+# ----------------------------------------------------------------------
+# Bulk span reads (fix-tk5)
+# ----------------------------------------------------------------------
+#
+# The debug UI stamps every listed turn from its spans. Through `get_spans`
+# that was one indexed query per listed turn, so a 500-turn rail refresh paid
+# 500 round trips. `spans_for_turns` answers a whole page in a bounded number
+# of queries; these pin that it answers exactly what the per-turn path would.
+
+
+def _count_selects(store) -> dict:
+    """Count SELECT statements this store issues, by tracing its connections."""
+    counts = {"selects": 0}
+    original = store._connect
+
+    def connect(*args, **kwargs):
+        conn = original(*args, **kwargs)
+        conn.set_trace_callback(
+            lambda sql: counts.__setitem__(
+                "selects", counts["selects"] + ("SELECT" in sql.upper())
+            )
+        )
+        return conn
+
+    store._connect = connect
+    return counts
+
+
+@pytest.fixture
+def many_turn_spans(db_path):
+    """30 turns x 4 spans, plus a turn with no spans and one span alone."""
+    sink = obs.SQLiteTraceSink(db_path)
+    keys = [f"20260907T{index:06d}-turn" for index in range(30)]
+    for turn_index, key in enumerate(keys):
+        for span_index in range(4):
+            sink.emit_span(
+                tracing.Span(
+                    span_id=f"{key}-s{span_index}",
+                    trace_id=key,
+                    name="fw.llm.call" if span_index else "fw.turn",
+                    start_ns=1_000 + turn_index * 100 + span_index,
+                    status="ok",
+                    attributes={"seq": span_index},
+                )
+            )
+    assert sink.flush()
+    sink.close()
+    return db_path, keys
+
+
+class TestSpansForTurns:
+    def test_matches_the_per_turn_path_exactly(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        bulk = store.spans_for_turns(keys)
+        assert bulk == {key: store.get_spans(key) for key in keys}
+        # Not vacuous: the fixture really did write spans.
+        assert all(len(bulk[key]) == 4 for key in keys)
+
+    def test_is_a_bounded_number_of_queries(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        counts = _count_selects(store)
+        store.spans_for_turns(keys)
+        assert counts["selects"] == 1
+
+    def test_unknown_keys_map_to_empty_lists(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        answer = store.spans_for_turns([keys[0], "never-recorded"])
+        assert answer["never-recorded"] == []
+        assert answer[keys[0]] == store.get_spans(keys[0])
+
+    def test_duplicate_and_blank_keys_are_collapsed(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        answer = store.spans_for_turns([keys[0], keys[0], "", None])
+        assert list(answer) == [keys[0]]
+
+    def test_no_keys_reads_nothing(self, many_turn_spans):
+        db, _keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        counts = _count_selects(store)
+        assert store.spans_for_turns([]) == {}
+        assert counts["selects"] == 0
+
+    def test_more_keys_than_one_chunk_are_chunked_not_refused(self, many_turn_spans):
+        """SQLite caps bound variables per statement; 1200 keys must answer,
+        in chunks, rather than raising."""
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        padding = [f"absent-{index}" for index in range(1200 - len(keys))]
+        counts = _count_selects(store)
+        answer = store.spans_for_turns(keys + padding)
+        assert len(answer) == 1200
+        assert answer[keys[0]] == store.get_spans(keys[0])
+        assert all(answer[key] == [] for key in padding)
+        # Chunked, but nowhere near one query per key.
+        assert 1 < counts["selects"] <= 5
+
+    def test_the_writable_store_has_it_too(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ObservabilityStore(db, migrate=False)
+        assert store.spans_for_turns(keys[:3]) == {
+            key: store.get_spans(key) for key in keys[:3]
+        }
 
 
 # ----------------------------------------------------------------------

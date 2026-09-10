@@ -12,6 +12,15 @@ description: >-
 
 # Evaluating intent routing
 
+## Relate routing results to application outcomes
+
+`intent_benchmark.json` measures intent routing; workflow-local `benchmarks/<id>/vN.json` measures
+application tasks through a driver. Keep both when both matter: a routing improvement does not
+prove better task completion. Use [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md)
+for the versioned task catalog and experiment UI, and
+[optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md) to compare actual
+conversations, trace failures and human feedback before/after a routing change.
+
 ## The number that has misled everyone
 
 Training reports a weighted F1 computed on a random split of the **same** synthetic utterances the

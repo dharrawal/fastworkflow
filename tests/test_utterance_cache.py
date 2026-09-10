@@ -823,6 +823,7 @@ def test_the_cached_prefix_is_rebuilt_from_live_seeds_not_from_the_cache(
     _generate()
 
     fingerprint = _fingerprint(
+        model=fastworkflow.get_env_var("LLM_SYNDATA_GEN"),
         completion_fn=RecordingCompletion(),
         persona_dataset_loader=_local_persona_dataset,
     )

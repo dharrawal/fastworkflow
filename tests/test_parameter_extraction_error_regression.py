@@ -4,6 +4,7 @@ import fastworkflow
 from fastworkflow import Workflow, NLUPipelineStage
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import ParameterExtraction
+from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import NOT_FOUND
 from pydantic import BaseModel, Field
 from unittest.mock import patch, MagicMock
 
@@ -31,7 +32,7 @@ class TestParameterExtractionErrorRegression:
         }
         
         # Create a stored parameter with missing field
-        stored_params = MockCommandParameters(user_name=fastworkflow.get_env_var("NOT_FOUND"))
+        stored_params = MockCommandParameters.model_construct(user_name=NOT_FOUND)
         cme_workflow.context["stored_parameters"] = stored_params
         
         # Create the parameter extractor with a direct parameter value
@@ -79,11 +80,11 @@ class TestParameterExtractionErrorRegression:
         extractor = ParameterExtraction(cme_workflow, app_workflow, "test_command", "test_value")
         
         # Test single parameter extraction
-        params = MockCommandParameters(user_name=fastworkflow.get_env_var("NOT_FOUND"))
+        params = MockCommandParameters.model_construct(user_name=NOT_FOUND)
         result = extractor._apply_missing_fields("john_doe", params, ["user_name"])
         assert result.user_name == "john_doe"
         
         # Test comma-separated values
-        params = MockCommandParameters(user_name=fastworkflow.get_env_var("NOT_FOUND"))
+        params = MockCommandParameters.model_construct(user_name=NOT_FOUND)
         result = extractor._apply_missing_fields("jane_doe", params, ["user_name"])
         assert result.user_name == "jane_doe"

@@ -379,6 +379,8 @@ Use **Clear conversations** in Debug mode for an explicit, confirmed reset. It r
 
 To turn recording off entirely, set `FW_OBSERVABILITY=0`.
 
+Phase 0 capture/tracing overhead (bead `fix-49m.2`, not a CI gate) was measured with a stubbed LM on hello-world `add_two_numbers` turns, observability on, no network: command-gap p50 **+0.7%** and turn-wall p50 **+1.6%** vs fork `9904df5` (change 4 `5b1e85e` in between). Reports and method: https://gist.github.com/dharrawal/2e123360ace2e948a138c52ce9f00601
+
 ---
 
 ## Production deployment
@@ -669,6 +671,7 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 | `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup) drops spans/artifacts (turn records are exempt) | Optional | `30` |
 | `FW_OBS_DB_MAX_BYTES` | Size cap; the automatic prune evicts oldest spans first while over it | Optional | `1073741824` (1 GiB) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |
+| `FW_OBS_SUPPRESS_PRUNE` | Withhold the automatic prune. **This is the cross-process contract for a measured run**: the in-process `suppress_pruning()` helper only covers the process that calls it, so when a harness drives a separate server the variable must be in the *server's* environment **before it starts** — the recorder prunes once on construction, so setting it afterwards is too late. Confirm the value took hold with `GET /probes/readyz?observability=true`, which reports `pruning_suppressed`; the server also logs the regime at startup | Optional | `0` |
 
 ### `fastworkflow.passwords.env`
 

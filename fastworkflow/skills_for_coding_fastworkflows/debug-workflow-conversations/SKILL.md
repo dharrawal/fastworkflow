@@ -1,54 +1,56 @@
 ---
 name: debug-workflow-conversations
 description: >-
-  Diagnose fastWorkflow task failures from the conversation logs in a workflow's
-  observability.sqlite3: locate and safely read the database, walk a turn's span
-  trace to the failing pipeline stage (intent routing, parameter extraction,
-  db_lookup, validation, planning, ask_user, or the app's own code), and route
-  each diagnosis to the fastWorkflow feature and companion skill that fixes it.
-  Covers the span taxonomy and structured attributes (classifier confidence and
-  thresholds, matcher layers, per-field db_lookup outcomes, validation-hook
-  verdicts, context mutations), the failure-triage decision tree, and the
-  read-only access rules. Use when asked why a workflow task or conversation
-  failed, when a chat turn did the wrong thing, when deciding which fastWorkflow
-  feature would prevent a failure, or before recommending changes to commands,
-  contexts, seeds or signatures based on observed behavior.
+  Diagnose fastWorkflow failures from run_chatbot traces and human comments, locate the
+  correct evidence store, and trace wrong routing, extraction, planning, execution or answers
+  to a concrete workflow fix. Use when a conversation behaves incorrectly or review feedback
+  needs a trace-supported diagnosis. Read recorded evidence without mutating it.
 ---
 
 # Debugging workflows from conversation logs
 
-Every turn a fastWorkflow workflow executes is recorded — the user's message, the
-agent's plan, every intent-detection attempt with the classifier's confidence,
-every extracted parameter, every db_lookup correction, every validation verdict,
-every ask_user exchange, and the final answer. When a task fails, the log tells
-you **which pipeline stage failed**, and each stage has a specific fastWorkflow
-feature that fixes it. This skill is the map from log to fix.
+Use recorded turns and their span trees to identify the first wrong decision and its
+consequences. Capture depends on the runtime profile, redaction, limits and writer health;
+not every run contains every input or response.
 
-## 1. Locate the database
+## 1. Locate the conversation and its evidence store
 
-One SQLite database per workflow, under the fastWorkflow state root:
+In an existing `run_chatbot` session, navigate **benchmark → experiment → conversation**, or
+**ad-hoc conversations → UTC date → conversation**. The left tree stops at conversations.
+Select turns and drill into phases, steps and calls on the right; the right breadcrumb shows
+the complete path. Read the **Human feedback** history at the relevant component as well as
+its raw evidence. Use [optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md)
+when the task is to improve and compare the workflow, rather than diagnose one failure.
+
+For ordinary runs, resolve the database through the framework:
 
 ```python
 from fastworkflow import state_paths
 db_path = state_paths.observability_db("<workflow_folder>")
-# typically ~/.local/state/fastworkflow/workflows/<workflow-name>/observability.sqlite3
 ```
 
-If the file does not exist, the workflow has never run with observability on
-(the default under `fastworkflow run`, `run_chatbot`, and `run_fastapi_mcp`).
-Reproduce the failure first — `fastworkflow run_chatbot <workflow>` is the
-fastest way; every chat turn lands in this database immediately.
+For registered experiments, resolve the registration's `store` via
+`benchmark_setup.load_experiment(workflow_folderpath, experiment_id)`. A null store means
+execution has not bound the registration yet. Workspace evidence may span multiple stores;
+retain `store_id` with every turn/span reference. Conversation IDs are local to channels/stores.
+
+A missing default database does not prove the workflow never ran: check the selected state root,
+experiment registration and workspace sources first. If reproduction is needed, prepare it under
+the project's execution permissions. The supported picker command is `fastworkflow run_chatbot`;
+selecting a workflow can start a server, so it is not merely an offline file viewer.
 
 ## 2. Read it — read-only, always
 
 ```python
-from fastworkflow.observability_store import ReadOnlyObservabilityStore
+from fastworkflow.observability.store import ReadOnlyObservabilityStore
 store = ReadOnlyObservabilityStore(db_path)
 ```
 
 **Never instantiate `ObservabilityStore` to inspect a database.** That class is
-the writer: constructing it creates the file if missing, runs schema migration,
-and write-probes it. `ReadOnlyObservabilityStore` opens `mode=ro` connections
+the writer: constructing it can create the file and write-probe it. Current stores use a fresh
+schema; incompatible stores are refused, not migrated. Preserve older evidence and read it
+with the matching framework version rather than altering its schema.
+`ReadOnlyObservabilityStore` opens `mode=ro` connections
 and cannot mutate anything. Raw SQL is equally fine (the schema is documented
 in [reference.md](reference.md)):
 
@@ -65,6 +67,7 @@ store.list_turns(command_name="cancel_order")     # turns that executed a comman
 store.list_turns(context="TodoList")              # substring match on entry context
 turn  = store.get_turn(turn_key)                  # full row incl. record_json
 spans = store.get_spans(turn_key)                 # the trace, ordered by start_ns
+comments = store.list_human_feedback(turn_key)    # all human annotation anchors for this turn
 ```
 
 Two orthogonal outcome fields, both worth reading:
@@ -103,8 +106,9 @@ under fw.turn without agent.step.
 
 ## 5. The triage tree
 
-Work through these checks **in order** — earlier stages corrupt everything
-downstream, so the first failing stage is the diagnosis.
+Inspect the recorded causal order. The checks below help locate the first wrong decision;
+a bad plan can precede routing, and a provider or backend failure may be environmental.
+Treat a human comment as a lead to verify, not proof of the cause.
 
 **A. Did routing pick the right command?** Compare `fw.command.execute`'s
 `raw_command` (what was asked) against its `command_name` (what ran), then read
@@ -115,7 +119,7 @@ the `fw.nlu.intent` spans:
 | `resolved: false` on every attempt (the walk climbed contexts and gave up) | The utterance routes nowhere — vocabulary gap or command missing from the context's surface | Seed utterances (`plain_utterances`, ~8 varied phrasings) · `design-context-models` (is the command reachable from this context?) |
 | `ambiguous: true` with a `candidates` list | Classifier confidence below threshold — check `classifier.confidence` vs `classifier.ambiguous_threshold`; near-misses mean starved or colliding seeds | `detect-duplicate-capabilities` (are two candidates the same capability?) · seeds · `design-context-models` |
 | Wrong `command_name`, `matcher_layer: classifier` | A confident mis-route: the wrong command's training set claims this phrasing | `detect-duplicate-capabilities` · `evaluate-intent-routing` (measure before/after) · seeds |
-| Wrong `command_name`, `matcher_layer: fuzzy_prematch` or `embedding_cache` | A pre-classifier layer matched — the utterance lexically resembles another command's name, or a stale cache entry | Rename the colliding command, or clear the workflow's `___convo_info` cache |
+| Wrong `command_name`, `matcher_layer: fuzzy_prematch` or `embedding_cache` | A pre-classifier layer matched — the utterance lexically resembles another command's name, or a stale cache entry | Rename the colliding command, or investigate the matched cache entry and its provenance |
 | `escalation_labels_discarded` present | The command likely lives in an ancestor context but the local prompt hid that | `design-context-models` (context surfaces / `base` inheritance) |
 
 **B. Were the parameters extracted correctly?** Read `fw.nlu.param_extraction`:
@@ -127,7 +131,7 @@ the `fw.nlu.intent` spans:
 | `db_lookup` event with `outcome: applied`, `corrected: true`, but wrong result downstream | The fuzzy matcher rewrote the value incorrectly (auto-apply too loose, or label/uid mixup) | `resolve-parameter-values` — `auto_apply_threshold`, and return the value the *field* holds, not the label matched on |
 | `validation_hook.is_valid: false` | The command's own `validate_extracted_parameters` rejected the call — `message` says why; `raised` means the hook itself crashed | `validate-command-parameters` |
 | `retry_round: true` on successive turns | The user is stuck in the NOT_FOUND correction loop — count the rounds; more than two means the error message is not actionable | `validate-command-parameters` (error-message quality) + field descriptions |
-| `extraction_method: llm` and the nested `fw.llm.call` shows `cache_hit: true` with a wrong completion | A stale DSPy-cache replay, not a live extraction failure | Clear the DSPy cache and re-test before changing anything |
+| `extraction_method: llm` and the nested `fw.llm.call` shows `cache_hit: true` with a wrong completion | Cached output; the cache hit alone does not prove staleness | Verify request/model/cache provenance; use an isolated fresh cache for an authorized comparison |
 | A nested `fw.llm.call` with `status: error` and an `exception` (auth, timeout) | Environment problem — keys/env files — not workflow design | Fix the env/passwords files; nothing to change in the workflow |
 
 **C. Did the agent plan a workable sequence?** `fw.planner.replan` spans carry
@@ -137,8 +141,9 @@ Repeated `ask_user_response` replans point at ambiguous command surfaces or
 missing context navigation → `design-context-models`.
 
 **D. Did the conversation stall on questions?** Multiple `fw.ask_user` spans in
-one turn (each records `agent_query` and the reply): the agent is asking for
-things the workflow should resolve itself — usually the same fixes as B.
+one turn (each records `agent_query` and the reply): review whether each question was needed.
+Separate repeated asks after a valid answer from
+necessary clarification or retries after invalid answers; inspect state retention as well as B.
 
 **E. Was state stored and used?** The `fw.turn` close carries
 `context_mutations` (`added` / `changed` / `removed` keys with brief values).
@@ -167,7 +172,20 @@ name the feature, and load the companion skill before writing the change:
 | `validate_extracted_parameters` | `validate-command-parameters` |
 | Training utterance realism | `supply-training-personas` |
 | Retraining mechanics after any of the above | `train-and-publish-models` |
-| Turning the failing conversation into regression coverage | `build-task-benchmarks` |
+| Publishing a regression task and creating a comparison experiment | [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md) |
+| Designing multi-turn regression content | [build-task-benchmarks](../build-task-benchmarks/SKILL.md) |
+| Using human feedback to verify an improvement | [optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md) |
+
+## Human feedback and output-quality failures
+
+Read [reference.md](reference.md#human-feedback) for annotation anchors and read APIs.
+`human_feedback` comments are distinct from agent-memory `feedback` and formal review ratings.
+Do not write an annotation merely to inspect a trace or present an agent judgment as a human one.
+
+If routing and parameters are correct, compare the final answer to command responses and the
+stated expected outcome. Inspect `fw.llm.call` request limits (`call_kwargs.max_tokens`), output,
+usage and errors for omitted or cut answers. Separate time spent waiting for a user from model
+and command time. A cached call is not inherently stale; missing usage is not zero cost.
 
 ## Honesty notes
 

@@ -241,7 +241,7 @@ def test_the_payload_has_the_designed_shape(store):
         "launch_context",
     }
     assert payload["record_type"] == "channel_checkpoint"
-    assert payload["protocol_version"] == 1
+    assert payload["protocol_version"] == PROTOCOL_VERSION
     # The raw id is kept so a key collision can be detected rather than served.
     assert payload["channel_id"] == "channel-shape"
 
@@ -613,10 +613,14 @@ def test_publishing_after_a_quarantine_starts_a_fresh_lineage(store):
 
 def test_a_record_above_the_readable_ceiling_quarantines(base, warnings_logged):
     identity = identity_for("channel-v2")
-    future_node = ChannelCheckpointStore(base, protocol_version=2)
+    future_node = ChannelCheckpointStore(
+        base, protocol_version=PROTOCOL_VERSION + 1
+    )
     publish(future_node, identity, marker="from-v2")
 
-    old_node = ChannelCheckpointStore(base)
+    old_node = ChannelCheckpointStore(
+        base, protocol_version=PROTOCOL_VERSION
+    )
     assert old_node.load(identity) is None
 
     preserved = old_node.list_quarantined(identity)
@@ -627,10 +631,17 @@ def test_a_record_above_the_readable_ceiling_quarantines(base, warnings_logged):
 
 def test_a_record_below_the_declared_floor_quarantines(base):
     identity = identity_for("channel-floor")
-    publish(ChannelCheckpointStore(base), identity)
+    publish(
+        ChannelCheckpointStore(
+            base, protocol_version=1, min_readable_protocol_version=1
+        ),
+        identity,
+    )
 
     strict_node = ChannelCheckpointStore(
-        base, protocol_version=2, min_readable_protocol_version=2
+        base,
+        protocol_version=PROTOCOL_VERSION,
+        min_readable_protocol_version=PROTOCOL_VERSION,
     )
     assert strict_node.load(identity) is None
     assert len(strict_node.list_quarantined(identity)) == 1
@@ -639,10 +650,14 @@ def test_a_record_below_the_declared_floor_quarantines(base):
 def test_an_unreadable_record_is_never_written_around(base):
     """Invariant 31: an old node must not publish a competing lineage beside it."""
     identity = identity_for("channel-skew")
-    future_node = ChannelCheckpointStore(base, protocol_version=2)
+    future_node = ChannelCheckpointStore(
+        base, protocol_version=PROTOCOL_VERSION + 1
+    )
     publish(future_node, identity, marker="from-v2")
 
-    old_node = ChannelCheckpointStore(base)
+    old_node = ChannelCheckpointStore(
+        base, protocol_version=PROTOCOL_VERSION
+    )
     assert old_node.publish(
         identity, **sample_sections("from-v1"), state_version=1
     ) == 1
@@ -666,7 +681,9 @@ def test_the_protocol_version_is_not_part_of_the_path(base):
 
 def test_a_node_cannot_declare_a_floor_it_cannot_itself_read(base):
     with pytest.raises(ValueError, match="unable to read itself"):
-        ChannelCheckpointStore(base, min_readable_protocol_version=2)
+        ChannelCheckpointStore(
+            base, min_readable_protocol_version=PROTOCOL_VERSION + 1
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1374,19 +1391,33 @@ def test_adoption_still_quarantines_on_a_non_incarnation_mismatch(
 def test_adoption_still_quarantines_an_unreadable_protocol_version(base):
     """Kind is checked before the incarnation is trusted, not after."""
     identity = identity_for("adopt-protocol")
-    publish(ChannelCheckpointStore(base, protocol_version=2), identity)
+    publish(
+        ChannelCheckpointStore(
+            base, protocol_version=PROTOCOL_VERSION + 1
+        ),
+        identity,
+    )
 
-    old_node = ChannelCheckpointStore(base)
+    old_node = ChannelCheckpointStore(
+        base, protocol_version=PROTOCOL_VERSION
+    )
     assert old_node.load_for_adoption(**identity.scope()) is None
     assert len(old_node.list_quarantined(identity)) == 1
 
 
 def test_adoption_still_quarantines_below_the_declared_floor(base):
     identity = identity_for("adopt-floor")
-    publish(ChannelCheckpointStore(base), identity)
+    publish(
+        ChannelCheckpointStore(
+            base, protocol_version=1, min_readable_protocol_version=1
+        ),
+        identity,
+    )
 
     strict_node = ChannelCheckpointStore(
-        base, protocol_version=2, min_readable_protocol_version=2
+        base,
+        protocol_version=PROTOCOL_VERSION,
+        min_readable_protocol_version=PROTOCOL_VERSION,
     )
     assert strict_node.load_for_adoption(**identity.scope()) is None
     assert len(strict_node.list_quarantined(identity)) == 1
@@ -1698,7 +1729,12 @@ def test_the_guard_does_not_fire_for_the_owning_incarnation(store):
 def test_a_non_incarnation_fault_still_quarantines_on_publish(store, base):
     """The guard narrows the refusal to reuse; it does not blanket the write path."""
     identity = identity_for("reuse-vs-protocol")
-    publish(ChannelCheckpointStore(base, protocol_version=2), identity)
+    publish(
+        ChannelCheckpointStore(
+            base, protocol_version=PROTOCOL_VERSION + 1
+        ),
+        identity,
+    )
 
     assert publish(store, identity, marker="fresh") == 1
     assert len(store.list_quarantined(identity)) == 1

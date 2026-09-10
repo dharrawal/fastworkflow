@@ -17,6 +17,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from typing import List, Dict, NamedTuple, Optional, Tuple,Union
 import pickle
+import threading
 from pathlib import Path
 from collections import Counter
 
@@ -49,6 +50,11 @@ except Exception:  # noqa: BLE001 - older transformers may not expose this
 
 dataset=None
 label_encoder=LabelEncoder()
+
+# Inference-side cache: path -> (artefact identity, encoder). See
+# `get_label_encoder` for why the inference path must not read the global above.
+_label_encoder_cache: dict[str, tuple[tuple[int, int], LabelEncoder]] = {}
+_label_encoder_cache_lock = threading.Lock()
 
 
 class TrainingDataError(ValueError):
@@ -148,9 +154,44 @@ def save_label_encoder(filepath):
         pickle.dump(label_encoder, f)
 
 def load_label_encoder(filepath):
+    """Rebind the trainer's module-level encoder. Not for inference - use
+    ``get_label_encoder``, which hands back the encoder instead of sharing it."""
     global label_encoder
     with open(filepath, 'rb') as f:
         label_encoder = pickle.load(f)
+
+
+def get_label_encoder(filepath) -> LabelEncoder:
+    """Return the encoder pickled at *filepath*, unpickling it at most once per version.
+
+    Callers must bind the result to a local. Assigning it to the module-level
+    ``label_encoder`` would reintroduce the cross-context decode this exists to
+    prevent: the module global is rebound by any concurrent prediction for a
+    different context, and `predict_batch` releases the GIL for tens of ms, so
+    the decode after it could run against another context's label space -
+    either raising "y contains previously unseen labels" or silently returning
+    another context's command name. Also spares every prediction an unpickle
+    from disk, which the previous ``load_label_encoder`` call per prediction
+    paid. The cache key is the artefact's (st_mtime_ns, st_size), so a retrain
+    in the same process is not served a stale encoder. fix-ajv.15.
+    """
+    stat = os.stat(filepath)
+    identity = (stat.st_mtime_ns, stat.st_size)
+
+    with _label_encoder_cache_lock:
+        cached = _label_encoder_cache.get(filepath)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+
+    # Unpickled outside the lock so a cold cache does not serialise every context's
+    # first prediction behind one disk read. Two threads racing here both produce a
+    # correct encoder for this artefact, so whichever result is stored is right.
+    with open(filepath, 'rb') as f:
+        encoder = pickle.load(f)
+
+    with _label_encoder_cache_lock:
+        _label_encoder_cache[filepath] = (identity, encoder)
+    return encoder
 
 
 def find_optimal_confidence_threshold(model, test_loader, device, min_threshold=0.5129, max_top3_usage=0.3, step_size=0.01, k_val=3):
@@ -437,6 +478,12 @@ class CommandRouter:
         The details dict is JSON-safe: {model_tier, confidence,
         ambiguous_threshold, confident, top_label, topk_labels}. The behavior
         of ``predict`` is unchanged — it delegates here.
+
+        Amendment (fix-ajv.12): ``topk_scores`` joins the list, positionally
+        aligned with ``topk_labels``. It is the probability behind each ranked
+        label, which is what a top-k margin is the difference of; the winning
+        label's own probability is ``confidence``, so the first score is that same
+        number rather than a second measurement of it.
         """
         results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
         used_distil = bool(results['used_distil'])
@@ -454,6 +501,7 @@ class CommandRouter:
             "confident": confident,
             "top_label": str(results['label']),
             "topk_labels": [str(label) for label in results['topk_labels']],
+            "topk_scores": [float(score) for score in results['topk_scores']],
         }
         return list(labels), details
             
@@ -700,26 +748,32 @@ def predict_single_sentence(
 
 
     # `path` is expected to be the absolute path to the label_encoder artefact
-    global label_encoder
-    load_label_encoder(path)
-    k_val=len(label_encoder.classes_)
+    encoder = get_label_encoder(path)
+    k_val=len(encoder.classes_)
     k_val = 3 if k_val>2 else 2
     # Make prediction using the pipeline's batch prediction method
     results = pipeline.predict_batch([text],k_val=k_val)
     # Get the numeric prediction
     numeric_prediction = results["predictions"][0]
 
-    label_names = label_encoder.inverse_transform(results['top_k_predictions'][0])
+    label_names = encoder.inverse_transform(results['top_k_predictions'][0])
 
     # Convert numeric prediction back to original label name
-    label_name = label_encoder.inverse_transform([numeric_prediction])[0]
+    label_name = encoder.inverse_transform([numeric_prediction])[0]
 
+    # `topk_scores` rides along with the labels it belongs to. `predict_batch`
+    # already computed it in the same forward pass, and dropping it here was what
+    # made `classifier-topk-margin` uncomputable downstream (FW-REQ-021 clause 1):
+    # with only the labels, there is no second-best probability to subtract, and a
+    # second forward pass to recover one would be a real performance change.
+    # Ordering matches `topk_labels` — both come from the same `torch.topk`.
     return {
         "prediction": numeric_prediction,
         "label": label_name,
         "confidence": results["confidences"][0],
         "used_distil": results["used_distil"][0],
-        "topk_labels":label_names
+        "topk_labels":label_names,
+        "topk_scores": results["top_k_scores"][0],
     }
 
 # ---------------------------------------------------------------------

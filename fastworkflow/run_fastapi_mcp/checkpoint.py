@@ -177,12 +177,14 @@ def runtime_projection(runtime: "ChannelRuntime") -> dict[str, Any]:
     convenience).
     """
     workflow = runtime.execution_context.app_workflow
+    claim = runtime.execution_context.observability_experiment_claim
     return {
         "active_conversation_id": runtime.active_conversation_id,
         "stream_format": runtime.stream_format,
         "is_complete": bool(workflow.is_complete) if workflow else False,
         "durable_turn_count": runtime.durable_turn_count,
         "startup_ran": runtime.startup_ran,
+        "experiment_claim": dict(claim) if claim else None,
     }
 
 
@@ -294,6 +296,25 @@ def restore(
     if the command contexts cannot be rebuilt, so the caller quarantines rather
     than continuing with half a session.
     """
+    runtime_section = dict(record.runtime or {})
+    claim = runtime_section.get("experiment_claim")
+    if claim is not None:
+        required = {
+            "experiment_id",
+            "task_id",
+            "attempt",
+            "epoch",
+            "server_incarnation",
+        }
+        if not isinstance(claim, dict) or not required <= set(claim):
+            raise CheckpointStoreError(
+                "registered experiment checkpoint has incomplete fencing identity"
+            )
+        if int(claim["attempt"]) <= 0 or int(claim["epoch"]) <= 0:
+            raise CheckpointStoreError(
+                "registered experiment checkpoint has invalid attempt or epoch"
+            )
+
     context_section = record.context or {}
     saved_context = dict(context_section.get("workflow_context") or {})
     prior_launch = dict((record.launch_context or {}).get("prior_projection") or {})
@@ -311,7 +332,7 @@ def restore(
     serialization_hooks.restore_command_contexts(
         runtime_workflow, context_section.get("command_contexts") or {}
     )
-    return dict(record.runtime or {})
+    return runtime_section
 
 
 def warn_pinned_once(channel_id: str, workflow_path: str, reason: str) -> None:
