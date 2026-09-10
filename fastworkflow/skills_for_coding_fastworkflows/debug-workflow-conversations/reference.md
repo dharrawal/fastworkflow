@@ -178,7 +178,7 @@ The full internal `TurnResult`, post-redaction:
 | `list_conversations(channel_id=, limit=, offset=)` / `list_channels()` | Navigation |
 | `get_artifact(artifact_id)` | Offloaded artifact row (`inline_value` is bytes) |
 | `list_train_runs(limit=)` | Training-run metrics rows, newest first (`metrics_json`) |
-| `list_human_feedback(turn_key)` | All component and turn comments, oldest first; decoded `span_ids` |
+| `list_human_feedback(turn_key)` | All component and turn comments, oldest first; decoded `span_ids`, plus parsed `went_wrong` / `worked` / `should_change` |
 | `get_feedback(turn_key)` / `list_feedback(channel_id=, limit=)` | Separate agent-memory feedback |
 | `get_experiment(experiment_id)` / `experiment_attempt_rows(experiment_id, task_id=)` | Pin/configuration and attempt records; attempt `runtime_snapshot` is decoded or null |
 | `store_identity()` / `capture_regime()` | Evidence source and capture profile/policy identity |

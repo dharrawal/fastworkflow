@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from fastworkflow import benchmark_setup
 from fastworkflow import observability_store as obs
 from fastworkflow import state_paths
 from fastworkflow.benchmark_catalog import (
@@ -170,6 +171,18 @@ class TestBenchmarkReadApi:
         status, data = _request(live_server, "/api/benchmarks/smoke/versions/v9")
         assert status == 404
         assert "not found" in data["error"]
+
+    def test_experiments_are_listed_newest_first(self, live_server, workflow_dir):
+        older = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
+        newer = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
+
+        status, data = _request(live_server, "/api/benchmarks/smoke/experiments")
+
+        assert status == 200
+        assert [row["experiment_id"] for row in data["experiments"]] == [
+            newer["experiment_id"],
+            older["experiment_id"],
+        ]
 
 
 class TestBenchmarkWriteApi:
@@ -360,6 +373,39 @@ class TestExperimentNotesApi:
         assert "notes" in data["error"]
         assert store.get_experiment("exp-1")["notes"] == "original notes"
 
+    def test_patch_archives_and_unarchives_an_experiment(self, experiment_server):
+        server, store = experiment_server
+
+        status, data = _request(
+            server,
+            "/api/experiment/exp-1",
+            method="PATCH",
+            body={"archived": True},
+        )
+        assert status == 200
+        assert data["experiment"]["archived"] is True
+        assert store.get_experiment("exp-1")["archived"] is True
+
+        status, data = _request(
+            server,
+            "/api/experiment/exp-1",
+            method="PATCH",
+            body={"archived": False},
+        )
+        assert status == 200
+        assert data["experiment"]["archived"] is False
+
+    def test_patch_archive_refused_in_workspace_mode(self, workspace_server):
+        server, _workflow, _before = workspace_server
+        status, data = _request(
+            server,
+            "/api/experiment/local",
+            method="PATCH",
+            body={"archived": True},
+        )
+        assert status == 403
+        assert "read-only" in data["error"]
+
 
 class TestSpaSurface:
     def test_benchmark_browser_ships(self):
@@ -371,7 +417,9 @@ class TestSpaSurface:
         assert b"/api/benchmarks" in page
         assert b"/analysis" in page
         assert b"Save analysis" in page
-        assert b"Save notes" in page
+        assert b"Save notes" not in page
+        assert b"Save postmortem" in page
+        assert b"Postmortem saved" in page
         # The detail API retains the digest; the concise experiment Result
         # does not expose raw provenance metadata.
         assert b"benchmark digest" not in page

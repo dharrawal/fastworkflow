@@ -81,6 +81,25 @@ def test_more_than_one_page_and_colliding_conversation_ids(tmp_path):
     assert len([n for n in walk(root) if n['kind'] == 'conversation']) == 2
 
 
+def test_navigation_orders_benchmark_experiments_newest_first():
+    rows = [
+        {'experiment_id': 'older', 'benchmark_id': 'bench',
+         'created_at': '2026-09-08T10:00:00+00:00'},
+        {'experiment_id': 'newer', 'benchmark_id': 'bench',
+         'created_at': '2026-09-09T10:00:00+00:00'},
+    ]
+    root = build_navigation(
+        [{'benchmark_id': 'bench'}],
+        rows,
+        [],
+    )
+    benchmark = root['children'][0]
+    assert [node['experiment_id'] for node in benchmark['children']] == [
+        'newer',
+        'older',
+    ]
+
+
 def test_navigation_workspace_is_scoped(workspace_server):
     server, _workflow, _before = workspace_server
     status, data = _request(server, '/api/navigation')
@@ -93,10 +112,11 @@ def test_page_separates_navigation_into_tabs():
     page = run_chatbot_server.load_index_html()
     assert b'id="navConversations"' in page
     assert b'id="navBenchmarks"' in page
-    assert b'id="navDistillations"' in page
-    assert b'var navigationSelection = {conversations: null, benchmarks: null, distillations: null};' in page
+    assert b'id="navDistillations"' not in page
+    assert b'var navigationSelection = {conversations: null, benchmarks: null};' in page
     assert b'function setNavigationTab(tab, restoreDetail)' in page
-    assert b"Distillations are coming soon" in page
+    assert b"Distillations are coming soon" not in page
+    assert b'setNavigationTab("distillations")' not in page
     assert b"Benchmarks &amp; conversations" not in page
     assert b">WORKSPACE<" not in page
 
@@ -121,5 +141,64 @@ def test_hierarchy_dom_clicks(hierarchy_server):
     script = Path(__file__).with_name('chatbot_hierarchy_dom.cjs')
     result = subprocess.run(['node', str(script), dependency,
         f'http://127.0.0.1:{server.port}/?token={server.token}', eid],
+        capture_output=True, text=True, timeout=40)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_experiment_archive_dom(hierarchy_server):
+    dependency = os.environ.get('TEST_JSDOM_ROOT')
+    if not dependency:
+        pytest.skip('Set TEST_JSDOM_ROOT to run DOM integration with jsdom')
+    server, _spec, eid, _default, _store = hierarchy_server
+    script = Path(__file__).with_name('chatbot_experiment_archive_dom.cjs')
+    result = subprocess.run(['node', str(script), dependency,
+        f'http://127.0.0.1:{server.port}/?token={server.token}', eid],
+        capture_output=True, text=True, timeout=40)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+NAV_TURNS = ['first turn', 'second turn', 'third turn']
+
+
+@pytest.fixture
+def record_nav_server(experiment_server):
+    """One conversation of three spanned turns: the arrows need real siblings."""
+    server, default = experiment_server
+    for index, message in enumerate(NAV_TURNS):
+        # A turn_key reaches /api/turn as a path segment, which the server reads
+        # verbatim, so the key is a slug and the prose stays in the message.
+        key = f'nav-turn-{index + 1}'
+        row = _turn_row(key, None, None, None)
+        row.update(channel_id='chat', conversation_id=7, ordinal=index + 1,
+                   user_message=message,
+                   started_at=f'2026-09-08T0{index + 1}:00:00+00:00')
+        with default._connect() as conn:
+            assert default.upsert_turn_row(conn, row, [], default._store_redactor())
+            conn.execute(
+                'INSERT INTO spans(span_id,trace_id,name,kind,start_ns,end_ns,status,attributes)'
+                ' VALUES(?,?,?,?,?,?,?,?)',
+                (f'{key}-plan', key, 'fw.planner.plan', 'internal', 1, 1000, 'ok', '{}'))
+    yield server
+
+
+def test_page_carries_the_record_navigator():
+    page = run_chatbot_server.load_index_html()
+    assert b'id="recordNav"' in page
+    for element in [b'recordNavUp', b'recordNavDown', b'recordNavPrev', b'recordNavNext']:
+        assert element in page
+    # The tab lives in the gutter #detail reserves for it, so the reserve and
+    # the tab have to ship together.
+    assert b'--record-nav-gutter' in page
+    assert b'function recordNavTarget(move)' in page
+
+
+def test_record_navigator_dom(record_nav_server):
+    dependency = os.environ.get('TEST_JSDOM_ROOT')
+    if not dependency:
+        pytest.skip('Set TEST_JSDOM_ROOT to run DOM integration with jsdom')
+    server = record_nav_server
+    script = Path(__file__).with_name('chatbot_record_nav_dom.cjs')
+    result = subprocess.run(['node', str(script), dependency,
+        f'http://127.0.0.1:{server.port}/?token={server.token}', *NAV_TURNS],
         capture_output=True, text=True, timeout=40)
     assert result.returncode == 0, result.stdout + result.stderr

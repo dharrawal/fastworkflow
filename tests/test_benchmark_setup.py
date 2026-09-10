@@ -215,7 +215,8 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     # default database points elsewhere. Cross-experiment writes are refused.
     feedback_path = "/api/human-feedback?turn_key=registered-turn&benchmark_experiment=" + experiment_id
     comment = {"target_kind": "turn", "span_ids": [], "target_label": "Turn",
-               "comment": "Check the final answer against the task prompt."}
+               "comment": "Check the final answer against the task prompt.",
+               "provenance": "human"}
     assert _request(server, feedback_path, "POST", comment)[0] == 201
     assert store.list_human_feedback("registered-turn")[0]["comment"] == comment["comment"]
     assert _request(server, "/api/experiment/" + experiment_id + "/analysis" + suffix,

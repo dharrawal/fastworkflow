@@ -2389,8 +2389,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._error(500, "Could not delete this experiment. Refresh and try again.")
 
     def do_PATCH(self) -> None:  # noqa: N802
-        """Two admitted PATCHes: an experiment's notes (`fix-bn1.5`), and the
-        author's description on a registration a runner has not claimed yet.
+        """Two admitted PATCH surfaces: an experiment's editable annotations,
+        and the author's description on a registration not yet claimed.
 
         The Host/Origin and bearer-token gates are applied per verb method with
         no shared chokepoint -- `_handle_get` and `do_POST` each run their own --
@@ -2404,9 +2404,6 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 self._refuse_write()
                 return
             query = parse_qs(split.query)
-            if query.get("benchmark_experiment"):
-                self._error(403, "benchmark execution drilldown is read-only")
-                return
             if not self._host_origin_allowed():
                 self._error(403, "forbidden: host/origin not allowed")
                 return
@@ -2425,13 +2422,17 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             if self.chatbot.workspace is not None:
                 self._error(
                     403,
-                    "workspace mode is read-only; experiment notes cannot be changed",
+                    "workspace mode is read-only; experiment annotations cannot be changed",
                 )
                 return
             if registration_path:
                 self._handle_registration_patch(split.path, body)
                 return
-            self._handle_experiment_patch(split.path, body)
+            self._handle_experiment_patch(
+                split.path,
+                body,
+                (query.get("benchmark_experiment") or [None])[0],
+            )
         except BrokenPipeError:
             pass
         except Exception as exc:
@@ -3019,6 +3020,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 continue
             try:
                 store = self._registered_store(record["experiment_id"])
+                detail = store.get_experiment(record["experiment_id"])
+                if detail is not None:
+                    record["archived"] = bool(detail.get("archived"))
                 sources.append({"store": store,
                     "source": {"benchmark_experiment": record["experiment_id"]},
                     "experiment_id": record["experiment_id"]})
@@ -3059,8 +3063,13 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 self._error(400, "turn does not belong to the selected experiment")
                 return
             if writing:
-                if set(body) != {"target_kind", "span_ids", "target_label", "comment"}:
-                    raise ValueError("provide target_kind, span_ids, target_label and comment")
+                required = {"target_kind", "span_ids", "target_label", "provenance"}
+                allowed = required | {"comment", "went_wrong", "worked", "should_change"}
+                if not required <= set(body) or not set(body) <= allowed:
+                    raise ValueError(
+                        "provide target_kind, span_ids, target_label, provenance, "
+                        "and comment or the went_wrong / worked / should_change fields"
+                    )
                 ObservabilityStore.open_for_annotation(store.db_path).add_human_feedback(turn_key, **body)
             self._send_json({"feedback": store.list_human_feedback(turn_key), "read_only": False},
                             status=201 if writing else 200)
@@ -3142,6 +3151,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"experiment": record})
 
     def _benchmark_experiments(self, benchmark_id):
+        from .navigation import newest_experiments_first
+
         folder = self._benchmark_workflow_path()
         if folder is None:
             return
@@ -3151,13 +3162,47 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             for logical in workspace.experiments():
                 matches = [workspace.experiment(segment["store_id"], segment["local_experiment_id"])
                            for segment in workspace.segments(logical["experiment_id"])]
-                versions = sorted({row["benchmark_version"] for row in matches
-                                   if row and row.get("benchmark_id") == benchmark_id})
+                benchmark_rows = [
+                    row for row in matches
+                    if row and row.get("benchmark_id") == benchmark_id
+                ]
+                versions = sorted(
+                    {row["benchmark_version"] for row in benchmark_rows}
+                )
                 if versions:
-                    rows.append(dict(logical, benchmark_version=", ".join(versions), workspace=True))
+                    rows.append(
+                        dict(
+                            logical,
+                            benchmark_version=", ".join(versions),
+                            workspace=True,
+                            archived=all(
+                                bool(row.get("archived")) for row in benchmark_rows
+                            ),
+                            created_at=max(
+                                row.get("created_at") or "" for row in benchmark_rows
+                            ),
+                        )
+                    )
         else:
             registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
             rows = [dict(row, registered=True, status="registered") for row in registrations]
+            for row in rows:
+                if not row.get("store"):
+                    row["archived"] = False
+                    continue
+                try:
+                    detail = self._registered_store(row["experiment_id"]).get_experiment(
+                        row["experiment_id"]
+                    )
+                    row["archived"] = bool(detail and detail.get("archived"))
+                except (
+                    ValueError,
+                    KeyError,
+                    OSError,
+                    sqlite3.Error,
+                    IncompatibleObservabilityDB,
+                ):
+                    row["archived"] = False
             try:
                 store = self.chatbot.open_store()
                 if store:
@@ -3174,7 +3219,9 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                         offset += len(batch)
             except IncompatibleObservabilityDB as exc:
                 warning = STORE_UNAVAILABLE + str(exc)
-        self._send_json({"experiments": rows, "warning": warning})
+        self._send_json(
+            {"experiments": newest_experiments_first(rows), "warning": warning}
+        )
 
     def _handle_benchmarks(self, path: str) -> None:
         """Read workflow-local benchmark catalogs from ``<workflow>/benchmarks/``."""
@@ -3312,11 +3359,10 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
     ) -> None:
         """The `/api/experiment*` GET surface (`fix-bn1.5`, `[XR9]`).
 
-        The noun split is deliberate: `/api/distillation/*` owns "run" (one row
-        per compared MESSAGE) and this surface never uses that word. An
-        experiment has tasks, a task has attempts, and an attempt resolves to
-        the channel/conversation/turn keys the existing trace views already
-        render — so nothing here re-implements a viewer.
+        The noun choice is deliberate: this surface never calls an experiment
+        attempt a "run". An experiment has tasks, a task has attempts, and an
+        attempt resolves to the channel/conversation/turn keys the existing
+        trace views already render — so nothing here re-implements a viewer.
 
         `[DR29]`'s posture: a DB written before the experiment tables existed
         404s with a reason a human can act on, rather than raising `no such
@@ -3421,14 +3467,19 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         else:
             self._error(404, "not found")
 
-    def _handle_experiment_patch(self, path: str, body: dict[str, Any]) -> None:
-        """`PATCH /api/experiment/<id>` -- notes only (`fix-bn1.5`).
+    def _handle_experiment_patch(
+        self,
+        path: str,
+        body: dict[str, Any],
+        source_experiment_id: Optional[str] = None,
+    ) -> None:
+        """`PATCH /api/experiment/<id>` -- editable annotations.
 
-        Admitted on the argument `[DR30]` made for `POST
-        /api/distillation/verdict`: the invariant protected is "recorded
-        observability data stays read-only over HTTP" (studio design §3.4, the
-        access-control section), and `notes` is an annotation column that cannot
-        alter any span, turn, artifact, attempt outcome or score.
+        Admitted on the annotation argument in `[DR30]`: the invariant
+        protected is "recorded observability data stays read-only over HTTP"
+        (studio design §3.4, the access-control section), and `notes` plus
+        `archived` are annotation columns that cannot alter any span, turn,
+        artifact, attempt outcome or score.
         """
         rest = path[len("/api/experiment/") :]
         # partition, not split-and-discard: the GET side validates its sub-path
@@ -3440,32 +3491,58 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         if not experiment_id or sub:
             self._error(404, "not found")
             return
-        store = self.chatbot.open_store()
+        if source_experiment_id is not None and source_experiment_id != experiment_id:
+            self._error(400, "benchmark experiment does not match the URL experiment")
+            return
+        try:
+            store = (
+                self._registered_store(source_experiment_id)
+                if source_experiment_id
+                else self.chatbot.open_store()
+            )
+        except (ValueError, KeyError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
+            self._error(409, str(exc))
+            return
         if store is None or not store.has_feature(FEATURE_EXPERIMENTS_V1):
             self._error(404, "this database predates experiment recording")
             return
         if "analysis" in body:
             self._error(400, "analysis is not a field of an experiment; use notes")
             return
-        if "notes" not in body:
-            self._error(400, 'nothing to patch: send {"notes": "..."}')
+        if set(body) - {"notes", "archived"}:
+            self._error(
+                400, "unexpected fields: this route updates notes and archived only"
+            )
+            return
+        if not body:
+            self._error(
+                400, 'nothing to patch: send {"notes": "..."} or {"archived": true}'
+            )
             return
         notes = body.get("notes")
-        if notes is not None and not isinstance(notes, str):
+        if "notes" in body and notes is not None and not isinstance(notes, str):
             self._error(400, "notes must be a string or null")
+            return
+        archived = body.get("archived")
+        if "archived" in body and not isinstance(archived, bool):
+            self._error(400, "archived must be true or false")
             return
         try:
             # `[DR53]`: the feature check above ran through the per-request
             # READ-ONLY handle, so a PATCH against a pre-experiments snapshot
             # cannot be what creates the tables in it.
-            ObservabilityStore.open_for_annotation(
-                self.chatbot.db_path
-            ).update_experiment_notes(experiment_id, notes)
+            writable = ObservabilityStore.open_for_annotation(store.db_path)
+            if "notes" in body:
+                writable.update_experiment_notes(experiment_id, notes)
+            if "archived" in body:
+                writable.update_experiment_archived(experiment_id, archived)
         except ExperimentNotFound:
             self._error(404, "experiment not found")
             return
         except (OSError, sqlite3.Error) as exc:
-            self._error(500, f"could not update notes: {type(exc).__name__}")
+            self._error(
+                500, f"could not update experiment annotations: {type(exc).__name__}"
+            )
             return
         self._send_json({"experiment": store.get_experiment(experiment_id)})
 

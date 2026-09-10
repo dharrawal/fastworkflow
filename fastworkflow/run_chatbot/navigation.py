@@ -28,6 +28,15 @@ def _date(value):
         return 'Unknown date'
 
 
+def _experiment_sort_key(row):
+    return row.get('created_at') or '', row.get('experiment_id') or ''
+
+
+def newest_experiments_first(rows):
+    """Give every experiment surface the same newest-first chronology."""
+    return sorted(rows, key=_experiment_sort_key, reverse=True)
+
+
 def read_source(store, source, experiment_id=None):
     return {
         'source': source, 'experiment_id': experiment_id,
@@ -132,5 +141,13 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
             if parent is not None:
                 conversation(row, parent)
     adhoc['children'].sort(key=lambda n: n['label'], reverse=True)
+    for branch in branches.values():
+        branch['children'] = sorted(
+            branch['children'],
+            key=lambda node: _experiment_sort_key(
+                dict(node.get('info') or {}, experiment_id=node.get('experiment_id'))
+            ),
+            reverse=True,
+        )
     root['children'].append(adhoc)
     return root

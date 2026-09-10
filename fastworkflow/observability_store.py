@@ -67,8 +67,11 @@ from fastworkflow.utils.logging import logger
 # server's credential-free runtime snapshot, stamped at claim time. Create-time
 # column only; a v2 store is refused on open like every older one.
 # v4 (fix-aw5): human feedback and its evidence anchors live in this DB.
+# v5 (fix-46l.2): feedback provenance distinguishes human, coding-agent, and
+# distillation-agent annotations.
+# v6 (fix-w6w): experiment archival is a durable annotation.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # Which capture profile this deployment records under (arch §12.0 delta 3).
 # Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
@@ -265,6 +268,88 @@ FEATURE_EXPERIMENT_LIFECYCLE_V1 = "experiment_lifecycle_v1"
 FEATURE_EXPERIMENT_DECLARATIONS_V1 = "experiment_declarations_v1"
 FEATURE_EXPERIMENT_CLAIMS_V1 = "experiment_claims_v1"
 FEATURE_EXPERIMENT_SEALING_V1 = "experiment_sealing_v1"
+FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
+# Composer tabs and stored-comment labels. Existing comments already used these
+# headings (and "What did not work" as a synonym for went-wrong); reads parse
+# them without rewriting the comment column, so older stores stay intact.
+HUMAN_FEEDBACK_SECTIONS = (
+    ("went_wrong", "What went wrong", ("what went wrong", "what did not work")),
+    ("worked", "What worked", ("what worked",)),
+    ("should_change", "What should change", ("what should change",)),
+)
+_HUMAN_FEEDBACK_HEADER_RE = re.compile(
+    r"(?im)^[ \t]*(What went wrong|What did not work|What worked|What should change)"
+    r"[ \t]*:[ \t]*"
+)
+_HUMAN_FEEDBACK_HEADER_TO_KEY = {
+    alias: key
+    for key, _label, aliases in HUMAN_FEEDBACK_SECTIONS
+    for alias in aliases
+}
+
+
+def parse_human_feedback_comment(comment: str) -> dict[str, str]:
+    """Split a stored comment into the three composer tabs.
+
+    Unlabelled text is left in ``comment`` only: guessing a tab would invent a
+    category the author did not choose. Duplicate headings concatenate.
+    """
+    sections = {key: "" for key, _label, _aliases in HUMAN_FEEDBACK_SECTIONS}
+    if not isinstance(comment, str) or not comment:
+        return sections
+    matches = list(_HUMAN_FEEDBACK_HEADER_RE.finditer(comment))
+    if not matches:
+        return sections
+    for index, match in enumerate(matches):
+        key = _HUMAN_FEEDBACK_HEADER_TO_KEY[match.group(1).strip().lower()]
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(comment)
+        chunk = comment[start:end].strip()
+        if not chunk:
+            continue
+        sections[key] = f"{sections[key]}\n\n{chunk}".strip() if sections[key] else chunk
+    return sections
+
+
+def compose_human_feedback_comment(
+    *,
+    went_wrong: str = "",
+    worked: str = "",
+    should_change: str = "",
+    comment: str | None = None,
+) -> str:
+    """Build the stored comment from tab fields, or keep a legacy free-form comment."""
+    values = {
+        "went_wrong": went_wrong,
+        "worked": worked,
+        "should_change": should_change,
+    }
+    for key, value in values.items():
+        if value is None:
+            values[key] = ""
+        elif not isinstance(value, str):
+            raise ValueError(f"{key} must be text")
+    parts = []
+    for key, label, _aliases in HUMAN_FEEDBACK_SECTIONS:
+        text = values[key].strip()
+        if text:
+            parts.append(f"{label}: {text}")
+    if parts:
+        composed = "\n\n".join(parts)
+    elif isinstance(comment, str) and comment.strip():
+        composed = comment.strip()
+    else:
+        raise ValueError("feedback must contain text (at most 100000 characters)")
+    if len(composed) > 100000:
+        raise ValueError("feedback must contain text (at most 100000 characters)")
+    return composed
+
+
+def _human_feedback_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    value = dict(row)
+    value["span_ids"] = json.loads(value.pop("span_ids_json"))
+    value.update(parse_human_feedback_comment(value.get("comment") or ""))
+    return value
 
 # Single source: the policy engine's own version (fix-49m.3 wiring).
 CAPTURE_POLICY_VERSION = capture_policy_module.CAPTURE_POLICY_VERSION
@@ -1271,6 +1356,7 @@ _SCHEMA_STATEMENTS = [
         turn_key TEXT NOT NULL REFERENCES turns(turn_key),
         target_kind TEXT NOT NULL, span_ids_json TEXT NOT NULL,
         target_label TEXT NOT NULL, comment TEXT NOT NULL,
+        provenance TEXT NOT NULL,
         created_at TEXT NOT NULL)""",
     """CREATE INDEX IF NOT EXISTS idx_human_feedback_turn
         ON human_feedback(turn_key, feedback_id)""",
@@ -1310,6 +1396,7 @@ _SCHEMA_STATEMENTS = [
         status TEXT NOT NULL,
         invalid_reason TEXT,
         invalid_detail TEXT,
+        archived INTEGER NOT NULL DEFAULT 0,
         declared_tasks INTEGER NOT NULL,
         declared_attempts INTEGER NOT NULL,
         required_evidence_segments INTEGER NOT NULL DEFAULT 0,
@@ -1485,7 +1572,8 @@ class ObservabilityStore:
                         "observability schema, fix-49m.3; experiments."
                         "benchmark_id, benchmark_version, benchmark_digest_sha256 "
                         "and experiment_attempts."
-                        "runtime_snapshot_json are create-time columns). Move or "
+                        "runtime_snapshot_json, human_feedback.provenance and "
+                        "experiments.archived are create-time columns). Move or "
                         "delete the file and its -wal/-shm sidecars to start a "
                         f"new store, or open it read-only with a v{found} build."
                     )
@@ -2666,17 +2754,14 @@ class ObservabilityStore:
                 "SELECT * FROM human_feedback WHERE turn_key=? ORDER BY feedback_id",
                 (turn_key,),
             ).fetchall()
-        result = []
-        for row in rows:
-            value = dict(row)
-            value["span_ids"] = json.loads(value.pop("span_ids_json"))
-            result.append(value)
-        return result
+        return [_human_feedback_row(row) for row in rows]
 
     def add_human_feedback(self, turn_key: str, *, target_kind: str,
                            span_ids: list[str], target_label: str,
-                           comment: str) -> None:
-        """Append a human comment after validating its recorded evidence anchor."""
+                           provenance: str, comment: str | None = None,
+                           went_wrong: str = "", worked: str = "",
+                           should_change: str = "") -> None:
+        """Append feedback after validating its provenance and evidence anchor."""
         if not isinstance(turn_key, str) or not turn_key:
             raise ValueError("turn_key is required")
         if target_kind not in ("turn", "phase", "step", "span"):
@@ -2687,10 +2772,16 @@ class ObservabilityStore:
         ids = sorted(set(span_ids))
         if (target_kind == "turn" and ids) or (target_kind != "turn" and not ids):
             raise ValueError("component feedback requires spans; turn feedback has none")
-        if not isinstance(comment, str) or not comment.strip() or len(comment) > 100000:
-            raise ValueError("feedback must contain text (at most 100000 characters)")
+        comment = compose_human_feedback_comment(
+            went_wrong=went_wrong, worked=worked, should_change=should_change,
+            comment=comment,
+        )
         if not isinstance(target_label, str) or not target_label or len(target_label) > 1000:
             raise ValueError("target_label is required (at most 1000 characters)")
+        if provenance not in FEEDBACK_PROVENANCES:
+            raise ValueError(
+                "provenance must be human, coding_agent, or distillation_agent"
+            )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM turns WHERE turn_key=?", (turn_key,)).fetchone() is None:
@@ -2701,10 +2792,10 @@ class ObservabilityStore:
                 raise ValueError("feedback spans must belong to the selected turn")
             conn.execute(
                 "INSERT INTO human_feedback "
-                "(turn_key,target_kind,span_ids_json,target_label,comment,created_at) "
-                "VALUES (?,?,?,?,?,?)",
+                "(turn_key,target_kind,span_ids_json,target_label,comment,provenance,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (turn_key, target_kind, json.dumps(ids), self._scrub(target_label),
-                 self._scrub(comment), _utcnow_iso()),
+                 self._scrub(comment), provenance, _utcnow_iso()),
             )
 
     def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
@@ -3613,6 +3704,18 @@ class ObservabilityStore:
             experiment_id,
         )
 
+    def update_experiment_archived(
+        self, experiment_id: str, archived: bool
+    ) -> None:
+        """Archive visibility is editable metadata, not recorded evidence."""
+        if not isinstance(archived, bool):
+            raise ValueError("archived must be true or false")
+        self._update_experiment(
+            "UPDATE experiments SET archived=? WHERE experiment_id=?",
+            (1 if archived else 0, experiment_id),
+            experiment_id,
+        )
+
     def _update_experiment(
         self, sql: str, params: tuple, experiment_id: str
     ) -> None:
@@ -4495,6 +4598,7 @@ class ObservabilityStore:
             if row is None:
                 return None
             experiment = dict(row)
+            experiment["archived"] = bool(experiment["archived"])
             segments = []
             for seg in conn.execute(
                 """SELECT * FROM experiment_evidence_runs
@@ -4534,7 +4638,7 @@ class ObservabilityStore:
             "e.baseline_experiment_id, e.declared_tasks, e.declared_attempts, "
             "e.invalid_reason, e.workflow_name, e.capture_profile, "
             "e.benchmark_id, e.benchmark_version, e.benchmark_digest_sha256, "
-            "e.created_at, e.completed_at, "
+            "e.archived, e.created_at, e.completed_at, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
             "  WHERE a.experiment_id=e.experiment_id) AS attempts_started, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
@@ -4544,7 +4648,10 @@ class ObservabilityStore:
         )
         params.extend([limit, offset])
         with self._connect() as conn:
-            return [dict(r) for r in conn.execute(query, params).fetchall()]
+            rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+        for row in rows:
+            row["archived"] = bool(row["archived"])
+        return rows
 
     def experiment_attempt_rows(
         self, experiment_id: str, task_id: Optional[str] = None

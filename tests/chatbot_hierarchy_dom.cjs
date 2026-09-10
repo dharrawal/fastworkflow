@@ -41,7 +41,9 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   click(expName);
   await until(()=>d.getElementById('detail').textContent.includes('RECORDED EXPERIMENT'));
   const railView = d.getElementById('detail').textContent;
-  assert.ok(railView.includes('Notes'), railView);
+  assert.ok(railView.includes('Postmortem'), railView);
+  assert.ok(!railView.includes('Save notes'), railView);
+  assert.ok(!railView.includes('Notes'), railView);
   assert.deepEqual([...d.querySelectorAll('#detail dl.kv > dt')].map(e=>e.textContent),
     ['status', 'declared', 'scored attempts', 'pass@1', 'pass^1', 'verdict sources']);
   assert.equal(d.querySelector('#detail details.provenance'), null);
@@ -49,11 +51,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.ok(railView.includes('evidence valid \u00b7 1 segment'), railView);
   const exp = find(expName).parentElement;
   assert.ok(exp.open);
-  d.getElementById('navDistillations').click();
-  assert.equal(summaries().length, 0);
-  assert.ok(d.getElementById('detail').textContent.includes('Distillations are coming soon'));
-  d.getElementById('navBenchmarks').click();
-  await until(()=>d.getElementById('detail').textContent.includes('RECORDED EXPERIMENT'));
+  assert.equal(d.getElementById('navDistillations'), null);
   assert.ok(find(expName).parentElement.classList.contains('selected'));
   // Two routes to one experiment. The card in the benchmark's list and the rail's
   // node both open the recorded run's results; the card used to branch on
@@ -70,7 +68,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.equal(w.benchmarkExperimentSource, eid);
   assert.ok(find('task').parentElement.open);
   click('experiment-turn'); // turns hang off their conversation in the rail
-  await until(()=>d.getElementById('detail').textContent.includes('Human feedback'));
+  await until(()=>d.getElementById('detail').textContent.includes('Feedback'));
   await until(()=>[...d.querySelectorAll('#detail .wfRow')].some(e=>e.textContent.includes('Planning')));
   const planningRow=[...d.querySelectorAll('#detail .wfRow')].find(e=>e.textContent.includes('Planning'));
   assert.equal(planningRow.getAttribute('role'),'button');
@@ -80,7 +78,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.ok(d.querySelector('#detail nav.crumbs').textContent.startsWith('Benchmarks'));
   const crumbs = d.querySelector('#detail nav.crumbs').textContent;
   for (const label of ['Tuning benchmark',expName,'task','experiment-turn','Planning']) assert.ok(crumbs.includes(label), crumbs);
-  assert.ok(d.getElementById('detail').textContent.includes('Human feedback'));
+  assert.ok(d.getElementById('detail').textContent.includes('Feedback'));
   await w.refreshConvs();
   assert.ok(d.querySelector('#detail nav.crumbs').textContent.includes('Planning'));
   assert.equal(find('Planning'), undefined);

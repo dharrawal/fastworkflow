@@ -232,23 +232,29 @@ class TestAdditiveSchema:
         assert {"experiment_id", "task_id", "attempt"} <= conv_cols
         assert {"idx_turns_experiment", "idx_conv_experiment_attempt"} <= indexes
 
-    def test_schema_version_is_three_for_create_time_only_columns(self, db_path):
+    def test_schema_version_is_six_for_create_time_only_columns(self, db_path):
         """fix-42b added create-time-only experiment columns and bumped v1->v2;
         fix-qe2 added experiment_attempts.runtime_snapshot_json and bumped
-        v2->v3. Both are create-time columns with no migration path."""
+        v2->v3; fix-aw5 added feedback in v4; fix-46l.2 added feedback
+        provenance in v5; fix-w6w added experiment archival in v6. All are
+        create-time columns with no migration path."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
             attempt_cols = {
                 r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
             }
+            experiment_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(experiments)")
+            }
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 3
+        assert obs.SCHEMA_VERSION == 6
         assert "runtime_snapshot_json" in attempt_cols
+        assert "archived" in experiment_cols
 
-    def test_a_pre_v3_db_fails_fast_instead_of_migrating(self, db_path):
+    def test_a_pre_v6_db_fails_fast_instead_of_migrating(self, db_path):
         """No legacy support: a populated v1 store is refused on open with a
         reason a human can act on, and is left untouched (not migrated).
 
@@ -298,7 +304,7 @@ class TestAdditiveSchema:
             obs.ObservabilityStore(db_path)
         message = str(excinfo.value)
         assert "schema v1" in message
-        assert "requires v3" in message
+        assert "requires v6" in message
         assert "carries no migration" in message
 
         conn = sqlite3.connect(db_path)
@@ -456,6 +462,30 @@ class TestExperimentDescription:
             store.create_experiment(
                 "exp-1", None, declared_tasks=1, declared_attempts=1
             )
+
+
+class TestExperimentArchive:
+    def test_archive_is_durable_and_included_in_reads(self, store, db_path):
+        store.create_experiment(
+            "exp-1", "first", declared_tasks=1, declared_attempts=1
+        )
+        store.update_experiment_archived("exp-1", True)
+
+        reopened = obs.ObservabilityStore(db_path)
+        assert reopened.get_experiment("exp-1")["archived"] is True
+        assert reopened.list_experiments()[0]["archived"] is True
+
+        reopened.update_experiment_archived("exp-1", False)
+        assert obs.ObservabilityStore(db_path).get_experiment("exp-1")["archived"] is False
+
+    def test_archive_requires_a_boolean_and_an_existing_experiment(self, store):
+        store.create_experiment(
+            "exp-1", "first", declared_tasks=1, declared_attempts=1
+        )
+        with pytest.raises(ValueError):
+            store.update_experiment_archived("exp-1", 1)
+        with pytest.raises(obs.ExperimentNotFound):
+            store.update_experiment_archived("missing", True)
 
 
 class TestInvalidIsTerminal:
@@ -2046,5 +2076,5 @@ class TestRuntimeSnapshotStamp:
             obs.ObservabilityStore(db_path)
         message = str(excinfo.value)
         assert "schema v2" in message
-        assert "requires v3" in message
+        assert "requires v6" in message
         assert "runtime_snapshot_json" in message
