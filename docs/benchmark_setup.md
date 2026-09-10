@@ -25,7 +25,7 @@ a benchmark by name.
 For an in-process harness (after your normal runtime initialization):
 
 ```python
-from fastworkflow.experiment import ExperimentHarness, ExperimentTask
+from fastworkflow.experiment.runner import ExperimentHarness, ExperimentTask
 
 harness = ExperimentHarness.from_benchmark_experiment(
     workflow_folderpath, experiment_id="exp-..."

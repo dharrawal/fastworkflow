@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastworkflow.benchmark_catalog import (
+from fastworkflow.benchmark.catalog import (
     BenchmarkManifestError,
     benchmarks_root,
     list_versions,

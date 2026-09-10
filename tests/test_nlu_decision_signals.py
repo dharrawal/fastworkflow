@@ -12,7 +12,7 @@ functions are pure functions of the capture bag, so most tiers can be covered
 without a model at all — which is the point of building them that way.
 
 *That nothing reads what is recorded* is checked statically, in the same spirit as
-``test_decision_signals.py::test_module_defines_no_decision_function``. The rule
+``test_observability/decision_signals.py::test_module_defines_no_decision_function``. The rule
 enforced here is narrower than "no conditional anywhere" and deliberately so: a
 recorder has to read facts to shape a record. What may never happen is a captured
 *measurement* — a confidence, a distance, a similarity, an assembled
@@ -57,7 +57,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     slot_binding_uncertainty,
 )
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.decision_signals import (
+from fastworkflow.observability.decision_signals import (
     SIGNAL_DOMAINS,
     SLOT_BINDING_SOURCES,
     DecisionUncertainty,
@@ -534,7 +534,7 @@ def test_no_binding_decision_produces_no_record():
 
 
 def test_every_extraction_method_the_emitter_writes_is_a_known_source():
-    """Guards the same drift `test_decision_signals.py` guards, from this side: a
+    """Guards the same drift `test_observability/decision_signals.py` guards, from this side: a
     new `extraction_method` literal must be added to SLOT_BINDING_SOURCES, and the
     correct fix if this fails is to widen the vocabulary deliberately, not here."""
     tree = ast.parse(
@@ -711,7 +711,7 @@ class TestSpansCarryTheRecords:
 # EXP-003 exit criterion 2: nothing reads what is captured
 # ----------------------------------------------------------------------
 
-# Imported from `fastworkflow.decision_signals`; anything one of these produces is
+# Imported from `fastworkflow.observability.decision_signals`; anything one of these produces is
 # a captured record.
 _CONTRACT_NAMES = frozenset({
     "DecisionUncertainty",

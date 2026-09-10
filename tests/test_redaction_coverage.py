@@ -45,8 +45,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus, tracing
-from fastworkflow import observability_store as obs
-from fastworkflow.capture_policy import (
+from fastworkflow.observability import store as obs
+from fastworkflow.observability.capture_policy import (
     CaptureFieldPolicy,
     evidence_policy,
     is_capture_envelope,

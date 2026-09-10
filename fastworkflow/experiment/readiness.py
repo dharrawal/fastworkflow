@@ -1,6 +1,6 @@
 """Credential-free runtime introspection for deployment readiness probes.
 
-Ported (trimmed) from the ido branch's `runtime_readiness.py` (fix-qe2). The
+Ported (trimmed) from the ido branch's `experiment/readiness.py` (fix-qe2). The
 source module reports the planner execution path -- plan decomposition mode,
 execution arm, packing, task-card catalogue, stress-mode deadlines. None of
 that exists on this branch, and none of it is ported: a snapshot field whose
@@ -40,8 +40,8 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-from fastworkflow import observability_store
-from fastworkflow.capture_policy import (
+from fastworkflow.observability import store as observability_store
+from fastworkflow.observability.capture_policy import (
     CAPTURE_POLICY_VERSION,
     CaptureProfileError,
     policy_for_profile,

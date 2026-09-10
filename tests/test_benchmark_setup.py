@@ -7,10 +7,10 @@ import sqlite3
 
 import pytest
 
-from fastworkflow import benchmark_setup as setup
-from fastworkflow import observability_store as obs
-from fastworkflow.benchmark_catalog import load_version, write_version
-from fastworkflow.experiment import ExperimentController, ExperimentHarness
+from fastworkflow.benchmark import setup as setup
+from fastworkflow.observability import store as obs
+from fastworkflow.benchmark.catalog import load_version, write_version
+from fastworkflow.experiment.runner import ExperimentController, ExperimentHarness
 from tests.test_experiment_setup import setup_server  # noqa: F401
 from tests.test_chatbot_benchmarks import _request, workspace_server  # noqa: F401
 from tests.test_experiment_container import _turn_row, _write_turn

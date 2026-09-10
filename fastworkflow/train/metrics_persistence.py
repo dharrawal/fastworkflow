@@ -203,7 +203,8 @@ def persist_train_run_metrics(
     Returns the run_id written, or None when disabled or on failure.
     """
     try:
-        from fastworkflow import observability_store, state_paths
+        from fastworkflow import state_paths
+        from fastworkflow.observability import store as observability_store
 
         if not observability_store.observability_enabled(default_on=True):
             return None

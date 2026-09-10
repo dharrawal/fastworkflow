@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.experiment_setup import (
+from fastworkflow.experiment.setup import (
     ExperimentSetups,
     SetupConflict,
     SCHEMA,

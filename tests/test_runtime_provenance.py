@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from fastworkflow.provenance import (
+from fastworkflow.observability.provenance import (
     LLM_ROLE_VARS,
     ORPHAN_ROLE_VARS,
     EngineProvenance,
@@ -73,7 +73,7 @@ def _metadata(**manifest_fields):
 # ======================================================================
 
 
-@pytest.mark.parametrize("module", ["runtime_manifest.py", "provenance.py"])
+@pytest.mark.parametrize("module", ["runtime_manifest.py", "observability/provenance.py"])
 def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     """Arch §22, checked structurally so it cannot rot.
 
@@ -81,7 +81,7 @@ def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     rule is about what they import, so read the imports rather than trusting a
     comment: any `fastworkflow.*` import must name another declared leaf.
     """
-    leaves = {"fastworkflow.runtime_manifest", "fastworkflow.provenance"}
+    leaves = {"fastworkflow.runtime_manifest", "fastworkflow.observability.provenance"}
     tree = ast.parse((REPO_ROOT / "fastworkflow" / module).read_text(encoding="utf-8"))
 
     imported: list[str] = []
@@ -234,12 +234,12 @@ def test_an_empty_loose_ref_falls_back_to_packed_refs(tmp_path):
 def test_source_version_survives_a_malformed_pyproject(tmp_path, monkeypatch):
     """`tool = "oops"` breaks the .get() chain with AttributeError, which is not
     in the obvious except tuple."""
-    import fastworkflow.provenance as provenance_module
+    import fastworkflow.observability.provenance as provenance_module
 
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
     (tmp_path / "pyproject.toml").write_text('tool = "oops"\n', encoding="utf-8")
-    monkeypatch.setattr(provenance_module, "__file__", str(package_dir / "provenance.py"))
+    monkeypatch.setattr(provenance_module, "__file__", str(package_dir / "observability/provenance.py"))
     assert source_version() is None
 
 

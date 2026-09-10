@@ -8,8 +8,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from fastworkflow.observability_store import ObservabilityStore
-from fastworkflow.observability_workspace import WORKSPACE_SCHEMA
+from fastworkflow.observability.store import ObservabilityStore
+from fastworkflow.observability.workspace import WORKSPACE_SCHEMA
 from fastworkflow.run_chatbot.server import ChatbotServer
 
 

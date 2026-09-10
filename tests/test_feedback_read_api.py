@@ -6,7 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
 
 

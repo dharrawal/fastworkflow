@@ -20,11 +20,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow import tracing
-from fastworkflow.experiment import ExperimentController
-from fastworkflow.observability_workspace import WORKSPACE_SCHEMA
-from fastworkflow.review_adapters import (
+from fastworkflow.experiment.runner import ExperimentController
+from fastworkflow.observability.workspace import WORKSPACE_SCHEMA
+from fastworkflow.review.adapters import (
     exp028_answer_rating_to_sidecar_export,
     ido_rating_to_sidecar_export,
     sidecar_export_to_exp028_answer_rating,

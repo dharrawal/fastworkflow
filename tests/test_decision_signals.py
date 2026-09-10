@@ -30,8 +30,8 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
-import fastworkflow.decision_signals as decision_signals
-from fastworkflow.decision_signals import (
+import fastworkflow.observability.decision_signals as decision_signals
+from fastworkflow.observability.decision_signals import (
     _CONSEQUENCE_ORDER,
     _EFFECT_BASE,
     _REVERSIBILITY_FLOOR,
@@ -469,7 +469,7 @@ def test_slot_binding_vocabulary_matches_what_the_runtime_emits():
     at capture time, which is invisible in a self-consistent unit test.
     """
     source = (
-        Path(inspect.getfile(decision_signals)).parent
+            Path(inspect.getfile(decision_signals)).parent.parent
         / "_workflows"
         / "command_metadata_extraction"
         / "parameter_extraction.py"

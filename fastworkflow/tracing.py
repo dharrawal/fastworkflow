@@ -41,7 +41,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
-from fastworkflow import capture_policy, decision_signals, runtime_manifest
+from fastworkflow import runtime_manifest
+from fastworkflow.observability import capture_policy, decision_signals
 
 logger = logging.getLogger(__name__)
 

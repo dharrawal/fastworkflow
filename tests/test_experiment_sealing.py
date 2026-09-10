@@ -9,9 +9,9 @@ import stat
 
 import pytest
 
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
-from fastworkflow.experiment import ExperimentController, experiment_store_readiness
+from fastworkflow.experiment.runner import ExperimentController, experiment_store_readiness
 
 
 @pytest.fixture

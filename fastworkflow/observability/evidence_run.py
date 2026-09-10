@@ -49,8 +49,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastworkflow import capture_policy, observability_store, state_paths, tracing
-from fastworkflow.provenance import ObservabilityProvenance
+from fastworkflow import state_paths, tracing
+from fastworkflow.observability import capture_policy, store as observability_store
+from fastworkflow.observability.provenance import ObservabilityProvenance
 from fastworkflow.utils.logging import logger
 
 # How often to re-read the persisted health row while waiting for it to advance.

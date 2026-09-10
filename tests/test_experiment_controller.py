@@ -8,8 +8,8 @@ import threading
 
 import pytest
 
-from fastworkflow import observability_store as obs
-from fastworkflow.experiment import (
+from fastworkflow.observability import store as obs
+from fastworkflow.experiment.runner import (
     ExperimentController,
     MissingExperimentLifecycleFeature,
     experiment_store_readiness,

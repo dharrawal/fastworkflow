@@ -3,7 +3,7 @@ from fastworkflow import tracing
 from fastworkflow.command_interfaces import CommandExecutorInterface
 
 from fastworkflow import Action, CommandOutput, ChatSession
-from fastworkflow.execution_recorder import record_execution, recorder_for
+from fastworkflow.observability.execution_recorder import record_execution, recorder_for
 from fastworkflow import ModuleType
 from fastworkflow.utils.signatures import InputForParamExtraction
 from pathlib import Path

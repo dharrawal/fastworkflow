@@ -178,7 +178,7 @@ def source_version() -> Optional[str]:
     This is the one that matches the code actually running when the two differ.
     """
     try:
-        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
         if not pyproject.is_file():
             return None
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
@@ -382,7 +382,7 @@ def capture_engine_provenance() -> EngineProvenance:
     that `source_hash` was computed from, so they cannot come to describe
     different codebases.
     """
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parent.parent
     repo_root = root.parent
     entries = imported_package_entries()
     installed = installed_version()

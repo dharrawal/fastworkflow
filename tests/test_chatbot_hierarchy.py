@@ -6,9 +6,9 @@ import subprocess
 
 import pytest
 
-from fastworkflow import benchmark_setup as setup
-from fastworkflow import observability_store as obs
-from fastworkflow.experiment import ExperimentController
+from fastworkflow.benchmark import setup as setup
+from fastworkflow.observability import store as obs
+from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.run_chatbot.navigation import build_navigation
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests.test_chatbot_benchmarks import _request, experiment_server, workflow_dir, workspace_server

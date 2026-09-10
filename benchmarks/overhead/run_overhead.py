@@ -454,7 +454,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     core = getattr(chat_session, "_core", None)
     if args.observability == "on":
         try:
-            from fastworkflow.observability_store import get_observability_sink
+            from fastworkflow.observability.store import get_observability_sink
             sink = get_observability_sink(workflow)
         except Exception as exc:
             notes.append(f"get_observability_sink unavailable: {exc!r}")

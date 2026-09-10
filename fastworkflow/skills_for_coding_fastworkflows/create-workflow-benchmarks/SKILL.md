@@ -40,7 +40,7 @@ Benchmarks navigation buttons are no longer part of this flow.
 For the UI's simple title/prompt model, use the setup API:
 
 ```python
-from fastworkflow import benchmark_setup
+from fastworkflow.benchmark import setup as benchmark_setup
 
 version = benchmark_setup.save_benchmark(workflow_folderpath, {
     "title": "Order support regressions",
@@ -60,10 +60,10 @@ for new rows. A stale version raises `BenchmarkSetupConflict`: reload and reconc
 silently overwriting another edit. Existing descriptions and opaque payloads survive this editor;
 new simple-editor tasks have empty descriptions and payloads.
 
-For explicit IDs or richer driver data, use `fastworkflow.benchmark_catalog.write_version`:
+For explicit IDs or richer driver data, use `fastworkflow.benchmark.catalog.write_version`:
 
 ```python
-from fastworkflow.benchmark_catalog import write_version
+from fastworkflow.benchmark.catalog import write_version
 
 version = write_version(workflow_folderpath, {
     "benchmark_id": "order-support",

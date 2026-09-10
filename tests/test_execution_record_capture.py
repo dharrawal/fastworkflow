@@ -27,9 +27,9 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnResult, tracing
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.execution_recorder import record_execution
+from fastworkflow.observability.execution_recorder import record_execution
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager

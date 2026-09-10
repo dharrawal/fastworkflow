@@ -197,7 +197,7 @@ Verified with `git show 9904df5:<path>` on 2026-09-06:
 | `ChatSession.start_workflow(path, keep_alive=True)` | `chat_session.py:152` |
 | `ChatSession.user_message_queue`, `.command_output_queue`, `.command_trace_queue` (None sentinel per turn) | `chat_session.py:297,301,305`; sentinel `workflow_execution_context.py:1417` |
 | `ChatSession.workflow_tool_agent` (`max_iters`, `iteration_counter` attrs) | `chat_session.py:267`; `utils/react.py:71-72` |
-| `fastworkflow.observability_store.get_observability_sink(workflow_path)` and `sink.flush()`, `sink.close()`, `sink.store.mint_conversation_id(...)` | `observability_store.py:1814,1530,1539,1275+`; used identically by `run/__main__.py:191-216` |
+| `fastworkflow.observability.store.get_observability_sink(workflow_path)` and `sink.flush()`, `sink.close()`, `sink.store.mint_conversation_id(...)` | `observability/store.py:1814,1530,1539,1275+`; used identically by `run/__main__.py:191-216` |
 | `ChatSession._core.set_trace_sink(...)`, `.bind_observability_identity(conversation_id=...)`, `.observability_channel_id` | private, but this is exactly what the CLI does (`run/__main__.py:203-215`); guarded with `set_trace_sink` on ChatSession preferred if it ever appears |
 | `fastworkflow.model_pipeline_training.is_workflow_trained(path)` | `model_pipeline_training.py:746` (guarded) |
 | `fastworkflow.state_paths.observability_db(path)` | `state_paths.py:134` (guarded, falls back to a glob under the state root) |

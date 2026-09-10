@@ -102,7 +102,7 @@ def _flush_observability(workflow_path: str) -> None:
     blocks until enqueued writes land. get_observability_sink returns the SAME
     process-wide sink the server's runtimes attached (one sink per DB path).
     """
-    from fastworkflow.observability_store import get_observability_sink
+    from fastworkflow.observability.store import get_observability_sink
 
     sink = get_observability_sink(workflow_path)
     if sink is None:

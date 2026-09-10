@@ -33,8 +33,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus, tracing
-from fastworkflow import observability_store as obs
-from fastworkflow.evidence_run import (
+from fastworkflow.observability import store as obs
+from fastworkflow.observability.evidence_run import (
     EvidenceRun,
     EvidenceRunInvalid,
     capture_observability_provenance,
@@ -363,7 +363,7 @@ def test_suppression_propagates_to_a_child_process(tmp_path):
     that actually prunes — the env var is what crosses the boundary."""
     script = (
         "import fastworkflow;"
-        "from fastworkflow import observability_store as obs;"
+        "from fastworkflow.observability import store as obs;"
         "print(obs.pruning_suppressed())"
     )
     env = dict(os.environ, FW_OBS_SUPPRESS_PRUNE="1")

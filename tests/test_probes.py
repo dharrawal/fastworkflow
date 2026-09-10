@@ -290,7 +290,7 @@ class TestObservabilityRegimeIsAssertable:
         assert "observability" not in client.get("/probes/readyz").json()
 
     def test_the_regime_reports_suppression_in_effect(self, app_module, monkeypatch):
-        from fastworkflow import observability_store as obs
+        from fastworkflow.observability import store as obs
 
         client = TestClient(app_module.app)
         app_module.readiness_state.set_ready(True)
@@ -303,7 +303,7 @@ class TestObservabilityRegimeIsAssertable:
 
     def test_the_regime_reports_suppression_not_in_effect(self, app_module, monkeypatch):
         """The answer a harness most needs: it asked, and it did NOT take hold."""
-        from fastworkflow import observability_store as obs
+        from fastworkflow.observability import store as obs
 
         client = TestClient(app_module.app)
         app_module.readiness_state.set_ready(True)
@@ -316,7 +316,7 @@ class TestObservabilityRegimeIsAssertable:
     def test_the_capture_profile_rides_along(self, app_module):
         """Two runs under different profiles are not comparable attribute by
         attribute, so the bundle has to cite the profile the SERVER used."""
-        from fastworkflow import observability_store as obs
+        from fastworkflow.observability import store as obs
 
         client = TestClient(app_module.app)
         app_module.readiness_state.set_ready(True)

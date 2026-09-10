@@ -20,7 +20,7 @@ from pathlib import Path
 
 import fastworkflow
 from fastworkflow import TurnStatus
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 
 CHANNEL = "shared"
 

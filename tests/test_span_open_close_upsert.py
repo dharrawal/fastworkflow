@@ -24,7 +24,7 @@ import uuid
 
 import pytest
 
-import fastworkflow.observability_store as obs
+import fastworkflow.observability.store as obs
 from fastworkflow import tracing
 
 

@@ -36,9 +36,9 @@ from pathlib import Path
 import pytest
 
 from fastworkflow import state_paths, tracing
-from fastworkflow import observability_store as obs
-from fastworkflow.experiment import ExperimentController
-from fastworkflow.observability_workspace import (
+from fastworkflow.observability import store as obs
+from fastworkflow.experiment.runner import ExperimentController
+from fastworkflow.observability.workspace import (
     WORKSPACE_SCHEMA,
     UnknownWorkspaceStore,
     load_observability_workspace,

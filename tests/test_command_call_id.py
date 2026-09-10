@@ -166,7 +166,7 @@ def test_the_join_survives_turn_record_serialization(ctx, sink):
     Stamping the span and the in-memory object is not enough: the correlation is
     only durable if the id survives the projection the store persists.
     """
-    from fastworkflow import observability_store as obs
+    from fastworkflow.observability import store as obs
 
     ctx.process_action_turn(_action())
 

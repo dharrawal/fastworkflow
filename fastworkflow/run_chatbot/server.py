@@ -44,9 +44,10 @@ from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from fastworkflow import benchmark_setup, state_paths
-from fastworkflow.experiment_setup import ExperimentSetups, SetupConflict
-from fastworkflow.benchmark_catalog import (
+from fastworkflow import state_paths
+from fastworkflow.benchmark import setup as benchmark_setup
+from fastworkflow.experiment.setup import ExperimentSetups, SetupConflict
+from fastworkflow.benchmark.catalog import (
     BenchmarkAlreadyExistsError,
     BenchmarkManifestError,
     list_benchmarks,
@@ -56,14 +57,14 @@ from fastworkflow.benchmark_catalog import (
     write_analysis,
     write_version,
 )
-from fastworkflow.observability_store import (
+from fastworkflow.observability.store import (
     FEATURE_EXPERIMENTS_V1,
     ExperimentNotFound,
     IncompatibleObservabilityDB,
     ObservabilityStore,
     ReadOnlyObservabilityStore,
 )
-from fastworkflow.observability_workspace import (
+from fastworkflow.observability.workspace import (
     WORKSPACE_SCHEMA,
     ObservabilityWorkspace,
     UnknownLogicalExperiment,
@@ -73,7 +74,7 @@ from fastworkflow.observability_workspace import (
     WorkspaceIntegrityError,
     load_observability_workspace,
 )
-from fastworkflow.review_sidecar import (
+from fastworkflow.review.sidecar import (
     ReviewAuthorizationError,
     ReviewNotFoundError,
     ReviewSidecar,

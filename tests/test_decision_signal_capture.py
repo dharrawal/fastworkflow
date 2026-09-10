@@ -1,6 +1,6 @@
 """fw.nlu.intent spans carry decision_uncertainty under real traced flows.
 
-Complements ``tests/test_nlu_decision_signals.py``: that file proves the
+Complements ``tests/test_nlu_observability/decision_signals.py``: that file proves the
 assembling functions and static no-read guards; this one proves the structured
 record actually lands on spans emitted by the real resolution path against the
 trained ``hello_world`` workflow — no mocks at the NLU boundary.
@@ -20,7 +20,7 @@ from fastworkflow._workflows.command_metadata_extraction.intent_detection import
     ESCALATION_OUTCOMES,
 )
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.decision_signals import DecisionUncertainty
+from fastworkflow.observability.decision_signals import DecisionUncertainty
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 HELLO_WORLD = str(

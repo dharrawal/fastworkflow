@@ -35,7 +35,7 @@ import urllib.request
 import pytest
 from fastapi.testclient import TestClient
 
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
 from fastworkflow.cli import add_run_chatbot_parser
 from fastworkflow.run_chatbot import launcher

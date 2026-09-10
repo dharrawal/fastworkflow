@@ -1,6 +1,6 @@
 """The capture policy where it meets the store (arch §6.6 / §12.0 delta 3).
 
-`tests/test_capture_policy.py` covers the policy in isolation; this file covers
+`tests/test_observability/capture_policy.py` covers the policy in isolation; this file covers
 the wiring, against real SQLite in tmp_path per the no-mocks-for-stores rule.
 
 Three properties are worth more than the rest:
@@ -32,8 +32,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus
-from fastworkflow import observability_store as obs
-from fastworkflow.capture_policy import (
+from fastworkflow.observability import store as obs
+from fastworkflow.observability.capture_policy import (
     CaptureFieldPolicy,
     CaptureProfileError,
     debug_policy,

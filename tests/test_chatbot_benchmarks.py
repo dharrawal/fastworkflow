@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import benchmark_setup
-from fastworkflow import observability_store as obs
+from fastworkflow.benchmark import setup as benchmark_setup
+from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
-from fastworkflow.benchmark_catalog import (
+from fastworkflow.benchmark.catalog import (
     SCHEMA,
     benchmarks_root,
     load_version,

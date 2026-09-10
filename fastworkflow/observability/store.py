@@ -51,7 +51,7 @@ from typing import Any, Mapping, Optional
 from pydantic import BaseModel, ConfigDict
 
 import fastworkflow
-from fastworkflow import capture_policy as capture_policy_module
+from fastworkflow.observability import capture_policy as capture_policy_module
 from fastworkflow import runtime_manifest, state_paths, tracing
 from fastworkflow.utils.logging import logger
 

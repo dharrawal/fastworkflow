@@ -54,11 +54,11 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow import tracing
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.evidence_run import capture_observability_provenance
-from fastworkflow.provenance import ObservabilityProvenance
+from fastworkflow.observability.evidence_run import capture_observability_provenance
+from fastworkflow.observability.provenance import ObservabilityProvenance
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager

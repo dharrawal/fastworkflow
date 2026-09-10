@@ -15,8 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastworkflow import observability_store as obs
-from fastworkflow.observability_workspace import (
+from fastworkflow.observability import store as obs
+from fastworkflow.observability.workspace import (
     WORKSPACE_SCHEMA,
     UnknownWorkspaceStore,
     WorkspaceIntegrityError,

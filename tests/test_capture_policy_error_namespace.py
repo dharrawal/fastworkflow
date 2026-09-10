@@ -13,12 +13,12 @@ only bites a deployment that has declared per-command rules — which is the one
 cared enough to declare them.
 """
 
-from fastworkflow.capture_policy import (
+from fastworkflow.observability.capture_policy import (
     CaptureFieldPolicy,
     evidence_policy,
     is_capture_envelope,
 )
-from fastworkflow.observability_store import _apply_capture_policy
+from fastworkflow.observability.store import _apply_capture_policy
 
 
 def _record(command_name, *, success, response="the response", artifacts=None,

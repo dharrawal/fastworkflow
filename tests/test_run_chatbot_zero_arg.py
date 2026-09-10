@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import observability_store as obs
-from fastworkflow.benchmark_catalog import benchmarks_root, load_version, write_version
-from fastworkflow.experiment import ExperimentController
-from fastworkflow.observability_workspace import (
+from fastworkflow.observability import store as obs
+from fastworkflow.benchmark.catalog import benchmarks_root, load_version, write_version
+from fastworkflow.experiment.runner import ExperimentController
+from fastworkflow.observability.workspace import (
     WORKSPACE_SCHEMA,
     WorkspaceManifestError,
     load_observability_workspace,

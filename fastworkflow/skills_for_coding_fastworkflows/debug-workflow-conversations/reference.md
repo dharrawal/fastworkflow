@@ -1,7 +1,7 @@
 # observability.sqlite3 — the read contract
 
 Reference for `debug-workflow-conversations` (see SKILL.md for the triage
-method). The current source uses `SCHEMA_VERSION = 4` in `observability_store.py`.
+method). The current source uses `SCHEMA_VERSION = 4` in `observability/store.py`.
 Readers check compatibility; older evidence is not migrated by this version. Preserve it and
 use its writer's framework version. Inspect `PRAGMA user_version` read-only when diagnosing a
 mismatch, rather than forcing a version number or adding columns.
@@ -12,7 +12,7 @@ mismatch, rather than forcing a version number or adding columns.
 from fastworkflow import state_paths
 db_path = state_paths.observability_db("<workflow_folder>")
 
-from fastworkflow.observability_store import ReadOnlyObservabilityStore
+from fastworkflow.observability.store import ReadOnlyObservabilityStore
 store = ReadOnlyObservabilityStore(db_path)   # mode=ro; cannot create/migrate/write
 ```
 
@@ -24,7 +24,7 @@ the file on construction.
 
 ## Relevant tables and joins
 
-Use the installed `observability_store.py` for the exact schema; this is a navigation map, not
+Use the installed `observability/store.py` for the exact schema; this is a navigation map, not
 DDL to recreate or upgrade an evidence database.
 
 | Table | Read purpose and identity |
@@ -263,7 +263,7 @@ Supported `target_kind` values are `turn`, `phase`, `step`, `span`:
 
 ```python
 import json
-from fastworkflow.observability_store import ReadOnlyObservabilityStore
+from fastworkflow.observability.store import ReadOnlyObservabilityStore
 
 store = ReadOnlyObservabilityStore(db_path)
 turn = store.get_turn(turn_key)

@@ -36,8 +36,8 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
-import fastworkflow.capture_policy as capture_policy
-from fastworkflow.capture_policy import (
+import fastworkflow.observability.capture_policy as capture_policy
+from fastworkflow.observability.capture_policy import (
     _PROFILE_DEFAULTS,
     _VOCABULARY_MAX_BYTES,
     CAPTURE_ENVELOPE_MARKER,

@@ -3,7 +3,7 @@
 Integration tests against a real SQLite store, the real `todo_list_workflow`,
 and the real stdlib chatbot server on an ephemeral port. No Mock fixtures, per
 `.cursor/rules/testing_rules.mdc` — the fakes stop at the NLU/command boundary,
-which is the same line `tests/test_observability_store.py` draws.
+which is the same line `tests/test_observability/store.py` draws.
 
 Design: `docs/experiment_container_design.md`. Each test names the ruling it
 pins, because several of these exist to prevent a *silent* wrong answer rather
@@ -27,10 +27,10 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.experiment import (
+from fastworkflow.experiment.runner import (
     ExperimentHarness,
     ExperimentTask,
     channel_for,
@@ -85,7 +85,7 @@ def deterministic_commands(monkeypatch):
     """Every command succeeds with a fixed response.
 
     The fake stops at `CommandExecutor.invoke_command`, the same boundary
-    `tests/test_observability_store.py` fakes: the workflow, the WEC, the turn
+    `tests/test_observability/store.py` fakes: the workflow, the WEC, the turn
     accumulator, the sink and the store are all real.
     """
 
@@ -1463,7 +1463,7 @@ class TestHarness:
         `sink_for_db_path` cannot see it and `quiesced()` cannot be called on
         it — the same blindness this process has toward a writer in another
         process, which is the topology `_external_writer` exists to simulate in
-        `tests/test_evidence_run.py`. There is nothing to hold still, so the
+        `tests/test_observability/evidence_run.py`. There is nothing to hold still, so the
         only honest answer is the one fix-7de kept: refuse.
         """
         db_path = state_paths.observability_db(todo_workflow_path)
@@ -1553,7 +1553,7 @@ class TestDeterminismSeams:
 class TestDerivedOutcomeIsNotAScore:
     def test_the_fallback_is_named_for_what_it_measures(self):
         """`[XR13]`: it reports a command-failure signal, not "the task passed"."""
-        from fastworkflow.experiment import AttemptRun
+        from fastworkflow.experiment.runner import AttemptRun
 
         task = ExperimentTask(task_id="t0")
         completed = type("S", (), {"value": "completed"})()
@@ -1566,7 +1566,7 @@ class TestDerivedOutcomeIsNotAScore:
         assert detail["predicate"] == "no_command_reported_failure"
 
     def test_an_unanswered_suspension_is_incomplete_not_a_fail(self):
-        from fastworkflow.experiment import AttemptRun
+        from fastworkflow.experiment.runner import AttemptRun
 
         awaiting = type("S", (), {"value": "awaiting_user"})()
         suspended = type("O", (), {"status": awaiting, "success": False})()
@@ -1969,7 +1969,7 @@ class TestRuntimeSnapshotStamp:
 
     @staticmethod
     def _controller(db_path):
-        from fastworkflow.experiment import ExperimentController
+        from fastworkflow.experiment.runner import ExperimentController
 
         store = obs.ObservabilityStore(db_path)
         controller = ExperimentController(

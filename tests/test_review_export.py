@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastworkflow.review_sidecar import REVIEW_DATABASE_NAME, ReviewSidecar
+from fastworkflow.review.sidecar import REVIEW_DATABASE_NAME, ReviewSidecar
 
 
 def _assignment() -> dict:

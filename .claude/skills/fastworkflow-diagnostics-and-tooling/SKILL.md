@@ -294,7 +294,7 @@ Re-verification one-liners for volatile facts:
 | CommandRouter decision rule / thresholds | `sed -n '289,335p' fastworkflow/model_pipeline_training.py` |
 | trained-check semantics | `grep -n "def is_workflow_trained" -A 15 fastworkflow/model_pipeline_training.py` |
 | action-log lifecycle + clear points | `grep -rn "clear_action_log\|append_action_log" fastworkflow/*.py` |
-| observability DB path + schema | `grep -n "def observability_db" -A 8 fastworkflow/state_paths.py; grep -n "_SCHEMA_STATEMENTS" -A 45 fastworkflow/observability_store.py` |
+| observability DB path + schema | `grep -n "def observability_db" -A 8 fastworkflow/state_paths.py; grep -n "_SCHEMA_STATEMENTS" -A 45 fastworkflow/observability/store.py` |
 | trace event emission sites | `grep -n "CommandTraceEvent" fastworkflow/workflow_agent.py fastworkflow/workflow_execution_context.py` |
 | server trace dict keys | `grep -n "_format_trace_event" -A 14 fastworkflow/run_fastapi_mcp/utils.py` |
 | turn response body keys | `grep -n "def render_turn_response" -A 40 fastworkflow/run_fastapi_mcp/turns.py` |

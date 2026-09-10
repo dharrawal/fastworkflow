@@ -7,8 +7,8 @@ import sqlite3
 
 import pytest
 
-from fastworkflow import observability_store as obs
-from fastworkflow.benchmark_catalog import (
+from fastworkflow.observability import store as obs
+from fastworkflow.benchmark.catalog import (
     BenchmarkManifestError,
     benchmarks_root,
     load_analysis,

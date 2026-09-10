@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import observability_store as obs
-from fastworkflow.benchmark_catalog import write_version
-from fastworkflow.experiment import (
+from fastworkflow.observability import store as obs
+from fastworkflow.benchmark.catalog import write_version
+from fastworkflow.experiment.runner import (
     BenchmarkPinDigestMismatch,
     ExperimentController,
     ExperimentHarness,

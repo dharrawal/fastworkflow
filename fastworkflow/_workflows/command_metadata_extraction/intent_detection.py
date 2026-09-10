@@ -9,7 +9,7 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow import NLUPipelineStage, tracing
 from fastworkflow.cache_matching import cache_match, store_utterance_cache
-from fastworkflow.decision_signals import (
+from fastworkflow.observability.decision_signals import (
     DecisionUncertainty,
     UncertaintySignal,
     ambiguity_set_size,

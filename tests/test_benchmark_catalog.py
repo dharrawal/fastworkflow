@@ -7,7 +7,7 @@ from enum import Enum
 
 import pytest
 
-from fastworkflow.benchmark_catalog import (
+from fastworkflow.benchmark.catalog import (
     SCHEMA,
     BenchmarkAlreadyExistsError,
     BenchmarkManifestError,

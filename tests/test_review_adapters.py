@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.review_adapters import (
+from fastworkflow.review.adapters import (
     exp028_answer_rating_to_sidecar_export,
     ido_rating_to_sidecar_export,
     sidecar_export_to_exp028_answer_rating,

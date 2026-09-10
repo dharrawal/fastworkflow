@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from fastworkflow.review_sidecar import (
+from fastworkflow.review.sidecar import (
     REVIEW_DATABASE_NAME,
     ReviewAuthorizationError,
     ReviewSidecar,

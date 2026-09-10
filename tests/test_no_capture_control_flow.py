@@ -13,7 +13,7 @@ Two halves, because either alone can pass while the property is false:
 **Structural.** An AST pass over the three runtime files this slice touched,
 asserting no captured value reaches a condition — including via a boolean
 computed first and branched on later, which a naive `if` scan would miss. Modelled
-on `test_module_defines_no_decision_function` in tests/test_decision_signals.py.
+on `test_module_defines_no_decision_function` in tests/test_observability/decision_signals.py.
 
 **Behavioral.** The same command run under different capture configurations must
 produce byte-identical outcomes. The structural test can only see the files it
@@ -32,7 +32,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import tracing
-from fastworkflow.capture_policy import HMAC_KEY_VAR
+from fastworkflow.observability.capture_policy import HMAC_KEY_VAR
 from fastworkflow.runtime_manifest import (
     CommandDeclaration,
     EffectContract,
@@ -48,9 +48,9 @@ from tests.todo_list_workflow.application.todo_manager import TodoListManager
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The runtime files this slice added capture to. Deliberately not
-# `capture_policy.py` or `decision_signals.py`: those legitimately validate their
+# `observability/capture_policy.py` or `observability/decision_signals.py`: those legitimately validate their
 # own fields (a `ConsequenceAssessment` that could grade below its floor is the
-# defect their validators exist to refuse), and tests/test_decision_signals.py
+# defect their validators exist to refuse), and tests/test_observability/decision_signals.py
 # already pins that neither exports anything to branch on.
 SCANNED_FILES = (
     "fastworkflow/command_executor.py",

@@ -46,9 +46,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 import fastworkflow
-from fastworkflow import evidence_run as evidence_run_module
-from fastworkflow import observability_store, state_paths
-from fastworkflow.benchmark_catalog import load_version
+from fastworkflow.observability import evidence_run as evidence_run_module
+from fastworkflow import state_paths
+from fastworkflow.observability import store as observability_store
+from fastworkflow.benchmark.catalog import load_version
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -451,7 +452,7 @@ class ExperimentController:
     ) -> None:
         # A UI-created identity pins the benchmark even when a driver supplies
         # only experiment/task IDs. Unregistered experiments keep their API.
-        from fastworkflow import benchmark_setup
+        from fastworkflow.benchmark import setup as benchmark_setup
 
         folder = workflow_folderpath or self.workflow_folderpath
         registration = None
@@ -794,7 +795,7 @@ class ExperimentHarness:
         Task prompts are optional in setup, so the harness supplies actual
         messages through ExperimentTask as usual. No model runs here.
         """
-        from fastworkflow.benchmark_setup import experiment_manifest
+        from fastworkflow.benchmark.setup import experiment_manifest
 
         record, _ = experiment_manifest(workflow_folderpath, experiment_id)
         # The registration's description is a default, not an override: a runner

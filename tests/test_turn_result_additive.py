@@ -41,8 +41,8 @@ from pydantic import ValidationError
 
 import fastworkflow
 from fastworkflow import TurnResult, TurnStatus, mint_turn_key
-from fastworkflow import observability_store as obs
-from fastworkflow.capture_policy import evidence_policy
+from fastworkflow.observability import store as obs
+from fastworkflow.observability.capture_policy import evidence_policy
 from fastworkflow.turn import (
     TURN_CAPTURE_CONTRACT_VERSION,
     ExecutionRecordRef,

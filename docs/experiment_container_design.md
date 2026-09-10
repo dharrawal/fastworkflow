@@ -55,13 +55,13 @@ What exists, and why each is not this:
 
 | What exists | Why it is not an experiment container |
 |---|---|
-| `observability.sqlite3` is three-level — channel → conversation → turn (`observability_store.py:1050,1058`), with `idx_turns_conv` and the shipped `/api/channels`, `/api/conversations`, `/api/turns` — and the SPA already nests those three levels (`index.html:736-746,767-787`) | The read shape generalises for free. The missing thing is a **grouping dimension**, not a viewer. |
-| `evidence_run.py` mints a `run_id` per measured run (`:267`) and asserts zero-drop, prune suppression, archival and provenance | That `run_id` exists **only** inside the dict `EvidenceRun.as_record()` returns (`:141-158`). **No column anywhere joins a turn back to the run it belonged to.** That is the gap in one sentence. |
+| `observability.sqlite3` is three-level — channel → conversation → turn (`observability/store.py:1050,1058`), with `idx_turns_conv` and the shipped `/api/channels`, `/api/conversations`, `/api/turns` — and the SPA already nests those three levels (`index.html:736-746,767-787`) | The read shape generalises for free. The missing thing is a **grouping dimension**, not a viewer. |
+| `observability/evidence_run.py` mints a `run_id` per measured run (`:267`) and asserts zero-drop, prune suppression, archival and provenance | That `run_id` exists **only** inside the dict `EvidenceRun.as_record()` returns (`:141-158`). **No column anywhere joins a turn back to the run it belonged to.** That is the gap in one sentence. |
 | `distillation_runs` (`:1095-1125`) is one row per compared **message** | A single trial, one level *below* a task attempt. |
 | `train_runs` (`:1087`) | A training publication, unrelated to task execution. |
 | `fix-9eg.3`'s aggregate views | Aggregate over whatever turns are in the DB, with no experiment boundary to `GROUP BY`. That bead depends on `fix-bn1.2` for exactly this reason. |
 
-`evidence_run()` has **no production callers today** — only `tests/test_evidence_run.py`.
+`evidence_run()` has **no production callers today** — only `tests/test_observability/evidence_run.py`.
 So `fix-bn1.4`'s harness is the first real consumer, and there is no existing
 bundle-writing code whose `as_record()` → column mapping can be copied.
 
@@ -110,7 +110,7 @@ Recorded here because it is the first thing anyone proposes.
    the ABC at `session_state_store.py:146,150,154` and the disk implementation at
    `:343,375,392`. All tasks would share one slot.
 3. **Topic uniquification is channel-scoped.** `_unique_topic_in_txn`
-   (`observability_store.py:1672`) suffixes collisions across the channel, so
+   (`observability/store.py:1672`) suffixes collisions across the channel, so
    repeating a task set inside one channel yields `Task 3`, `Task 3 1`,
    `Task 3 2` — titles stop being join keys exactly when they are needed as
    join keys.
@@ -136,7 +136,7 @@ before any task runs.
 It is **not** `EvidenceRun.run_id`, for one reason that cannot be worked around:
 
 > An experiment may span more than one evidence run. `evidence_run()` is a
-> context manager whose `run_id` is minted at entry (`evidence_run.py:267`) and
+> context manager whose `run_id` is minted at entry (`observability/evidence_run.py:267`) and
 > whose verdict is only meaningful after the block ends (`:123-134` —
 > `delta is None` ⇒ invalid). A harness that crashes and resumes opens a
 > **second** `evidence_run()` block and gets a **second** `run_id`. If
@@ -153,7 +153,7 @@ phrase "the `EvidenceRun.as_record()` observability block" is ambiguous:
 `record["observability"]` alone is the `ObservabilityProvenance` sub-dict and
 carries neither the run id, nor `valid`, nor `problems`, nor the archive digest.
 The full dict is already JSON-round-trippable (asserted at
-`tests/test_evidence_run.py:422`).
+`tests/test_observability/evidence_run.py:422`).
 
 Validity across segments is a conjunction: an experiment can be `complete` only
 if **every** segment row has `valid = 1`.
@@ -211,7 +211,7 @@ filters need no join. The same argument applies here, with one exclusion:
 ## 4. Schema `[XR5]`
 
 Inherited from `fix-sb8`, **not re-litigated**. `[DR28]` (recorded at
-`observability_store.py:1385-1399`) abandoned `user_version` gating: the premise
+`observability/store.py:1385-1399`) abandoned `user_version` gating: the premise
 "schema v1 was never shipped" expired at v3.2.0, so two released builds already
 disagree about shape at the same `user_version`. Readers feature-detect.
 
@@ -256,7 +256,7 @@ Concretely — and this is **two halves, not one**, which revision 1 got wrong:
 5. `_load_features`' PRAGMA fallback (`:1477-1485`) gains an arm: a DB whose
    `turns` table has `experiment_id` but whose marker is missing is
    `experiments_v1`.
-6. `SCHEMA_VERSION` **stays 1**. `tests/test_observability_store.py:1117`
+6. `SCHEMA_VERSION` **stays 1**. `tests/test_observability/store.py:1117`
    asserts it, and a bump would also change every `provenance.db_schema_version`
    and every `archive["schema_version"]` already recorded.
 
@@ -381,7 +381,7 @@ of each other.
 `TurnResult` (`turn.py:405-450`, whose docstring requires "appended, never
 reordered", with defaults — the `execution_records`/`routing_events` precedent at
 `:449-450`), passed at `:1282`, projected in `serialize_turn_result`'s `turn_row`
-literal (`observability_store.py:1009-1037`).
+literal (`observability/store.py:1009-1037`).
 
 `upsert_turn_row` needs **no change**: it derives its column list from
 `turn_row.keys()` (`:1955-1963`). But that cuts both ways —
@@ -423,7 +423,7 @@ Four ids, three of them spelled `run_id`:
 | Id | Format | Where |
 |---|---|---|
 | distillation run | `run-<12 hex>` | `distillation_runs.run_id` |
-| evidence run | `run-<YYYYmmddTHHMMSSZ>-<8 hex>` | `evidence_run.py:267`, no table today |
+| evidence run | `run-<YYYYmmddTHHMMSSZ>-<8 hex>` | `observability/evidence_run.py:267`, no table today |
 | train run | `<YYYYmmddTHHMMSS>-<8 hex>` | `train_runs.run_id` |
 | replay | `rpl-…` | `distillation_runs.run_id` under replay |
 
@@ -435,7 +435,7 @@ point `run_id` is ambiguous in SQL.
 Ruling: **`EvidenceRun`'s default prefix becomes `evr-`**, and the column is
 `evidence_run_id`. Cheap and safe: no DB row is keyed on it, no id is derived
 from it, and every test passes an explicit `run_id`. The archive filename
-(`evidence_run.py:388`) changes shape, which no shipped code parses.
+(`observability/evidence_run.py:388`) changes shape, which no shipped code parses.
 
 Do **not** touch `distillation._new_run_id()`'s output: `insight_id` and
 `divergence_id` are seeded from it (`distillation.py:100`,
@@ -451,7 +451,7 @@ introduced.
 ## 6. Capture policy `[XR6]` `[XR7]` `[XR8]` `[XR20]`
 
 `FW-REQ-002` clause 3 requires every captured field to have a **declared**
-policy. The module comment at `observability_store.py:276-290` is explicit that
+policy. The module comment at `observability/store.py:276-290` is explicit that
 each non-`TurnResult` surface is "decided here rather than by omission —
 including the three that are deliberately scrub-only". This section is that
 decision for the fourth surface, and revision 2 reverses two of revision 1's
@@ -460,14 +460,14 @@ rulings on it.
 ### 6.1 The constraint that decides it
 
 Under the `evidence` profile, `user-text` is **omitted**, not bounded
-(`capture_policy.py:109-110`) — "a bounded prefix of arbitrary text is still
+(`observability/capture_policy.py:109-110`) — "a bounded prefix of arbitrary text is still
 arbitrary text". `opaque-payload` is **omitted** too (`:104-106`).
 `controlled-vocabulary` bounds at 256 bytes (`:130`). `identifier` refuses
 `bounded-text` outright at policy-construction time (`:200-206`).
 
 So no *classification* produces "bounded but readable". Only an explicitly
 declared `CaptureFieldPolicy` does — and **`resolve_capture_policy()`
-(`observability_store.py:232-245`) calls `policy_for_profile(name)` with no
+(`observability/store.py:232-245`) calls `policy_for_profile(name)` with no
 `field_policies` at all.** There is today no runtime surface through which a
 deployment can declare one. Verified.
 
@@ -570,7 +570,7 @@ Revision 1 put a JSON array in `experiments.provenance_json` classified
 `opaque-payload` and policed. Two blocking findings:
 
 1. **`opaque-payload` maps to `omit` under `evidence`, not to a digest**
-   (`capture_policy.py:104-106`). The entire `as_record()` array — `valid`,
+   (`observability/capture_policy.py:104-106`). The entire `as_record()` array — `valid`,
    `problems`, `writer_health_delta`, `archive` — would be erased under the one
    profile an evidence-grade experiment runs in. (The stated *reason* was wrong
    too: `ObservabilityProvenance.config` is a hard-coded tuple of eleven named
@@ -790,7 +790,7 @@ containing an `incomplete` attempt cannot be `complete`.
 `pass@1` is the fraction of attempts with `outcome='pass'`; `pass^k` is the
 fraction of tasks all of whose attempts passed. Both are computed over
 `declared_tasks × declared_attempts`, **never** over surviving rows — the same
-argument `EvidenceRun` makes one layer down (`evidence_run.py:5-9`).
+argument `EvidenceRun` makes one layer down (`observability/evidence_run.py:5-9`).
 
 `complete_experiment` **computes the verdict itself** in one `BEGIN IMMEDIATE`;
 the caller may request completion or force `invalid`, and nothing else:
@@ -977,7 +977,7 @@ rediscovered:
 * A suspended turn returns `AWAITING_USER` and never blocks. See §8.1 for the
   outcome it must be given.
 * `evidence_run()`'s in-process verdict requires the harness to hold the sink
-  (`evidence_run.py:265-280`); driving attempts against a spawned server silently
+  (`observability/evidence_run.py:265-280`); driving attempts against a spawned server silently
   downgrades the bundle to the persisted-health path.
 
 ---

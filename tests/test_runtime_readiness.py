@@ -14,14 +14,14 @@ import os
 
 import pytest
 
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow.runtime_manifest import (
     RuntimeManifest,
     clear_runtime_metadata,
     merge_and_gate,
     register_runtime_metadata,
 )
-from fastworkflow.runtime_readiness import (
+from fastworkflow.experiment.readiness import (
     capture_regime,
     runtime_readiness_snapshot,
     snapshot_env_names,

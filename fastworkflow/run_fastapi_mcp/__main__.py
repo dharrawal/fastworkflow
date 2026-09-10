@@ -52,7 +52,7 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import state_paths
-from fastworkflow.runtime_readiness import runtime_readiness_snapshot
+from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.runtime_manifest import (
     check_startup_conformance,
     deployment_env,
@@ -125,9 +125,9 @@ from fastworkflow.conversation_labeling import (
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
 )
-from fastworkflow.observability_store import ObservabilityStore
-from fastworkflow.observability_store import get_observability_sink
-from fastworkflow.experiment import experiment_store_readiness
+from fastworkflow.observability.store import ObservabilityStore
+from fastworkflow.observability.store import get_observability_sink
+from fastworkflow.experiment.runner import experiment_store_readiness
 
  
 # ============================================================================
@@ -340,7 +340,7 @@ def _log_memory_bounds() -> None:
     # mis-setting visible at the one moment it can still be corrected.
     # fix-ajv.14; assertable via GET /probes/readyz?observability=true.
     try:
-        from fastworkflow import observability_store as _obs
+        from fastworkflow.observability import store as _obs
 
         logger.info(
             "observability capture regime: "
@@ -911,7 +911,7 @@ async def readiness_probe(
         }
 
     if observability:
-        from fastworkflow import observability_store as _obs
+        from fastworkflow.observability import store as _obs
 
         content["observability"] = {
             "config": _obs.observability_config(),
@@ -1105,7 +1105,7 @@ def _observability_store():
     runtimes already attach (``_create_channel_runtime``), so reads go against
     exactly the DB the sink writes.
     """
-    from fastworkflow.observability_store import get_observability_sink
+    from fastworkflow.observability.store import get_observability_sink
 
     sink = get_observability_sink(ARGS.workflow_path)
     return sink.store if sink is not None else None

@@ -215,7 +215,7 @@ def run_main(args):
     # sink defaults ON (FW_OBSERVABILITY=0 disables). The CLI channel is the
     # synthetic cli:<start> id ChatSession bound; each CLI session starts a
     # fresh conversation, and //new mints another [R17].
-    from fastworkflow.observability_store import get_observability_sink
+    from fastworkflow.observability.store import get_observability_sink
     obs_sink = get_observability_sink(args.workflow_path)
 
     def _bind_fresh_cli_conversation() -> None:

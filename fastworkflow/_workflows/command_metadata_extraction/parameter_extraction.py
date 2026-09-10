@@ -11,7 +11,7 @@ from pydantic_core import PydanticUndefined
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow import ModuleType, tracing
-from fastworkflow.decision_signals import (
+from fastworkflow.observability.decision_signals import (
     DecisionUncertainty,
     UncertaintySignal,
     slot_binding_source,

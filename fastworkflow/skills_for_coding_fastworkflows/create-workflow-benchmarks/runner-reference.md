@@ -1,13 +1,13 @@
 # Runner handoff and optional pre-run review
 
 Use this reference when connecting an application's runner to UI-authored benchmarks. Source
-contracts are `fastworkflow/benchmark_setup.py`, `benchmark_catalog.py`, `experiment.py`, and
-`experiment_setup.py` in the installed framework checkout.
+contracts are `fastworkflow/benchmark/setup.py`, `benchmark/catalog.py`, `experiment/runner.py`, and
+`experiment/setup.py` in the installed framework checkout.
 
 ## Resolve the frozen input
 
 ```python
-from fastworkflow.benchmark_setup import experiment_manifest
+from fastworkflow.benchmark.setup import experiment_manifest
 
 registration, manifest = experiment_manifest(workflow_folderpath, experiment_id)
 # Verifies the registered version's byte digest, not whatever version is newest.
@@ -24,8 +24,8 @@ when `run()` is reached; use only after runtime configuration, fixtures and exec
 are in place. It is not a dry-run snippet.
 
 ```python
-from fastworkflow.experiment import ExperimentHarness, ExperimentTask
-from fastworkflow.benchmark_setup import experiment_manifest
+from fastworkflow.experiment.runner import ExperimentHarness, ExperimentTask
+from fastworkflow.benchmark.setup import experiment_manifest
 
 registration, manifest = experiment_manifest(workflow_folderpath, experiment_id)
 tasks = []
@@ -39,7 +39,7 @@ harness = ExperimentHarness.from_benchmark_experiment(
     workflow_folderpath, experiment_id,
     max_workers=1,
 )
-# grade_attempt is the application's outcome checker (see Grader in experiment.py).
+# grade_attempt is the application's outcome checker (see Grader in experiment/runner.py).
 result = harness.run(tasks, attempts=1, grader=grade_attempt)
 ```
 

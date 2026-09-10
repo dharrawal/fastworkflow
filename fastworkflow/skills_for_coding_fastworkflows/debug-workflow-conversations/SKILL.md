@@ -42,7 +42,7 @@ selecting a workflow can start a server, so it is not merely an offline file vie
 ## 2. Read it — read-only, always
 
 ```python
-from fastworkflow.observability_store import ReadOnlyObservabilityStore
+from fastworkflow.observability.store import ReadOnlyObservabilityStore
 store = ReadOnlyObservabilityStore(db_path)
 ```
 

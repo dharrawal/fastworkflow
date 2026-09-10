@@ -27,7 +27,7 @@ from types import SimpleNamespace
 import pytest
 
 from fastworkflow import state_paths, tracing
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow.cli import add_run_chatbot_parser
 from fastworkflow.run_chatbot import server as run_chatbot_server
 

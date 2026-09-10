@@ -13,7 +13,7 @@ import pytest
 from fastapi import HTTPException
 
 import fastworkflow
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow import tracing
 from fastworkflow.checkpoint_store import (
     PROTOCOL_VERSION,
@@ -21,7 +21,7 @@ from fastworkflow.checkpoint_store import (
     CheckpointIdentity,
 )
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.experiment import ExperimentController
+from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.run_fastapi_mcp.utils import refuse_registered_token_reissue
 from fastworkflow.session_state_store import SCHEMA_VERSION as PENDING_SCHEMA_VERSION

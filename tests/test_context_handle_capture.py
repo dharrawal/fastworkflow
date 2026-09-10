@@ -40,7 +40,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import tracing
-from fastworkflow.capture_policy import HMAC_KEY_VAR
+from fastworkflow.observability.capture_policy import HMAC_KEY_VAR
 from fastworkflow.runtime_manifest import (
     CommandDeclaration,
     EffectContract,

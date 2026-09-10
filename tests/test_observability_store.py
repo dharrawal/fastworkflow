@@ -23,7 +23,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus, tracing
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 

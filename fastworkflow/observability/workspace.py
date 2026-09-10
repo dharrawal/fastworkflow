@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
-from fastworkflow.observability_store import (
+from fastworkflow.observability.store import (
     IncompatibleObservabilityDB,
     ReadOnlyObservabilityStore,
 )

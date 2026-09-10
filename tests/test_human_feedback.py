@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import observability_store as obs
+from fastworkflow.observability import store as obs
 from tests.test_chatbot_benchmarks import (
     _request, experiment_server, live_server, workflow_dir, workspace_server,
 )
