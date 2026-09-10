@@ -5,7 +5,7 @@ import tempfile
 import shutil
 from pathlib import Path
 
-def test_libcst_postprocessor_preserves_content():
+def test_libcst_postprocessor_preserves_content(monkeypatch):
     """Test that LibCST postprocessor preserves existing content while adding new."""
     
     # Create a temporary directory for testing
@@ -51,6 +51,10 @@ class Signature:
         
         try:
             # Import and run the postprocessor
+            monkeypatch.setattr(
+                "fastworkflow.build.genai_postprocessor.dspy_utils.get_lm",
+                lambda *args, **kwargs: object(),
+            )
             from fastworkflow.build.genai_postprocessor import GenAIPostProcessor
             
             processor = GenAIPostProcessor()

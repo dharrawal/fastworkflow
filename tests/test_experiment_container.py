@@ -1935,7 +1935,7 @@ class TestColdStart:
 class TestSpaSurface:
     def test_the_experiment_browser_ships_and_obeys_the_page_rules(self):
         page = run_chatbot_server.load_index_html()
-        assert b"experimentsBtn" in page
+        assert b'id="navBenchmarks"' in page
         assert b"showExperiments" in page
         assert b"showExperimentTask" in page
         assert b"openExperimentAttempt" in page

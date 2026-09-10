@@ -65,7 +65,9 @@ class RecordingTraceSink:
 
 @pytest.fixture
 def hello_ctx():
-    if not Path(HELLO_WORLD, "___command_info").is_dir():
+    if not Path(
+        HELLO_WORLD, "___command_info", "global", "threshold.json"
+    ).is_file():
         pytest.skip("hello_world is not trained on this machine")
     sink = RecordingTraceSink()
     wf = fastworkflow.Workflow.create(

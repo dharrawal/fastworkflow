@@ -27,10 +27,15 @@ def todo_workflow_path() -> str:
 
 
 @pytest.fixture
-def initialized_fastworkflow(tmp_path):
+def initialized_fastworkflow(tmp_path, monkeypatch):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     from fastworkflow.command_routing import RoutingRegistry
 
+    monkeypatch.setattr(
+        WorkflowExecutionContext,
+        "_agent_dspy_context",
+        lambda self: (SimpleNamespace(model="test-model"), None),
+    )
     RoutingRegistry.clear_registry()
     yield tmp_path
     RoutingRegistry.clear_registry()

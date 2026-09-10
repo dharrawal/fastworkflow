@@ -96,6 +96,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await new Promise(r=>setTimeout(r,250));
   assert.ok(d.getElementById('detail').textContent.includes('2026-09-07'));
   // Authoring, feedback, busy state, focus, and deletion through real HTTP.
+  d.getElementById('navBenchmarks').click();
+  await until(()=>find('Tuning benchmark'));
   click('Tuning benchmark');
   const button = text => [...d.querySelectorAll('#detail button')].find(e=>e.textContent===text);
   await until(()=>button('New experiment'));
@@ -113,9 +115,11 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.equal(d.activeElement,button('Delete empty experiment'));
   button('Delete empty experiment').click();
   d.getElementById('confirmDelete').click();
-  await until(()=>button('New experiment'));
+  await until(()=>notices.includes('Empty experiment deleted'));
   await until(()=>![...d.querySelectorAll('#convList [data-experiment-id]')].some(e=>e.dataset.experimentId===createdId));
-  assert.ok(notices.includes('Empty experiment deleted'));
+  await until(()=>find('Tuning benchmark'));
+  click('Tuning benchmark');
+  await until(()=>button('New experiment'));
   assert.equal(d.activeElement.tagName,'H1');
   button('Edit benchmark').click();
   await until(()=>d.querySelector('[aria-label="Title"]'));

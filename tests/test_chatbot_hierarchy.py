@@ -41,8 +41,15 @@ def hierarchy_server(experiment_server, tmp_path):
     eid = registration['experiment_id']
     controller.create_experiment(eid, 'Recorded experiment', declared_tasks=1, declared_attempts=1,
         declarations=[(registration['task_ids'][0], 1, 'registered')])
+    store.start_attempt(
+        eid, registration['task_ids'][0], 1, 'registered', source_key='registered'
+    )
+    store.finish_attempt(
+        eid, registration['task_ids'][0], 1, outcome='pass', outcome_source='test'
+    )
     store.record_evidence_segment(eid, 1, 'evr-recorded',
         {'valid': True, 'problems': [], 'writer_health_delta': {'records_dropped': 0}})
+    assert store.complete_experiment(eid) == 'complete'
     add_turn(store, 'experiment-turn', eid=eid, channel='registered')
     with store._connect() as conn:
         conn.execute("INSERT INTO spans(span_id,trace_id,name,kind,start_ns,end_ns,status,attributes) VALUES(?,?,?,?,?,?,?,?)",
