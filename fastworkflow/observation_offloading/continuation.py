@@ -9,11 +9,13 @@ from typing import Any, Callable, Mapping, Optional
 import dspy
 
 from fastworkflow import tracing
-from fastworkflow.observation_offloading.archive import RuntimeHandleScope
+from fastworkflow.observation_offloading.archive import RuntimeHandleScope, RuntimeHandleArchive
 from fastworkflow.observation_offloading.compact import execute_ordinals, step_indexes
-from fastworkflow.observation_offloading.labels import is_offload_label
+from fastworkflow.observation_offloading.labels import is_offload_label, label_alias, replacement_saves_space, offload_label
 from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
+    archive,
+    default_scope,
     env_int,
     record_event,
 )
@@ -48,27 +50,14 @@ class ContinuationPlanSignature(dspy.Signature):
     )
 
 
-def _observation_label(
-    trajectory: Mapping[str, Any],
-    key: str,
-    value: Any,
-    alias: str,
-) -> str:
-    suffix = key.removeprefix("observation_")
-    text = str(value)
-    command = str(trajectory.get(f"tool_name_{suffix}") or "unknown")
-    return (
-        f"{alias} — {command}; observation label only "
-        f"({len(text)} chars, {len(text.encode('utf-8'))} UTF-8 bytes; "
-        f"sha256 {hashlib.sha256(text.encode('utf-8')).hexdigest()})"
-    )
-
-
 def replan_trajectory_skeleton(
     trajectory: Mapping[str, Any],
     *,
     greedy_max_bytes: int = REPLAN_OBSERVATION_MAX_BYTES,
     ordinal_offset: int = 0,
+    scope: Optional[RuntimeHandleScope] = None,
+    selected_archive: Optional[RuntimeHandleArchive] = None,
+    describe_output: Optional[Callable[[str, str], str]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Label every observation, then inline newest execute slots until the bound."""
 
@@ -93,10 +82,15 @@ def replan_trajectory_skeleton(
         text = str(value)
         alias = execute_aliases.get(key, f"S{index}" if index >= 0 else f"S-{suffix}")
         if is_offload_label(text):
-            first_token = text.split(maxsplit=1)[0]
-            if first_token.startswith("O") and first_token[1:].isdigit():
-                alias = first_token
-        skeleton[key] = _observation_label(trajectory, key, value, alias)
+            alias = label_alias(text) or alias
+            skeleton[key] = text
+        else:
+            args = trajectory.get(f"tool_args_{suffix}") or {}
+            command = str(args.get("command") or "execute_workflow_query")
+            label = offload_label(alias=alias, command_name=command, response=text,
+                                 description=describe_output(command, text) if describe_output else "")
+            skeleton[key] = (label if key in execute_aliases and replacement_saves_space(text, label)
+                             else value)
 
     execute_keys = [key for key in observation_keys if key in execute_aliases]
     inlined_keys: list[str] = []
@@ -111,6 +105,20 @@ def replan_trajectory_skeleton(
     measured_bytes = sum(len(str(skeleton[key]).encode("utf-8")) for key in observation_keys)
     if measured_bytes > greedy_max_bytes:
         raise ValueError("observation labels alone exceed the greedy replan observation bound")
+    # Only label text that is durably resolvable by search_memory in this turn.
+    store = selected_archive or archive()
+    selected_scope = scope or default_scope()
+    for key in execute_keys:
+        text = str(trajectory[key])
+        if skeleton[key] == text or is_offload_label(text):
+            continue
+        suffix = key.removeprefix("observation_")
+        command = str((trajectory.get(f"tool_args_{suffix}") or {}).get("command") or "execute_workflow_query")
+        store.persist(selected_scope, alias=execute_aliases[key],
+                      offload_order=int(execute_aliases[key][1:]), command_name=command,
+                      step_index=int(suffix), text=text,
+                      text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+    inlined_keys = [key for key in execute_keys if not is_offload_label(str(skeleton[key]))]
     inlined_aliases = [execute_aliases[key] for key in execute_keys if key in inlined_keys]
     labeled_aliases = [execute_aliases[key] for key in execute_keys if key not in inlined_keys]
     metadata = {
@@ -231,6 +239,9 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         skeleton, observation_metadata = replan_trajectory_skeleton(
             trajectory,
             ordinal_offset=getattr(self, "truncated_execute_steps", 0),
+            scope=getattr(self, "continuation_scope", None),
+            selected_archive=getattr(self, "observation_archive", None),
+            describe_output=getattr(self, "describe_output", None),
         )
         trigger = (
             f"segment {completed_segment} reached the {self.max_iters}-iteration "

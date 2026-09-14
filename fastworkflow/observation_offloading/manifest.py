@@ -7,7 +7,7 @@ import re
 from typing import Any, Mapping, Optional
 
 from fastworkflow import tracing
-from fastworkflow.observation_offloading.labels import OFFLOAD_MARK
+from fastworkflow.observation_offloading.labels import is_offload_label, label_alias
 
 CONTRACT = "fastworkflow-trajectory-manifest/1"
 DSPY_OBS_RE = re.compile(
@@ -21,12 +21,12 @@ _original_capped = tracing._capped
 
 
 def observation_row(key: str, text: str) -> dict[str, Any]:
-    alias_match = ALIAS_RE.match(text.lstrip())
+    alias = label_alias(text.lstrip())
     encoded = text.encode("utf-8")
     return {
         "key": key,
-        "alias": alias_match.group(1) if alias_match else None,
-        "kind": "label" if OFFLOAD_MARK in text else "text",
+        "alias": alias,
+        "kind": "label" if is_offload_label(text) else "text",
         "chars": len(text),
         "utf8_bytes": len(encoded),
         "sha256": hashlib.sha256(encoded).hexdigest(),

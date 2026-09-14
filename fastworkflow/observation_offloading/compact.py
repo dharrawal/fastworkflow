@@ -4,13 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import (
     estimated_tokens,
     is_offload_label,
     offload_label,
+    replacement_saves_space,
 )
 from fastworkflow.observation_offloading.state import (
     archive,
@@ -92,6 +93,7 @@ def compact_trajectory(
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
     ordinal_offset: int = 0,
+    describe_output: Optional[Callable[[str, str], str]] = None,
 ) -> list[dict[str, Any]]:
     """Mutate trajectory observations in place. Return offload decisions.
 
@@ -163,7 +165,12 @@ def compact_trajectory(
                 alias=alias,
                 command_name=command or "execute_workflow_query",
                 response=response,
+                description=describe_output(command, response) if describe_output else "",
             )
+            if not replacement_saves_space(response, label):
+                decision["reason"] = "replacement_not_smaller"
+                decisions.append(decision)
+                continue
             digest = hashlib.sha256(response.encode("utf-8")).hexdigest()
             packed_utf8_bytes_before = len(packed_text.encode("utf-8"))
             try:

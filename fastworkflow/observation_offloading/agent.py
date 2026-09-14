@@ -5,7 +5,9 @@ import logging
 import os
 from typing import Any, Callable, Optional
 
+import fastworkflow
 from fastworkflow import state_paths, tracing
+from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.continuation import (
@@ -71,6 +73,7 @@ def build_compacting_step(
     fallback_scope: RuntimeHandleScope,
     selected_archive: RuntimeHandleArchive,
     on_step_complete: Optional[Callable[[int, dict[str, Any]], bool]] = None,
+    describe_output: Optional[Callable[[str, str], str]] = None,
 ) -> Callable[[int, dict[str, Any]], bool]:
     """The ReAct on_step_complete hook: compact, then defer to the caller's hook.
 
@@ -89,6 +92,7 @@ def build_compacting_step(
                 scope=scope,
                 selected_archive=selected_archive,
                 ordinal_offset=int(getattr(agent, "truncated_execute_steps", 0) or 0),
+                describe_output=describe_output,
             )
         except Exception as error:  # noqa: BLE001
             logger.warning(
@@ -109,6 +113,40 @@ def build_compacting_step(
         return True
 
     return compacting_step
+
+
+def current_search_reasoning(agent: Any) -> str:
+    """Read the current search step, not an earlier completed tool's thought."""
+    trajectory = agent.current_trajectory
+    indexes = [int(key.removeprefix("tool_name_")) for key in trajectory
+               if key.startswith("tool_name_") and key.removeprefix("tool_name_").isdigit()]
+    if not indexes:
+        return ""
+    index = max(indexes)
+    if trajectory.get(f"tool_name_{index}") != "search_memory":
+        return ""
+    return str(trajectory.get(f"thought_{index}") or "")
+
+
+def describe_command_output(chat_session: Any, command: str, response: str) -> str:
+    """Resolve authored output fields from the command that actually produced this text."""
+    core = getattr(chat_session, "_core", chat_session)
+    records = getattr(core, "action_log", [])
+    record = next((r for r in reversed(records)
+                   if r.get("command") == command and r.get("response") == response), None)
+    if record is None:
+        return ""
+    try:
+        workflow = chat_session.get_active_workflow()
+        routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+        metadata = CommandMetadataAPI._extract_signature_info(
+            record["command_name"], routing, routing)
+        fields = metadata.get("outputs", [])
+        return "; ".join(f"{field['name']}: {field['description']}"
+                         for field in fields if field.get("description"))
+    except Exception:
+        # Missing metadata must never prevent persistence or turn success.
+        return ""
 
 
 def maybe_wrap_tool_agent(
@@ -139,14 +177,16 @@ def maybe_wrap_tool_agent(
         fallback_scope=scope,
         selected_archive=selected_archive,
         on_step_complete=on_step_complete,
+        describe_output=lambda command, response: describe_command_output(chat_session, command, response),
     )
 
-    def scoped_search_memory(question: str, alias: str = "") -> str:
-        """Search bounded excerpts from this turn's offloaded observations."""
+    def scoped_search_memory(question: str, alias: str) -> str:
+        """Answer a question inside one offloaded observation. alias is required (e.g. O8)."""
 
         current = getattr(rebuilt, "continuation_scope", None) or scope
         return search_memory(
-            question, alias, scope=current, selected_archive=selected_archive
+            question, alias, reasoning=current_search_reasoning(rebuilt),
+            scope=current, selected_archive=selected_archive
         )
 
     scoped_search_memory.__name__ = "search_memory"
@@ -164,6 +204,8 @@ def maybe_wrap_tool_agent(
         scope_factory=lambda: _scope_for_session(chat_session),
     )
     rebuilt.continuation_scope_id = scope.scope_id
+    rebuilt.observation_archive = selected_archive
+    rebuilt.describe_output = lambda command, response: describe_command_output(chat_session, command, response)
     record_event(
         {
             "kind": "agent_installed",
