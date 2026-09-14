@@ -14,6 +14,7 @@ from fastworkflow.observation_offloading.compact import (
     PACKED_TARGET_BYTES,
     RECENT_OBSERVATIONS_PROTECTED,
     annotate_execute_observations,
+    archive_execute_observations,
     compact_trajectory,
     execute_ordinals,
 )
@@ -38,6 +39,7 @@ from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
     hot_payload_bytes,
+    observation_inline,
     reset_runtime_state,
     stored_handles,
 )
@@ -53,6 +55,7 @@ __all__ = [
     "StructuredContinuationReAct",
     "alias_line",
     "annotate_execute_observations",
+    "archive_execute_observations",
     "build_tool_agent",
     "classify_against_steps",
     "clear_hot_handles",
@@ -61,6 +64,7 @@ __all__ = [
     "execute_ordinals",
     "hot_payload_bytes",
     "install_span_policy",
+    "observation_inline",
     "offload_label",
     "printed_alias",
     "replan_trajectory_skeleton",

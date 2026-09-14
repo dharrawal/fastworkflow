@@ -187,8 +187,9 @@ def build_tool_agent(
 
         alias is the O-number printed on that observation's first line
         ("Observation O42 (execute_workflow_query)") or named in its offload
-        label. Never pass a step number. An alias that was never printed is a
-        miss, not another observation.
+        label. Any printed O-number works, whether its result is still shown in
+        full or was replaced by a label. Never pass a step number. An alias that
+        was never printed is a miss, not another observation.
         """
 
         current = getattr(agent, "continuation_scope", None) or scope

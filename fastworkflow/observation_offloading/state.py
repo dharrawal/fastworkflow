@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _handles: dict[str, dict[str, Any]] = {}
+_archived: dict[str, dict[str, Any]] = {}
 _events: list[dict[str, Any]] = []
 _event_log_failures: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
@@ -120,10 +121,52 @@ def snapshot_events() -> list[dict[str, Any]]:
         return list(_events)
 
 
+def mark_archived(
+    scope: RuntimeHandleScope, alias: str, *, text_sha256: str, inline: bool = True
+) -> None:
+    """Remember that this alias is durable, and whether it is still inline.
+
+    The digest lets the eager archiver skip a re-write of text it already wrote
+    in this process (compaction revisits every execute step at every step), and
+    the ``inline`` flag lets a search event separate a miss on a handle that was
+    never printed from a miss on an observation the agent could still read.
+    """
+    with _lock:
+        _archived[handle_key(scope, alias)] = {
+            "text_sha256": text_sha256,
+            "inline": inline,
+        }
+
+
+def mark_offloaded(scope: RuntimeHandleScope, alias: str) -> None:
+    """The trajectory now carries a label for this alias instead of its text."""
+    key = handle_key(scope, alias)
+    with _lock:
+        entry = _archived.get(key)
+        if entry is None:
+            _archived[key] = {"text_sha256": None, "inline": False}
+        else:
+            entry["inline"] = False
+
+
+def archived_digest(scope: RuntimeHandleScope, alias: str) -> Optional[str]:
+    with _lock:
+        entry = _archived.get(handle_key(scope, alias))
+    return None if entry is None else entry["text_sha256"]
+
+
+def observation_inline(scope: RuntimeHandleScope, alias: str) -> Optional[bool]:
+    """True while the observation is inline, False once labelled, None if unknown."""
+    with _lock:
+        entry = _archived.get(handle_key(scope, alias))
+    return None if entry is None else bool(entry["inline"])
+
+
 def reset_runtime_state() -> None:
     global _default_archive
     with _lock:
         _handles.clear()
+        _archived.clear()
         _events.clear()
         _event_log_failures.clear()
         _default_archive = None

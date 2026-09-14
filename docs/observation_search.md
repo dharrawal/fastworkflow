@@ -54,6 +54,68 @@ answers from the unmodified command output. Offload eligibility, the size
 thresholds and the savings rule are likewise evaluated on the response alone, so
 printing a handle can never be what makes an offload look profitable.
 
+## Every execute observation is archived
+
+Persistence no longer waits for an offload decision. When a step completes, the
+same `on_step_complete` hook that prints the handle calls
+`archive_execute_observations`, which writes **every** `execute_workflow_query`
+observation into the scoped SQLite archive under its canonical `O` alias.
+Offloading is then purely a residency decision — whether the text stays in the
+prompt — and never a decision about whether the text can be found again.
+
+Before this, only an observation that compaction chose to replace was persisted,
+so an alias the run had just printed on an inline result resolved to
+`no matching offloaded handle`: the evidence was visible in the prompt and
+unreachable through `search_memory` at the same time.
+
+What is stored is the raw command response, with the presentation line removed by
+`strip_alias_line`, and `text_sha256` is the digest of exactly those bytes — the
+same convention the offload path uses, so the later offload of an alias finds the
+identical row rather than writing a second one. Writes are insert-or-nothing
+(`ON CONFLICT DO NOTHING` plus a digest check), and a digest already written in
+this process for that alias is skipped, so revisiting a step across the many
+compaction passes of a turn costs nothing and can never produce a duplicate.
+The archive key is the alias actually **printed** on the observation when there
+is one, so the handle the agent can see is always the key its text is stored
+under — including in the `alias_conflict` case, where the printed alias stands
+and the recomputed one is not used.
+
+Each first write is recorded as an `observation_archived` event (alias, step,
+digest, bytes, hot-cache evictions) and puts a copy in the bounded hot cache, so
+the existing cap and oldest-first eviction still apply — inline observations now
+compete for that cache too, and an evicted alias simply resolves from SQLite at
+the `sqlite` tier. Compaction policy is untouched: eligibility, the recency
+protection of the newest execute observations, the savings rule and the packed
+target all behave exactly as before.
+
+Persistence is an availability optimisation on the hot path of every agent step,
+so a failure must never cost evidence. A failed write records an
+`archive_refused` event (`reason: persistence_failed_original_retained`) and
+leaves the observation inline and unchanged; nothing is raised into the agent
+loop. Rewriting a completed observation's text under a live alias is refused the
+same way: the stored evidence stands.
+
+## Inline and offloaded searches, and what a miss means
+
+`search_memory` resolves any alias printed in the current scope, whether its text
+is still inline or already replaced by a label, and answers from the same
+archived bytes either way. The search event records the answering tier
+(`hot`/`sqlite`) as before, plus `still_inline`:
+
+| `still_inline` | meaning |
+| --- | --- |
+| `true` | the observation was still in the prompt when the agent searched it |
+| `false` | it had been offloaded to a label |
+| `null` | this process has no record of that alias being printed in this scope |
+
+So a miss with `still_inline: null` is a wrong-handle selection — an invented or
+mis-remembered `O` — while a miss on a handle the run did print would be a
+retrieval failure. The flag is process-local bookkeeping, so a turn resumed in
+another process reports `null` until it prints handles again; `status` still
+says whether the search was answered. There is still no step-number fallback and no nearest-handle
+guess: an alias that was never printed is an explicit miss, recorded with
+`status: missing`, and no model is called.
+
 ## Configuration
 
 Set the search model independently of the main agent:
@@ -114,7 +176,15 @@ resolution, required keys, current-step reasoning, archive eviction and existing
 continuation behavior. `PrintedObservationHandles` covers the printed handle:
 interleaved tools, truncation via `ordinal_offset`, the replan skeleton, the
 inline/label/archive alias being one identifier, savings accounting with the
-added line, and an unknown handle staying an explicit miss. Provider tests are opt-in:
+added line, and an unknown handle staying an explicit miss.
+`EagerObservationArchive` covers the eager archive: observations archived whether
+or not they are offloaded, an inline and an offloaded search receiving the same
+bytes and digest, eviction and a cleared cache resolving from SQLite, repeated
+persistence keeping one row, another turn's alias staying invisible, a failed or
+conflicting write keeping the inline evidence and recording `archive_refused`,
+the `still_inline` flag, archiving under the printed alias in the
+`alias_conflict` case, and the replan skeleton persisting without a second row.
+Provider tests are opt-in:
 
 ```bash
 FW_TEST_OBSERVATION_SEARCH_LIVE=1 python -m pytest \

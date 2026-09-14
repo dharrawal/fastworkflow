@@ -26,6 +26,7 @@ from fastworkflow.observation_offloading.archive import (
 from fastworkflow.observation_offloading.compact import (
     PACKED_TARGET_BYTES,
     annotate_execute_observations,
+    archive_execute_observations,
     compact_trajectory,
     execute_ordinals,
     packed_target_bytes_from_env,
@@ -64,6 +65,7 @@ from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
     hot_handle_max_bytes_from_env,
     hot_payload_bytes,
+    observation_inline,
     record_event,
     remember_handle,
     reset_runtime_state,
@@ -665,16 +667,22 @@ class TruncationTolerance(unittest.TestCase):
     def test_compaction_continues_after_truncation_without_alias_collision(self) -> None:
         large_first = "first dump\n" + ("row\n" * 3_000)
         large_second = "second dump\n" + ("col\n" * 3_000)
+        large_third = "third dump\n" + ("val\n" * 3_000)
         # Eight executes: the newest five are recency-protected, so O1..O3 are
-        # the offloadable slots before truncation and O2..O3 after it.
+        # the offloadable slots before truncation and O2..O3 after it. The third
+        # dump is present from the start: every execute observation is archived
+        # when its step completes, so rewriting a completed step's text under a
+        # live alias is a collision, not a fixture shortcut.
         trajectory = self._trajectory(8)
         trajectory["observation_0"] = large_first
         trajectory["observation_1"] = large_second
+        trajectory["observation_2"] = large_third
+        # A byte target that two offloads satisfy, leaving O3 inline and large.
         first = compact_trajectory(
             trajectory,
             scope=self.scope,
             selected_archive=self.archive,
-            packed_target_tokens=10,
+            packed_target_bytes=20_000,
             recent_observations_protected=5,
         )
         offloaded = [item["alias"] for item in first if item["action"] == "offloaded"]
@@ -683,7 +691,6 @@ class TruncationTolerance(unittest.TestCase):
         # The base ReAct context-window fallback drops step 0 entirely.
         for prefix in ("thought", "tool_name", "tool_args", "observation"):
             del trajectory[f"{prefix}_0"]
-        trajectory["observation_2"] = "third dump\n" + ("val\n" * 3_000)
         second = compact_trajectory(
             trajectory,
             scope=self.scope,
@@ -1229,4 +1236,280 @@ class PrintedObservationHandles(unittest.TestCase):
         )
         self.assertEqual(
             [printed_alias(trajectory[f"observation_{i}"]) for i in (1, 3)], [None, None]
+        )
+
+
+class EagerObservationArchive(unittest.TestCase):
+    """A2 (ido-986.14.8): every execute observation is durable when its step ends.
+
+    Before this, only an observation compaction chose to replace was persisted,
+    so an alias the run had just printed resolved to "no matching offloaded
+    handle" while its text was sitting in the prompt. Offloading is now purely a
+    residency decision; availability is unconditional.
+    """
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.addCleanup(reset_runtime_state)
+        self.archive = RuntimeHandleArchive(str(Path(self.tempdir.name) / "handles.sqlite3"))
+        self.scope = RuntimeHandleScope(
+            store_identity="fixture-store",
+            channel_id="fixture-channel",
+            experiment_id="fixture-experiment",
+            task_id="fixture-task",
+            attempt=1,
+            turn_key="fixture-turn",
+        )
+
+    def compact(self, trajectory, **kwargs):
+        return compact_trajectory(
+            trajectory, scope=self.scope, selected_archive=self.archive, **kwargs
+        )
+
+    @staticmethod
+    def _step(trajectory, index, tool, observation, command=None):
+        trajectory[f"thought_{index}"] = f"think-{index}"
+        trajectory[f"tool_name_{index}"] = tool
+        if command is not None:
+            trajectory[f"tool_args_{index}"] = {"command": command}
+        trajectory[f"observation_{index}"] = observation
+
+    def _search(self, question, alias, *, scope=None, **kwargs):
+        """search_memory with a deterministic stand-in for the search model.
+
+        Returns the observation text the model was actually handed, so an
+        inline answer and an offloaded answer can be compared byte for byte
+        without a provider call.
+        """
+        seen: dict = {"observation": None}
+        lm = SimpleNamespace(
+            history=[{"usage": {"completion_tokens": 7}, "cost": 0.0}], model="fixture-lm"
+        )
+
+        def predict(_signature):
+            def call(question, observation):
+                seen["observation"] = observation
+                return SimpleNamespace(answer=f"observed {len(observation.encode('utf-8'))} bytes")
+            return call
+
+        with patch("fastworkflow.observation_offloading.search.get_lm", return_value=lm) as get_lm, \
+                patch("fastworkflow.observation_offloading.search.dspy") as fake_dspy:
+            fake_dspy.Predict.side_effect = predict
+            seen["answer"] = search_memory(
+                question, alias, scope=scope or self.scope,
+                selected_archive=self.archive, **kwargs,
+            )
+            seen["model_calls"] = get_lm.call_count
+        seen["event"] = [e for e in snapshot_events() if e["kind"] == "search_memory"][-1]
+        return seen
+
+    def test_every_execute_observation_is_archived_whether_or_not_it_is_offloaded(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        self._step(trajectory, 1, "what_can_i_do", "command metadata")
+        self._step(trajectory, 2, "execute_workflow_query", "rights rows", command="show_rights")
+        decisions = self.compact(trajectory)
+        # Nothing is big enough to offload; everything is still searchable.
+        self.assertEqual([item["action"] for item in decisions], ["kept", "kept"])
+        self.assertEqual(printed_alias(trajectory["observation_0"]), "O1")
+        self.assertEqual(printed_alias(trajectory["observation_2"]), "O2")
+        stored = {row["alias"]: row["text"] for row in self.archive.list(self.scope)}
+        self.assertEqual(stored, {"O1": "holder rows", "O2": "rights rows"})
+        # The non-execute observation has no handle and is not archived.
+        self.assertNotIn("command metadata", stored.values())
+        for alias, text in stored.items():
+            self.assertEqual(
+                self.archive.get(self.scope, alias)["text_sha256"],
+                hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
+            self.assertIsNone(printed_alias(text))
+
+    def test_search_answers_from_the_same_text_inline_or_offloaded(self) -> None:
+        large = "holder uid label\n" + ("x" * 30_000)
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", large, command="show_holders")
+        for index in range(1, 6):
+            self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
+                       command=f"find_{index}")
+        # Recency-protected: the agent can read O1 in its prompt right now.
+        self.compact(trajectory, recent_observations_protected=6)
+        self.assertEqual(printed_alias(trajectory["observation_0"]), "O1")
+        inline_row = self.archive.get(self.scope, "O1")
+        self.assertEqual(inline_row["text"], large)
+
+        self.assertIs(observation_inline(self.scope, "O1"), True)
+        inline = self._search("Which holder?", "O1")
+        self.assertEqual(inline["observation"], large)
+        self.assertTrue(inline["event"]["still_inline"])
+        self.assertEqual(inline["event"]["tier"], "hot")
+        self.assertEqual(inline["event"]["text_sha256"], inline_row["text_sha256"])
+
+        # Now let compaction offload the same observation.
+        decisions = self.compact(trajectory, recent_observations_protected=5)
+        self.assertEqual(decisions[0]["action"], "offloaded")
+        offloaded_row = self.archive.get(self.scope, "O1")
+        self.assertEqual(offloaded_row["text"], inline_row["text"])
+        self.assertEqual(offloaded_row["text_sha256"], inline_row["text_sha256"])
+        self.assertEqual(len(self.archive.list(self.scope, "O1")), 1)
+
+        self.assertIs(observation_inline(self.scope, "O1"), False)
+        offloaded = self._search("Which holder?", "O1")
+        self.assertEqual(offloaded["observation"], inline["observation"])
+        self.assertEqual(offloaded["answer"], inline["answer"])
+        self.assertFalse(offloaded["event"]["still_inline"])
+        self.assertEqual(offloaded["event"]["text_sha256"], inline["event"]["text_sha256"])
+
+    def test_eviction_and_a_cleared_cache_still_resolve_an_inline_alias(self) -> None:
+        big = "target person\n" + ("row\n" * 4_000)
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", big, command="show_holders")
+        self._step(trajectory, 1, "execute_workflow_query", big.replace("target", "second"),
+                   command="show_rights")
+        self.compact(trajectory, hot_handle_max_bytes=8_000)
+        # Nothing was offloaded, so the hot cache only holds eager archive
+        # copies -- and the existing cap and oldest-first eviction still apply.
+        self.assertEqual([item["action"] for item in self.compact(trajectory)], ["kept", "kept"])
+        self.assertLessEqual(hot_payload_bytes(self.scope), 8_000 + len(big.encode("utf-8")))
+        self.assertTrue([e for e in snapshot_events() if e["kind"] == "hot_evict"])
+
+        clear_hot_handles(self.scope)  # a restart: nothing left in this process
+        self.assertEqual(stored_handles(self.scope), {})
+        restarted = self._search("Who is the target person?", "O1")
+        self.assertEqual(restarted["observation"], big)
+        self.assertEqual(restarted["event"]["tier"], "sqlite")
+
+    def test_repeated_persistence_keeps_one_row_with_the_same_digest(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        for _ in range(4):
+            self.compact(trajectory)
+            self._step(trajectory, len(trajectory) // 4, "execute_workflow_query",
+                       "more rows", command="show_more")
+        rows = self.archive.list(self.scope, "O1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["text"], "holder rows")
+        self.assertEqual(
+            rows[0]["text_sha256"],
+            hashlib.sha256(b"holder rows").hexdigest(),
+        )
+        # One archive event per alias: revisiting a step writes nothing.
+        archived = [e for e in snapshot_events() if e["kind"] == "observation_archived"]
+        self.assertEqual(len([e for e in archived if e["alias"] == "O1"]), 1)
+
+    def test_another_turns_alias_is_not_visible(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "first-turn holders",
+                   command="show_holders")
+        self.compact(trajectory)
+        other = RuntimeHandleScope(
+            store_identity="fixture-store",
+            channel_id="fixture-channel",
+            experiment_id="fixture-experiment",
+            task_id="fixture-task",
+            attempt=1,
+            turn_key="another-turn",
+        )
+        self.assertIsNone(self.archive.get(other, "O1"))
+        miss = self._search("Which holders?", "O1", scope=other)
+        self.assertIn("no matching offloaded handle O1", miss["answer"])
+        self.assertEqual(miss["model_calls"], 0)
+        self.assertIsNone(miss["event"]["still_inline"])
+
+    def test_persistence_failure_keeps_inline_evidence_and_records_the_event(self) -> None:
+        class BrokenArchive:
+            def persist(self, *args, **kwargs):
+                raise OSError("disk unavailable")
+
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        decisions = compact_trajectory(
+            trajectory,
+            scope=self.scope,
+            selected_archive=BrokenArchive(),  # type: ignore[arg-type]
+        )
+        # The turn continues: the observation keeps its handle and its text.
+        self.assertEqual(trajectory["observation_0"], alias_line("O1") + "holder rows")
+        self.assertEqual(decisions[0]["action"], "kept")
+        refused = [e for e in snapshot_events() if e["kind"] == "archive_refused"]
+        self.assertEqual(
+            [(e["alias"], e["reason"], e["error"]) for e in refused],
+            [("O1", "persistence_failed_original_retained", "OSError")],
+        )
+        self.assertIsNone(self.archive.get(self.scope, "O1"))
+
+    def test_rewritten_text_under_a_live_alias_is_refused_not_overwritten(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        self.compact(trajectory)
+        # An observation is immutable once its step completed; a different text
+        # under the same alias must never replace the stored evidence.
+        trajectory["observation_0"] = "rewritten rows"
+        self.compact(trajectory)
+        self.assertEqual(self.archive.get(self.scope, "O1")["text"], "holder rows")
+        refused = [e for e in snapshot_events() if e["kind"] == "archive_refused"]
+        self.assertEqual([e["error"] for e in refused], ["PersistenceError"])
+        self.assertEqual(trajectory["observation_0"], alias_line("O1") + "rewritten rows")
+
+    def test_wrong_handle_stays_an_explicit_miss_with_no_model_call(self) -> None:
+        trajectory: dict = {}
+        for index in range(3):
+            self._step(trajectory, index, "execute_workflow_query", f"body-{index}",
+                       command=f"c{index}")
+        self.compact(trajectory)
+        # O4 was never printed: no step-number fallback, no nearest handle.
+        miss = self._search("Which control?", "O4")
+        self.assertIn("no matching offloaded handle O4", miss["answer"])
+        self.assertEqual(miss["model_calls"], 0)
+        self.assertEqual(miss["event"]["status"], "missing")
+        self.assertIsNone(miss["event"]["still_inline"])
+        # Every printed handle, by contrast, resolves.
+        for alias in ("O1", "O2", "O3"):
+            self.assertIsNotNone(self.archive.get(self.scope, alias))
+
+    def test_alias_conflict_archives_under_the_printed_handle(self) -> None:
+        trajectory: dict = {}
+        for index in range(2):
+            self._step(trajectory, index, "execute_workflow_query", f"body-{index}",
+                       command=f"c{index}")
+        self.compact(trajectory)
+        # A1: a wrong offset would renumber O1 -> O3; the printed alias stands.
+        annotate_execute_observations(trajectory, ordinal_offset=2)
+        conflicts = [e for e in snapshot_events() if e["kind"] == "alias_conflict"]
+        self.assertEqual([e["expected_alias"] for e in conflicts], ["O3", "O4"])
+        other = RuntimeHandleScope(
+            store_identity="fixture-store",
+            channel_id="fixture-channel",
+            experiment_id="fixture-experiment",
+            task_id="fixture-task",
+            attempt=1,
+            turn_key="conflict-turn",
+        )
+        archive_execute_observations(
+            trajectory, ordinal_offset=2, scope=other, selected_archive=self.archive
+        )
+        # The archive key is the handle the agent can actually see.
+        self.assertEqual({row["alias"] for row in self.archive.list(other)}, {"O1", "O2"})
+        self.assertEqual(self.archive.get(other, "O1")["text"], "body-0")
+
+    def test_replan_skeleton_persists_before_labelling_without_double_insert(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows\n" + "x" * 9_000,
+                   command="show_holders")
+        self._step(trajectory, 1, "execute_workflow_query", "small rows", command="show_rights")
+        self.compact(trajectory)
+        before = self.archive.list(self.scope)
+        skeleton, metadata = replan_trajectory_skeleton(
+            trajectory, greedy_max_bytes=1_000,
+            scope=self.scope, selected_archive=self.archive,
+        )
+        self.assertEqual(metadata["labeled_aliases"], ["O1"])
+        self.assertEqual(metadata["persistence_failures"], [])
+        self.assertEqual(label_alias(skeleton["observation_0"]), "O1")
+        after = self.archive.list(self.scope)
+        self.assertEqual(len(after), len(before))
+        self.assertEqual(
+            [(row["alias"], row["text_sha256"]) for row in after],
+            [(row["alias"], row["text_sha256"]) for row in before],
         )

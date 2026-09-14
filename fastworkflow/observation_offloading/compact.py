@@ -11,6 +11,7 @@ from fastworkflow.observation_offloading.labels import (
     alias_line,
     estimated_tokens,
     is_offload_label,
+    label_alias,
     offload_label,
     printed_alias,
     replacement_saves_space,
@@ -18,11 +19,14 @@ from fastworkflow.observation_offloading.labels import (
 )
 from fastworkflow.observation_offloading.state import (
     archive,
+    archived_digest,
     default_scope,
     env_int,
     evict_hot_handles,
     hot_handle_max_bytes_from_env,
     hot_payload_bytes,
+    mark_archived,
+    mark_offloaded,
     record_event,
     remember_handle,
 )
@@ -124,6 +128,118 @@ def annotate_execute_observations(
     return annotated
 
 
+def archive_execute_observations(
+    trajectory: Mapping[str, Any],
+    *,
+    executes: Optional[list[tuple[int, int]]] = None,
+    ordinal_offset: int = 0,
+    scope: Optional[RuntimeHandleScope] = None,
+    selected_archive: Optional[RuntimeHandleArchive] = None,
+    hot_handle_max_bytes: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Persist every execute observation under its canonical alias, offload or not.
+
+    Compaction only ever archived what it was about to replace, so an alias the
+    agent could read inline resolved to nothing: ``search_memory`` answered
+    "no matching offloaded handle" for a handle the run had just printed. Here
+    the observation becomes durable as soon as the step completes, and the
+    offload decision is purely a residency decision.
+
+    The alias is the one actually printed on the observation when there is one
+    (``annotate_execute_observations`` runs first), so a handle the agent can
+    see is always the key it is stored under -- including the ``alias_conflict``
+    case, where the printed alias stands and the recomputed one is not used.
+
+    Stored text is the raw command response: ``strip_alias_line`` removes the
+    presentation line, exactly as the offload path does, so the same alias
+    written twice is the same bytes and the same digest. Writes are
+    insert-or-nothing and skipped entirely once this process has written that
+    digest for that alias, so revisiting a step costs nothing.
+
+    This is an availability optimisation on the hot path of every agent step.
+    A failure to persist must never lose the inline evidence or abort the turn:
+    it records ``archive_refused`` and leaves the observation as it stands.
+    """
+    selected_scope = scope or default_scope()
+    store = selected_archive or archive()
+    if hot_handle_max_bytes is None:
+        hot_handle_max_bytes = hot_handle_max_bytes_from_env()
+    if executes is None:
+        executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
+    archived: list[dict[str, Any]] = []
+    for step_index, ordinal in executes:
+        shown = trajectory.get(f"observation_{step_index}")
+        if not isinstance(shown, str):
+            continue
+        if is_offload_label(shown):
+            alias = label_alias(shown) or f"O{ordinal}"
+            mark_offloaded(selected_scope, alias)
+            continue
+        alias = printed_alias(shown) or f"O{ordinal}"
+        original = strip_alias_line(shown)
+        digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        if archived_digest(selected_scope, alias) == digest:
+            continue
+        args = trajectory.get(f"tool_args_{step_index}")
+        command = ""
+        if isinstance(args, Mapping):
+            command = str(args.get("command") or "")
+        try:
+            store.persist(
+                selected_scope,
+                alias=alias,
+                offload_order=ordinal,
+                command_name=command,
+                step_index=step_index,
+                text=original,
+                text_sha256=digest,
+            )
+        except Exception as error:  # noqa: BLE001
+            record_event(
+                {
+                    "kind": "archive_refused",
+                    "scope_id": selected_scope.scope_id,
+                    "alias": alias,
+                    "step_index": step_index,
+                    "reason": "persistence_failed_original_retained",
+                    "error": type(error).__name__,
+                }
+            )
+            continue
+        mark_archived(selected_scope, alias, text_sha256=digest, inline=True)
+        remember_handle(
+            selected_scope,
+            {
+                "alias": alias,
+                "text": original,
+                "text_sha256": digest,
+                "command": command,
+                "step_index": step_index,
+                "offload_order": ordinal,
+            },
+        )
+        evicted = evict_hot_handles(
+            selected_scope, hot_handle_max_bytes=hot_handle_max_bytes
+        )
+        record = {
+            "alias": alias,
+            "step_index": step_index,
+            "text_sha256": digest,
+            "utf8_bytes": len(original.encode("utf-8")),
+            "hot_evictions": evicted,
+        }
+        archived.append(record)
+        record_event(
+            {
+                "kind": "observation_archived",
+                "scope_id": selected_scope.scope_id,
+                "hot_payload_bytes": hot_payload_bytes(selected_scope),
+                **record,
+            }
+        )
+    return archived
+
+
 def _over_packed_target(
     text: str,
     *,
@@ -169,6 +285,16 @@ def compact_trajectory(
     # Print the handle before measuring: the packed target must be checked
     # against the trajectory the agent actually receives.
     annotate_execute_observations(trajectory, executes=executes)
+    # Then make every execute observation durable, whatever the offload
+    # decision below turns out to be. Residency and availability are separate:
+    # a handle the agent can read inline must resolve too.
+    archive_execute_observations(
+        trajectory,
+        executes=executes,
+        scope=selected_scope,
+        selected_archive=store,
+        hot_handle_max_bytes=hot_handle_max_bytes,
+    )
     protected_from = ordinal_offset + max(
         1, len(executes) - recent_observations_protected + 1
     )
@@ -271,6 +397,7 @@ def compact_trajectory(
                 selected_scope, hot_handle_max_bytes=hot_handle_max_bytes
             )
             trajectory[key] = label
+            mark_offloaded(selected_scope, alias)
             decision["action"] = "offloaded"
             decision["reason"] = "oldest_eligible_until_target"
             decision["label"] = label

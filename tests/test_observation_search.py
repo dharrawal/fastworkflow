@@ -58,17 +58,21 @@ class ObservationSearch(unittest.TestCase):
         self.assertEqual(label_alias(label), 'O12')
 
     def test_small_observations_and_long_command_arguments_never_expand(self):
-        for text, command in [("Context is now '*'", 'reset_context'), ('x'*5000, 'query '+'é'*6000)]:
+        for turn, (text, command) in enumerate([("Context is now '*'", 'reset_context'), ('x'*5000, 'query '+'é'*6000)]):
+            # One observation per alias per scope: each case is its own turn.
+            scope = RuntimeHandleScope('store', 'channel', 'experiment', 'task', 1, f'turn-{turn}')
             trajectory = {'tool_name_0': 'execute_workflow_query', 'tool_args_0': {'command': command}, 'observation_0': text}
             decisions = compact_trajectory(trajectory, eligibility_threshold_tokens=0,
                 recent_observations_protected=0, packed_target_tokens=1,
-                scope=self.scope, selected_archive=self.archive)
+                scope=scope, selected_archive=self.archive)
             self.assertEqual(trajectory['observation_0'], alias_line('O1') + text)
             self.assertEqual(decisions[0]['reason'], 'replacement_not_smaller')
-            skeleton, _ = replan_trajectory_skeleton(trajectory, scope=self.scope, selected_archive=self.archive)
+            skeleton, _ = replan_trajectory_skeleton(trajectory, scope=scope, selected_archive=self.archive)
             # An inline copy in the replan skeleton keeps the same printed handle.
             self.assertEqual(skeleton['observation_0'], alias_line('O1') + text)
-            self.assertIsNone(self.archive.get(self.scope, 'O1'))
+            # The observation stays inline AND is searchable: keeping it in the
+            # prompt is a residency decision, not an availability one (A2).
+            self.assertEqual(self.archive.get(scope, 'O1')['text'], text)
 
     def test_replan_pointer_is_persisted_and_small_text_stays_inline(self):
         trajectory = {'tool_name_0': 'execute_workflow_query', 'tool_args_0': {'command': 'show_holders'}, 'observation_0': 'holder rows\n'+'x'*9000,

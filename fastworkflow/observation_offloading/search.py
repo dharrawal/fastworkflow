@@ -13,6 +13,7 @@ from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, Ru
 from fastworkflow.observation_offloading.state import (
     archive,
     default_scope,
+    observation_inline,
     record_event,
     stored_handles,
 )
@@ -129,6 +130,14 @@ def search_memory(
         raise ValueError("question must not be empty")
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
+    # Every execute observation is archived when its step completes, so a
+    # printed alias resolves whether its text is still inline or already a
+    # label. ``still_inline`` separates the two for measurement: True means the
+    # agent could also have read the text in its prompt, False means it was
+    # offloaded, and None means this process has no record of that alias being
+    # printed in this scope -- on a miss, a wrong-handle selection rather than a
+    # retrieval failure.
+    still_inline = observation_inline(selected_scope, wanted)
     handle = stored_handles(selected_scope).get(wanted)
     tier = "hot"
     if handle is None:
@@ -136,11 +145,11 @@ def search_memory(
         tier = "sqlite"
     if handle is None:
         record_event({"kind": "search_memory", "scope_id": selected_scope.scope_id,
-                      "alias": wanted, "status": "missing"})
+                      "alias": wanted, "status": "missing", "still_inline": still_inline})
         return f"search_memory: no matching offloaded handle {wanted} in this turn."
     query = f"{reasoning.strip().rstrip('.')}. {question.strip()}" if reasoning.strip() else question.strip()
     event = {"kind": "search_memory", "scope_id": selected_scope.scope_id,
-             "alias": wanted, "tier": tier, "question": question,
+             "alias": wanted, "tier": tier, "still_inline": still_inline, "question": question,
              "reasoning": reasoning, "observation_bytes": len(handle["text"].encode("utf-8")),
              "text_sha256": handle["text_sha256"]}
     started = time.monotonic()
