@@ -3,15 +3,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-from typing import Any, Mapping
+from dataclasses import asdict
+from typing import Any, Callable, Mapping, Optional
 
 import dspy
 
 from fastworkflow import tracing
-from fastworkflow.observation_offloading.compact import execute_ordinals
+from fastworkflow.observation_offloading.archive import RuntimeHandleScope
+from fastworkflow.observation_offloading.compact import execute_ordinals, step_indexes
 from fastworkflow.observation_offloading.labels import is_offload_label
-from fastworkflow.observation_offloading.state import record_event
+from fastworkflow.observation_offloading.state import (
+    clear_hot_handles,
+    env_int,
+    record_event,
+)
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.utils.react import NoSuspendedAgentStateError, fastWorkflowReAct
 
@@ -24,8 +29,7 @@ MAX_FORCED_REPLANS_ENV = "FW_MAX_FORCED_REPLANS"
 
 
 def max_forced_replans_from_env(default: int = MAX_FORCED_REPLANS) -> int:
-    raw = os.environ.get(MAX_FORCED_REPLANS_ENV, "").strip()
-    return default if not raw else int(raw)
+    return env_int(MAX_FORCED_REPLANS_ENV, default)
 
 
 class ContinuationPlanSignature(dspy.Signature):
@@ -64,12 +68,15 @@ def replan_trajectory_skeleton(
     trajectory: Mapping[str, Any],
     *,
     greedy_max_bytes: int = REPLAN_OBSERVATION_MAX_BYTES,
+    ordinal_offset: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Label every observation, then inline newest execute slots until the bound."""
 
     execute_aliases = {
         f"observation_{step_index}": f"O{ordinal}"
-        for step_index, ordinal in execute_ordinals(trajectory)
+        for step_index, ordinal in execute_ordinals(
+            trajectory, ordinal_offset=ordinal_offset
+        )
     }
     skeleton: dict[str, Any] = {}
     observation_keys: list[str] = []
@@ -126,23 +133,79 @@ def _next_step_index(trajectory: Mapping[str, Any]) -> int:
 
 
 class StructuredContinuationReAct(fastWorkflowReAct):
-    """Three segments of max_iters with at most two greedy-28k replans."""
+    """Three segments of max_iters with at most two greedy-28k replans.
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    ``scope_factory`` is called once per ``forward`` so the handle scope (and
+    with it the ``O{n}`` alias namespace) belongs to the turn being run, not to
+    the turn the agent happened to be constructed in. The bound scope travels
+    with the suspended state so an ask_user resume, in this process or another,
+    keeps writing and reading the same handles.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        scope_factory: Optional[Callable[[], RuntimeHandleScope]] = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.forced_replans = 0
+        self.truncated_execute_steps = 0
+        self.continuation_scope: RuntimeHandleScope | None = None
         self.continuation_scope_id: str | None = None
+        self._scope_factory = scope_factory
         self.max_forced_replans = max_forced_replans_from_env()
+
+    def bind_scope(self) -> RuntimeHandleScope | None:
+        """Resolve the scope for the turn that is starting; drop the previous turn's hot cache."""
+        factory = getattr(self, "_scope_factory", None)
+        if factory is None:
+            return getattr(self, "continuation_scope", None)
+        previous = getattr(self, "continuation_scope", None)
+        scope = factory()
+        if previous is not None and previous != scope:
+            clear_hot_handles(previous)
+        self.continuation_scope = scope
+        self.continuation_scope_id = scope.scope_id
+        return scope
 
     def export_suspended(self) -> dict[str, Any] | None:
         data = super().export_suspended()
         if data is not None:
             data["forced_replans"] = self.forced_replans
+            data["truncated_execute_steps"] = getattr(self, "truncated_execute_steps", 0)
+            scope = getattr(self, "continuation_scope", None)
+            if scope is not None:
+                data["continuation_scope"] = asdict(scope)
         return data
 
     def import_suspended(self, data: dict[str, Any]) -> None:
         super().import_suspended(data)
         self.forced_replans = int(data.get("forced_replans", 0))
+        self.truncated_execute_steps = int(data.get("truncated_execute_steps", 0))
+        raw_scope = data.get("continuation_scope")
+        if isinstance(raw_scope, Mapping):
+            scope = RuntimeHandleScope(**raw_scope)
+            self.continuation_scope = scope
+            self.continuation_scope_id = scope.scope_id
+
+    def truncate_trajectory(self, trajectory: dict[str, Any]) -> dict[str, Any]:
+        """Drop the oldest surviving step, remembering how many executes are gone.
+
+        The base class pops the first four keys in insertion order. Here steps
+        are removed by index so a ``replan_N`` artifact is never mistaken for a
+        step key, and execute steps are counted so ``execute_ordinals`` keeps
+        assigning the aliases the surviving observations were persisted under.
+        """
+        indexes = step_indexes(trajectory)
+        if not indexes:
+            return super().truncate_trajectory(trajectory)
+        oldest = indexes[0]
+        if str(trajectory.get(f"tool_name_{oldest}") or "") == "execute_workflow_query":
+            self.truncated_execute_steps = getattr(self, "truncated_execute_steps", 0) + 1
+        for prefix in ("thought", "tool_name", "tool_args", "observation"):
+            trajectory.pop(f"{prefix}_{oldest}", None)
+        return trajectory
 
     def _finish_prediction(
         self,
@@ -165,21 +228,25 @@ class StructuredContinuationReAct(fastWorkflowReAct):
     ) -> None:
         completed_segment = self.forced_replans + 1
         next_segment = completed_segment + 1
-        skeleton, observation_metadata = replan_trajectory_skeleton(trajectory)
+        skeleton, observation_metadata = replan_trajectory_skeleton(
+            trajectory,
+            ordinal_offset=getattr(self, "truncated_execute_steps", 0),
+        )
         trigger = (
             f"segment {completed_segment} reached the {self.max_iters}-iteration "
             "limit without agent-selected finish"
         )
         host = tracing.current_host()
+        # Same key set as build_query_with_next_steps: fw.planner.replan has one
+        # SpanContract, so every producer writes {model, replan_trigger, plan}.
+        # Segment bookkeeping and the injected artifact go to record_event below.
         span = tracing.start_span(
             host,
             tracing.SPAN_PLANNER_REPLAN,
             kind=tracing.KIND_LLM,
             attributes={
+                "model": getattr(dspy.settings.lm, "model", None),
                 "replan_trigger": "structured_continuation_segment_limit",
-                "completed_segment": completed_segment,
-                "next_segment": next_segment,
-                "max_segments": TOTAL_SEGMENTS,
             },
         )
         try:
@@ -197,7 +264,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             f"HARNESS REPLAN — segment {next_segment} of {TOTAL_SEGMENTS}. "
             f"Reason: {trigger}.\n{plan or 'Continue unfinished requested work.'}"
         )
-        tracing.end_span(host, span, attributes={"plan": plan, "artifact": artifact})
+        tracing.end_span(host, span, attributes={"plan": plan})
         artifact_key = f"replan_{completed_segment}"
         trajectory[artifact_key] = artifact
         self.current_trajectory[artifact_key] = artifact
@@ -212,6 +279,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                 "max_segments": TOTAL_SEGMENTS,
                 "reason": trigger,
                 "plan": plan,
+                "artifact": artifact,
                 "skeleton_steps": len(
                     [key for key in skeleton if key.startswith("tool_name_")]
                 ),
@@ -256,6 +324,8 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.current_trajectory = {}
         self.iteration_counter = 0
         self.forced_replans = 0
+        self.truncated_execute_steps = 0
+        self.bind_scope()
         trajectory: dict[str, Any] = {}
         max_iters = int(input_args.pop("max_iters", self.max_iters))
         return self._run_segments(trajectory, 0, input_args, max_iters)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -18,9 +19,12 @@ HANDLE_ARCHIVE_ENV = "FW_OFFLOAD_HANDLE_ARCHIVE"
 HOT_HANDLE_MAX_BYTES_ENV = "FW_OFFLOAD_HOT_MAX_BYTES"
 EVENTS_ENV = "FW_OFFLOAD_EVENTS"
 
+logger = logging.getLogger(__name__)
+
 _lock = threading.Lock()
 _handles: dict[str, dict[str, Any]] = {}
 _events: list[dict[str, Any]] = []
+_event_log_failures: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
 _default_scope = RuntimeHandleScope(
     store_identity=f"process-{os.getpid()}",
@@ -32,9 +36,34 @@ _default_scope = RuntimeHandleScope(
 )
 
 
+def env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Read a non-negative integer knob, falling back to ``default`` on bad input.
+
+    These parsers run on the compaction hot path of every agent step, so a
+    mistyped export must degrade to the default with a warning rather than
+    abort the turn.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not an integer; using default %d", name, raw, default
+        )
+        return default
+    if value < minimum:
+        logger.warning(
+            "%s=%d is below the minimum %d; using default %d",
+            name, value, minimum, default,
+        )
+        return default
+    return value
+
+
 def hot_handle_max_bytes_from_env(default: int = HOT_HANDLE_MAX_BYTES) -> int:
-    raw = os.environ.get(HOT_HANDLE_MAX_BYTES_ENV, "").strip()
-    return default if not raw else int(raw)
+    return env_int(HOT_HANDLE_MAX_BYTES_ENV, default)
 
 
 def archive() -> RuntimeHandleArchive:
@@ -57,16 +86,33 @@ def default_scope() -> RuntimeHandleScope:
 
 
 def record_event(event: Mapping[str, Any]) -> None:
+    """Append to the in-memory log and, when configured, the event file.
+
+    The file write is best effort: offloading is an optimisation, so a full
+    disk or a revoked permission on the event log must not abort the agent
+    step that produced the event. The first failure per path is logged.
+    """
     item = dict(event)
     with _lock:
         _events.append(item)
         path = os.environ.get(EVENTS_ENV, "").strip()
         if not path:
             return
-        dest = Path(path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with dest.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+        try:
+            dest = Path(path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with dest.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                    + "\n"
+                )
+        except (OSError, TypeError, ValueError) as error:
+            if path not in _event_log_failures:
+                _event_log_failures.add(path)
+                logger.warning(
+                    "observation offloading could not append to %s=%s: %s",
+                    EVENTS_ENV, path, error,
+                )
 
 
 def snapshot_events() -> list[dict[str, Any]]:
@@ -79,6 +125,7 @@ def reset_runtime_state() -> None:
     with _lock:
         _handles.clear()
         _events.clear()
+        _event_log_failures.clear()
         _default_archive = None
 
 

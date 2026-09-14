@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import re
 from typing import Any, Mapping, Optional
 
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
@@ -15,6 +15,7 @@ from fastworkflow.observation_offloading.labels import (
 from fastworkflow.observation_offloading.state import (
     archive,
     default_scope,
+    env_int,
     evict_hot_handles,
     hot_handle_max_bytes_from_env,
     hot_payload_bytes,
@@ -28,20 +29,44 @@ PACKED_TARGET_BYTES = 28_000
 TRAJECTORY_MAX_BYTES_ENV = "FW_TRAJECTORY_MAX_BYTES"
 
 
+_STEP_KEY = re.compile(r"^(?:tool_name|observation)_(\d+)$")
+
+
 def packed_target_bytes_from_env(default: int = PACKED_TARGET_BYTES) -> int:
-    raw = os.environ.get(TRAJECTORY_MAX_BYTES_ENV, "").strip()
-    return default if not raw else int(raw)
+    return env_int(TRAJECTORY_MAX_BYTES_ENV, default, minimum=1)
 
 
-def execute_ordinals(trajectory: Mapping[str, Any]) -> list[tuple[int, int]]:
+def step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
+    """Every step index still present, ascending, gaps included.
+
+    The base ReAct's context-window fallback pops the oldest step's keys, so the
+    trajectory can start at step 3 or skip a step in the middle. Scanning the
+    keys, rather than counting up from zero until the first miss, keeps
+    compaction and replan skeletons working after such a truncation.
+    """
+    indexes: set[int] = set()
+    for key in trajectory:
+        match = _STEP_KEY.match(str(key))
+        if match:
+            indexes.add(int(match.group(1)))
+    return sorted(indexes)
+
+
+def execute_ordinals(
+    trajectory: Mapping[str, Any], *, ordinal_offset: int = 0
+) -> list[tuple[int, int]]:
+    """``(step_index, ordinal)`` for every execute_workflow_query step present.
+
+    ``ordinal_offset`` is the number of execute steps already truncated out of
+    this trajectory, so the ``O{n}`` alias of a surviving step never shifts onto
+    an alias an earlier, now-removed step already persisted under.
+    """
     found: list[tuple[int, int]] = []
-    ordinal = 0
-    index = 0
-    while f"tool_name_{index}" in trajectory or f"observation_{index}" in trajectory:
+    ordinal = ordinal_offset
+    for index in step_indexes(trajectory):
         if str(trajectory.get(f"tool_name_{index}") or "") == "execute_workflow_query":
             ordinal += 1
             found.append((index, ordinal))
-        index += 1
     return found
 
 
@@ -66,8 +91,14 @@ def compact_trajectory(
     hot_handle_max_bytes: Optional[int] = None,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
+    ordinal_offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Mutate trajectory observations in place. Return offload decisions."""
+    """Mutate trajectory observations in place. Return offload decisions.
+
+    ``ordinal_offset`` counts execute steps the agent has truncated out of the
+    trajectory (see ``execute_ordinals``); recency protection is measured over
+    the steps still present.
+    """
 
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
@@ -77,10 +108,12 @@ def compact_trajectory(
         hot_handle_max_bytes = hot_handle_max_bytes_from_env()
     if hot_handle_max_bytes < 0:
         raise ValueError("hot_handle_max_bytes cannot be negative")
-    executes = execute_ordinals(trajectory)
+    executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
     if not executes:
         return []
-    protected_from = max(1, len(executes) - recent_observations_protected + 1)
+    protected_from = ordinal_offset + max(
+        1, len(executes) - recent_observations_protected + 1
+    )
     packed_text = json.dumps(trajectory, ensure_ascii=False, default=str)
     decisions: list[dict[str, Any]] = []
     for step_index, ordinal in executes:

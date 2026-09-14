@@ -1,8 +1,9 @@
 """Wire Arm D offloading onto an initialized workflow tool agent."""
 from __future__ import annotations
 
+import logging
 import os
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastworkflow import state_paths, tracing
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
@@ -17,6 +18,8 @@ from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import HANDLE_ARCHIVE_ENV, record_event
 
 ENABLED_ENV = "FW_OBSERVATION_OFFLOADING"
+
+logger = logging.getLogger(__name__)
 
 
 def enabled() -> bool:
@@ -62,6 +65,52 @@ def _scope_for_session(chat_session: Any) -> RuntimeHandleScope:
     )
 
 
+def build_compacting_step(
+    agent_ref: Callable[[], Any],
+    *,
+    fallback_scope: RuntimeHandleScope,
+    selected_archive: RuntimeHandleArchive,
+    on_step_complete: Optional[Callable[[int, dict[str, Any]], bool]] = None,
+) -> Callable[[int, dict[str, Any]], bool]:
+    """The ReAct on_step_complete hook: compact, then defer to the caller's hook.
+
+    ``_run_loop`` invokes this with no try/except of its own, so anything raised
+    here would turn a successful tool call into a full-turn abort. Offloading is
+    an optimisation; a failure to compact is logged and recorded, and the step
+    continues with its observation left inline.
+    """
+
+    def compacting_step(idx: int, trajectory: dict[str, Any]) -> bool:
+        agent = agent_ref()
+        scope = getattr(agent, "continuation_scope", None) or fallback_scope
+        try:
+            compact_trajectory(
+                trajectory,
+                scope=scope,
+                selected_archive=selected_archive,
+                ordinal_offset=int(getattr(agent, "truncated_execute_steps", 0) or 0),
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "observation offloading skipped compaction at step %d: %s: %s",
+                idx, type(error).__name__, error,
+            )
+            record_event(
+                {
+                    "kind": "compaction_failed",
+                    "scope_id": scope.scope_id,
+                    "step_index": idx,
+                    "error": type(error).__name__,
+                    "detail": str(error)[:300],
+                }
+            )
+        if on_step_complete is not None and not on_step_complete(idx, trajectory):
+            return False
+        return True
+
+    return compacting_step
+
+
 def maybe_wrap_tool_agent(
     chat_session: Any,
     agent: Any,
@@ -72,6 +121,9 @@ def maybe_wrap_tool_agent(
     if not enabled():
         return agent
     install_span_policy()
+    # The scope is re-resolved by the rebuilt agent at every forward(), so the
+    # turn_key it carries is the turn actually running. This one is only the
+    # fallback for a step that fires before the first forward() bound a scope.
     scope = _scope_for_session(chat_session)
     archive_path = os.environ.get(HANDLE_ARCHIVE_ENV, "").strip()
     if not archive_path:
@@ -80,18 +132,21 @@ def maybe_wrap_tool_agent(
         workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
         archive_path = state_paths.observability_db(workflow_path) + ".offload-handles.sqlite3"
     selected_archive = RuntimeHandleArchive(archive_path)
+    rebuilt: Any = None
 
-    def compacting_step(idx: int, trajectory: dict[str, Any]) -> bool:
-        compact_trajectory(trajectory, scope=scope, selected_archive=selected_archive)
-        if on_step_complete is not None and not on_step_complete(idx, trajectory):
-            return False
-        return True
+    compacting_step = build_compacting_step(
+        lambda: rebuilt,
+        fallback_scope=scope,
+        selected_archive=selected_archive,
+        on_step_complete=on_step_complete,
+    )
 
     def scoped_search_memory(question: str, alias: str = "") -> str:
         """Search bounded excerpts from this turn's offloaded observations."""
 
+        current = getattr(rebuilt, "continuation_scope", None) or scope
         return search_memory(
-            question, alias, scope=scope, selected_archive=selected_archive
+            question, alias, scope=current, selected_archive=selected_archive
         )
 
     scoped_search_memory.__name__ = "search_memory"
@@ -106,6 +161,7 @@ def maybe_wrap_tool_agent(
         tools=callables,
         max_iters=int(max_iters or DEFAULT_MAX_ITERS),
         on_step_complete=compacting_step,
+        scope_factory=lambda: _scope_for_session(chat_session),
     )
     rebuilt.continuation_scope_id = scope.scope_id
     record_event(

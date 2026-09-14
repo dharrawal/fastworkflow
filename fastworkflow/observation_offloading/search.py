@@ -16,15 +16,34 @@ SEARCH_MEMORY_MAX_PAGES = 3
 
 
 class InvalidPageBoundary(ValueError):
-    """A requested page would start inside a UTF-8 or newline record."""
+    """A requested page would start outside the text or inside a UTF-8 sequence."""
+
+
+def _is_continuation_byte(payload: bytes, position: int) -> bool:
+    return 0 <= position < len(payload) and (payload[position] & 0xC0) == 0x80
+
+
+def _char_boundary_at_or_before(payload: bytes, position: int) -> int:
+    while position > 0 and _is_continuation_byte(payload, position):
+        position -= 1
+    return position
 
 
 def text_page(text: str, start_byte: int, max_bytes: int) -> dict[str, Any]:
+    """One page of at most ``max_bytes`` UTF-8 bytes starting at ``start_byte``.
+
+    Pages end just after the last newline inside the window when there is one.
+    A window with no newline (a one-line JSON blob, a base64 artifact, a long
+    stack-trace line) ends at the last complete UTF-8 character instead, so the
+    caller can always feed ``end_byte`` back in as the next ``start_byte`` and
+    the slice always decodes. ``start_byte`` must therefore sit on a character
+    boundary; it need not follow a newline.
+    """
     payload = text.encode("utf-8")
     if start_byte < 0 or start_byte > len(payload):
         raise InvalidPageBoundary("start_byte is outside the stored text")
-    if start_byte and payload[start_byte - 1 : start_byte] != b"\n":
-        raise InvalidPageBoundary("start_byte must be zero or immediately after a newline")
+    if _is_continuation_byte(payload, start_byte):
+        raise InvalidPageBoundary("start_byte must be on a UTF-8 character boundary")
     if start_byte == len(payload):
         return {
             "start_byte": start_byte,
@@ -33,10 +52,19 @@ def text_page(text: str, start_byte: int, max_bytes: int) -> dict[str, Any]:
             "has_more": False,
             "total_bytes": len(payload),
         }
-    candidate_end = min(len(payload), start_byte + max_bytes)
+    candidate_end = min(len(payload), start_byte + max(1, max_bytes))
     if candidate_end < len(payload):
         newline = payload.rfind(b"\n", start_byte, candidate_end + 1)
-        end_byte = candidate_end if newline < start_byte else newline + 1
+        if newline >= start_byte:
+            end_byte = newline + 1
+        else:
+            end_byte = _char_boundary_at_or_before(payload, candidate_end)
+            if end_byte <= start_byte:
+                # A single character wider than the page: emit it whole rather
+                # than return an empty page the caller could never advance past.
+                end_byte = start_byte + 1
+                while _is_continuation_byte(payload, end_byte):
+                    end_byte += 1
     else:
         end_byte = len(payload)
     return {
