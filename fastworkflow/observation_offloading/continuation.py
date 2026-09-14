@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict
 from typing import Any, Callable, Mapping, Optional
 
@@ -22,7 +23,10 @@ from fastworkflow.observation_offloading.state import (
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.utils.react import NoSuspendedAgentStateError, fastWorkflowReAct
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MAX_ITERS = 25
+DEFAULT_CONTINUATION_PLAN = "Continue unfinished requested work."
 MAX_FORCED_REPLANS = 2
 TOTAL_SEGMENTS = MAX_FORCED_REPLANS + 1
 MAX_REPLAN_CHARS = 2_000
@@ -260,6 +264,12 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                 "replan_trigger": "structured_continuation_segment_limit",
             },
         )
+        # The planner is advisory. Stock ReAct falls back to extract() at the
+        # iteration limit, so a planner hiccup here (rate limit, timeout, parse
+        # failure) degrades to the default continuation plan rather than
+        # aborting a turn that has already done the work. Non-Exception
+        # BaseExceptions (KeyboardInterrupt, suspension) still propagate.
+        planner_error: str | None = None
         try:
             prediction = dspy.Predict(ContinuationPlanSignature)(
                 user_query=str(input_args.get("user_query") or ""),
@@ -268,14 +278,25 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                 ),
             )
             plan = str(prediction.next_steps or "").strip()[:MAX_REPLAN_CHARS]
+        except Exception as error:  # noqa: BLE001
+            planner_error = f"{type(error).__name__}: {error}"[:300]
+            logger.warning(
+                "continuation planner failed at segment %d; using the default plan: %s",
+                completed_segment, planner_error,
+            )
+            plan = ""
+            tracing.end_span(
+                host, span, status=tracing.STATUS_ERROR, attributes={"plan": plan}
+            )
         except BaseException:
             tracing.end_span(host, span, status=tracing.STATUS_ERROR)
             raise
+        else:
+            tracing.end_span(host, span, attributes={"plan": plan})
         artifact = (
             f"HARNESS REPLAN — segment {next_segment} of {TOTAL_SEGMENTS}. "
-            f"Reason: {trigger}.\n{plan or 'Continue unfinished requested work.'}"
+            f"Reason: {trigger}.\n{plan or DEFAULT_CONTINUATION_PLAN}"
         )
-        tracing.end_span(host, span, attributes={"plan": plan})
         artifact_key = f"replan_{completed_segment}"
         trajectory[artifact_key] = artifact
         self.current_trajectory[artifact_key] = artifact
@@ -290,6 +311,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                 "max_segments": TOTAL_SEGMENTS,
                 "reason": trigger,
                 "plan": plan,
+                "planner_error": planner_error,
                 "artifact": artifact,
                 "skeleton_steps": len(
                     [key for key in skeleton if key.startswith("tool_name_")]

@@ -4,7 +4,7 @@ Enabled by default. Set ``FW_OBSERVATION_OFFLOADING=0`` to restore stock ReAct.
 """
 from __future__ import annotations
 
-from fastworkflow.observation_offloading.agent import enabled, maybe_wrap_tool_agent
+from fastworkflow.observation_offloading.agent import build_tool_agent, enabled
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
     RuntimeHandleArchive,
@@ -45,6 +45,7 @@ __all__ = [
     "RuntimeHandleArchive",
     "RuntimeHandleScope",
     "StructuredContinuationReAct",
+    "build_tool_agent",
     "classify_against_steps",
     "clear_hot_handles",
     "compact_trajectory",
@@ -52,7 +53,6 @@ __all__ = [
     "execute_ordinals",
     "hot_payload_bytes",
     "install_span_policy",
-    "maybe_wrap_tool_agent",
     "offload_label",
     "replan_trajectory_skeleton",
     "reset_runtime_state",
