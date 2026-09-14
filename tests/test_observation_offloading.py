@@ -218,7 +218,7 @@ class CompactTrajectory(unittest.TestCase):
         self.compact(trajectory, packed_target_tokens=10)
         clear_hot_handles(self.scope)
         answer = search_memory(
-            "restart answer",
+            "What exact heading appears at the start of this observation?",
             alias="O1",
             scope=self.scope,
             selected_archive=self.archive,

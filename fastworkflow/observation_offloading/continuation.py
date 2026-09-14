@@ -107,21 +107,31 @@ def replan_trajectory_skeleton(
             measured = measured - current_bytes + candidate_bytes
             inlined_keys.append(key)
     measured_bytes = sum(len(str(skeleton[key]).encode("utf-8")) for key in observation_keys)
-    if measured_bytes > greedy_max_bytes:
-        raise ValueError("observation labels alone exceed the greedy replan observation bound")
+    # A byte target cannot override the no-expansion rule or invent searchable
+    # O handles for non-command observations. Keep that irreducible evidence
+    # and report the overage instead of aborting a successful tool trajectory.
     # Only label text that is durably resolvable by search_memory in this turn.
-    store = selected_archive or archive()
+    store = selected_archive
     selected_scope = scope or default_scope()
+    persistence_failures: list[str] = []
     for key in execute_keys:
         text = str(trajectory[key])
         if skeleton[key] == text or is_offload_label(text):
             continue
         suffix = key.removeprefix("observation_")
         command = str((trajectory.get(f"tool_args_{suffix}") or {}).get("command") or "execute_workflow_query")
-        store.persist(selected_scope, alias=execute_aliases[key],
-                      offload_order=int(execute_aliases[key][1:]), command_name=command,
-                      step_index=int(suffix), text=text,
-                      text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+        try:
+            store = store or archive()
+            store.persist(selected_scope, alias=execute_aliases[key],
+                          offload_order=int(execute_aliases[key][1:]), command_name=command,
+                          step_index=int(suffix), text=text,
+                          text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+        except Exception as error:
+            skeleton[key] = trajectory[key]
+            persistence_failures.append(execute_aliases[key])
+            record_event({"kind": "replan_offload_refused", "alias": execute_aliases[key],
+                          "scope_id": selected_scope.scope_id, "error": type(error).__name__})
+    measured_bytes = sum(len(str(skeleton[key]).encode("utf-8")) for key in observation_keys)
     inlined_keys = [key for key in execute_keys if not is_offload_label(str(skeleton[key]))]
     inlined_aliases = [execute_aliases[key] for key in execute_keys if key in inlined_keys]
     labeled_aliases = [execute_aliases[key] for key in execute_keys if key not in inlined_keys]
@@ -131,6 +141,8 @@ def replan_trajectory_skeleton(
         "labeled_aliases": labeled_aliases,
         "measured_bytes": measured_bytes,
         "greedy_max_bytes": greedy_max_bytes,
+        "over_target": measured_bytes > greedy_max_bytes,
+        "persistence_failures": persistence_failures,
     }
     return skeleton, metadata
 

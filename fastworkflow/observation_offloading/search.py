@@ -93,11 +93,24 @@ class ObservationSearchSignature(dspy.Signature):
     supporting rows/facts. If the observation does not establish the answer,
     say so; absence from a partial list does not establish absence in reality.
     Do not invent facts or use other observations or external knowledge.
+    Do not reproduce long tables. For a broad request for all rows, give the
+    recorded count and a concise description of the contents, explicitly say
+    the full list is not reproduced, and ask for a focused entity or predicate.
+    Never present a subset as an exhaustive list.
     """
 
     question: str = dspy.InputField(desc="Current agent reasoning followed by its question")
     observation: str = dspy.InputField(desc="Complete text of the single selected observation")
     answer: str = dspy.OutputField(desc="Evidence-grounded answer, or an explicit evidence gap")
+
+
+def completion_was_truncated(history: dict[str, Any], limit: int = 2048) -> bool:
+    response = history.get("response")
+    choices = getattr(response, "choices", None) or (response.get("choices", []) if isinstance(response, dict) else [])
+    finish = getattr(choices[0], "finish_reason", None) if choices else None
+    if choices and isinstance(choices[0], dict):
+        finish = choices[0].get("finish_reason")
+    return finish == "length" or (history.get("usage") or {}).get("completion_tokens", 0) >= limit
 
 
 def search_memory(
@@ -134,9 +147,17 @@ def search_memory(
     try:
         lm = get_lm("LLM_OBSERVATION_SEARCH", "LITELLM_API_KEY_OBSERVATION_SEARCH",
                     temperature=0, max_tokens=2048, timeout=120, num_retries=1)
-        with dspy.context(lm=lm):
+        # Keep one response locally so completion-limit detection also works when
+        # the surrounding server disables DSPy history.
+        with dspy.context(lm=lm, disable_history=False, max_history_size=1):
             prediction = dspy.Predict(ObservationSearchSignature)(
                 question=query, observation=handle["text"])
+        history = lm.history[-1] if lm.history else {}
+        if completion_was_truncated(history):
+            record_event({**event, "status": "incomplete", "reason": "completion_limit"})
+            return (f"search_memory: answer for {wanted} exceeded the completion limit; "
+                    "no complete evidence answer was produced. Ask a focused question "
+                    "about specific entities or a narrower predicate in this observation.")
         answer = str(prediction.answer).strip()
         if not answer:
             raise ValueError("observation search returned an empty answer")
@@ -149,6 +170,8 @@ def search_memory(
     history = lm.history[-1] if lm.history else {}
     record_event({**event, "status": "answered", "model": lm.model,
                   "latency_ms": round((time.monotonic() - started) * 1000),
-                  "usage": history.get("usage"), "cost_usd": history.get("cost"),
+                  "usage": {key: (history.get("usage") or {}).get(key) for key in
+                            ("prompt_tokens", "completion_tokens", "total_tokens")},
+                  "cost_usd": history.get("cost"),
                   "answer": answer})
     return f"Observation {wanted} (tier={tier}):\n{answer}"

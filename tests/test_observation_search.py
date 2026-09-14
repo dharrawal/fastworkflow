@@ -12,7 +12,7 @@ from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, Ru
 from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.continuation import replan_trajectory_skeleton
 from fastworkflow.observation_offloading.labels import offload_label, label_alias, is_offload_label
-from fastworkflow.observation_offloading.search import search_memory
+from fastworkflow.observation_offloading.search import search_memory, completion_was_truncated
 from fastworkflow.observation_offloading.state import reset_runtime_state, snapshot_events
 
 
@@ -31,6 +31,11 @@ class ObservationSearch(unittest.TestCase):
 
     def search(self, question, alias, **kwargs):
         return search_memory(question, alias, scope=self.scope, selected_archive=self.archive, **kwargs)
+
+    def test_truncated_provider_response_is_not_an_evidence_answer(self):
+        self.assertTrue(completion_was_truncated({'response': {'choices': [{'finish_reason': 'length'}]}}))
+        self.assertTrue(completion_was_truncated({'usage': {'completion_tokens': 2048}}))
+        self.assertFalse(completion_was_truncated({'response': {'choices': [{'finish_reason': 'stop'}]}, 'usage': {'completion_tokens': 50}}))
 
     def test_alias_is_required_and_validated_before_model_call(self):
         self.assertIs(inspect.signature(search_memory).parameters['alias'].default, inspect.Parameter.empty)
@@ -72,6 +77,26 @@ class ObservationSearch(unittest.TestCase):
         self.assertEqual(self.archive.get(self.scope, 'O1')['text'], trajectory['observation_0'])
         self.assertEqual(skeleton['observation_1'], trajectory['observation_1'])
 
+    def test_replan_archive_failure_preserves_original_evidence(self):
+        # A real SQLite failure: the database path names a directory.
+        self.archive.db_path = self.tmp.name
+        text = 'holder rows\n' + 'x'*9000
+        skeleton, metadata = replan_trajectory_skeleton(
+            {'tool_name_0': 'execute_workflow_query', 'tool_args_0': {'command': 'show_holders'}, 'observation_0': text},
+            greedy_max_bytes=1000, scope=self.scope, selected_archive=self.archive)
+        self.assertEqual(skeleton['observation_0'], text)
+        self.assertEqual(metadata['persistence_failures'], ['O1'])
+        self.assertTrue(metadata['over_target'])
+
+    def test_replan_keeps_irreducible_non_command_evidence_without_aborting(self):
+        text = 'available command metadata\n' + 'x'*30000
+        skeleton, metadata = replan_trajectory_skeleton(
+            {'tool_name_0': 'what_can_i_do', 'observation_0': text},
+            scope=self.scope, selected_archive=self.archive)
+        self.assertEqual(skeleton['observation_0'], text)
+        self.assertTrue(metadata['over_target'])
+        self.assertIsNone(self.archive.get(self.scope, 'O1'))
+
     def test_reasoning_is_current_step_even_after_resume_or_truncation(self):
         trajectory = {'tool_name_8': 'search_memory', 'thought_8': 'stale thought',
                       'tool_name_20': 'search_memory', 'thought_20': 'Need the account UID, not identity UID'}
@@ -79,6 +104,18 @@ class ObservationSearch(unittest.TestCase):
         self.assertEqual(current_search_reasoning(agent), trajectory['thought_20'])
         trajectory['tool_name_21'] = 'execute_workflow_query'
         self.assertEqual(current_search_reasoning(agent), '')
+
+    @unittest.skipUnless(os.environ.get('FW_TEST_OBSERVATION_SEARCH_LIVE') == '1', 'requires configured observation-search provider')
+    def test_broad_question_returns_bounded_summary_not_truncated_table(self):
+        text = '477 holder(s).\n' + '\n'.join(f'{i:032x} Person {i}' for i in range(477))
+        self.persist('O1', text)
+        import dspy
+        with dspy.context(disable_history=True):
+            answer = self.search('Give every identity_uid and label in this result.', 'O1')
+        self.assertIn('477', answer)
+        self.assertLess(len(answer), 2000)
+        self.assertEqual(snapshot_events()[-1]['status'], 'answered')
+        self.assertGreater(snapshot_events()[-1]['usage']['completion_tokens'], 0)
 
     @unittest.skipUnless(os.environ.get('FW_TEST_OBSERVATION_SEARCH_LIVE') == '1', 'requires configured observation-search provider')
     def test_full_observation_reasoning_and_scope_with_real_dspy(self):
