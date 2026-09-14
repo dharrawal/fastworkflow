@@ -13,6 +13,7 @@ from fastworkflow.observation_offloading.archive import (
 from fastworkflow.observation_offloading.compact import (
     PACKED_TARGET_BYTES,
     RECENT_OBSERVATIONS_PROTECTED,
+    annotate_execute_observations,
     compact_trajectory,
     execute_ordinals,
 )
@@ -22,7 +23,12 @@ from fastworkflow.observation_offloading.continuation import (
     StructuredContinuationReAct,
     replan_trajectory_skeleton,
 )
-from fastworkflow.observation_offloading.labels import offload_label
+from fastworkflow.observation_offloading.labels import (
+    alias_line,
+    offload_label,
+    printed_alias,
+    strip_alias_line,
+)
 from fastworkflow.observation_offloading.manifest import (
     classify_against_steps,
     install_span_policy,
@@ -45,6 +51,8 @@ __all__ = [
     "RuntimeHandleArchive",
     "RuntimeHandleScope",
     "StructuredContinuationReAct",
+    "alias_line",
+    "annotate_execute_observations",
     "build_tool_agent",
     "classify_against_steps",
     "clear_hot_handles",
@@ -54,9 +62,11 @@ __all__ = [
     "hot_payload_bytes",
     "install_span_policy",
     "offload_label",
+    "printed_alias",
     "replan_trajectory_skeleton",
     "reset_runtime_state",
     "search_memory",
     "stored_handles",
+    "strip_alias_line",
     "uninstall_span_policy",
 ]

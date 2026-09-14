@@ -12,7 +12,13 @@ import dspy
 from fastworkflow import tracing
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope, RuntimeHandleArchive
 from fastworkflow.observation_offloading.compact import execute_ordinals, step_indexes
-from fastworkflow.observation_offloading.labels import is_offload_label, label_alias, replacement_saves_space, offload_label
+from fastworkflow.observation_offloading.labels import (
+    is_offload_label,
+    label_alias,
+    offload_label,
+    replacement_saves_space,
+    strip_alias_line,
+)
 from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
     archive,
@@ -90,9 +96,12 @@ def replan_trajectory_skeleton(
         else:
             args = trajectory.get(f"tool_args_{suffix}") or {}
             command = str(args.get("command") or "execute_workflow_query")
-            label = offload_label(alias=alias, command_name=command, response=text,
-                                 description=describe_output(command, text) if describe_output else "")
-            skeleton[key] = (label if key in execute_aliases and replacement_saves_space(text, label)
+            # The printed handle line is presentation; label text, its authored
+            # description lookup and the savings rule all use the exact response.
+            original = strip_alias_line(text)
+            label = offload_label(alias=alias, command_name=command, response=original,
+                                 description=describe_output(command, original) if describe_output else "")
+            skeleton[key] = (label if key in execute_aliases and replacement_saves_space(original, label)
                              else value)
 
     execute_keys = [key for key in observation_keys if key in execute_aliases]
@@ -114,11 +123,12 @@ def replan_trajectory_skeleton(
     selected_scope = scope or default_scope()
     persistence_failures: list[str] = []
     for key in execute_keys:
-        text = str(trajectory[key])
-        if skeleton[key] == text or is_offload_label(text):
+        shown = str(trajectory[key])
+        if skeleton[key] == shown or is_offload_label(shown):
             continue
         suffix = key.removeprefix("observation_")
         command = str((trajectory.get(f"tool_args_{suffix}") or {}).get("command") or "execute_workflow_query")
+        text = strip_alias_line(shown)
         try:
             store = store or archive()
             store.persist(selected_scope, alias=execute_aliases[key],

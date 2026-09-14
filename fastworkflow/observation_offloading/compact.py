@@ -8,10 +8,13 @@ from typing import Any, Callable, Mapping, Optional
 
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import (
+    alias_line,
     estimated_tokens,
     is_offload_label,
     offload_label,
+    printed_alias,
     replacement_saves_space,
+    strip_alias_line,
 )
 from fastworkflow.observation_offloading.state import (
     archive,
@@ -71,6 +74,56 @@ def execute_ordinals(
     return found
 
 
+def annotate_execute_observations(
+    trajectory: dict[str, Any],
+    *,
+    ordinal_offset: int = 0,
+    executes: Optional[list[tuple[int, int]]] = None,
+) -> list[dict[str, Any]]:
+    """Print the canonical ``O{n}`` handle on every execute observation, in place.
+
+    The agent only ever saw an alias on an offload label, so it guessed ReAct
+    step numbers when it wanted to search a result that was still inline. This
+    prints the same alias ``execute_ordinals`` assigns -- including
+    ``ordinal_offset`` for execute steps truncated out of the trajectory -- on
+    the observation itself, the moment the step completes.
+
+    The line is presentation only. ``strip_alias_line`` recovers the exact
+    command response for the archive and for the offload label's description,
+    so stored text and its digest stay comparable with observations recorded
+    before this existed.
+
+    An alias, once printed, is never rewritten: a surviving step's ordinal
+    cannot change, so a disagreement is a bug, not a renumbering. It is
+    recorded as ``alias_conflict`` and the text is left exactly as it stands.
+    """
+    if executes is None:
+        executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
+    annotated: list[dict[str, Any]] = []
+    for step_index, ordinal in executes:
+        key = f"observation_{step_index}"
+        text = trajectory.get(key)
+        if not isinstance(text, str) or is_offload_label(text):
+            continue
+        alias = f"O{ordinal}"
+        shown = printed_alias(text)
+        if shown == alias:
+            continue
+        if shown is not None:
+            record_event(
+                {
+                    "kind": "alias_conflict",
+                    "step_index": step_index,
+                    "printed_alias": shown,
+                    "expected_alias": alias,
+                }
+            )
+            continue
+        trajectory[key] = alias_line(alias) + text
+        annotated.append({"alias": alias, "step_index": step_index})
+    return annotated
+
+
 def _over_packed_target(
     text: str,
     *,
@@ -113,6 +166,9 @@ def compact_trajectory(
     executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
     if not executes:
         return []
+    # Print the handle before measuring: the packed target must be checked
+    # against the trajectory the agent actually receives.
+    annotate_execute_observations(trajectory, executes=executes)
     protected_from = ordinal_offset + max(
         1, len(executes) - recent_observations_protected + 1
     )
@@ -124,10 +180,13 @@ def compact_trajectory(
         if not isinstance(response, str):
             continue
         alias = f"O{ordinal}"
+        # Every offload decision is taken on the exact command response, so the
+        # printed handle cannot shift eligibility, savings or the stored digest.
+        original = strip_alias_line(response)
         size = {
-            "characters": len(response),
-            "utf8_bytes": len(response.encode("utf-8")),
-            "estimated_tokens": estimated_tokens(response),
+            "characters": len(original),
+            "utf8_bytes": len(original.encode("utf-8")),
+            "estimated_tokens": estimated_tokens(original),
         }
         recency_protected = ordinal >= protected_from
         already_label = is_offload_label(response)
@@ -164,14 +223,14 @@ def compact_trajectory(
             label = offload_label(
                 alias=alias,
                 command_name=command or "execute_workflow_query",
-                response=response,
-                description=describe_output(command, response) if describe_output else "",
+                response=original,
+                description=describe_output(command, original) if describe_output else "",
             )
-            if not replacement_saves_space(response, label):
+            if not replacement_saves_space(original, label):
                 decision["reason"] = "replacement_not_smaller"
                 decisions.append(decision)
                 continue
-            digest = hashlib.sha256(response.encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
             packed_utf8_bytes_before = len(packed_text.encode("utf-8"))
             try:
                 store.persist(
@@ -180,7 +239,7 @@ def compact_trajectory(
                     offload_order=ordinal,
                     command_name=command,
                     step_index=step_index,
-                    text=response,
+                    text=original,
                     text_sha256=digest,
                 )
             except Exception as error:  # noqa: BLE001
@@ -201,7 +260,7 @@ def compact_trajectory(
                 selected_scope,
                 {
                     "alias": alias,
-                    "text": response,
+                    "text": original,
                     "text_sha256": digest,
                     "command": command,
                     "step_index": step_index,

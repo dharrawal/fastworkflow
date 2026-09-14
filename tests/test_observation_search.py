@@ -11,7 +11,7 @@ from fastworkflow.observation_offloading.agent import current_search_reasoning
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.continuation import replan_trajectory_skeleton
-from fastworkflow.observation_offloading.labels import offload_label, label_alias, is_offload_label
+from fastworkflow.observation_offloading.labels import offload_label, label_alias, is_offload_label, alias_line
 from fastworkflow.observation_offloading.search import search_memory, completion_was_truncated
 from fastworkflow.observation_offloading.state import reset_runtime_state, snapshot_events
 
@@ -63,10 +63,11 @@ class ObservationSearch(unittest.TestCase):
             decisions = compact_trajectory(trajectory, eligibility_threshold_tokens=0,
                 recent_observations_protected=0, packed_target_tokens=1,
                 scope=self.scope, selected_archive=self.archive)
-            self.assertEqual(trajectory['observation_0'], text)
+            self.assertEqual(trajectory['observation_0'], alias_line('O1') + text)
             self.assertEqual(decisions[0]['reason'], 'replacement_not_smaller')
             skeleton, _ = replan_trajectory_skeleton(trajectory, scope=self.scope, selected_archive=self.archive)
-            self.assertEqual(skeleton['observation_0'], text)
+            # An inline copy in the replan skeleton keeps the same printed handle.
+            self.assertEqual(skeleton['observation_0'], alias_line('O1') + text)
             self.assertIsNone(self.archive.get(self.scope, 'O1'))
 
     def test_replan_pointer_is_persisted_and_small_text_stays_inline(self):

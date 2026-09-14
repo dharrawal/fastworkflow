@@ -183,7 +183,13 @@ def build_tool_agent(
     )
 
     def scoped_search_memory(question: str, alias: str) -> str:
-        """Answer a question inside one offloaded observation. alias is required (e.g. O8)."""
+        """Answer a question inside ONE earlier execute_workflow_query observation.
+
+        alias is the O-number printed on that observation's first line
+        ("Observation O42 (execute_workflow_query)") or named in its offload
+        label. Never pass a step number. An alias that was never printed is a
+        miss, not another observation.
+        """
 
         current = getattr(agent, "continuation_scope", None) or scope
         return search_memory(

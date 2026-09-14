@@ -25,6 +25,7 @@ from fastworkflow.observation_offloading.archive import (
 )
 from fastworkflow.observation_offloading.compact import (
     PACKED_TARGET_BYTES,
+    annotate_execute_observations,
     compact_trajectory,
     execute_ordinals,
     packed_target_bytes_from_env,
@@ -37,7 +38,14 @@ from fastworkflow.observation_offloading.continuation import (
     max_forced_replans_from_env,
     replan_trajectory_skeleton,
 )
-from fastworkflow.observation_offloading.labels import offload_label
+from fastworkflow.observation_offloading.labels import (
+    alias_line,
+    is_offload_label,
+    label_alias,
+    offload_label,
+    printed_alias,
+    strip_alias_line,
+)
 from fastworkflow.observation_offloading.manifest import (
     classify_against_steps,
     install_span_policy,
@@ -103,8 +111,9 @@ class CompactTrajectory(unittest.TestCase):
         self.assertEqual(decisions[0]["action"], "offloaded")
         self.assertEqual(decisions[0]["alias"], "O1")
         self.assertIn("Use search_memory tool to search inside Observation", trajectory["observation_0"])
-        self.assertEqual(trajectory["observation_6"], "small-6")
+        self.assertEqual(trajectory["observation_6"], alias_line("O7") + "small-6")
         self.assertIn("O1", stored_handles(self.scope))
+        self.assertEqual(stored_handles(self.scope)["O1"]["text"], large)
 
     @unittest.skipUnless(os.environ.get("FW_TEST_OBSERVATION_SEARCH_LIVE") == "1", "requires configured observation-search provider")
     def test_search_memory_returns_handle_page_not_full_dump(self) -> None:
@@ -142,7 +151,7 @@ class CompactTrajectory(unittest.TestCase):
             trajectory[f"observation_{index}"] = f"small-{index}"
         decisions = self.compact(trajectory)
         self.assertEqual(decisions[0]["action"], "offloaded")
-        self.assertEqual(trajectory["observation_5"], "small-5")
+        self.assertEqual(trajectory["observation_5"], alias_line("O6") + "small-5")
 
     def test_default_recent_observations_protected_is_5(self) -> None:
         self.assertEqual(RECENT_OBSERVATIONS_PROTECTED, 5)
@@ -167,7 +176,7 @@ class CompactTrajectory(unittest.TestCase):
             },
         )
         self.assertIn("Use search_memory tool to search inside Observation", trajectory["observation_0"])
-        self.assertEqual(trajectory["observation_6"], large)
+        self.assertEqual(trajectory["observation_6"], alias_line("O7") + large)
 
     def test_default_target_measures_multibyte_utf8_not_characters(self) -> None:
         large = "é" * 15_000
@@ -248,7 +257,8 @@ class CompactTrajectory(unittest.TestCase):
             selected_archive=BrokenArchive(),  # type: ignore[arg-type]
             packed_target_tokens=10,
         )
-        self.assertEqual(trajectory["observation_0"], large)
+        # The handle is still printed; only the offload was refused.
+        self.assertEqual(trajectory["observation_0"], alias_line("O1") + large)
 
     def test_scope_prevents_alias_collision(self) -> None:
         other = RuntimeHandleScope(
@@ -973,3 +983,250 @@ class PlannerFailure(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertTrue(events[0]["planner_error"])
         self.assertEqual(events[0]["plan"], "")
+
+
+class PrintedObservationHandles(unittest.TestCase):
+    """A1 (ido-986.14.9): the canonical O alias is printed on every execute result.
+
+    The control runs recorded the agent asking search_memory for ReAct step
+    numbers (O48 for O42, O50 for O42, O59 for O49) because an alias was only
+    ever visible on an offload label. These checks pin the printed identifier to
+    exactly what execute_ordinals assigns, and keep archived text free of it.
+    """
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.addCleanup(reset_runtime_state)
+        self.archive = RuntimeHandleArchive(str(Path(self.tempdir.name) / "handles.sqlite3"))
+        self.scope = RuntimeHandleScope(
+            store_identity="fixture-store",
+            channel_id="fixture-channel",
+            experiment_id="fixture-experiment",
+            task_id="fixture-task",
+            attempt=1,
+            turn_key="fixture-turn",
+        )
+
+    def compact(self, trajectory, **kwargs):
+        return compact_trajectory(
+            trajectory, scope=self.scope, selected_archive=self.archive, **kwargs
+        )
+
+    @staticmethod
+    def _step(trajectory, index, tool, observation, command=None):
+        trajectory[f"thought_{index}"] = f"think-{index}"
+        trajectory[f"tool_name_{index}"] = tool
+        if command is not None:
+            trajectory[f"tool_args_{index}"] = {"command": command}
+        trajectory[f"observation_{index}"] = observation
+
+    def test_interleaved_tools_number_executes_only(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "holders page", command="show_holders")
+        self._step(trajectory, 1, "search_memory", "Observation O1 (tier=hot):\nan answer")
+        self._step(trajectory, 2, "ask_user", "the user replied")
+        self._step(trajectory, 3, "what_can_i_do", "available command metadata")
+        self._step(trajectory, 4, "execute_workflow_query", "rights page", command="show_rights")
+        self.compact(trajectory)
+        self.assertEqual(trajectory["observation_0"], alias_line("O1") + "holders page")
+        self.assertEqual(trajectory["observation_4"], alias_line("O2") + "rights page")
+        # A non-execute tool output never acquires an O alias, and the step
+        # number of the second execute (4) is never printed as one.
+        for index in (1, 2, 3):
+            self.assertIsNone(printed_alias(trajectory[f"observation_{index}"]))
+        self.assertNotIn("O5", trajectory["observation_4"])
+
+    def test_printed_alias_matches_execute_ordinals_with_offset(self) -> None:
+        trajectory: dict = {}
+        for index in range(3):
+            self._step(trajectory, index, "execute_workflow_query", f"body-{index}", command=f"c{index}")
+        self.compact(trajectory)
+        printed_before = {
+            index: printed_alias(trajectory[f"observation_{index}"]) for index in range(3)
+        }
+        self.assertEqual(printed_before, {0: "O1", 1: "O2", 2: "O3"})
+
+        # The base ReAct context-window fallback drops step 0; the agent counts
+        # the truncated execute and compaction resumes with ordinal_offset=1.
+        agent = StructuredContinuationReAct.__new__(StructuredContinuationReAct)
+        agent.truncated_execute_steps = 0
+        agent.truncate_trajectory(trajectory)
+        self.assertEqual(agent.truncated_execute_steps, 1)
+        self._step(trajectory, 3, "execute_workflow_query", "body-3", command="c3")
+        self.compact(trajectory, ordinal_offset=agent.truncated_execute_steps)
+
+        self.assertEqual(printed_alias(trajectory["observation_1"]), "O2")
+        self.assertEqual(printed_alias(trajectory["observation_2"]), "O3")
+        self.assertEqual(printed_alias(trajectory["observation_3"]), "O4")
+        self.assertEqual(
+            [alias for _, alias in
+             [(i, printed_alias(trajectory[f"observation_{i}"])) for i in (1, 2, 3)]],
+            [f"O{ordinal}" for _, ordinal in
+             execute_ordinals(trajectory, ordinal_offset=1)],
+        )
+
+    def test_reannotation_never_renumbers_a_surviving_observation(self) -> None:
+        trajectory: dict = {}
+        for index in range(2):
+            self._step(trajectory, index, "execute_workflow_query", f"body-{index}", command=f"c{index}")
+        self.compact(trajectory)
+        frozen = dict(trajectory)
+        # Compacting again is a no-op on the printed handles.
+        self.compact(trajectory)
+        self.assertEqual(trajectory["observation_0"], frozen["observation_0"])
+        # A wrong offset would renumber O1 -> O3; the printed alias wins and the
+        # disagreement is recorded instead of rewritten.
+        annotated = annotate_execute_observations(trajectory, ordinal_offset=2)
+        self.assertEqual(annotated, [])
+        self.assertEqual(trajectory["observation_0"], frozen["observation_0"])
+        conflicts = [e for e in snapshot_events() if e["kind"] == "alias_conflict"]
+        self.assertEqual(
+            [(e["printed_alias"], e["expected_alias"]) for e in conflicts],
+            [("O1", "O3"), ("O2", "O4")],
+        )
+
+    def test_replan_skeleton_reuses_the_printed_alias(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows\n" + "x" * 9_000,
+                   command="show_holders")
+        self._step(trajectory, 1, "what_can_i_do", "metadata")
+        self._step(trajectory, 2, "execute_workflow_query", "small rows", command="show_rights")
+        self.compact(trajectory)
+        self.assertEqual(printed_alias(trajectory["observation_0"]), "O1")
+        self.assertEqual(printed_alias(trajectory["observation_2"]), "O2")
+        skeleton, metadata = replan_trajectory_skeleton(
+            trajectory, greedy_max_bytes=1_000,
+            scope=self.scope, selected_archive=self.archive,
+        )
+        self.assertEqual(metadata["labeled_aliases"], ["O1"])
+        self.assertEqual(metadata["inlined_aliases"], ["O2"])
+        self.assertEqual(label_alias(skeleton["observation_0"]), "O1")
+        self.assertEqual(printed_alias(skeleton["observation_2"]), "O2")
+        # The replan copy persists the exact command response, not the line.
+        self.assertEqual(
+            self.archive.get(self.scope, "O1")["text"], "holder rows\n" + "x" * 9_000
+        )
+
+    def test_inline_alias_equals_the_label_and_archive_alias_after_offload(self) -> None:
+        large = "holder uid label\n" + ("x" * 30_000)
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", large, command="show_holders")
+        for index in range(1, 6):
+            self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
+                       command=f"find_{index}")
+        # Step 0 is recency-protected here, so the agent reads it inline first.
+        self.compact(trajectory, recent_observations_protected=6)
+        seen_inline = printed_alias(trajectory["observation_0"])
+        self.assertEqual(seen_inline, "O1")
+
+        decisions = self.compact(trajectory, recent_observations_protected=5)
+        self.assertEqual(decisions[0]["action"], "offloaded")
+        self.assertEqual(label_alias(trajectory["observation_0"]), seen_inline)
+        row = self.archive.get(self.scope, seen_inline)
+        self.assertIsNotNone(row)
+        # Archived text is the original response: no alias line, so its digest
+        # is comparable with observations recorded before A1.
+        self.assertEqual(row["text"], large)
+        self.assertEqual(
+            row["text_sha256"], hashlib.sha256(large.encode("utf-8")).hexdigest()
+        )
+        self.assertIsNone(printed_alias(row["text"]))
+        self.assertEqual(stored_handles(self.scope)[seen_inline]["text"], large)
+
+    def test_printed_alias_is_what_search_memory_resolves(self) -> None:
+        large = "holder uid label\n" + ("x" * 30_000)
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", large, command="show_holders")
+        self._step(trajectory, 1, "what_can_i_do", "metadata")
+        for index in range(2, 7):
+            self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
+                       command=f"find_{index}")
+        self.compact(trajectory)
+        alias = label_alias(trajectory["observation_0"])
+        self.assertEqual(alias, "O1")
+        # search_memory accepts the printed alias (validated before any model
+        # call) and resolves it to the exact original text.
+        with self.assertRaises(ValueError):
+            search_memory("", alias, scope=self.scope, selected_archive=self.archive)
+        self.assertEqual(self.archive.get(self.scope, alias)["text"], large)
+        # The step number of the newest execute is 6; its canonical alias is O6.
+        self.assertEqual(printed_alias(trajectory["observation_6"]), "O6")
+        # A step number that is not a live alias stays an explicit miss: no
+        # nearest-handle fallback, no model call.
+        miss = search_memory(
+            "Which control names the identity?", "O7",
+            scope=self.scope, selected_archive=self.archive,
+        )
+        self.assertIn("no matching offloaded handle O7", miss)
+        self.assertEqual(
+            [e["status"] for e in snapshot_events() if e["kind"] == "search_memory"],
+            ["missing"],
+        )
+
+    def test_label_still_saves_space_against_the_printed_observation(self) -> None:
+        body = "holder uid label\n" + ("x" * 30_000)
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", body, command="show_holders")
+        for index in range(1, 6):
+            self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
+                       command=f"find_{index}")
+        self.compact(trajectory)
+        label = trajectory["observation_0"]
+        printed = alias_line("O1") + body
+        self.assertTrue(is_offload_label(label))
+        self.assertLess(len(label), len(printed))
+        self.assertLess(len(label.encode("utf-8")), len(printed.encode("utf-8")))
+        # And against the response alone, so the added line can never be what
+        # makes an offload look profitable.
+        self.assertLess(len(label.encode("utf-8")), len(body.encode("utf-8")))
+
+    def test_decision_sizes_and_eligibility_ignore_the_printed_line(self) -> None:
+        body = "y" * 4_000
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query", body, command="show_holders")
+        decisions = self.compact(trajectory, recent_observations_protected=0,
+                                 packed_target_tokens=1)
+        self.assertEqual(decisions[0]["response_size"]["characters"], len(body))
+        self.assertEqual(decisions[0]["response_size"]["utf8_bytes"], len(body.encode("utf-8")))
+        self.assertEqual(strip_alias_line(trajectory["observation_0"]), body)
+
+    def test_error_and_empty_execute_observations_are_still_addressable(self) -> None:
+        trajectory: dict = {}
+        self._step(trajectory, 0, "execute_workflow_query",
+                   "Execution error in execute_workflow_query: boom", command="show_holders")
+        self._step(trajectory, 1, "execute_workflow_query", "", command="show_rights")
+        self.compact(trajectory)
+        self.assertEqual(printed_alias(trajectory["observation_0"]), "O1")
+        self.assertEqual(trajectory["observation_1"], alias_line("O2"))
+
+    def test_step_hook_prints_the_handle_as_the_loop_advances(self) -> None:
+        """The injection point: the ReAct on_step_complete hook, per step."""
+        agent = SimpleNamespace(continuation_scope=self.scope, truncated_execute_steps=0)
+        step = build_compacting_step(
+            lambda: agent,
+            fallback_scope=self.scope,
+            selected_archive=self.archive,
+        )
+        trajectory: dict = {}
+        plan = [
+            ("execute_workflow_query", "holders", "show_holders"),
+            ("search_memory", "an answer", None),
+            ("execute_workflow_query", "rights", "show_rights"),
+            ("ask_user", "the user replied", None),
+            ("execute_workflow_query", "controls", "list_controls"),
+        ]
+        for index, (tool, observation, command) in enumerate(plan):
+            self._step(trajectory, index, tool, observation, command=command)
+            self.assertTrue(step(index, trajectory))
+            if command is not None:
+                # The handle is visible on the very step that produced it.
+                self.assertIsNotNone(printed_alias(trajectory[f"observation_{index}"]))
+        self.assertEqual(
+            [printed_alias(trajectory[f"observation_{i}"]) for i in (0, 2, 4)],
+            ["O1", "O2", "O3"],
+        )
+        self.assertEqual(
+            [printed_alias(trajectory[f"observation_{i}"]) for i in (1, 3)], [None, None]
+        )
