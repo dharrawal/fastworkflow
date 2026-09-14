@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ITERS = 25
 DEFAULT_CONTINUATION_PLAN = "Continue unfinished requested work."
 MAX_FORCED_REPLANS = 2
-TOTAL_SEGMENTS = MAX_FORCED_REPLANS + 1
 MAX_REPLAN_CHARS = 2_000
 REPLAN_OBSERVATION_MAX_BYTES = 28_000
 MAX_FORCED_REPLANS_ENV = "FW_MAX_FORCED_REPLANS"
@@ -180,6 +179,11 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self._scope_factory = scope_factory
         self.max_forced_replans = max_forced_replans_from_env()
 
+    @property
+    def total_segments(self) -> int:
+        """Segments a turn may run: the first plus one per allowed forced replan."""
+        return getattr(self, "max_forced_replans", MAX_FORCED_REPLANS) + 1
+
     def bind_scope(self) -> RuntimeHandleScope | None:
         """Resolve the scope for the turn that is starting; drop the previous turn's hot cache."""
         factory = getattr(self, "_scope_factory", None)
@@ -306,7 +310,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         else:
             tracing.end_span(host, span, attributes={"plan": plan})
         artifact = (
-            f"HARNESS REPLAN — segment {next_segment} of {TOTAL_SEGMENTS}. "
+            f"HARNESS REPLAN — segment {next_segment} of {self.total_segments}. "
             f"Reason: {trigger}.\n{plan or DEFAULT_CONTINUATION_PLAN}"
         )
         artifact_key = f"replan_{completed_segment}"
@@ -320,7 +324,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                 "scope_id": getattr(self, "continuation_scope_id", None),
                 "completed_segment": completed_segment,
                 "next_segment": next_segment,
-                "max_segments": TOTAL_SEGMENTS,
+                "max_segments": self.total_segments,
                 "reason": trigger,
                 "plan": plan,
                 "planner_error": planner_error,
@@ -346,14 +350,15 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             if not self._exhausted_last_run:
                 return self._finish_prediction(trajectory, input_args)
             if self.forced_replans >= getattr(self, "max_forced_replans", MAX_FORCED_REPLANS):
+                total_segments = self.total_segments
                 record_event(
                     {
                         "kind": "forced_replan_wall",
                         "scope_id": getattr(self, "continuation_scope_id", None),
-                        "completed_segment": TOTAL_SEGMENTS,
-                        "max_segments": TOTAL_SEGMENTS,
+                        "completed_segment": total_segments,
+                        "max_segments": total_segments,
                         "reason": (
-                            f"segment {TOTAL_SEGMENTS} reached the "
+                            f"segment {total_segments} reached the "
                             f"{max_iters}-iteration limit"
                         ),
                     }

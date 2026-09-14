@@ -434,6 +434,53 @@ class StructuredContinuation(unittest.TestCase):
         self.assertIn("segment 2 of 3", trajectory["replan_1"])
         self.assertNotIn("x" * 1000, captured["trajectory_skeleton"])
 
+    def test_env_override_reports_actual_segment_total(self) -> None:
+        """Ultrareview normal finding: the artifact and events said "of 3"
+        while FW_MAX_FORCED_REPLANS gated a different number of segments."""
+        class ScriptedAgent(StructuredContinuationReAct):
+            def _run_loop(self, trajectory, idx, input_args, max_iters, exception_count):
+                self.segment_calls.append(max_iters)
+                trajectory[f"tool_name_{idx}"] = "execute_workflow_query"
+                trajectory[f"tool_args_{idx}"] = {"command": f"segment-{len(self.segment_calls)}"}
+                trajectory[f"observation_{idx}"] = f"result-{len(self.segment_calls)}"
+                self._exhausted_last_run = True
+                return None
+
+            def _finish_prediction(self, trajectory, input_args):
+                return SimpleNamespace(exhausted=self._exhausted_last_run)
+
+        def fake_predict(_signature):
+            return lambda **kwargs: SimpleNamespace(next_steps="Keep going.")
+
+        env = patch.dict(os.environ, {"FW_MAX_FORCED_REPLANS": "4"})
+        env.start()
+        self.addCleanup(env.stop)
+        agent = ScriptedAgent.__new__(ScriptedAgent)
+        agent.max_iters = 25
+        agent.forced_replans = 0
+        agent.iteration_counter = 0
+        agent.current_trajectory = {}
+        agent.segment_calls = []
+        agent.max_forced_replans = max_forced_replans_from_env()
+        self.assertEqual(agent.total_segments, 5)
+        trajectory = {}
+        with patch(
+            "fastworkflow.observation_offloading.continuation.dspy.Predict",
+            side_effect=fake_predict,
+        ):
+            result = agent._run_segments(trajectory, 0, {"user_query": "task"}, 25)
+        self.assertTrue(result.exhausted)
+        self.assertEqual(len(agent.segment_calls), 5)
+        self.assertIn("segment 2 of 5", trajectory["replan_1"])
+        self.assertIn("segment 5 of 5", trajectory["replan_4"])
+        replans = [e for e in snapshot_events() if e["kind"] == "forced_replan"]
+        self.assertEqual([e["max_segments"] for e in replans], [5, 5, 5, 5])
+        walls = [e for e in snapshot_events() if e["kind"] == "forced_replan_wall"]
+        self.assertEqual(len(walls), 1)
+        self.assertEqual(walls[0]["completed_segment"], 5)
+        self.assertEqual(walls[0]["max_segments"], 5)
+        self.assertIn("segment 5 reached", walls[0]["reason"])
+
 
 class TrajectoryManifest(unittest.TestCase):
     def setUp(self) -> None:
