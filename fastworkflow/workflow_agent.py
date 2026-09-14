@@ -15,9 +15,9 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
+from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-from fastworkflow.observation_offloading.agent import maybe_wrap_tool_agent
+from fastworkflow.observation_offloading.agent import build_tool_agent
 
 class WorkflowAgentSignature(dspy.Signature):
     """
@@ -649,15 +649,10 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         ask_user,
     ]
 
-    agent = fastWorkflowReAct(
-        AgentSignature,
-        tools=tools,
-        max_iters=max_iters,
-        on_step_complete=on_step_complete,
-    )
-    return maybe_wrap_tool_agent(
+    return build_tool_agent(
         chat_session_obj,
-        agent,
+        AgentSignature,
+        tools,
         max_iters=max_iters,
         on_step_complete=on_step_complete,
     )

@@ -13,7 +13,11 @@ from unittest.mock import patch
 import dspy
 
 from fastworkflow import tracing
-from fastworkflow.observation_offloading.agent import build_compacting_step
+from fastworkflow.observation_offloading.agent import (
+    ENABLED_ENV,
+    build_compacting_step,
+    build_tool_agent,
+)
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
     RuntimeHandleArchive,
@@ -26,6 +30,7 @@ from fastworkflow.observation_offloading.compact import (
     packed_target_bytes_from_env,
 )
 from fastworkflow.observation_offloading.continuation import (
+    DEFAULT_CONTINUATION_PLAN,
     MAX_FORCED_REPLANS,
     REPLAN_OBSERVATION_MAX_BYTES,
     StructuredContinuationReAct,
@@ -38,6 +43,7 @@ from fastworkflow.observation_offloading.manifest import (
     install_span_policy,
     uninstall_span_policy,
 )
+from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.observation_offloading.search import (
     DEFAULT_PAGE_BYTES,
     InvalidPageBoundary,
@@ -45,6 +51,7 @@ from fastworkflow.observation_offloading.search import (
     text_page,
 )
 from fastworkflow.observation_offloading.state import (
+    HANDLE_ARCHIVE_ENV,
     HOT_HANDLE_MAX_BYTES,
     clear_hot_handles,
     hot_handle_max_bytes_from_env,
@@ -823,3 +830,85 @@ class HookIsolation(unittest.TestCase):
         self.assertEqual(
             [e["kind"] for e in snapshot_events()], ["probe", "probe-again"]
         )
+
+
+class AgentConstruction(unittest.TestCase):
+    """Review nit: the wrapper discarded a fully built ReAct and rebuilt it."""
+
+    class Signature(dspy.Signature):
+        user_query: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self._set_env(HANDLE_ARCHIVE_ENV, str(Path(self.tempdir.name) / "handles.sqlite3"))
+
+    def _set_env(self, name: str, value: str) -> None:
+        previous = os.environ.get(name)
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+
+        self.addCleanup(restore)
+        os.environ[name] = value
+
+    @staticmethod
+    def noop_tool(command: str) -> str:
+        """Return the command unchanged."""
+        return command
+
+    def test_enabled_builds_one_continuation_agent_with_search_memory(self) -> None:
+        self._set_env(ENABLED_ENV, "1")
+        agent = build_tool_agent(
+            SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
+        )
+        self.assertIsInstance(agent, StructuredContinuationReAct)
+        self.assertEqual(set(agent.tools), {"noop_tool", "search_memory", "finish"})
+        self.assertEqual(agent.max_iters, 3)
+        installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
+        self.assertEqual(len(installed), 1)
+
+    def test_disabled_builds_a_stock_react_without_search_memory(self) -> None:
+        self._set_env(ENABLED_ENV, "0")
+        agent = build_tool_agent(
+            SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
+        )
+        self.assertIsInstance(agent, fastWorkflowReAct)
+        self.assertNotIsInstance(agent, StructuredContinuationReAct)
+        self.assertEqual(set(agent.tools), {"noop_tool", "finish"})
+
+
+class PlannerFailure(unittest.TestCase):
+    """Review nit: a planner LLM error at the segment limit aborted the turn."""
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+
+    def test_planner_error_degrades_to_the_default_plan(self) -> None:
+        agent = StructuredContinuationReAct.__new__(StructuredContinuationReAct)
+        agent.max_iters = 25
+        agent.forced_replans = 0
+        agent.iteration_counter = 25
+        agent.current_trajectory = {}
+        trajectory = {
+            "thought_0": "Need evidence",
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "show_holders"},
+            "observation_0": "x" * 3_000,
+        }
+        # No LM configured: dspy.Predict raises for real, no stubbing needed.
+        with dspy.context(lm=None):
+            agent._force_replan(trajectory, {"user_query": "audit"})
+        self.assertEqual(agent.forced_replans, 1)
+        self.assertEqual(agent.iteration_counter, 0)
+        self.assertIn(DEFAULT_CONTINUATION_PLAN, trajectory["replan_1"])
+        self.assertIn("segment 2 of 3", trajectory["replan_1"])
+        events = [e for e in snapshot_events() if e["kind"] == "forced_replan"]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["planner_error"])
+        self.assertEqual(events[0]["plan"], "")

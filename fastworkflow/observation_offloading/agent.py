@@ -1,4 +1,4 @@
-"""Wire Arm D offloading onto an initialized workflow tool agent."""
+"""Build the workflow tool agent, with Arm D offloading when enabled."""
 from __future__ import annotations
 
 import logging
@@ -16,6 +16,7 @@ from fastworkflow.observation_offloading.continuation import (
 from fastworkflow.observation_offloading.manifest import install_span_policy
 from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import HANDLE_ARCHIVE_ENV, record_event
+from fastworkflow.utils.react import fastWorkflowReAct
 
 ENABLED_ENV = "FW_OBSERVATION_OFFLOADING"
 
@@ -25,17 +26,6 @@ logger = logging.getLogger(__name__)
 def enabled() -> bool:
     raw = os.environ.get(ENABLED_ENV, "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
-
-
-def _callable_from_tool(tool: Any) -> Callable[..., Any]:
-    if callable(tool) and not hasattr(tool, "func"):
-        return tool
-    func = getattr(tool, "func", None)
-    if callable(func):
-        return func
-    if callable(tool):
-        return tool
-    raise TypeError(f"cannot unwrap tool {tool!r}")
 
 
 def _scope_for_session(chat_session: Any) -> RuntimeHandleScope:
@@ -111,19 +101,31 @@ def build_compacting_step(
     return compacting_step
 
 
-def maybe_wrap_tool_agent(
+def build_tool_agent(
     chat_session: Any,
-    agent: Any,
+    signature: Any,
+    tools: list[Callable[..., Any]],
     *,
     max_iters: int,
     on_step_complete=None,
 ) -> Any:
+    """Construct the ReAct agent once, offloading-aware when enabled.
+
+    The DSPy signature build (tool wrapping, instruction assembly, the react and
+    extract predictors) happens exactly once: either a stock fastWorkflowReAct
+    or a StructuredContinuationReAct with search_memory appended to ``tools``.
+    """
     if not enabled():
-        return agent
+        return fastWorkflowReAct(
+            signature,
+            tools=tools,
+            max_iters=max_iters,
+            on_step_complete=on_step_complete,
+        )
     install_span_policy()
-    # The scope is re-resolved by the rebuilt agent at every forward(), so the
-    # turn_key it carries is the turn actually running. This one is only the
-    # fallback for a step that fires before the first forward() bound a scope.
+    # The scope is re-resolved by the agent at every forward(), so the turn_key
+    # it carries is the turn actually running. This one is only the fallback
+    # for a step that fires before the first forward() bound a scope.
     scope = _scope_for_session(chat_session)
     archive_path = os.environ.get(HANDLE_ARCHIVE_ENV, "").strip()
     if not archive_path:
@@ -132,10 +134,10 @@ def maybe_wrap_tool_agent(
         workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
         archive_path = state_paths.observability_db(workflow_path) + ".offload-handles.sqlite3"
     selected_archive = RuntimeHandleArchive(archive_path)
-    rebuilt: Any = None
+    agent: Any = None
 
     compacting_step = build_compacting_step(
-        lambda: rebuilt,
+        lambda: agent,
         fallback_scope=scope,
         selected_archive=selected_archive,
         on_step_complete=on_step_complete,
@@ -144,33 +146,27 @@ def maybe_wrap_tool_agent(
     def scoped_search_memory(question: str, alias: str = "") -> str:
         """Search bounded excerpts from this turn's offloaded observations."""
 
-        current = getattr(rebuilt, "continuation_scope", None) or scope
+        current = getattr(agent, "continuation_scope", None) or scope
         return search_memory(
             question, alias, scope=current, selected_archive=selected_archive
         )
 
     scoped_search_memory.__name__ = "search_memory"
-    callables: list[Callable[..., Any]] = []
-    for name, tool in agent.tools.items():
-        if name == "finish":
-            continue
-        callables.append(_callable_from_tool(tool))
-    callables.append(scoped_search_memory)
-    rebuilt = StructuredContinuationReAct(
-        agent.signature,
-        tools=callables,
+    agent = StructuredContinuationReAct(
+        signature,
+        tools=[*tools, scoped_search_memory],
         max_iters=int(max_iters or DEFAULT_MAX_ITERS),
         on_step_complete=compacting_step,
         scope_factory=lambda: _scope_for_session(chat_session),
     )
-    rebuilt.continuation_scope_id = scope.scope_id
+    agent.continuation_scope_id = scope.scope_id
     record_event(
         {
             "kind": "agent_installed",
-            "max_iters": rebuilt.max_iters,
+            "max_iters": agent.max_iters,
             "max_forced_replans": max_forced_replans_from_env(),
-            "tools": sorted(rebuilt.tools),
+            "tools": sorted(agent.tools),
             "scope_id": scope.scope_id,
         }
     )
-    return rebuilt
+    return agent
