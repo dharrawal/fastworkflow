@@ -180,6 +180,71 @@ implementation of that scope, reached both from the ReAct loop and from a
 command's own frame — a scope computed two ways would be two scopes the moment
 either changed.
 
+## Continuation: the offset walk
+
+When a handle carries a descriptor, `fetch_page` continues the producing query
+past the rows the command materialised. A resolver is called with one
+`SourceRequest` per backend page:
+
+```python
+SourceRequest(descriptor, start, limit, contains=None, filter_columns=(),
+              count_only=False)
+```
+
+and returns a mapping (or any object with the same attributes):
+`{"rows": [...], "total": int | None, "count": int | None, "columns": {name: type} | None}`.
+`rows` are the view's own rows; the store renders each one as the producer
+would — `uid  label` from `uid_field` and the first non-empty `label_fields`
+entry — so a stored listing and its continuation are one sequence of rows to the
+agent. The first page's column names and types and one sample row are written
+into the declaration, once.
+
+**The walk stops on an empty page, and on nothing else.** B0 measured a sorted
+offset walk on `ido_groupDetail_identity` returning exactly `total` rows while
+20 of 540 members were never shown. `rows == total` is therefore not a stop
+condition here and is not a completeness proof anywhere.
+
+**Coverage is proven by distinct uids against `countOnly`.** An empty page ends
+the walk; it does not prove the walk saw everything. When the walk ends, the
+resolver is called once more with `count_only=True` (which honours the filter),
+and `source_complete` — or `matched_complete` for a filtered query — becomes
+true only if the count and the distinct-uid sequence agree. A disagreement is
+reported, not resolved: the page says how many distinct rows the walk reached
+and what the source's own count says.
+
+Duplicates are dropped from the traversal sequence in first-seen order and the
+raw page that carried them is stored whole, so a repeated row can never displace
+one that has not been shown.
+
+One `fetch_page` call reads at most `MAX_RESOLVER_CALLS_PER_FETCH` (8) backend
+pages. Reaching that bound is `resolver_call_limit`: the page warns, shows what
+it has, and the cursor resumes at the same offset. It is a bound on one call,
+never a cap on enumeration. A resolver that raises is `resolver_error` — the
+rows already stored are still served and the cursor still advances, because a
+refusal is usually transient. A descriptor whose resolver this process has not
+registered is `resolver_unavailable`: stored rows are served and no cursor is
+offered, because it would not move.
+
+## Filtering
+
+`contains` is a literal, never a question. It is normalised (below), then:
+
+1. if the base traversal is **complete** — declared complete, or walked and
+   reconciled — the literal is matched locally over the rendered rows. A
+   complete local set *is* the whole relation, so this is a whole-relation
+   search, and it matches uid and label alike;
+2. otherwise, if the descriptor has verified `filter_columns`, the literal is
+   mapped **server-side**: `filter` and `filter_columns` travel together in one
+   call, and the filtered walk has its own query scope, its own stored pages,
+   its own cursor and its own `countOnly` reconciliation;
+3. otherwise the page is **unsupported** and says so. A partial local filter is
+   never presented as a whole-relation search.
+
+The literal is never tokenised and tokens are never intersected: "Cooper Alan"
+is sent as "Cooper Alan" and a complete zero for it is a complete zero, not an
+invitation to try the words separately. A filtered fetch never mutates the base
+traversal or the base total.
+
 ## Query scopes and cursors
 
 A cursor is opaque (base64url of a small JSON object) and carries its **query
@@ -214,8 +279,11 @@ budget: `RESULT_PAGE_MAX_BYTES` = 3,072 UTF-8 bytes, header line included
 page position, the counts and the continuation state:
 
 ```
-result_handle=O42 page 2 rows 26-50 of 477 matched=477 materialized=50 total=477 source_complete=false matched_complete=true continuation=cursor has_more=true next_cursor=eyJk…
+result_handle=O42 page 2 rows 26-50 of 477 matched=477 materialized=50 total=477 source_complete=false matched_complete=true continuation=cursor outcome=rows has_more=true next_cursor=eyJk…
 ```
+
+The header names the outcome class as well as the counts, so a page with no rows
+can never be read as a zero when it is an unsupported query or a refusal.
 
 Rows are packed **whole**. The packer stops at the last row that fits and the
 next cursor starts at the first one that did not, so a row is never cut, never
@@ -229,12 +297,36 @@ refuses.
 `next_cursor`, plus `handle`, `page_alias`, `parent_alias`, `rows`, `outcome`,
 `position`, `page_index`, `literal`, `filter_columns`, `warnings`, `notes`.
 
-`continuation` is one of `cursor` (more rows in this query scope),
-`complete` (every row of this query was shown and the query is proven complete)
-or `source-incomplete` (no more rows can be shown and the source could not be
-proven complete). `incomplete_reason` is typed:
-`producer_materialized_subset` — the producing command did not materialise every
-backend row and this handle has no descriptor to continue with.
+Pages are filled to the observation budget rather than to one backend page, so
+a small `page_size` does not produce a three-line page. Rows fetched but not
+shown are not discarded: they are stored, and the next cursor returns them
+without another backend read.
+
+After the third page of one handle in a turn, the observation carries a note
+suggesting `contains=<name>` for a named lookup — one filtered call finds a row
+at any page position. It suggests; it never refuses, never caps and never
+narrows anything itself.
+
+`continuation` describes the query that actually ran: `cursor` (more rows, or a
+walk that can continue), `complete` (every row of this query was shown and the
+query is proven complete) or `source-incomplete` (no more rows can be shown and
+the query could not be proven complete). A filter the backend applied to the
+whole relation is `complete` even when the base listing this handle materialised
+is not — the header reports both numbers.
+
+`incomplete_reason` is typed:
+
+| reason | meaning |
+| --- | --- |
+| `producer_materialized_subset` | the command materialised part of the relation and this handle has no descriptor to continue with |
+| `no_verified_filter_columns` | the handle cannot map a literal to verified columns for this view |
+| `resolver_error` | the source refused a page; stored rows still served, cursor still advances |
+| `resolver_unavailable` | no resolver of that name is registered in this process |
+| `resolver_call_limit` | this call reached its backend-page bound; ask again to continue |
+| `countonly_mismatch` | the walk and the source's own count disagree |
+| `countonly_unavailable` | the source offers no independent count to prove coverage |
+| `countonly_error` | the source refused the count that would prove coverage |
+| `offset_origin_not_zero` | the handle starts partway into the relation, so a count cannot prove its coverage |
 
 ## Outcome classes
 
@@ -245,10 +337,12 @@ Every page states which of these it is, and they are not interchangeable:
 | `rows` | rows matched and are shown |
 | `complete-zero` | the query ran completely and matched nothing |
 | `unsupported` | this handle cannot answer this query at all |
-| `error` | the source refused or failed |
+| `error` | the source refused or failed and there are no rows to show |
 | `partial` | rows are shown but coverage is not proven |
 
-A complete zero is phrased as a fact about the query — "No rows matched the
+A page that shows rows it cannot prove to be all of them is `partial`, and says
+which of the reasons above made it one. A complete zero is phrased as a fact
+about the query — "No rows matched the
 literal … in these fields … it is not evidence that the person or object does not
 exist" — never as the absence of an entity. A filter over a handle that holds
 only part of its relation is reported as **unsupported**, not run locally and

@@ -73,6 +73,15 @@ UNSORTED_OFFSET = "unsorted-offset"
 
 CURSOR_VERSION = 1
 
+#: Backend pages one fetch call may read before it warns and hands the rest to
+#: the next cursor. A bound on one call, never a cap on enumeration.
+MAX_RESOLVER_CALLS_PER_FETCH = 8
+#: How many times one call may widen its read to fill the byte budget.
+MAX_FILL_ROUNDS = 4
+#: Pages of one handle in a turn after which the observation suggests a literal
+#: filter. It suggests; it never refuses and never narrows anything itself.
+PAGE_WARNING_AFTER = 3
+
 #: ``%`` and ``_`` are LIKE wildcards on the portal and ``*`` behaves as one
 #: too; backslash escaping does not work (B0 §b). A literal filter therefore
 #: cannot be delivered by passing the agent's text through, so the characters
@@ -989,6 +998,7 @@ def _header(page: "ResultPage") -> str:
         "source_complete=%s" % str(page.source_complete).lower(),
         "matched_complete=%s" % str(page.matched_complete).lower(),
         "continuation=%s" % page.continuation,
+        "outcome=%s" % page.outcome,
         "has_more=%s" % str(page.next_cursor is not None).lower(),
     ]
     if page.literal:
@@ -1002,48 +1012,53 @@ def _header(page: "ResultPage") -> str:
     return " ".join(parts)
 
 
-def _render(
-    page: "ResultPage",
-    *,
-    budget_bytes: int,
-    warnings: Sequence[str] = (),
-    reported_budget: Optional[int] = None,
-) -> tuple[str, list[str], tuple[str, ...]]:
-    """Pack whole rows under the byte budget, header and notes included.
+def _fixed_lines(page: "ResultPage") -> list[str]:
+    """Everything above the rows: the header, the producer's summary, the notes."""
+    lines = [_header(page)]
+    if page.summary:
+        lines.append(page.summary)
+    lines.extend(page.notes)
+    return lines
+
+
+def _pack(page: "ResultPage", *, budget_bytes: int) -> tuple[list[str], bool]:
+    """The whole rows that fit, and whether the page is over its budget.
 
     Rows are never split and never skipped: the packer stops at the last row
     that fits and the next cursor starts at the first one that did not. A single
-    row wider than the whole budget is emitted whole with a warning, because
-    dropping it would lose evidence and truncating it would invent a row that
-    was never returned.
+    row wider than the whole budget is emitted whole — cutting it would invent a
+    row that was never returned, dropping it would lose evidence — and the
+    overage is reported instead.
+
+    This is the ONLY place that decides how many rows a page shows. The cursor
+    is computed from its answer and the text is assembled from the same list, so
+    a header that grows after packing can never silently swallow a row.
     """
-    lines = [line for line in page.rows]
-    warnings = list(warnings)
-    fixed = [_header(page)]
-    if page.summary:
-        fixed.append(page.summary)
-    for note in page.notes:
-        fixed.append(note)
-    overhead = len("\n".join(fixed + [""]).encode("utf-8")) if fixed else 0
-    for warning in warnings:
-        overhead += len(warning.encode("utf-8")) + 1
+    fixed = _fixed_lines(page)
+    overhead = sum(len(line.encode("utf-8")) + 1 for line in fixed)
+    overhead += sum(len(warning.encode("utf-8")) + 1 for warning in page.warnings)
     shown: list[str] = []
     used = 0
-    for line in lines:
+    for line in page.rows:
         cost = len(line.encode("utf-8")) + 1
         if shown and overhead + used + cost > budget_bytes:
             break
         shown.append(line)
         used += cost
-    if shown and overhead + used > budget_bytes:
-        # Whole rows or nothing: a cut row is a row that was never returned, and
-        # a dropped one is evidence lost. Report the overage and continue.
+    return shown, bool(shown) and overhead + used > budget_bytes
+
+
+def _assemble(
+    page: "ResultPage", shown: Sequence[str], *, over_budget: bool, budget_bytes: int
+) -> tuple[str, tuple[str, ...]]:
+    warnings = list(page.warnings)
+    if over_budget:
         warnings.append(
             "Warning: this page is over its %d-byte observation budget. A row is "
             "never cut or skipped, so it is shown whole and the overage is "
-            "reported instead." % (reported_budget or budget_bytes)
+            "reported instead." % budget_bytes
         )
-    return "\n".join(fixed + shown + warnings), shown, tuple(warnings)
+    return "\n".join(_fixed_lines(page) + list(shown) + warnings), tuple(warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -1108,16 +1123,20 @@ def declare(
     try:
         store_ = selected_store or store()
         store_.put_declaration(selected_scope, handle, payload)
-        store_.put_page(
-            selected_scope,
-            alias=handle,
-            query_scope="",
-            start_offset=int(descriptor.start_offset) if descriptor else 0,
-            limit_requested=len(items),
-            source="producer",
-            record={"rows": [], "records": _records_from_items(items)},
-            backend_total=int(spec.total or len(items)),
-        )
+        if items:
+            # Only when there are rows. A zero-row producer page stored at the
+            # walk's first offset would be read back as the empty page that ends
+            # a walk, and the walk would stop before it started.
+            store_.put_page(
+                selected_scope,
+                alias=handle,
+                query_scope="",
+                start_offset=int(descriptor.start_offset) if descriptor else 0,
+                limit_requested=len(items),
+                source="producer",
+                record={"rows": [], "records": _records_from_items(items)},
+                backend_total=int(spec.total or len(items)),
+            )
     except ResultHandleError:
         raise
     except Exception as error:  # noqa: BLE001
@@ -1186,6 +1205,72 @@ def parent_handle(
     return declaration["parent_alias"] or None
 
 
+@dataclass(frozen=True)
+class SourceRequest:
+    """One call to a resolver: one offset window of one query, or its count.
+
+    The descriptor arrives as the JSON that was stored, so a resolver reads
+    exactly what the evidence records — not an object assembled here. ``filter``
+    and ``filter_columns`` travel together and are never separable: the portal
+    silently ignores a filter that names no columns and hands back the whole
+    scope, which is a search that did not run wearing the answer of one that
+    did.
+    """
+
+    descriptor: Mapping[str, Any]
+    start: int
+    limit: int
+    contains: Optional[str] = None
+    filter_columns: tuple[str, ...] = ()
+    count_only: bool = False
+
+
+def _call_resolver(resolver: Callable[..., Any], request: SourceRequest) -> dict[str, Any]:
+    """Normalise whatever a resolver returns into rows / total / count / columns."""
+    response = resolver(request)
+    if response is None:
+        return {"rows": []}
+    if isinstance(response, Mapping):
+        return dict(response)
+    return {
+        "rows": list(getattr(response, "rows", []) or []),
+        "total": getattr(response, "total", None),
+        "count": getattr(response, "count", None),
+        "columns": getattr(response, "columns", None),
+    }
+
+
+def _render_row(row: Mapping[str, Any], descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    """A backend row as the producer would have rendered it: ``uid  label``.
+
+    The rendering has to match the producer's, because a stored listing and its
+    continuation are one sequence of rows to the agent, and a filter matches the
+    row text it was shown.
+    """
+    uid_field = str(descriptor.get("uid_field") or "")
+    if not uid_field:
+        uid_field = next(iter(row), "")
+    uid = "" if uid_field not in row else str(row.get(uid_field) or "")
+    label = ""
+    for field_name in descriptor.get("label_fields") or ():
+        value = row.get(field_name)
+        if value not in (None, ""):
+            label = str(value)
+            break
+    line = (uid + ROW_SEPARATOR + label) if label else uid
+    return {"uid": uid, "line": line, "row": dict(row)}
+
+
+def _columns_of(response: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The column names and types this view really returned on its first page."""
+    declared = response.get("columns")
+    if isinstance(declared, Mapping) and declared:
+        return {str(name): str(kind) for name, kind in declared.items()}
+    if not rows:
+        return {}
+    return {str(name): type(value).__name__ for name, value in rows[0].items()}
+
+
 def _walk_records(
     scope: RuntimeHandleScope,
     store_: ResultHandleStore,
@@ -1196,7 +1281,8 @@ def _walk_records(
 
     Distinct uids in first-seen order: a page that repeats a uid the walk has
     already passed adds nothing to the sequence, which is what keeps a duplicate
-    from displacing a row that has not been shown yet.
+    from displacing a row that has not been shown yet. Rebuilding from SQLite is
+    what makes hot eviction free of consequence.
     """
     alias = declaration["alias"]
     key = _hot_key(scope, alias, query_scope)
@@ -1205,7 +1291,7 @@ def _walk_records(
         return cached
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    next_offset = 0
+    next_offset = int((declaration["descriptor"] or {}).get("start_offset") or 0)
     backend_total: Optional[int] = None
     for page in store_.list_pages(scope, alias=alias, query_scope=query_scope):
         record = page["record"]
@@ -1224,25 +1310,240 @@ def _walk_records(
         "records": records,
         "seen": seen,
         "next_offset": next_offset,
+        # Without a descriptor the producer's own rows are all there will ever
+        # be, so the producer's own claim about coverage is the walk's.
         "complete": bool(declaration["source_complete"]) and not query_scope,
         "backend_total": backend_total,
-        "reconciled": None,
-        "incomplete_reason": None,
+        "count_only": None,
+        "stop_reason": None,
+        "error": None,
         "bytes": 0,
     }
     _remember_walk(key, walk)
     return walk
 
 
+def _extend_walk(
+    scope: RuntimeHandleScope,
+    store_: ResultHandleStore,
+    declaration: Mapping[str, Any],
+    walk: dict[str, Any],
+    *,
+    descriptor: Mapping[str, Any],
+    query_scope: str,
+    literal: "Literal",
+    needed: int,
+    budget_calls: int = MAX_RESOLVER_CALLS_PER_FETCH,
+) -> dict[str, Any]:
+    """Walk offsets until ``needed`` rows are known or the walk ends.
+
+    **The walk stops on an empty page and on nothing else.** B0 measured a
+    sorted offset walk on ``ido_groupDetail_identity`` returning exactly
+    ``total`` rows while 20 of 540 members were never shown, so a pager that
+    stops at ``rows == total`` reports a complete enumeration that is missing
+    people. ``rows == total`` is not a stop condition here and is not a
+    completeness proof anywhere; the proof is distinct uids reconciled against
+    ``countOnly`` (see ``_reconcile``).
+
+    Never sends a sort: the descriptor has no field for one.
+
+    A refusal on the way is not an exception the agent cannot act on: the rows
+    already stored stay served, and the walk carries a typed stop reason the
+    page turns into ``incomplete_reason``.
+    """
+    walk["stop_reason"] = None
+    walk["error"] = None
+    if walk["complete"]:
+        return walk
+    alias = declaration["alias"]
+    key = _hot_key(scope, alias, query_scope)
+    try:
+        resolver = resolver_for(str(descriptor.get("resolver") or ""))
+    except ResultHandleError as error:
+        walk["stop_reason"] = "resolver_unavailable"
+        walk["error"] = str(error)
+        _remember_walk(key, walk)
+        return walk
+    limit = max(1, int(descriptor.get("page_size") or DEFAULT_PAGE_SIZE))
+    columns_for = tuple(descriptor.get("filter_columns") or ()) if query_scope else ()
+    calls = 0
+    while len(walk["records"]) < needed:
+        start = int(walk["next_offset"])
+        stored = store_.get_page(
+            scope, alias=alias, query_scope=query_scope, start_offset=start
+        )
+        if stored is None:
+            if calls >= budget_calls:
+                # Over-limit warns and continues: the cursor still advances, so
+                # the next call resumes exactly here.
+                walk["stop_reason"] = "resolver_call_limit"
+                break
+            try:
+                response = _call_resolver(
+                    resolver,
+                    SourceRequest(
+                        descriptor=dict(descriptor),
+                        start=start,
+                        limit=limit,
+                        contains=literal.text or None if query_scope else None,
+                        filter_columns=columns_for,
+                    ),
+                )
+            except Exception as error:  # noqa: BLE001
+                walk["stop_reason"] = "resolver_error"
+                walk["error"] = "%s: %s" % (type(error).__name__, error)
+                record_event(
+                    {
+                        "kind": "result_handle_resolver_error",
+                        "scope_id": scope.scope_id,
+                        "alias": alias,
+                        "query_scope": query_scope,
+                        "start": start,
+                        "error": type(error).__name__,
+                        "detail": str(error)[:300],
+                    }
+                )
+                break
+            calls += 1
+            rows = [dict(row) for row in (response.get("rows") or [])]
+            records = [_render_row(row, descriptor) for row in rows]
+            stored = store_.put_page(
+                scope,
+                alias=alias,
+                query_scope=query_scope,
+                start_offset=start,
+                limit_requested=limit,
+                source="resolver",
+                record={"rows": rows, "records": records,
+                        "columns": _columns_of(response, rows)},
+                backend_total=response.get("total"),
+            )
+            if rows:
+                store_.set_verified_columns(
+                    scope, alias,
+                    columns=_columns_of(response, rows),
+                    sample_row=rows[0],
+                )
+        record = stored["record"]
+        page_records = record.get("records") or []
+        if not page_records and not (record.get("rows") or []):
+            if stored["source"] == "producer":
+                # Nothing the producer stored; the backend has not been asked.
+                walk["next_offset"] = start + max(1, int(stored["limit_requested"]))
+                continue
+            # THE stop condition, and the only one.
+            walk["complete"] = True
+            break
+        for entry in page_records:
+            item = _record_of(entry)
+            if item["uid"] and item["uid"] in walk["seen"]:
+                continue
+            walk["seen"].add(item["uid"])
+            walk["records"].append(item)
+        walk["next_offset"] = start + limit
+        if stored["backend_total"] is not None:
+            walk["backend_total"] = stored["backend_total"]
+    if walk["complete"]:
+        _reconcile(
+            scope, declaration, walk, descriptor=descriptor,
+            query_scope=query_scope, literal=literal, resolver=resolver,
+        )
+    _remember_walk(key, walk)
+    return walk
+
+
+def _reconcile(
+    scope: RuntimeHandleScope,
+    declaration: Mapping[str, Any],
+    walk: dict[str, Any],
+    *,
+    descriptor: Mapping[str, Any],
+    query_scope: str,
+    literal: "Literal",
+    resolver: Callable[..., Any],
+) -> None:
+    """Prove coverage by distinct uids against an independent ``countOnly``.
+
+    An empty page ends the walk; it does not prove the walk saw everything.
+    ``countOnly`` honours the filter, so this is as available for a filtered
+    query as for the whole relation. Completeness is claimed only when the two
+    numbers agree — a mismatch leaves the walk incomplete and says so, which is
+    exactly the case a ``rows == total`` pager reports as finished.
+    """
+    walk["count_only"] = None
+    if int(descriptor.get("start_offset") or 0) != 0:
+        walk["complete"] = False
+        walk["stop_reason"] = "offset_origin_not_zero"
+        return
+    if not descriptor.get("count_only", True):
+        walk["complete"] = False
+        walk["stop_reason"] = "countonly_unavailable"
+        return
+    try:
+        response = _call_resolver(
+            resolver,
+            SourceRequest(
+                descriptor=dict(descriptor),
+                start=0,
+                limit=0,
+                contains=literal.text or None if query_scope else None,
+                filter_columns=(tuple(descriptor.get("filter_columns") or ())
+                                if query_scope else ()),
+                count_only=True,
+            ),
+        )
+    except Exception as error:  # noqa: BLE001
+        walk["complete"] = False
+        walk["stop_reason"] = "countonly_error"
+        walk["error"] = "%s: %s" % (type(error).__name__, error)
+        return
+    count = response.get("count")
+    if count is None:
+        count = response.get("total")
+    if count is None:
+        walk["complete"] = False
+        walk["stop_reason"] = "countonly_unavailable"
+        return
+    distinct = len(walk["records"])
+    walk["count_only"] = int(count)
+    if int(count) != distinct:
+        walk["complete"] = False
+        walk["stop_reason"] = "countonly_mismatch"
+    record_event(
+        {
+            "kind": "result_handle_reconciled",
+            "scope_id": scope.scope_id,
+            "alias": declaration["alias"],
+            "query_scope": query_scope,
+            "distinct_uids": distinct,
+            "count_only": int(count),
+            "complete": bool(walk["complete"]),
+        }
+    )
+
+
 def _filter_records(
-    records: Sequence[Mapping[str, Any]], literal: Literal
+    records: Sequence[Mapping[str, Any]], literal: "Literal"
 ) -> list[dict[str, Any]]:
+    """Case-insensitive literal over the rendered rows, uid and label included."""
     needle = literal.text.casefold()
     return [
         _record_of(record)
         for record in records
         if needle in str(record["line"]).casefold()
     ]
+
+
+_STOP_REASON_NOTES = {
+    "resolver_error": "the source refused a page of this query",
+    "resolver_unavailable": "this process cannot reach the source that produced these rows",
+    "resolver_call_limit": "this call reached its backend-page limit; ask again to continue",
+    "countonly_mismatch": "the walk and the source's own count disagree",
+    "countonly_unavailable": "the source offers no independent count to prove coverage",
+    "countonly_error": "the source refused the count that would prove coverage",
+    "offset_origin_not_zero": "this handle starts partway into the relation",
+    "producer_materialized_subset": "the producing command did not materialise every row",
+}
 
 
 def fetch_page(
@@ -1265,6 +1566,10 @@ def fetch_page(
     ``handle`` is the ``O`` alias printed on the producing observation. A page's
     own alias is accepted too and resolves to the listing it came from, so the
     parent is reachable from the page the agent is looking at.
+
+    ``contains`` is a literal, not a question: it is normalised and matched, and
+    it is never split into tokens to be intersected. A named lookup is one
+    filtered call at any page position; paging is for enumeration.
     """
     selected_scope = scope or current_scope()
     store_ = selected_store or store()
@@ -1278,6 +1583,8 @@ def fetch_page(
     alias = declaration["alias"]
     literal = normalize_literal(contains)
     query_scope = literal.scope
+    descriptor = declaration["descriptor"] or {}
+    filter_columns = tuple(descriptor.get("filter_columns") or ())
     descriptor_sha256 = declaration["descriptor_sha256"]
     position = 0
     if cursor:
@@ -1288,116 +1595,248 @@ def fetch_page(
             literal=literal,
             descriptor_sha256=descriptor_sha256,
         )
-    base = _walk_records(selected_scope, store_, declaration, "")
-    materialized = len(base["records"])
-    total = int(declaration["total"])
-    source_complete = bool(declaration["source_complete"])
-    descriptor = declaration["descriptor"] or {}
-    filter_columns = tuple(descriptor.get("filter_columns") or ())
+    budget = budget_bytes or page_max_bytes_from_env()
+    page_size = max(1, int(descriptor.get("page_size") or declaration["page_size"]
+                           or DEFAULT_PAGE_SIZE))
     notes: list[str] = list(literal.notes)
     warnings: list[str] = []
-    incomplete_reason: Optional[str] = None
-    outcome = "rows"
 
+    base = _walk_records(selected_scope, store_, declaration, "")
+    base_complete = bool(declaration["source_complete"]) or bool(base["complete"])
+
+    # Which query this call actually runs, and whether it can be run at all.
     if query_scope:
-        if not source_complete:
-            # A filter over a partial local copy is a partial answer wearing a
-            # whole-relation answer's clothes. Say it is unsupported instead.
+        if base_complete:
+            # Every row of the relation is already here, so a literal over the
+            # rendered rows IS a whole-relation search, not a partial one.
+            plan = "local-filter"
+        elif descriptor and filter_columns:
+            plan = "backend-filter"
+        else:
             return _unsupported_page(
                 declaration=declaration,
                 literal=literal,
-                materialized=materialized,
-                total=total,
-                budget_bytes=budget_bytes,
+                materialized=len(base["records"]),
+                total=int(declaration["total"]),
+                budget_bytes=budget,
                 scope=selected_scope,
                 store_=store_,
-                reason="producer_materialized_subset",
+                reason=("no_verified_filter_columns" if descriptor
+                        else "producer_materialized_subset"),
                 message=(
-                    "This handle holds %d of %d rows, so a filter over it could "
-                    "not speak for the whole relation. Re-run the producing "
-                    "command with a narrower query."
-                    % (materialized, total)
+                    "This handle holds %d of %d rows and has no verified "
+                    "filterable columns for this view, so a filter over it could "
+                    "not speak for the whole relation. Page it, or re-run the "
+                    "producing command with a narrower query."
+                    % (len(base["records"]), int(declaration["total"]))
                 ),
             )
-        records = _filter_records(base["records"], literal)
-        matched = len(records)
-        matched_complete = True
     else:
-        records = base["records"]
-        matched = materialized
-        matched_complete = source_complete
-        if not source_complete:
-            incomplete_reason = "producer_materialized_subset"
+        plan = "backend-walk" if descriptor else "local"
 
-    available = [str(record["line"]) for record in records[position:]]
+    walk = base
+    if plan == "backend-filter":
+        walk = _walk_records(selected_scope, store_, declaration, query_scope)
+
+    # How many rows this page can show is decided once, by the packer, after
+    # every line above the rows is known. Deciding it twice is how a page skips
+    # a row: a header that grew by a cursor would push out a row the previous
+    # cursor had already counted as shown.
+    rounds = 0
+    while True:
+        if plan in ("backend-walk", "backend-filter"):
+            # Ask for enough rows to fill the observation, not for one backend
+            # page: with a small page size a page-at-a-time fill would return a
+            # three-line observation and call it a page.
+            _extend_walk(
+                selected_scope, store_, declaration, walk,
+                descriptor=descriptor, query_scope=query_scope, literal=literal,
+                needed=position + _rows_wanted(walk, budget, page_size) * (rounds + 1),
+            )
+            records: list[dict[str, Any]] = walk["records"]
+        elif plan == "local-filter":
+            records = _filter_records(base["records"], literal)
+        else:
+            records = base["records"]
+        available = [str(record["line"]) for record in records[position:]]
+        probe = _provisional_page(
+            declaration=declaration, alias=alias, rows=available, records=records,
+            base=base, walk=walk, plan=plan, literal=literal,
+            filter_columns=filter_columns, descriptor=descriptor,
+            position=position, scope=selected_scope, notes=notes,
+            warnings=warnings, query_scope=query_scope,
+            descriptor_sha256=descriptor_sha256,
+        )
+        shown, _ = _pack(probe, budget_bytes=budget)
+        if (
+            not plan.startswith("backend")
+            or walk["complete"]
+            or walk.get("stop_reason")
+            or len(shown) < len(available)
+            or rounds >= MAX_FILL_ROUNDS
+        ):
+            break
+        rounds += 1
+
+    page = probe
+    matched = page.matched
+    # Outcome classes, distinguished. None of them is a stand-in for another,
+    # and each is decided on rows that EXIST for this query, not on rows that
+    # happened to fit in this observation.
+    error_reason = page.incomplete_reason in (
+        "resolver_error", "resolver_unavailable", "countonly_error"
+    )
+    if error_reason and not available:
+        page.outcome = "error"
+        notes.append(
+            "The source refused this query (%s). Rows already stored are still "
+            "readable; nothing here shows what the unread rows contain."
+            % (walk.get("error") or page.incomplete_reason)
+        )
+    elif matched == 0 and page.matched_complete:
+        page.outcome = "complete-zero"
+        notes.append(_zero_message(literal, page.filter_columns, declaration))
+    elif matched == 0:
+        page.outcome = "partial"
+        notes.append(
+            "No rows matched here, and this query is not complete (%s), so this "
+            "is not a zero: it is an unfinished search."
+            % _STOP_REASON_NOTES.get(page.incomplete_reason or "", "incomplete")
+        )
+    elif not page.matched_complete:
+        page.outcome = "partial"
+        notes.append(
+            "Coverage is not proven for this query (%s), so treat these rows as "
+            "some of the matches, never as all of them."
+            % _STOP_REASON_NOTES.get(page.incomplete_reason or "", "incomplete")
+        )
+    else:
+        page.outcome = "rows"
+    if page.incomplete_reason == "countonly_mismatch":
+        notes.append(
+            "The walk reached %d distinct rows and the source's own count says "
+            "%s. Rows retrieved equalling the reported total is not coverage; "
+            "the disagreement is reported rather than resolved."
+            % (len(walk["records"]), walk.get("count_only"))
+        )
+    if page.page_index >= PAGE_WARNING_AFTER and not literal.text:
+        warnings.append(
+            "Note: this is page %d of %s in this turn. For a named lookup one "
+            "filtered call finds the row at any page position — pass "
+            "contains=<name>. Paging still works and is not being restricted."
+            % (page.page_index, alias)
+        )
+    page.notes = tuple(notes)
+    page.warnings = tuple(warnings)
+
+    shown, over_budget = _pack(page, budget_bytes=budget)
+    remaining = len(available) - len(shown)
+    walk_can_continue = (
+        plan.startswith("backend")
+        and not walk["complete"]
+        # A refusal or a call bound stops THIS call, not the enumeration: the
+        # cursor resumes exactly where the walk stopped, and the stored pages
+        # cost nothing to pass again. A resolver this process cannot reach, or a
+        # walk that ended without proving coverage, is not continuable, and the
+        # page says so rather than offering a cursor that would not move.
+        and walk.get("stop_reason") in (None, "resolver_call_limit", "resolver_error")
+    )
+    page.rows = list(shown)
+    if remaining > 0 or walk_can_continue:
+        page.continuation = "cursor"
+        page.next_cursor = encode_cursor(
+            alias=alias, query_scope=query_scope, position=position + len(shown),
+            descriptor_sha256=descriptor_sha256,
+        )
+    elif page.matched_complete:
+        # Completeness is a property of the query that ran. A filter the backend
+        # applied to the whole relation is complete even when the base listing
+        # this handle materialised is not; the header reports both numbers.
+        page.continuation = "complete"
+        page.next_cursor = None
+    else:
+        page.continuation = "source-incomplete"
+        page.next_cursor = None
+    page.observation, page.warnings = _assemble(
+        page, shown, over_budget=over_budget, budget_bytes=budget
+    )
+    _record_page_event(selected_scope, page, literal)
+    _link_page(selected_scope, store_, page, declaration, query_scope)
+    return page
+
+
+def _rows_wanted(walk: Mapping[str, Any], budget: int, page_size: int) -> int:
+    """How many rows it would take to fill one observation at this row width."""
+    records = walk["records"]
+    if records:
+        widths = [len(str(record["line"]).encode("utf-8")) + 1 for record in records]
+        estimate = max(16, sum(widths) // len(widths))
+    else:
+        estimate = 64
+    return max(page_size, -(-budget // estimate))
+
+
+def _provisional_page(
+    *,
+    declaration: Mapping[str, Any],
+    alias: str,
+    rows: Sequence[str],
+    records: Sequence[Mapping[str, Any]],
+    base: Mapping[str, Any],
+    walk: Mapping[str, Any],
+    plan: str,
+    literal: "Literal",
+    filter_columns: tuple[str, ...],
+    descriptor: Mapping[str, Any],
+    position: int,
+    scope: RuntimeHandleScope,
+    notes: Sequence[str],
+    warnings: Sequence[str],
+    query_scope: str,
+    descriptor_sha256: str,
+) -> ResultPage:
+    """The page as it will be, with the widest header it could carry.
+
+    Packing happens against this: ``source-incomplete`` is the longest
+    continuation word and the cursor is the longest cursor this query could
+    write, so the real header is never wider than the one the rows were measured
+    against.
+    """
+    source_complete = bool(declaration["source_complete"]) or bool(base["complete"])
+    matched_complete = (bool(walk["complete"]) if plan == "backend-filter"
+                        else source_complete)
+    stop_reason = walk.get("stop_reason") if plan.startswith("backend") else None
+    if not source_complete and not stop_reason and not descriptor:
+        stop_reason = "producer_materialized_subset"
     page = ResultPage(
         handle=alias,
         kind=declaration["kind"],
         summary=declaration["summary"],
-        rows=available,
-        matched=matched,
-        total=total,
-        materialized=materialized,
+        rows=list(rows),
+        matched=len(records),
+        total=int(declaration["total"]),
+        materialized=len(base["records"]),
         source_complete=source_complete,
         matched_complete=matched_complete,
-        continuation="complete",
-        incomplete_reason=incomplete_reason,
-        next_cursor=None,
-        outcome=outcome,
+        continuation="source-incomplete",
+        # Placeholders chosen as the LONGEST each field can become, so the
+        # header the rows were packed against is never narrower than the header
+        # the page finally carries. Both are overwritten before assembly.
+        outcome="complete-zero",
+        incomplete_reason=stop_reason,
+        next_cursor=encode_cursor(
+            alias=alias, query_scope=query_scope,
+            position=max(len(records), 1), descriptor_sha256=descriptor_sha256,
+        ),
         position=position,
-        page_index=_page_index(selected_scope, alias, position),
+        page_index=_page_index(scope, alias, position),
         parent_alias=alias,
         page_alias=current_execute_alias(),
         literal=literal.text or None,
-        filter_columns=filter_columns if literal.text else (),
+        filter_columns=filter_columns if plan == "backend-filter" else (),
         warnings=tuple(warnings),
         notes=tuple(notes),
     )
-    budget = budget_bytes or page_max_bytes_from_env()
-    # Pack against a budget reduced by the longest cursor this page could carry.
-    # The header is built before the packer knows how many rows fit, and the
-    # cursor is built after, so without the reserve a full page would overrun
-    # the budget by exactly the length of its own continuation.
-    reserve = len(" next_cursor=") + len(
-        encode_cursor(
-            alias=alias,
-            query_scope=query_scope,
-            position=max(len(records), 1),
-            descriptor_sha256=descriptor_sha256,
-        )
-    )
-    base_warnings = tuple(warnings)
-    observation, shown, warned = _render(
-        page, budget_bytes=max(budget - reserve, 1), warnings=base_warnings,
-        reported_budget=budget,
-    )
-    page.rows = shown
-    page.warnings = warned
-    remaining = len(records) - position - len(shown)
-    if remaining > 0:
-        page.continuation = "cursor"
-        page.next_cursor = encode_cursor(
-            alias=alias,
-            query_scope=query_scope,
-            position=position + len(shown),
-            descriptor_sha256=descriptor_sha256,
-        )
-    elif not page.matched_complete or not page.source_complete:
-        page.continuation = "source-incomplete"
-        page.incomplete_reason = page.incomplete_reason or "producer_materialized_subset"
-    else:
-        page.continuation = "complete"
-    if not shown and matched == 0:
-        page.outcome = "complete-zero" if page.matched_complete else "partial"
-        notes.append(_zero_message(literal, filter_columns, declaration))
-        page.notes = tuple(notes)
-    elif not page.matched_complete or not page.source_complete:
-        page.outcome = "partial"
-    page.observation, page.rows, page.warnings = _render(
-        page, budget_bytes=budget, warnings=base_warnings, reported_budget=budget
-    )
-    _record_page_event(selected_scope, page, literal)
-    _link_page(selected_scope, store_, page, declaration, query_scope)
     return page
 
 
@@ -1451,8 +1890,10 @@ def _unsupported_page(
         notes=(("Filtering is unsupported for this handle. " + message),),
     )
     budget = budget_bytes or page_max_bytes_from_env()
-    page.observation, page.rows, page.warnings = _render(
-        page, budget_bytes=budget, reported_budget=budget
+    shown, over_budget = _pack(page, budget_bytes=budget)
+    page.rows = shown
+    page.observation, page.warnings = _assemble(
+        page, shown, over_budget=over_budget, budget_bytes=budget
     )
     _record_page_event(scope, page, literal)
     return page
@@ -1557,6 +1998,7 @@ __all__ = [
     "ResultHandleStore",
     "ResultPage",
     "SourceDescriptor",
+    "SourceRequest",
     "UNSORTED_OFFSET",
     "WILDCARD_CHARACTERS",
     "current_execute_alias",
@@ -1569,6 +2011,8 @@ __all__ = [
     "normalize_literal",
     "page_max_bytes_from_env",
     "parent_handle",
+    "MAX_RESOLVER_CALLS_PER_FETCH",
+    "PAGE_WARNING_AFTER",
     "register_resolver",
     "registered_resolvers",
     "reset_result_handle_state",

@@ -312,6 +312,7 @@ class ObservationTests(unittest.TestCase):
         self.assertIn("total=12", header)
         self.assertIn("materialized=12", header)
         self.assertIn("continuation=cursor", header)
+        self.assertIn("outcome=", header)
         self.assertIn("next_cursor=", header)
         self.assertLessEqual(
             len(page.as_observation().encode("utf-8")),
@@ -328,6 +329,22 @@ class ObservationTests(unittest.TestCase):
                 for warning in page.warnings)
         )
         self.assertEqual(page.continuation, "cursor")
+
+    def test_every_page_states_its_outcome_class_in_the_header(self):
+        self.declare_rows(holders(6))
+        for contains, expected in (("Cooper", "rows"), ("Ochoa", "complete-zero")):
+            page = fetch_page("O1", None, contains, scope=scope(),
+                              selected_store=self.store)
+            self.assertIn("outcome=%s" % expected,
+                          page.as_observation().splitlines()[0])
+
+    def test_a_long_outcome_word_cannot_push_the_page_over_budget(self):
+        self.declare_rows(holders(40))
+        budget = one_row_budget("O1", self.store)
+        page = fetch_page("O1", scope=scope(), selected_store=self.store,
+                          budget_bytes=budget)
+        self.assertLessEqual(len(page.as_observation().encode("utf-8")), budget)
+        self.assertEqual(page.warnings, ())
 
     def test_a_complete_zero_is_not_phrased_as_absence(self):
         self.declare_rows(holders(6))
@@ -485,3 +502,438 @@ class OffloadingInterplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# ido-986.14.2: continuation against a source that behaves like the portal
+# ---------------------------------------------------------------------------
+
+#: The eight columns B0 verified as filterable on the relation detail views.
+VERIFIED_COLUMNS = (
+    "identity_displayname", "identity_surname", "identity_given_name",
+    "identity_email", "identity_employee_number", "identity__id",
+    "repository__id", "repository_displayname",
+)
+
+
+class PortalError(RuntimeError):
+    """What WSClient raises when the portal refuses a view call."""
+
+
+class FakePortal:
+    """A resolver with the semantics b0-probe.md measured, and nothing else.
+
+    Substring matching is case-insensitive and applied to the raw string with no
+    normalisation; a filter with no columns is silently ignored and returns the
+    whole scope; an unknown column errors the whole call; ``countOnly`` honours
+    the filter; a page past the end is empty. ``lossy`` reproduces the group
+    view under an explicit sort: the walk returns exactly ``total`` rows while
+    some members are never shown.
+    """
+
+    def __init__(self, rows, *, lossy=False, fail_at=None, count=True):
+        self.rows = rows
+        self.lossy = lossy
+        self.fail_at = fail_at
+        self.count = count
+        self.calls = []
+
+    def matching(self, request):
+        if not request.contains:
+            return list(self.rows)
+        if not request.filter_columns:
+            # The ignored case: the portal hands back the whole scope. A caller
+            # that can emit this pair cannot tell a search from a non-search.
+            return list(self.rows)
+        for column in request.filter_columns:
+            if column not in VERIFIED_COLUMNS:
+                raise PortalError("Error executing view with query: %s" % column)
+        needle = request.contains.lower()
+        return [
+            row for row in self.rows
+            if any(needle in str(row.get(column, "")).lower()
+                   for column in request.filter_columns)
+        ]
+
+    def __call__(self, request):
+        self.calls.append(request)
+        assert "sort" not in request.descriptor, "a sort must never be sent"
+        if request.count_only:
+            if not self.count:
+                return {}
+            return {"count": len(self.matching(request))}
+        if self.fail_at is not None and request.start == self.fail_at:
+            raise PortalError("Cannot get view results")
+        matched = self.matching(request)
+        if self.lossy and not request.contains:
+            return {"rows": self.lossy_page(matched, request), "total": len(matched)}
+        return {"rows": matched[request.start:request.start + request.limit],
+                "total": len(matched)}
+
+    def lossy_page(self, matched, request):
+        """Exactly ``total`` rows over the walk, with the tail repeating rows.
+
+        This is the trap: a pager that stops at ``rows == total`` calls this a
+        complete enumeration while the last 20 members were never shown.
+        """
+        drop = 20
+        body = matched[:len(matched) - drop]
+        if request.start < len(body):
+            return body[request.start:request.start + request.limit]
+        shown = request.start - len(body)
+        if shown >= drop:
+            return []
+        return matched[shown:shown + min(request.limit, drop - shown)]
+
+
+def portal_rows(count, *, surname="Cooper"):
+    names = ["Alan", "Brandon", "Christopher", "Jill", "John", "Zoe"]
+    return [
+        {
+            "identity__id": "uid%03d" % index,
+            "identity_displayname": "%s %s %d" % (names[index % len(names)],
+                                                  surname, index),
+            "identity_surname": surname,
+            "repository_displayname": "HR",
+        }
+        for index in range(count)
+    ]
+
+
+class BackendPagingTests(unittest.TestCase):
+    """The walk stops on an empty page and proves coverage with countOnly."""
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.rows = portal_rows(540)
+        self.portal = FakePortal(self.rows)
+        result_handles.register_resolver("fake-portal", self.portal)
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("fake-portal")
+        reset_result_handle_state()
+        self.temp.cleanup()
+
+    def descriptor(self, **kwargs):
+        return SourceDescriptor(
+            resolver="fake-portal",
+            view="ido_groupDetail_identity",
+            params={"scope": "f737245119f5ee6347e6f10cb569fe86"},
+            filter_columns=kwargs.pop("filter_columns",
+                                      ("identity_displayname", "identity_surname")),
+            uid_field="identity__id",
+            label_fields=("identity_displayname",),
+            page_size=kwargs.pop("page_size", 40),
+            **kwargs,
+        )
+
+    def declare_handle(self, *, materialized=0, total=540, complete=False, **kwargs):
+        rendered = [
+            "%s  %s" % (row["identity__id"], row["identity_displayname"])
+            for row in self.rows[:materialized]
+        ]
+        return declare(
+            ResultHandleSpec(kind="member", summary="%d member(s)." % total,
+                             items=rendered, total=total, source_complete=complete,
+                             page_size=40),
+            source=self.descriptor(materialized=materialized, **kwargs),
+            scope=scope(), selected_store=self.store, alias="O7",
+        )
+
+    def walk_everything(self, **kwargs):
+        seen, cursor = [], None
+        for _ in range(60):
+            page = fetch_page("O7", cursor, kwargs.get("contains"), scope=scope(),
+                              selected_store=self.store,
+                              budget_bytes=kwargs.get("budget_bytes", 3_072))
+            seen.extend(page.rows)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        return seen, page
+
+    def test_the_walk_stops_on_an_empty_page_not_on_rows_equals_total(self):
+        self.declare_handle(materialized=40)
+        seen, page = self.walk_everything()
+        self.assertEqual(len(seen), 540)
+        self.assertEqual(seen, ["%s  %s" % (row["identity__id"],
+                                            row["identity_displayname"])
+                                for row in self.rows])
+        starts = [call.start for call in self.portal.calls if not call.count_only]
+        # 540 rows at page size 40: the cumulative count reaches `total` at
+        # offset 520. The walk must read past it and find the empty page.
+        self.assertIn(520, starts)
+        self.assertIn(560, starts)
+        self.assertTrue(page.source_complete)
+        self.assertEqual(page.continuation, "complete")
+        self.assertEqual(page.outcome, "rows")
+
+    def test_a_lossy_walk_is_caught_by_the_countonly_reconciliation(self):
+        self.portal.lossy = True
+        self.declare_handle(materialized=0)
+        seen, page = self.walk_everything()
+        # The walk returned exactly `total` rows and 20 members were never in
+        # them: a pager that stopped at rows == total would call this complete.
+        self.assertEqual(len(seen), 520)
+        self.assertFalse(page.source_complete)
+        self.assertEqual(page.incomplete_reason, "countonly_mismatch")
+        self.assertEqual(page.outcome, "partial")
+        self.assertEqual(page.continuation, "source-incomplete")
+        self.assertIn("not coverage", page.as_observation())
+
+    def test_a_source_with_no_independent_count_is_never_called_complete(self):
+        self.portal.count = False
+        self.declare_handle()
+        _, page = self.walk_everything()
+        self.assertFalse(page.source_complete)
+        self.assertEqual(page.incomplete_reason, "countonly_unavailable")
+        self.assertEqual(page.outcome, "partial")
+
+    def test_a_refetched_offset_is_served_from_the_store(self):
+        self.declare_handle()
+        self.walk_everything()
+        first = [call.start for call in self.portal.calls if not call.count_only]
+        reset_result_handle_state()
+        seen, page = self.walk_everything()
+        second = [call.start for call in self.portal.calls
+                  if not call.count_only][len(first):]
+        self.assertEqual(len(seen), 540)
+        # Not one stored offset was read from the source a second time. The
+        # walk re-proves only its end, which is memory the store does not keep.
+        self.assertEqual(sorted(set(second) & set(first)), [])
+        self.assertTrue(page.source_complete)
+
+    def test_a_resolver_error_is_an_outcome_not_a_crash(self):
+        self.portal.fail_at = 80
+        self.declare_handle(materialized=0)
+        page = fetch_page("O7", scope=scope(), selected_store=self.store,
+                          budget_bytes=3_072)
+        self.assertEqual(page.incomplete_reason, "resolver_error")
+        self.assertEqual(page.outcome, "partial")
+        self.assertTrue(page.rows)
+        self.assertEqual(page.continuation, "cursor")
+
+    def test_a_resolver_the_process_cannot_reach_still_serves_stored_rows(self):
+        self.declare_handle(materialized=40)
+        result_handles.unregister_resolver("fake-portal")
+        page = fetch_page("O7", scope=scope(), selected_store=self.store,
+                          budget_bytes=3_072)
+        self.assertEqual(page.incomplete_reason, "resolver_unavailable")
+        self.assertEqual(len(page.rows), 40)
+        self.assertEqual(page.outcome, "partial")
+
+    def test_one_call_is_bounded_and_the_cursor_carries_on(self):
+        self.declare_handle(page_size=1)
+        page = fetch_page("O7", scope=scope(), selected_store=self.store,
+                          budget_bytes=3_072)
+        self.assertEqual(page.incomplete_reason, "resolver_call_limit")
+        self.assertIsNotNone(page.next_cursor)
+        self.assertEqual(page.continuation, "cursor")
+        second = fetch_page("O7", page.next_cursor, scope=scope(),
+                            selected_store=self.store, budget_bytes=3_072)
+        self.assertTrue(second.rows)
+
+    def test_three_pages_warn_and_keep_serving(self):
+        self.declare_handle(materialized=40)
+        cursor, pages = None, []
+        for _ in range(3):
+            page = fetch_page("O7", cursor, scope=scope(),
+                              selected_store=self.store, budget_bytes=1_200)
+            pages.append(page)
+            cursor = page.next_cursor
+        self.assertEqual(pages[0].warnings, ())
+        self.assertTrue(any("contains=" in warning for warning in pages[2].warnings))
+        self.assertTrue(pages[2].rows)
+        self.assertIsNotNone(pages[2].next_cursor)
+
+    def test_the_observation_stays_inside_its_budget(self):
+        self.declare_handle(materialized=40)
+        page = fetch_page("O7", scope=scope(), selected_store=self.store)
+        self.assertLessEqual(len(page.as_observation().encode("utf-8")),
+                             result_handles.RESULT_PAGE_MAX_BYTES)
+        self.assertGreater(len(page.rows), 10)
+
+
+class BackendFilterTests(unittest.TestCase):
+    """A literal, mapped to verified columns server-side — never tokenised."""
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.rows = portal_rows(120)
+        self.portal = FakePortal(self.rows)
+        result_handles.register_resolver("fake-portal", self.portal)
+        self.declare(filter_columns=("identity_displayname", "identity_surname"))
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("fake-portal")
+        reset_result_handle_state()
+        self.temp.cleanup()
+
+    def declare(self, **kwargs):
+        rendered = ["%s  %s" % (row["identity__id"], row["identity_displayname"])
+                    for row in self.rows[:25]]
+        return declare(
+            ResultHandleSpec(kind="holder", summary="120 holder(s).",
+                             items=rendered, total=120, source_complete=False,
+                             page_size=25),
+            source=SourceDescriptor(
+                resolver="fake-portal", view="ido_permissiondetail_identity",
+                uid_field="identity__id", label_fields=("identity_displayname",),
+                page_size=25, materialized=25, **kwargs),
+            scope=scope(), selected_store=self.store, alias="O3",
+        )
+
+    def test_the_filter_is_sent_with_its_columns_and_the_literal_is_normalised(self):
+        page = fetch_page("O3", None, "Alan Coo%per 0", scope=scope(),
+                          selected_store=self.store)
+        sent = [call for call in self.portal.calls if call.contains]
+        self.assertTrue(sent)
+        self.assertEqual(sent[0].contains, "Alan Cooper 0")
+        self.assertEqual(sent[0].filter_columns,
+                         ("identity_displayname", "identity_surname"))
+        self.assertEqual(page.matched, 1)
+        self.assertTrue(page.matched_complete)
+        self.assertEqual(page.continuation, "complete")
+        self.assertEqual(page.outcome, "rows")
+
+    def test_a_multi_row_literal_pages_within_its_own_scope(self):
+        seen, cursor = [], None
+        for _ in range(20):
+            page = fetch_page("O3", cursor, "Cooper", scope=scope(),
+                              selected_store=self.store, budget_bytes=900)
+            seen.extend(page.rows)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        self.assertEqual(len(seen), 120)
+        self.assertEqual(len(set(seen)), 120)
+        self.assertEqual(page.matched, 120)
+        self.assertEqual(page.total, 120)
+        # The filtered walk stored its own pages; the base traversal did not move.
+        self.assertEqual(
+            len(self.store.list_pages(scope(), alias="O3", query_scope="")), 1
+        )
+        self.assertGreater(
+            len(self.store.list_pages(
+                scope(), alias="O3",
+                query_scope=result_handles.normalize_literal("Cooper").scope)), 1
+        )
+
+    def test_a_complete_backend_zero_is_not_absence(self):
+        page = fetch_page("O3", None, "Ochoa", scope=scope(),
+                          selected_store=self.store)
+        self.assertEqual(page.outcome, "complete-zero")
+        self.assertTrue(page.matched_complete)
+        self.assertIn("not evidence", page.as_observation())
+        self.assertIn("identity_displayname", page.as_observation())
+
+    def test_a_handle_with_no_verified_columns_reports_unsupported(self):
+        reset_result_handle_state()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        store = ResultHandleStore(os.path.join(temp.name, "h2.sqlite3"))
+        declare(
+            ResultHandleSpec(kind="holder", items=["uid1  Alan Cooper"], total=120,
+                             source_complete=False, page_size=25),
+            source=SourceDescriptor(resolver="fake-portal", view="v",
+                                    uid_field="identity__id", page_size=25),
+            scope=scope(), selected_store=store, alias="O3",
+        )
+        before = len(self.portal.calls)
+        page = fetch_page("O3", None, "Cooper", scope=scope(),
+                          selected_store=store)
+        self.assertEqual(page.outcome, "unsupported")
+        self.assertEqual(page.incomplete_reason, "no_verified_filter_columns")
+        self.assertEqual(len(self.portal.calls), before)
+        self.assertEqual(page.rows, [])
+
+    def test_the_literal_is_never_split_into_tokens(self):
+        page = fetch_page("O3", None, "Cooper Alan", scope=scope(),
+                          selected_store=self.store)
+        sent = [call for call in self.portal.calls if call.contains]
+        self.assertEqual(sent[0].contains, "Cooper Alan")
+        self.assertEqual(page.matched, 0)
+        self.assertEqual(page.outcome, "complete-zero")
+
+    def test_a_filtered_page_leaves_the_base_total_alone(self):
+        fetch_page("O3", None, "Cooper", scope=scope(), selected_store=self.store)
+        base = fetch_page("O3", scope=scope(), selected_store=self.store,
+                          budget_bytes=900)
+        self.assertEqual(base.total, 120)
+        self.assertEqual(base.rows[0], "uid000  Alan Cooper 0")
+
+    def test_the_first_backend_page_records_verified_columns_and_a_sample(self):
+        fetch_page("O3", None, "Cooper", scope=scope(), selected_store=self.store)
+        stored = self.store.get_declaration(scope(), "O3")
+        self.assertIn("identity_displayname", stored["columns"])
+        self.assertEqual(stored["columns"]["identity__id"], "str")
+        self.assertEqual(stored["sample_row"]["identity_surname"], "Cooper")
+
+    def test_the_same_cursor_returns_the_same_page(self):
+        first = fetch_page("O3", None, "Cooper", scope=scope(),
+                           selected_store=self.store, budget_bytes=900)
+        again = fetch_page("O3", None, "Cooper", scope=scope(),
+                           selected_store=self.store, budget_bytes=900)
+        self.assertEqual(first.rows, again.rows)
+        self.assertEqual(first.next_cursor, again.next_cursor)
+        second = fetch_page("O3", first.next_cursor, "Cooper", scope=scope(),
+                            selected_store=self.store, budget_bytes=900)
+        retried = fetch_page("O3", first.next_cursor, "Cooper", scope=scope(),
+                             selected_store=self.store, budget_bytes=900)
+        self.assertEqual(second.rows, retried.rows)
+        self.assertEqual(second.position, len(first.rows))
+
+
+class CompactionPolicyTests(unittest.TestCase):
+    """A page observation is an execute observation. Nothing about compaction
+    treats it specially, and this slice changed none of it."""
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.archive = RuntimeHandleArchive(os.path.join(self.temp.name, "h.sqlite3"))
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def page_text(self, rows):
+        declare(
+            ResultHandleSpec(kind="holder", summary="%d holder(s)." % len(rows),
+                             items=rows, total=len(rows)),
+            scope=scope(), selected_store=self.store, alias="O1",
+        )
+        return fetch_page("O1", scope=scope(), selected_store=self.store)
+
+    def test_the_saving_rule_prices_a_page_like_any_other_observation(self):
+        from fastworkflow.observation_offloading.compact import (
+            MIN_OFFLOAD_SAVING_BYTES,
+        )
+        from fastworkflow.observation_offloading.labels import (
+            offload_label,
+            offload_saving_bytes,
+        )
+        self.assertEqual(MIN_OFFLOAD_SAVING_BYTES, 1_024)
+        small = self.page_text(holders(4)).as_observation()
+        label = offload_label(alias="O2", command_name="fetch_result_page",
+                              response=small)
+        self.assertLess(offload_saving_bytes(small, label), MIN_OFFLOAD_SAVING_BYTES)
+        trajectory = {
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "fetch_result_page handle=O1"},
+            "observation_0": small,
+        }
+        decisions = compact_trajectory(trajectory, scope=scope(),
+                                       selected_archive=self.archive,
+                                       packed_target_bytes=1)
+        self.assertEqual(decisions[0]["action"], "kept")
+        # The five most recent execute observations are protected exactly as
+        # before; nothing here asked compaction to treat a page differently.
+        self.assertEqual(decisions[0]["reason"], "recent_observation_protected")
