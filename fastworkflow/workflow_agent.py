@@ -23,12 +23,6 @@ class WorkflowAgentSignature(dspy.Signature):
     """
     Carefully review the user request, then execute the next steps using available tools for building the final answer.
     Every user intent must be fully addressed before returning the final answer.
-
-    Before finishing, verify every claim in your final answer against the data you retrieved in this turn:
-    - State a fact only if an observation you retrieved supports it, and cite that observation's O-number.
-    - If retrieved data contradicts a claim in the request, say the request was wrong and give the evidence.
-    - If a requested item was not retrieved, name it as unresolved instead of filling it in.
-    - Distinguish claims the retrieved data contradicts from claims you could not verify.
     """
     user_query = dspy.InputField(desc="The natural language user query.")
     final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
