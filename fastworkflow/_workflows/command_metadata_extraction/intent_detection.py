@@ -74,6 +74,14 @@ _FUZZY_PREMATCH_MAX_DISTANCE = 0.3  # Adjust threshold as needed
 # changing the field name.
 _FUZZY_MATCHER_VERSION = "levenshtein-leading-window/1"
 
+# The matching layer R1 (ido-8ps.8) adds between the context-scoped exact-name
+# match and the fuzzy pre-match: the first token names a real command of this
+# workflow, and this context is not one that owns it. Recorded as its own layer
+# rather than folded into "no matcher claimed it", because the two are opposite
+# facts -- this one is a deterministic refusal to answer, and a span that says
+# so is how a misroute is counted after the fact.
+MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT = "known_name_foreign_context"
+
 # Reported when the classifier artifacts are not under the R4 versioned layout. A
 # tree that has never been trained under versioning has no version to report, and
 # saying so is better than inventing one that would look comparable across runs.
@@ -178,7 +186,17 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
     # do not enumerate resolved to exactly one command, or to none at all.
     candidate_count = nlu_trace.get("candidate_count", 1)
 
-    if matcher_layer == "exact_prefix":
+    if matcher_layer == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT:
+        # The first token is a command name this workflow owns elsewhere. That
+        # is a lookup against an inventory, not a measurement: there is no
+        # confidence, distance or candidate set behind it, and the decision it
+        # produced was "decline, let the parent chain answer". Reporting it as
+        # deterministic keeps it out of every calibration curve, where a
+        # confidence of 1.0 (or an uncaptured-measurement marker) would both be
+        # false.
+        signals_absent_reason = "deterministic-resolution"
+        candidate_count = 0
+    elif matcher_layer == "exact_prefix":
         # An exact command-name match has nothing to be unsure about. Emitting
         # confidence 1.0 here would enter a calibration curve as a real
         # measurement of a classifier that never ran.
@@ -292,6 +310,9 @@ class CommandNamePrediction:
         self.convo_path = os.path.join(self.app_workflow_folderpath, "___convo_info")
         self.cache_path = self._get_cache_path(self.app_workflow_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path, self.app_workflow_id)
+        # Built once per predictor and reused across the parent-chain walk,
+        # which asks the same question in every context it visits.
+        self._command_inventory: Optional[dict[str, tuple[str, ...]]] = None
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         """Predict, wrapped in a ``fw.nlu.intent`` span (D3 as amended).
@@ -351,6 +372,49 @@ class CommandNamePrediction:
             },
         )
         return output
+
+    def command_inventory(self) -> dict[str, tuple[str, ...]]:
+        """Every command name this app workflow owns, and the contexts owning it.
+
+        Keyed on the lowercased simple name, which is what the exact-name
+        matcher compares against, and valued with the context names so a span
+        can say where the call should have gone. Reserved labels (`wildcard`,
+        `parameter_value`) name no command and are left out.
+
+        Read from the same `RoutingDefinition` the per-context candidate set is
+        built from (`RoutingRegistry` caches it per workflow folder), so there
+        is no second source of truth to drift: this is that definition read
+        across every context instead of one.
+        """
+        if self._command_inventory is None:
+            app_crd = fastworkflow.RoutingRegistry.get_definition(
+                self.app_workflow_folderpath)
+            owners: dict[str, set[str]] = {}
+            for context_name, qualified_names in app_crd.contexts.items():
+                for qualified_name in qualified_names:
+                    simple_name = qualified_name.split('/')[-1]
+                    if is_non_routable(simple_name):
+                        continue
+                    owners.setdefault(simple_name.lower(), set()).add(context_name)
+            self._command_inventory = {
+                name: tuple(sorted(contexts)) for name, contexts in owners.items()
+            }
+        return self._command_inventory
+
+    def foreign_owner_contexts(
+        self, normalized_command_name: str, command_name_dict: dict[str, str]
+    ) -> list[str]:
+        """Contexts owning *normalized_command_name*, when this one does not.
+
+        Empty when the token names no command of this workflow (ordinary free
+        text, which is what the classifier is for) and empty when this
+        context's own candidate set contains it (already matched above). A
+        non-empty result is the R1 condition: a real command name, reached in a
+        context that cannot execute it.
+        """
+        if normalized_command_name in command_name_dict:
+            return []
+        return list(self.command_inventory().get(normalized_command_name, ()))
 
     def _predict_impl(
         self,
@@ -434,6 +498,36 @@ class CommandNamePrediction:
             command_name = normalized_command_name
             command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
             nlu_trace["matcher_layer"] = "exact_prefix"
+        elif (
+            nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
+            and (owner_contexts := self.foreign_owner_contexts(
+                normalized_command_name, command_name_dict))
+        ):
+            # R1 (ido-8ps.8): a known command name may not be answered by a
+            # context that does not own it. The exact-name matcher above is
+            # scoped to THIS context's command set, so a root ('*') or sibling
+            # command typed verbatim -- `fetch_result_page <handle>O9</handle>`,
+            # `show_holders <filter>...`, `list_permissions` -- is invisible to
+            # layers 1 and 2 here and would be adjudicated by this context's
+            # classifier, which answered four of them with a confident
+            # "No permissions found." (ido-8ps.6.1 section 4.2: 69 silent
+            # misroutes across 31 stored runs).
+            #
+            # None is already the signal that drives the parent-chain walk
+            # (`_commands/wildcard.py:98-106`), so returning it here carries the
+            # call up to the context that does own the name, where the
+            # deterministic matcher resolves it. Nothing below this line runs:
+            # no fuzzy candidates, no embedding cache, no classifier. A name
+            # whose owner is not on this chain now reaches `you_misunderstood`
+            # instead of a lucky classifier guess -- loud instead of silent.
+            #
+            # INTENT_DETECTION only: the clarification stages match against a
+            # constrained suggestion set, where "not in this context's set" is
+            # the normal case rather than a misroute.
+            nlu_trace["matcher_layer"] = MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
+            nlu_trace["known_name_foreign_context"] = True
+            nlu_trace["known_name_owner_contexts"] = owner_contexts
+            return CommandNamePrediction.Output(command_name=None)
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
             # No match is ([], None), never (None, None) — len() here is safe.
