@@ -632,6 +632,31 @@ class ResultHandleStore:
             ).fetchall()
         return [self._decode_page(row) for row in rows]
 
+    def list_page_query_scopes(
+        self, scope: RuntimeHandleScope, *, alias: str
+    ) -> list[str]:
+        """Every traversal that has stored pages for *alias*, base one first.
+
+        A handle's rows are stored per query scope: the unfiltered walk under
+        ``""`` and one scope per literal filter run against it. Reading a handle
+        back whole at answer time (``ido-8ps.18``) has to know which scopes
+        exist, and the scope is the only key ``list_pages`` cannot supply itself.
+        Read-only, like every other list method here.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT query_scope FROM result_handle_pages
+                WHERE scope_id = ? AND alias = ?
+                ORDER BY query_scope
+                """,
+                (scope.scope_id, alias),
+            ).fetchall()
+        scopes = [str(row["query_scope"]) for row in rows]
+        return [value for value in scopes if not value] + [
+            value for value in scopes if value
+        ]
+
     @staticmethod
     def _decode_page(row: sqlite3.Row) -> dict[str, Any]:
         payload = bytes(row["record_json"])

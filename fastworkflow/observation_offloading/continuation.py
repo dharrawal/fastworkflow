@@ -269,9 +269,11 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         trajectory: dict[str, Any],
         input_args: dict[str, Any],
     ) -> dspy.Prediction:
-        extract = self._call_with_potential_trajectory_truncation(
-            self.extract, trajectory, **input_args
-        )
+        # The one extract call of a segmented turn: agent-selected finish and
+        # the replan wall both end here. It goes through _extract_prediction so
+        # answer-time rehydration (ido-8ps.18) reaches the configuration that
+        # actually runs; with the flag off it is the identical call it was.
+        extract = self._extract_prediction(trajectory, **input_args)
         return dspy.Prediction(
             trajectory=trajectory,
             exhausted=self._exhausted_last_run,

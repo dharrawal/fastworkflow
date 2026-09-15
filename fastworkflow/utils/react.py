@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from litellm import ContextWindowExceededError
@@ -127,6 +128,11 @@ class fastWorkflowReAct(Module):
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
+        # How many times the context-window fallback has truncated a trajectory
+        # in this process. Only read as a delta around one call (ido-8ps.18, to
+        # tell an extract that overflowed from one that did not); it changes
+        # nothing about what the fallback does.
+        self._truncation_count = 0
 
     def clear_suspension(self) -> None:
         """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
@@ -184,9 +190,7 @@ class fastWorkflowReAct(Module):
         if suspended is not None:
             return suspended
 
-        extract = self._call_with_potential_trajectory_truncation(
-            self.extract, trajectory, **input_args
-        )
+        extract = self._extract_prediction(trajectory, **input_args)
         return dspy.Prediction(
             trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
         )
@@ -223,9 +227,7 @@ class fastWorkflowReAct(Module):
         if suspended is not None:
             return suspended
 
-        extract = self._call_with_potential_trajectory_truncation(
-            self.extract, trajectory, **input_args
-        )
+        extract = self._extract_prediction(trajectory, **input_args)
         return dspy.Prediction(
             trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
         )
@@ -426,8 +428,135 @@ class fastWorkflowReAct(Module):
             if pred.next_tool_name == "finish":
                 break
 
-        extract = await self._async_call_with_potential_trajectory_truncation(self.extract, trajectory, **input_args)
+        extract = await self._async_extract_prediction(trajectory, **input_args)
         return dspy.Prediction(trajectory=trajectory, **extract)
+
+    def _rehydrate_for_extract(self, trajectory):
+        """``(trajectory_for_the_extractor, report, budget, scope_id)``.
+
+        ``ido-8ps.18``. With ``FW_ANSWER_REHYDRATION`` unset or 0 this returns
+        the trajectory OBJECT it was given and no report, so every extract call
+        site is exactly the call it was before -- same module, same object, same
+        truncation fallback -- and an extract prompt measured at ``e16b6c5``
+        reproduces byte for byte.
+
+        With the flag on it returns a COPY in which offload labels, bounded
+        listing observations and page observations carry the stored evidence
+        behind them (see ``fastworkflow.answer_rehydration``). The loop's own
+        trajectory is then never the object passed on, so neither rehydration nor
+        a truncation of the rehydrated copy can change what the turn recorded. A
+        failure anywhere here falls back to the plain call: an answer over
+        pointers is worse than one over evidence and far better than no answer.
+        """
+        from fastworkflow import answer_rehydration
+        from fastworkflow.observation_offloading.state import record_event
+
+        if not answer_rehydration.answer_rehydration_enabled():
+            return trajectory, None, 0, None
+
+        budget = answer_rehydration.max_bytes_from_env()
+        scope = getattr(self, "continuation_scope", None)
+        scope_id = getattr(scope, "scope_id", None)
+        record_event(
+            {
+                "kind": "rehydration_started",
+                "scope_id": scope_id,
+                "flag": True,
+                "budget_bytes": budget,
+                "bytes_before": answer_rehydration.trajectory_bytes(trajectory),
+            }
+        )
+        try:
+            rehydrated, report = answer_rehydration.rehydrate(
+                trajectory,
+                scope=scope,
+                archive=getattr(self, "observation_archive", None),
+                budget=budget,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "answer rehydration skipped: %s: %s", type(error).__name__, error
+            )
+            record_event(
+                {
+                    "kind": "rehydration_failed",
+                    "scope_id": scope_id,
+                    "error": type(error).__name__,
+                    "detail": str(error)[:300],
+                }
+            )
+            return trajectory, None, budget, scope_id
+        return rehydrated, report, budget, scope_id
+
+    def _record_extract_finished(
+        self, report, *, budget, scope_id, started, truncations_before
+    ):
+        """Close the rehydration record for one extract call."""
+        from fastworkflow.observation_offloading.state import record_event
+
+        duration_ms = round((time.monotonic() - started) * 1000.0, 3)
+        overflowed = getattr(self, "_truncation_count", 0) > truncations_before
+        if overflowed:
+            record_event(
+                {
+                    "kind": "rehydration_overflow",
+                    "scope_id": scope_id,
+                    "truncations": (
+                        getattr(self, "_truncation_count", 0) - truncations_before
+                    ),
+                    "budget_bytes": budget,
+                    "bytes_after": report.bytes_after,
+                }
+            )
+        record_event(
+            {
+                "kind": "rehydration_finished",
+                "scope_id": scope_id,
+                "flag": True,
+                "extract_duration_ms": duration_ms,
+                "extract_prompt_tokens": _extract_prompt_tokens(),
+                "rehydration_overflow": overflowed,
+                **report.as_event(),
+            }
+        )
+
+    def _extract_prediction(self, trajectory, **input_args):
+        """The extract call, with answer-time rehydration when it is enabled."""
+        selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
+        if report is None:
+            return self._call_with_potential_trajectory_truncation(
+                self.extract, selected, **input_args
+            )
+        truncations_before = getattr(self, "_truncation_count", 0)
+        started = time.monotonic()
+        try:
+            return self._call_with_potential_trajectory_truncation(
+                self.extract, selected, **input_args
+            )
+        finally:
+            self._record_extract_finished(
+                report, budget=budget, scope_id=scope_id, started=started,
+                truncations_before=truncations_before,
+            )
+
+    async def _async_extract_prediction(self, trajectory, **input_args):
+        """``_extract_prediction`` for the async loop, same rules."""
+        selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
+        if report is None:
+            return await self._async_call_with_potential_trajectory_truncation(
+                self.extract, selected, **input_args
+            )
+        truncations_before = getattr(self, "_truncation_count", 0)
+        started = time.monotonic()
+        try:
+            return await self._async_call_with_potential_trajectory_truncation(
+                self.extract, selected, **input_args
+            )
+        finally:
+            self._record_extract_finished(
+                report, budget=budget, scope_id=scope_id, started=started,
+                truncations_before=truncations_before,
+            )
 
     def _call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
         for _ in range(3):
@@ -438,9 +567,11 @@ class fastWorkflowReAct(Module):
                 )
             except litellm_exceptions.BadRequestError: 
                 logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
+                self._count_truncation()
                 trajectory = self.truncate_trajectory(trajectory)
             except ContextWindowExceededError:
                 logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
+                self._count_truncation()
                 trajectory = self.truncate_trajectory(trajectory)
 
     async def _async_call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
@@ -452,7 +583,12 @@ class fastWorkflowReAct(Module):
                 )
             except ContextWindowExceededError:
                 logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
+                self._count_truncation()
                 trajectory = self.truncate_trajectory(trajectory)
+
+    def _count_truncation(self) -> None:
+        """Bookkeeping only: the fallback's behaviour is untouched."""
+        self._truncation_count = getattr(self, "_truncation_count", 0) + 1
 
     def truncate_trajectory(self, trajectory):
         """Truncates the trajectory so that it fits in the context window.
@@ -471,6 +607,25 @@ class fastWorkflowReAct(Module):
             trajectory.pop(key)
 
         return trajectory
+
+
+def _extract_prompt_tokens() -> int | None:
+    """Prompt tokens of the most recent LM call, when the history holds them.
+
+    ``ido-8ps.18`` measures the extract call because it is the single large one
+    at answer time. History can be disabled, empty, or carry no usage block, and
+    none of those is an error: the measure is then simply absent.
+    """
+    try:
+        lm = dspy.settings.lm
+        history = getattr(lm, "history", None) or []
+        if not history:
+            return None
+        usage = history[-1].get("usage") or {}
+        tokens = usage.get("prompt_tokens")
+        return int(tokens) if tokens else None
+    except Exception:  # noqa: BLE001 - a measurement must never fail a turn
+        return None
 
 
 def _as_text(value: Any) -> str:

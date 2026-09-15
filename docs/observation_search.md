@@ -161,6 +161,12 @@ time or filtered by a literal, and can continue the query against the backend
 beyond the rows the command materialised. Both are reached with the alias
 printed on the observation.
 
+**At answer time both can be read back whole.** The extract step has no tools, so
+a label or a bounded page is all the evidence it has unless something puts the
+text back. Flag-gated answer-time rehydration does exactly that, on the
+extractor's own copy of the trajectory and under a byte budget: see
+[Answer-time rehydration](answer_rehydration.md).
+
 ## Every execute observation is archived
 
 Persistence no longer waits for an offload decision. When a step completes, the
