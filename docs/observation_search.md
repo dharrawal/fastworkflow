@@ -140,36 +140,6 @@ defect, recorded as an `alias_conflict` event, with the printed text left as it
 stands. There is no step-number fallback anywhere — an `O` the run never printed
 stays an explicit `no matching offloaded handle` miss.
 
-#### The readers that produce the answer see it too (`ido-8ps.15`)
-
-`ido-8ps.13` printed the clause and then measured that nothing which produces
-the final answer could read it: the archive stores the raw response, and the
-filler, `search_memory` and the extract step all read stored text. 85 of that
-run's 110 instance-scoped observations named their subject **nowhere** in their
-own archived text. So the clause now travels three further steps, still without
-becoming part of the evidence text:
-
-* **Archive metadata.** `persist(..., context=...)` files the clause in a
-  separate `observation_offload_context` table, keyed by the same
-  `(scope_id, alias)`. A separate table and not a column on
-  `observation_offload_handles`, because the archived response and its
-  `text_sha256` are the evidence record and are compared across experiments;
-  `get` and `list` return it as `context` beside the text. `""` means the
-  command ran at the root, `None` means no clause was captured — different
-  facts, never merged. `state.observation_context` resolves a clause from this
-  process first and the archive second.
-* **`search_memory`.** The observation handed to the search model is prefixed
-  with the same `alias_line`, and the signature tells the model that the first
-  line is provenance, not evidence, and to name the context instance in its
-  answer when the rows do not identify their own subject. The archived text and
-  its digest are untouched, and the event records `context` alongside
-  `observation_bytes` and `presented_observation_bytes`.
-* **The evidence filler.** Every page is headed with the clause, the clause is
-  indexed with the page for ranking, it counts as part of the cited
-  observation's text for the literal-value check, and a filled worksheet line
-  names it: `item: value (Observation O27, in Account 28c5… Alan Cooper)`. See
-  [Evidence filler](evidence_filler.md).
-
 **Archived text excludes the handle line**, the context clause included. The
 line is presentation only:
 `strip_alias_line` recovers the exact command response, and that response — not

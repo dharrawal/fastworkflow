@@ -53,7 +53,6 @@ from fastworkflow.observation_offloading.search import (
 from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
     hot_payload_bytes,
-    observation_context,
     observation_inline,
     reset_runtime_state,
     stored_handles,
@@ -86,7 +85,6 @@ __all__ = [
     "install_span_policy",
     "is_search_answer_key",
     "min_offload_saving_bytes_from_env",
-    "observation_context",
     "observation_inline",
     "offload_label",
     "offload_saving_bytes",

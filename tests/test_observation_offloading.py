@@ -1383,9 +1383,7 @@ class EagerObservationArchive(unittest.TestCase):
 
         self.assertIs(observation_inline(self.scope, "O1"), True)
         inline = self._search("Which holder?", "O1")
-        # ido-8ps.15: the model is shown the observation under its provenance
-        # line; the archived row above is still the raw response.
-        self.assertEqual(inline["observation"], alias_line("O1") + large)
+        self.assertEqual(inline["observation"], large)
         self.assertTrue(inline["event"]["still_inline"])
         self.assertEqual(inline["event"]["tier"], "hot")
         self.assertEqual(inline["event"]["text_sha256"], inline_row["text_sha256"])
@@ -1421,7 +1419,7 @@ class EagerObservationArchive(unittest.TestCase):
         clear_hot_handles(self.scope)  # a restart: nothing left in this process
         self.assertEqual(stored_handles(self.scope), {})
         restarted = self._search("Who is the target person?", "O1")
-        self.assertEqual(restarted["observation"], alias_line("O1") + big)
+        self.assertEqual(restarted["observation"], big)
         self.assertEqual(restarted["event"]["tier"], "sqlite")
 
     def test_repeated_persistence_keeps_one_row_with_the_same_digest(self) -> None:
