@@ -137,6 +137,10 @@ def build_tool_agent(
     extract predictors) happens exactly once: either a stock fastWorkflowReAct
     or a StructuredContinuationReAct with search_memory appended to ``tools``.
     """
+    # Imported here, not at module import: `evidence_filler` reads this
+    # package, and this package is imported from `fastworkflow/__init__`.
+    from fastworkflow.evidence_filler import evidence_filler_enabled
+
     if not enabled():
         return fastWorkflowReAct(
             signature,
@@ -204,6 +208,10 @@ def build_tool_agent(
             "max_forced_replans": max_forced_replans_from_env(),
             "tools": sorted(agent.tools),
             "scope_id": scope.scope_id,
+            # ido-8ps.10. Recorded whatever its value, so a run measured with
+            # the filler off is distinguishable from one measured before the
+            # filler existed (where the key is absent, not false).
+            "evidence_filler": evidence_filler_enabled(),
         }
     )
     return agent

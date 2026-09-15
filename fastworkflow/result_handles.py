@@ -632,6 +632,25 @@ class ResultHandleStore:
             ).fetchall()
         return [self._decode_page(row) for row in rows]
 
+    def list_scope_pages(self, scope: RuntimeHandleScope) -> list[dict[str, Any]]:
+        """Every stored page of this turn, oldest handle first. Read only.
+
+        The rows a bounded listing did not print are here and nowhere else, so
+        this is what lets the evidence filler (ido-8ps.10) answer from the whole
+        enumeration rather than from the 3 KB the observation showed. It adds no
+        behaviour: no caller of ``fetch_page`` or ``declare`` reaches it.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM result_handle_pages
+                WHERE scope_id = ?
+                ORDER BY alias, query_scope, start_offset
+                """,
+                (scope.scope_id,),
+            ).fetchall()
+        return [self._decode_page(row) for row in rows]
+
     @staticmethod
     def _decode_page(row: sqlite3.Row) -> dict[str, Any]:
         payload = bytes(row["record_json"])
