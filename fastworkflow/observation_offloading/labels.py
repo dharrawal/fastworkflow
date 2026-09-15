@@ -8,6 +8,27 @@ CHARS_PER_TOKEN = 4
 OFFLOAD_MARK = "Use search_memory tool to search inside Observation "
 LABEL_RE = re.compile(r"^Use search_memory tool to search inside Observation (O[1-9]\d*) returned by ")
 ALIAS_LINE_RE = re.compile(r"^Observation (O[1-9]\d*) \(execute_workflow_query\)\n")
+SEARCH_ANSWER_KEY_RE = re.compile(r"^(O[1-9]\d*)#a([1-9]\d*)$")
+
+
+def search_answer_key(alias: str, sequence: int) -> str:
+    r"""Archive key for one complete search answer, under the searched handle.
+
+    Deliberately NOT an O alias. The agent-visible ``O`` namespace is execute
+    ordinals only, and ``search_memory`` validates its ``alias`` argument
+    against ``O[1-9]\d*``, so this key can never be passed back as a handle: a
+    bounded answer's marking names a record, not a searchable observation. The
+    searched alias is kept as the prefix so the archived answer is filed under
+    the observation that produced it, and ``sequence`` separates repeated
+    searches of the same observation within one scope.
+    """
+    if not sequence >= 1:
+        raise ValueError("search answer sequence must be a positive integer")
+    return f"{alias}#a{sequence}"
+
+
+def is_search_answer_key(key: str) -> bool:
+    return SEARCH_ANSWER_KEY_RE.match(key) is not None
 
 
 def alias_line(alias: str) -> str:

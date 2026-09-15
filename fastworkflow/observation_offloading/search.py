@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+import hashlib
 import re
 import time
 
@@ -10,9 +11,12 @@ import dspy
 from fastworkflow.utils.dspy_utils import get_lm
 
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
+from fastworkflow.observation_offloading.labels import is_search_answer_key, search_answer_key
 from fastworkflow.observation_offloading.state import (
     archive,
     default_scope,
+    env_int,
+    next_search_answer_sequence,
     observation_inline,
     record_event,
     stored_handles,
@@ -20,6 +24,22 @@ from fastworkflow.observation_offloading.state import (
 
 DEFAULT_PAGE_BYTES = 4096
 SEARCH_MEMORY_MAX_PAGES = 3
+# A search answer is model output capped only by the 2,048-token completion
+# limit (~8 KB), it is a non-execute observation that compaction never offloads,
+# and the replan skeleton carries it into every later segment in full. So it is
+# given the same 3 KB presentation budget a listing observation has, measured
+# over the whole observation - header and bounded marking included, not just the
+# answer body. Recorded answers are far below this (max 1,855 B over 27 answers
+# in the h1-control, A1+A2 smoke and ido-5uv stores), so the bound is a tail
+# guard: under budget the observation is byte-identical to an unbounded one.
+SEARCH_ANSWER_MAX_BYTES = 3_072
+SEARCH_ANSWER_MAX_BYTES_ENV = "FW_SEARCH_ANSWER_MAX_BYTES"
+# Below this the marking would not fit inside the budget it is describing.
+SEARCH_ANSWER_MIN_BYTES = 1_024
+
+
+def search_answer_max_bytes_from_env(default: int = SEARCH_ANSWER_MAX_BYTES) -> int:
+    return env_int(SEARCH_ANSWER_MAX_BYTES_ENV, default, minimum=SEARCH_ANSWER_MIN_BYTES)
 
 
 class InvalidPageBoundary(ValueError):
@@ -83,6 +103,109 @@ def text_page(text: str, start_byte: int, max_bytes: int) -> dict[str, Any]:
     }
 
 
+def answer_header(alias: str, tier: str, *, bounded: bool = False) -> str:
+    """The first line of a search observation. Unbounded form is unchanged."""
+    return f"Observation {alias} (tier={tier}{', bounded' if bounded else ''}):\n"
+
+
+def bounded_answer_marking(
+    *, alias: str, archive_key: str, digest: str, shown_bytes: int, total_bytes: int
+) -> str:
+    """Say that the answer was cut, by how much, and how to get the rest.
+
+    A bounded answer must never read as a complete one: the marking states the
+    omission in bytes, denies the absence inference an incomplete answer would
+    otherwise invite, names the record holding the full text, and gives the
+    agent an action it can actually take -- the same observation, a narrower
+    question. It names a record key, never an ``O`` handle, because the record
+    is not a searchable observation.
+    """
+    return (
+        f"[search_memory BOUNDED ANSWER: shown {shown_bytes:,} of {total_bytes:,} "
+        f"UTF-8 bytes of the answer for {alias}; {total_bytes - shown_bytes:,} bytes "
+        f"are NOT shown. This is not the complete answer, and nothing missing from "
+        f"it is thereby absent from {alias}. Full answer archived as {archive_key} "
+        f"(sha256 {digest[:12]}). To get the rest, call search_memory on {alias} "
+        f"again with a narrower question naming the entity or predicate you still "
+        f"need.]"
+    )
+
+
+def present_answer(
+    answer: str,
+    *,
+    alias: str,
+    tier: str,
+    archive_key: str,
+    digest: str,
+    max_bytes: int,
+) -> tuple[str, Optional[dict[str, Any]]]:
+    """The observation text for one answer, bounded to ``max_bytes`` if needed.
+
+    Returns ``(text, bound_metadata)``; ``bound_metadata`` is None when the
+    whole answer fits, and in that case the text is exactly what an unbounded
+    ``search_memory`` returned before this bound existed.
+
+    The cut is taken by ``text_page``, so it lands just after the last newline
+    inside the window and otherwise on a UTF-8 character boundary: an
+    identifier the answer offers as evidence is never split mid-token, and a
+    row is never halved into a plausible-looking shorter one.
+    """
+    header = answer_header(alias, tier)
+    total_bytes = len(answer.encode("utf-8"))
+    if len(header.encode("utf-8")) + total_bytes <= max_bytes:
+        return header + answer, None
+    header = answer_header(alias, tier, bounded=True)
+    # Reserve the marking at its widest. It prints three numbers -- shown,
+    # total and omitted -- and each of the three is at most as wide as the
+    # total, so rendering it with shown = total (omitted collapses to "0") and
+    # paying for omitted at the total's width bounds every real rendering.
+    widest = len(f"{total_bytes:,}") - len("0")
+    reserve = len(header.encode("utf-8")) + 1 + widest + len(
+        bounded_answer_marking(alias=alias, archive_key=archive_key, digest=digest,
+                               shown_bytes=total_bytes, total_bytes=total_bytes
+                               ).encode("utf-8")
+    )
+    page = text_page(answer, 0, max(1, max_bytes - reserve))
+    shown_bytes = page["end_byte"]
+    marking = bounded_answer_marking(
+        alias=alias, archive_key=archive_key, digest=digest,
+        shown_bytes=shown_bytes, total_bytes=total_bytes,
+    )
+    text = f"{header}{page['text'].rstrip(chr(10))}\n{marking}"
+    return text, {
+        "answer_bounded": True,
+        "answer_utf8_bytes": total_bytes,
+        "answer_shown_utf8_bytes": shown_bytes,
+        "answer_omitted_utf8_bytes": total_bytes - shown_bytes,
+        "answer_archive_key": archive_key,
+        "answer_sha256": digest,
+        "observation_utf8_bytes": len(text.encode("utf-8")),
+        "max_bytes": max_bytes,
+    }
+
+
+def archived_search_answer(
+    archive_key: str,
+    *,
+    scope: Optional[RuntimeHandleScope] = None,
+    selected_archive: Optional[RuntimeHandleArchive] = None,
+) -> Optional[dict[str, Any]]:
+    """The complete text of a bounded answer, by the key its marking names.
+
+    The documented retrieval path for the part a bound cut off: operators and
+    the evaluation tooling read the full answer here, digest-verified by the
+    archive, without a second model call. It is deliberately not an agent tool
+    -- the agent's route to the missing part is a narrower question on the same
+    observation, which is evidence-grounded, whereas re-reading a truncated
+    answer is not.
+    """
+    if not is_search_answer_key(archive_key):
+        raise ValueError("not a search answer record key, e.g. O12#a1")
+    store = selected_archive or archive()
+    return store.get(scope or default_scope(), archive_key)
+
+
 class ObservationSearchSignature(dspy.Signature):
     """Answer the question using only the supplied observation as evidence.
 
@@ -112,6 +235,45 @@ def completion_was_truncated(history: dict[str, Any], limit: int = 2048) -> bool
     if choices and isinstance(choices[0], dict):
         finish = choices[0].get("finish_reason")
     return finish == "length" or (history.get("usage") or {}).get("completion_tokens", 0) >= limit
+
+
+def bound_answer_for_trajectory(
+    answer: str,
+    *,
+    alias: str,
+    tier: str,
+    scope: RuntimeHandleScope,
+    store: RuntimeHandleArchive,
+    max_bytes: Optional[int] = None,
+) -> tuple[str, Optional[dict[str, Any]]]:
+    """Archive the complete answer, then present at most ``max_bytes`` of it.
+
+    Archiving happens first and only for an answer that would be cut: the part
+    the bound removes must be recoverable before it is removed. If that write
+    fails the answer is NOT bounded -- the complete text is returned inline,
+    over budget, and ``search_answer_archive_refused`` records why. Evidence
+    outranks the byte budget, the same way a failed offload keeps its
+    observation inline.
+    """
+    if max_bytes is None:
+        max_bytes = search_answer_max_bytes_from_env()
+    header_bytes = len(answer_header(alias, tier).encode("utf-8"))
+    if header_bytes + len(answer.encode("utf-8")) <= max_bytes:
+        return answer_header(alias, tier) + answer, None
+    digest = hashlib.sha256(answer.encode("utf-8")).hexdigest()
+    key = search_answer_key(alias, next_search_answer_sequence(scope))
+    try:
+        store.persist(scope, alias=key, offload_order=0, command_name="search_memory",
+                      step_index=-1, text=answer, text_sha256=digest)
+    except Exception as error:  # noqa: BLE001
+        record_event({"kind": "search_answer_archive_refused", "scope_id": scope.scope_id,
+                      "alias": alias, "archive_key": key,
+                      "reason": "persistence_failed_complete_answer_retained",
+                      "error": type(error).__name__,
+                      "answer_utf8_bytes": len(answer.encode("utf-8"))})
+        return answer_header(alias, tier) + answer, None
+    return present_answer(answer, alias=alias, tier=tier, archive_key=key,
+                          digest=digest, max_bytes=max_bytes)
 
 
 def search_memory(
@@ -177,10 +339,20 @@ def search_memory(
                 "no evidence answer was produced. Check LLM_OBSERVATION_SEARCH and "
                 "LITELLM_API_KEY_OBSERVATION_SEARCH configuration or retry.")
     history = lm.history[-1] if lm.history else {}
+    text, bound = bound_answer_for_trajectory(
+        answer, alias=wanted, tier=tier, scope=selected_scope, store=store)
     record_event({**event, "status": "answered", "model": lm.model,
                   "latency_ms": round((time.monotonic() - started) * 1000),
                   "usage": {key: (history.get("usage") or {}).get(key) for key in
                             ("prompt_tokens", "completion_tokens", "total_tokens")},
                   "cost_usd": history.get("cost"),
+                  "answer_utf8_bytes": len(answer.encode("utf-8")),
+                  "observation_utf8_bytes": len(text.encode("utf-8")),
+                  "answer_bounded": bool(bound),
+                  **({k: v for k, v in bound.items()
+                      if k in ("answer_shown_utf8_bytes", "answer_omitted_utf8_bytes",
+                               "answer_archive_key", "answer_sha256")} if bound else {}),
+                  # The complete answer stays in the event log whether or not the
+                  # observation carries it, so a bound never loses the evidence.
                   "answer": answer})
-    return f"Observation {wanted} (tier={tier}):\n{answer}"
+    return text

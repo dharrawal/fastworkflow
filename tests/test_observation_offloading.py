@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +43,7 @@ from fastworkflow.observation_offloading.continuation import (
 from fastworkflow.observation_offloading.labels import (
     alias_line,
     is_offload_label,
+    is_search_answer_key,
     label_alias,
     offload_label,
     printed_alias,
@@ -55,7 +57,11 @@ from fastworkflow.observation_offloading.manifest import (
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.observation_offloading.search import (
     DEFAULT_PAGE_BYTES,
+    SEARCH_ANSWER_MAX_BYTES,
+    SEARCH_ANSWER_MAX_BYTES_ENV,
     InvalidPageBoundary,
+    archived_search_answer,
+    search_answer_max_bytes_from_env,
     search_memory,
     text_page,
 )
@@ -211,7 +217,7 @@ class CompactTrajectory(unittest.TestCase):
             scope=self.scope,
             selected_archive=self.archive,
         )
-        self.assertIn("tier=sqlite", answer)
+        self.assertIn("tier=hot", answer)
         self.assertIn("target person", answer)
 
     @unittest.skipUnless(os.environ.get("FW_TEST_OBSERVATION_SEARCH_LIVE") == "1", "requires configured observation-search provider")
@@ -235,7 +241,7 @@ class CompactTrajectory(unittest.TestCase):
             selected_archive=self.archive,
         )
         self.assertEqual(stored_handles(self.scope), {})
-        self.assertIn("tier=sqlite", answer)
+        self.assertIn("tier=hot", answer)
         self.assertIn("restart answer", answer)
 
     def test_broken_persistence_retains_original_without_label(self) -> None:
@@ -1513,3 +1519,285 @@ class EagerObservationArchive(unittest.TestCase):
             [(row["alias"], row["text_sha256"]) for row in after],
             [(row["alias"], row["text_sha256"]) for row in before],
         )
+
+
+class BoundedSearchAnswers(unittest.TestCase):
+    """A3 (ido-986.14.10): search output has a presentation bound.
+
+    A ``search_memory`` answer is model output capped only by the 2,048-token
+    completion limit (~8 KB). It is a non-execute observation, so compaction
+    never offloads it and the replan skeleton carries it into every later
+    segment in full: whatever it costs, it costs for the rest of the turn.
+
+    The offline measurement over the h1-control (n=3), A1+A2 smoke and ido-5uv
+    stores found no recorded answer above 1,855 B and none at the completion
+    limit, so this bound is a tail guard rather than a saving: under budget the
+    observation is byte-identical to the unbounded one these tests also assert.
+    Over budget, the answer is archived whole first, the observation is cut at a
+    line boundary, and it says it is incomplete.
+    """
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.addCleanup(reset_runtime_state)
+        self.archive = RuntimeHandleArchive(str(Path(self.tempdir.name) / "handles.sqlite3"))
+        self.scope = RuntimeHandleScope(
+            store_identity="fixture-store",
+            channel_id="fixture-channel",
+            experiment_id="fixture-experiment",
+            task_id="fixture-task",
+            attempt=1,
+            turn_key="fixture-turn",
+        )
+        digest = hashlib.sha256(b"holder rows").hexdigest()
+        self.archive.persist(
+            self.scope, alias="O5", offload_order=5, command_name="show_holders",
+            step_index=4, text="holder rows", text_sha256=digest,
+        )
+        # Hot, so a broken archive in a later test breaks only the answer write.
+        remember_handle(self.scope, {"alias": "O5", "text": "holder rows",
+                                     "text_sha256": digest, "command": "show_holders",
+                                     "step_index": 4, "offload_order": 5})
+
+    def search(self, answer: str, *, alias: str = "O5", **kwargs) -> str:
+        """search_memory with a deterministic stand-in returning ``answer``.
+
+        No provider call: the bound is a presentation decision taken after the
+        answer exists, so it is fully testable offline.
+        """
+        lm = SimpleNamespace(
+            history=[{"usage": {"completion_tokens": 11}, "cost": 0.0}], model="fixture-lm"
+        )
+
+        def predict(_signature):
+            return lambda question, observation: SimpleNamespace(answer=answer)
+
+        with patch("fastworkflow.observation_offloading.search.get_lm", return_value=lm), \
+                patch("fastworkflow.observation_offloading.search.dspy") as fake_dspy:
+            fake_dspy.Predict.side_effect = predict
+            return search_memory("Who holds it?", alias, scope=self.scope,
+                                 selected_archive=self.archive, **kwargs)
+
+    @staticmethod
+    def last_search_event() -> dict:
+        return [e for e in snapshot_events() if e["kind"] == "search_memory"][-1]
+
+    @staticmethod
+    def rows(count: int) -> str:
+        """Answer rows whose identifiers are exactly the evidence a cut must not split."""
+        return "\n".join(
+            f"{index:032x} Person {index} account_uid=account-{index:05d}"
+            for index in range(count)
+        )
+
+    def archive_key_from(self, observation: str) -> str:
+        match = re.search(r"archived as (\S+) \(sha256", observation)
+        self.assertIsNotNone(match, observation)
+        return match.group(1)
+
+    # -- under the budget: nothing changes -----------------------------------
+
+    def test_an_answer_under_the_budget_is_presented_exactly_as_before(self) -> None:
+        answer = "Cooper and Miller both hold it (identity_uid=ab12, cd34)."
+        observation = self.search(answer)
+        self.assertEqual(observation, f"Observation O5 (tier=hot):\n{answer}")
+        self.assertNotIn("BOUNDED", observation)
+        # No record is written for an answer that was never cut.
+        self.assertEqual([row["alias"] for row in self.archive.list(self.scope)], ["O5"])
+        event = self.last_search_event()
+        self.assertFalse(event["answer_bounded"])
+        self.assertEqual(event["answer"], answer)
+        self.assertEqual(event["observation_utf8_bytes"], len(observation.encode("utf-8")))
+
+    def test_every_recorded_answer_size_stays_under_the_bound(self) -> None:
+        # The largest answer in h1-control/a12-smoke/ido-5uv was 1,855 bytes.
+        for size in (27, 355, 649, 1855):
+            with self.subTest(size=size):
+                observation = self.search("x" * size)
+                self.assertNotIn("BOUNDED", observation)
+                self.assertLess(len(observation.encode("utf-8")), SEARCH_ANSWER_MAX_BYTES)
+
+    # -- over the budget: bounded, marked, archived ---------------------------
+
+    def test_a_long_answer_is_bounded_marked_and_archived_whole(self) -> None:
+        answer = self.rows(400)
+        self.assertGreater(len(answer.encode("utf-8")), 3 * SEARCH_ANSWER_MAX_BYTES)
+        observation = self.search(answer)
+        self.assertLessEqual(len(observation.encode("utf-8")), SEARCH_ANSWER_MAX_BYTES)
+        self.assertTrue(observation.startswith("Observation O5 (tier=hot, bounded):\n"))
+        self.assertIn("BOUNDED ANSWER", observation)
+        self.assertIn("This is not the complete answer", observation)
+        self.assertIn("call search_memory on O5 again with a narrower question", observation)
+        key = self.archive_key_from(observation)
+        stored = self.archive.get(self.scope, key)
+        self.assertEqual(stored["text"], answer)
+        self.assertEqual(stored["text_sha256"],
+                         hashlib.sha256(answer.encode("utf-8")).hexdigest())
+        event = self.last_search_event()
+        self.assertTrue(event["answer_bounded"])
+        self.assertEqual(event["answer"], answer)
+        self.assertEqual(event["answer_utf8_bytes"], len(answer.encode("utf-8")))
+        self.assertEqual(event["answer_archive_key"], key)
+        self.assertEqual(
+            event["answer_shown_utf8_bytes"] + event["answer_omitted_utf8_bytes"],
+            event["answer_utf8_bytes"],
+        )
+
+    def test_the_marking_states_the_omission_in_bytes_and_denies_absence(self) -> None:
+        answer = self.rows(400)
+        observation = self.search(answer)
+        event = self.last_search_event()
+        shown, omitted = event["answer_shown_utf8_bytes"], event["answer_omitted_utf8_bytes"]
+        self.assertGreater(omitted, 0)
+        self.assertIn(f"shown {shown:,} of {shown + omitted:,} UTF-8 bytes", observation)
+        self.assertIn(f"{omitted:,} bytes are NOT shown", observation)
+        # An incomplete answer must never support an absence claim.
+        self.assertIn("nothing missing from it is thereby absent from O5", observation)
+
+    def test_the_cut_lands_on_a_line_boundary_and_never_splits_an_identifier(self) -> None:
+        answer = self.rows(400)
+        observation = self.search(answer)
+        lines = observation.split("\n")
+        body = lines[1:-1]
+        self.assertTrue(body)
+        # Every shown row is a whole row of the answer, in order, unaltered.
+        self.assertEqual(body, answer.split("\n")[:len(body)])
+        for line in body:
+            self.assertRegex(line, r"^[0-9a-f]{32} Person \d+ account_uid=account-\d{5}$")
+
+    def test_an_answer_with_no_newline_is_cut_on_a_character_boundary(self) -> None:
+        answer = "é" * 4000
+        observation = self.search(answer)
+        body = observation.split("\n")[1]
+        self.assertLessEqual(len(observation.encode("utf-8")), SEARCH_ANSWER_MAX_BYTES)
+        # Decoding is the assertion: a cut inside a UTF-8 sequence cannot decode.
+        self.assertTrue(answer.startswith(body))
+        self.assertEqual(set(body), {"é"})
+
+    def test_the_observation_fits_the_budget_at_every_admissible_bound(self) -> None:
+        answer = self.rows(400)
+        for configured in (str(SEARCH_ANSWER_MAX_BYTES), "1024", "1536", "4096", "8192"):
+            with self.subTest(bound=configured), \
+                    patch.dict(os.environ, {SEARCH_ANSWER_MAX_BYTES_ENV: configured}):
+                bound = search_answer_max_bytes_from_env()
+                self.assertEqual(bound, int(configured))
+                observation = self.search(answer)
+                self.assertLessEqual(len(observation.encode("utf-8")), bound)
+                self.assertIn("BOUNDED ANSWER", observation)
+
+    def test_a_bad_or_too_small_bound_falls_back_to_the_default(self) -> None:
+        for configured in ("", "not-a-number", "16", "0"):
+            with self.subTest(bound=configured), \
+                    patch.dict(os.environ, {SEARCH_ANSWER_MAX_BYTES_ENV: configured}):
+                self.assertEqual(search_answer_max_bytes_from_env(), SEARCH_ANSWER_MAX_BYTES)
+
+    # -- retrieving the part the bound removed --------------------------------
+
+    def test_the_full_answer_is_retrievable_by_the_key_the_marking_names(self) -> None:
+        answer = self.rows(400)
+        observation = self.search(answer)
+        key = self.archive_key_from(observation)
+        record = archived_search_answer(key, scope=self.scope, selected_archive=self.archive)
+        self.assertEqual(record["text"], answer)
+        self.assertEqual(record["command"], "search_memory")
+        digest = hashlib.sha256(answer.encode("utf-8")).hexdigest()
+        self.assertEqual(record["text_sha256"], digest)
+        # The marking's digest prefix identifies the record it names.
+        self.assertIn(f"sha256 {digest[:12]}", observation)
+        # Another turn's scope cannot read it.
+        other = RuntimeHandleScope("fixture-store", "fixture-channel", "fixture-experiment",
+                                   "fixture-task", 2, "another-turn")
+        self.assertIsNone(archived_search_answer(key, scope=other,
+                                                 selected_archive=self.archive))
+
+    def test_repeated_bounded_searches_keep_one_record_each(self) -> None:
+        first = self.search(self.rows(400))
+        second = self.search(self.rows(400) + "\nlast row")
+        first_key, second_key = self.archive_key_from(first), self.archive_key_from(second)
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual([first_key, second_key], ["O5#a1", "O5#a2"])
+        self.assertNotEqual(
+            archived_search_answer(first_key, scope=self.scope, selected_archive=self.archive)["text"],
+            archived_search_answer(second_key, scope=self.scope, selected_archive=self.archive)["text"],
+        )
+
+    def test_the_answer_record_is_not_an_o_alias_and_is_not_searchable(self) -> None:
+        """A1's rule: the O namespace is execute ordinals, nothing else."""
+        observation = self.search(self.rows(400))
+        key = self.archive_key_from(observation)
+        self.assertTrue(is_search_answer_key(key))
+        self.assertIsNone(re.fullmatch(r"O[1-9]\d*", key))
+        # search_memory rejects it before any model call rather than resolving it.
+        with self.assertRaises(ValueError):
+            search_memory("Who?", key, scope=self.scope, selected_archive=self.archive)
+        # And the marking never offers it as an observation handle.
+        self.assertNotIn(f"Observation {key}", observation)
+        self.assertIn("Full answer archived as", observation)
+
+    def test_a_failed_answer_archive_keeps_the_complete_answer_inline(self) -> None:
+        answer = self.rows(400)
+        # A real SQLite failure: the database path names a directory.
+        self.archive.db_path = self.tempdir.name
+        observation = self.search(answer)
+        self.assertEqual(observation, f"Observation O5 (tier=hot):\n{answer}")
+        self.assertNotIn("BOUNDED", observation)
+        self.assertFalse(self.last_search_event()["answer_bounded"])
+        refused = [e for e in snapshot_events() if e["kind"] == "search_answer_archive_refused"]
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(refused[0]["reason"],
+                         "persistence_failed_complete_answer_retained")
+        self.assertEqual(refused[0]["alias"], "O5")
+
+    # -- interplay with A1 and A2 ---------------------------------------------
+
+    def test_a_bounded_search_observation_gets_no_alias_and_is_not_archived(self) -> None:
+        bounded = self.search(self.rows(400))
+        trajectory = {
+            "thought_0": "look", "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "show_holders"}, "observation_0": "holder rows",
+            "thought_1": "ask", "tool_name_1": "search_memory",
+            "tool_args_1": {"question": "Who holds it?", "alias": "O5"},
+            "observation_1": bounded,
+        }
+        before = [(row["alias"], row["text_sha256"]) for row in self.archive.list(self.scope)]
+        compact_trajectory(trajectory, scope=self.scope, selected_archive=self.archive)
+        # A1: no O alias line is printed on a non-execute observation.
+        self.assertEqual(trajectory["observation_1"], bounded)
+        self.assertIsNone(printed_alias(bounded))
+        self.assertEqual(strip_alias_line(bounded), bounded)
+        self.assertFalse(is_offload_label(bounded))
+        self.assertEqual(printed_alias(trajectory["observation_0"]), "O1")
+        # A2: eager archiving still covers execute observations only.
+        after = [(row["alias"], row["text_sha256"]) for row in self.archive.list(self.scope)]
+        self.assertEqual(sorted(a for a, _ in after),
+                         sorted([a for a, _ in before] + ["O1"]))
+        self.assertNotIn(bounded, [row["text"] for row in self.archive.list(self.scope)])
+
+    def test_the_bound_caps_what_a_search_costs_in_packed_and_replan_bytes(self) -> None:
+        answer = self.rows(400)
+        bounded = self.search(answer)
+        unbounded = f"Observation O5 (tier=hot):\n{answer}"
+        # Packed cost of the search_memory_answers class, measured the way
+        # compact_trajectory measures the trajectory.
+        packed = len(json.dumps(bounded, ensure_ascii=False).encode("utf-8"))
+        self.assertLessEqual(packed, SEARCH_ANSWER_MAX_BYTES + 64)
+        self.assertLess(packed,
+                        len(json.dumps(unbounded, ensure_ascii=False).encode("utf-8")) / 3)
+        # The replan skeleton labels execute observations only, so a search
+        # answer is carried into every later segment exactly as it stands.
+        trajectory = {
+            "thought_0": "look", "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "show_holders"},
+            "observation_0": "holder rows\n" + "x" * 9_000,
+            "thought_1": "ask", "tool_name_1": "search_memory",
+            "observation_1": bounded,
+        }
+        skeleton, metadata = replan_trajectory_skeleton(
+            trajectory, greedy_max_bytes=1_000, scope=self.scope,
+            selected_archive=self.archive)
+        self.assertEqual(skeleton["observation_1"], bounded)
+        self.assertTrue(is_offload_label(skeleton["observation_0"]))
+        self.assertLessEqual(len(bounded.encode("utf-8")), SEARCH_ANSWER_MAX_BYTES)
+        self.assertLess(metadata["measured_bytes"], SEARCH_ANSWER_MAX_BYTES + 500)

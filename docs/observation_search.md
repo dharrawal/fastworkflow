@@ -116,6 +116,86 @@ says whether the search was answered. There is still no step-number fallback and
 guess: an alias that was never printed is an explicit miss, recorded with
 `status: missing`, and no model is called.
 
+## Search output residency
+
+An execute observation that grows large is offloaded and replaced by a label. A
+`search_memory` answer is not: it is a non-execute observation, so
+`compact_trajectory` never selects it, and `replan_trajectory_skeleton` labels
+execute observations only, so the answer is carried into every later segment of
+the turn in full. Whatever a search answer costs, it costs for the rest of the
+turn — and its size is model output, capped only by the 2,048-token completion
+limit (roughly 8 KB).
+
+So a search observation is held to the same 3 KB budget a listing observation
+has. The budget covers the **whole observation**, header and marking included,
+not just the answer body:
+
+```dotenv
+FW_SEARCH_ANSWER_MAX_BYTES=3072   # default; values below 1024 fall back to it
+```
+
+An answer that fits is presented exactly as before, byte for byte:
+
+```
+Observation O34 (tier=hot):
+Christopher Hubbard (identity_uid=c062...) holds it; 3 of the 22 remediation ...
+```
+
+An answer that does not fit is archived whole, then cut at a line boundary by
+`text_page` — the same rule paging uses, so an identifier the answer offers as
+evidence is never split mid-token and a row is never halved into a shorter,
+plausible-looking one — and the observation says what happened:
+
+```
+Observation O34 (tier=hot, bounded):
+00000000000000000000000000000000 Person 0 account_uid=account-00000
+... 38 whole rows ...
+[search_memory BOUNDED ANSWER: shown 2,612 of 27,889 UTF-8 bytes of the answer
+for O34; 25,277 bytes are NOT shown. This is not the complete answer, and nothing
+missing from it is thereby absent from O34. Full answer archived as O34#a1
+(sha256 9f3c1a2b4d5e). To get the rest, call search_memory on O34 again with a
+narrower question naming the entity or predicate you still need.]
+```
+
+A bounded answer is never presented as a complete one. The marking states the
+omission in bytes, denies the absence inference an incomplete answer would
+otherwise invite, and gives an action the agent can actually take: the same
+observation, a narrower question — which is evidence-grounded, where re-reading
+a truncated answer is not.
+
+`O34#a1` is a **record key, not a handle**. The agent-visible `O` namespace is
+execute ordinals only, and `search_memory` validates its `alias` against
+`O[1-9]\d*`, so this key can never be passed back as an observation: an answer
+record is not a searchable observation. The prefix files the answer under the
+observation that produced it and the suffix separates repeated searches of the
+same observation within one scope. Operators and evaluation tooling read the
+complete text with `archived_search_answer("O34#a1", scope=...)`, digest-verified
+by the archive and with no second model call; the search event carries the whole
+answer regardless, so a bound never loses the evidence.
+
+Archiving happens **before** the cut, and evidence outranks the byte budget: if
+that write fails, the answer is not bounded at all. The complete text is returned
+inline, over budget, and `search_answer_archive_refused` records
+`persistence_failed_complete_answer_retained` — the same choice a failed offload
+makes when it keeps its observation inline.
+
+The answered search event gains `answer_bounded`, `answer_utf8_bytes`,
+`observation_utf8_bytes` and, when bounded, `answer_shown_utf8_bytes`,
+`answer_omitted_utf8_bytes`, `answer_archive_key` and `answer_sha256`.
+
+The bound is a tail guard, not a saving. Measured over the saved
+`h1-control` (n=3), A1+A2 smoke and `ido-5uv` stores, the largest answer in 27
+was 1,855 B — 60% of the budget — peak completion usage was 790 of 2,048 tokens,
+and the `completion_limit` branch has never been taken. Search answers held
+2.1–7.4% of end-of-turn packed bytes and 0.0–6.8% at peak, behind execute
+observations, thoughts and arguments, and `what_can_i_do` output in every run.
+Nothing in the code prevented an 8 KB answer; the runs simply had not produced
+one. Search observations were deliberately **not** made eligible for oldest-first
+compaction: the eligibility threshold is 1,000 estimated tokens, which no
+recorded answer approaches, an offload label is about the size of a typical
+answer so `replacement_saves_space` would usually refuse the swap, and reading a
+label back would cost a paid model call to recover a few hundred bytes.
+
 ## Configuration
 
 Set the search model independently of the main agent:
@@ -155,7 +235,9 @@ inside the observation as untrusted claims, not additional evidence.
 
 Broad requests for entire tables receive a count/description and a request for a
 focused predicate. Completions cut off at the output limit are reported as
-incomplete searches rather than successful evidence answers.
+incomplete searches rather than successful evidence answers. An answer that fits
+is returned whole; one that does not is bounded and marked as incomplete (see
+*Search output residency*), never silently shortened.
 
 The returned answer names the source observation. Search events record scope,
 source hash and size, question and attached reasoning, status, model, answer,
@@ -164,7 +246,8 @@ normal DSPy observability. Provider failure yields an explicit search failure;
 it is never reported as evidence that an entity is absent.
 
 The full observation consumes the search model's input context and incurs model
-cost. There is no silent truncation or page limit. An observation too large for
+cost. The observation handed to the search model is never truncated or paged;
+only the answer's presentation in the trajectory is bounded, and visibly so. An observation too large for
 the configured provider may fail; the caller receives an explicit failure and the
 original saved text remains available. This search supplies evidence; it does not
 by itself guarantee that the main agent's final conclusion is correct.
@@ -184,6 +267,16 @@ persistence keeping one row, another turn's alias staying invisible, a failed or
 conflicting write keeping the inline evidence and recording `archive_refused`,
 the `still_inline` flag, archiving under the printed alias in the
 `alias_conflict` case, and the replan skeleton persisting without a second row.
+`BoundedSearchAnswers` covers the search output bound: every recorded answer size
+presented unchanged, a long answer bounded, marked and archived whole, the cut
+landing on a line boundary with identifiers intact, a newline-free answer cut on
+a character boundary, the observation fitting the budget at every admissible
+bound, a bad or too-small bound falling back to the default, the full answer
+retrievable by the key the marking names and invisible to another scope, repeated
+searches keeping one record each, the record key rejected by `search_memory` and
+never offered as a handle, a failed answer archive keeping the complete answer
+inline, a bounded observation getting no `O` alias and not being archived as one,
+and the packed and replan cost of a search staying inside the budget.
 Provider tests are opt-in:
 
 ```bash

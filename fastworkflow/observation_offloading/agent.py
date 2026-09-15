@@ -190,6 +190,10 @@ def build_tool_agent(
         label. Any printed O-number works, whether its result is still shown in
         full or was replaced by a label. Never pass a step number. An alias that
         was never printed is a miss, not another observation.
+
+        A long answer is bounded to fit the prompt. A bounded answer says so
+        and reports how many bytes it left out; treat it as incomplete and ask
+        again on the same observation with a narrower question.
         """
 
         current = getattr(agent, "continuation_scope", None) or scope

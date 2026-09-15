@@ -26,8 +26,10 @@ from fastworkflow.observation_offloading.continuation import (
 )
 from fastworkflow.observation_offloading.labels import (
     alias_line,
+    is_search_answer_key,
     offload_label,
     printed_alias,
+    search_answer_key,
     strip_alias_line,
 )
 from fastworkflow.observation_offloading.manifest import (
@@ -35,7 +37,14 @@ from fastworkflow.observation_offloading.manifest import (
     install_span_policy,
     uninstall_span_policy,
 )
-from fastworkflow.observation_offloading.search import search_memory
+from fastworkflow.observation_offloading.search import (
+    SEARCH_ANSWER_MAX_BYTES,
+    archived_search_answer,
+    bounded_answer_marking,
+    present_answer,
+    search_answer_max_bytes_from_env,
+    search_memory,
+)
 from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
     hot_payload_bytes,
@@ -52,10 +61,13 @@ __all__ = [
     "REPLAN_OBSERVATION_MAX_BYTES",
     "RuntimeHandleArchive",
     "RuntimeHandleScope",
+    "SEARCH_ANSWER_MAX_BYTES",
     "StructuredContinuationReAct",
     "alias_line",
     "annotate_execute_observations",
     "archive_execute_observations",
+    "archived_search_answer",
+    "bounded_answer_marking",
     "build_tool_agent",
     "classify_against_steps",
     "clear_hot_handles",
@@ -64,11 +76,15 @@ __all__ = [
     "execute_ordinals",
     "hot_payload_bytes",
     "install_span_policy",
+    "is_search_answer_key",
     "observation_inline",
     "offload_label",
+    "present_answer",
     "printed_alias",
     "replan_trajectory_skeleton",
     "reset_runtime_state",
+    "search_answer_key",
+    "search_answer_max_bytes_from_env",
     "search_memory",
     "stored_handles",
     "strip_alias_line",

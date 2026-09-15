@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _handles: dict[str, dict[str, Any]] = {}
 _archived: dict[str, dict[str, Any]] = {}
+_search_answers: dict[str, int] = {}
 _events: list[dict[str, Any]] = []
 _event_log_failures: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
@@ -162,11 +163,25 @@ def observation_inline(scope: RuntimeHandleScope, alias: str) -> Optional[bool]:
     return None if entry is None else bool(entry["inline"])
 
 
+def next_search_answer_sequence(scope: RuntimeHandleScope) -> int:
+    """The next ordinal for an archived search answer in this scope.
+
+    Only used to build a record key (``labels.search_answer_key``) when an
+    answer had to be bounded, so repeated searches of the same observation each
+    keep their own complete text. It is not an observation ordinal and never
+    enters the agent-visible ``O`` namespace.
+    """
+    with _lock:
+        _search_answers[scope.scope_id] = _search_answers.get(scope.scope_id, 0) + 1
+        return _search_answers[scope.scope_id]
+
+
 def reset_runtime_state() -> None:
     global _default_archive
     with _lock:
         _handles.clear()
         _archived.clear()
+        _search_answers.clear()
         _events.clear()
         _event_log_failures.clear()
         _default_archive = None
