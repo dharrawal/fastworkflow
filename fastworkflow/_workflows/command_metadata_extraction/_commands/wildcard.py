@@ -96,6 +96,11 @@ class ResponseGenerator:
                 app_workflow.current_command_context
 
             if cnp_output.command_name is None:
+                # R1 (ido-8ps.8): the hint the first declining context composed.
+                # Every context on the chain declines the same token for the
+                # same reason, so the first one is the whole story; it is kept
+                # rather than recomputed because the walk overwrites cnp_output.
+                routing_hint = cnp_output.routing_hint
                 while not cnp_output.command_name and \
                     app_workflow.command_context_for_response_generation is not None and \
                         not app_workflow.is_command_context_for_response_generation_root:
@@ -104,6 +109,7 @@ class ResponseGenerator:
                     cnp_output = predictor.predict(
                         fastworkflow.Workflow.get_command_context_name(app_workflow.command_context_for_response_generation), 
                         command, nlu_pipeline_stage)
+                    routing_hint = routing_hint or cnp_output.routing_hint
             
                 if cnp_output.command_name is None:
                     if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
@@ -119,6 +125,16 @@ class ResponseGenerator:
                             command=command,
                         )
                         command_output = CommandExecutor.perform_action(workflow, startup_action)
+                        # The name IS a command of this workflow; the walk simply
+                        # never passed a context that owns it. "Nothing matched"
+                        # is true and useless here, so say where it lives and how
+                        # to get there. A hint only: nothing below navigates, and
+                        # navigating on a guess about what was meant would change
+                        # the workflow's state on the strength of that guess
+                        # (ido-8ps.8, owner-approved scope addition).
+                        if routing_hint:
+                            response = command_output.command_response
+                            response.response = f"{response.response}\n\n{routing_hint}"
                         command_output.command_response.artifacts["command_handled"] = True
                         return command_output
 

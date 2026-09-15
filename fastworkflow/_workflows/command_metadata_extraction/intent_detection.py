@@ -82,6 +82,17 @@ _FUZZY_MATCHER_VERSION = "levenshtein-leading-window/1"
 # so is how a misroute is counted after the fact.
 MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT = "known_name_foreign_context"
 
+#: Class attribute a workflow's context callback class may declare to say which
+#: command enters that context, e.g. `enter_command = "open_account_by_uid
+#: <account_uid>"` on the `Account` context, or `enter_command =
+#: "open_controls_monitor"` on a workspace that takes no parameter. It is the
+#: only generic source for that fact: nothing in the routing definition or the
+#: context model records which command sets the current context, and inferring
+#: it from a command's NAME would bake one workflow's spelling conventions into
+#: the framework. Undeclared, the hint names the owning context alone, which is
+#: still the fact the caller was missing.
+CONTEXT_ENTER_COMMAND_ATTRS = ("enter_command", "enter_commands")
+
 # Reported when the classifier artifacts are not under the R4 versioned layout. A
 # tree that has never been trained under versioning has no version to report, and
 # saying so is better than inventing one that would look comparable across runs.
@@ -91,6 +102,38 @@ _UNVERSIONED_ARTIFACT = "unversioned"
 # defaulted to "tiny", because a signal_version that claims the wrong tier is worse
 # than one that admits it does not know.
 _UNKNOWN_MODEL_TIER = "unknown-tier"
+
+
+def foreign_context_hint(
+    command_name: str, owner_contexts: list[str], enter_commands: list[str]
+) -> str:
+    """What to say when a real command name reaches a context that cannot run it.
+
+    R1 returns None for such a name and the parent walk carries it up; when no
+    context on that chain owns it either, the walk ends at `you_misunderstood`,
+    which says only that nothing matched. That is true and useless: the name IS
+    a command, the runtime knows exactly which contexts have it, and the caller
+    is one navigation away from being able to run it.
+
+    A hint, never an action: this composes text and nothing here navigates. The
+    difference matters because auto-navigating on a misrouted call would change
+    the workflow's state on the strength of a guess about what was meant.
+
+    Generic by construction. The owning contexts come from the routing
+    definition, and the entering command only from a context's own
+    `enter_command` declaration -- never from the shape of a command's name.
+    """
+    owners = ", ".join(owner_contexts)
+    plural = "contexts" if len(owner_contexts) > 1 else "context"
+    entry = ""
+    if enter_commands:
+        entry = " Enter it with: " + ", ".join(f"'{c}'" for c in enter_commands) + "."
+    return (
+        f"'{command_name}' is a command of the {owners} {plural}, which this "
+        f"context and its parents do not provide.{entry} Then run "
+        f"'{command_name}' there. Use 'what_can_i_do' to list the commands "
+        f"available where you are now."
+    )
 
 
 def escalation_outcome_of(predictions: list[str]) -> str:
@@ -300,6 +343,12 @@ class CommandNamePrediction:
         command_name: Optional[str] = None
         error_msg: Optional[str] = None
         is_cme_command: bool = False
+        # R1 (ido-8ps.8): set only when the first token names a command this
+        # context does not own. The walk carries them so the failure message at
+        # the end of the chain can say where the command actually lives; a
+        # resolved prediction leaves them None and nothing reads them.
+        known_name_owner_contexts: Optional[list[str]] = None
+        routing_hint: Optional[str] = None
 
     def __init__(self, cme_workflow: fastworkflow.Workflow):
         self.cme_workflow = cme_workflow
@@ -313,6 +362,7 @@ class CommandNamePrediction:
         # Built once per predictor and reused across the parent-chain walk,
         # which asks the same question in every context it visits.
         self._command_inventory: Optional[dict[str, tuple[str, ...]]] = None
+        self._enter_commands: dict[str, list[str]] = {}
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         """Predict, wrapped in a ``fw.nlu.intent`` span (D3 as amended).
@@ -400,6 +450,48 @@ class CommandNamePrediction:
                 name: tuple(sorted(contexts)) for name, contexts in owners.items()
             }
         return self._command_inventory
+
+    def enter_commands_for(self, context_name: str) -> list[str]:
+        """The command(s) a workflow declares as entering *context_name*.
+
+        Read from the context's own callback class (`CONTEXT_ENTER_COMMAND_ATTRS`),
+        which is the only place the fact is recorded. Empty when the workflow
+        declares nothing, when the context has no callback class, or when
+        loading it fails -- a hint that names the context alone is worth more
+        than a failed turn, so nothing here is allowed to raise.
+        """
+        if context_name in self._enter_commands:
+            return self._enter_commands[context_name]
+        declared: list[str] = []
+        try:
+            app_crd = fastworkflow.RoutingRegistry.get_definition(
+                self.app_workflow_folderpath)
+            context_class = app_crd.context_model.get_context_class(
+                context_name, fastworkflow.ModuleType.CONTEXT_CLASS)
+            for attribute in CONTEXT_ENTER_COMMAND_ATTRS:
+                value = getattr(context_class, attribute, None)
+                if isinstance(value, str) and value.strip():
+                    declared = [value.strip()]
+                    break
+                if isinstance(value, (list, tuple)) and value:
+                    declared = [str(v).strip() for v in value if str(v).strip()]
+                    break
+        except Exception as exc:  # noqa: BLE001 - a hint must not fail a turn
+            logger.debug(
+                f"no enter_command declaration readable for context "
+                f"'{context_name}': {exc!r}")
+            declared = []
+        self._enter_commands[context_name] = declared
+        return declared
+
+    def routing_hint_for(self, command_name: str, owner_contexts: list[str]) -> str:
+        """The hint for one foreign known name, entering commands resolved."""
+        enter_commands: list[str] = []
+        for context_name in owner_contexts:
+            for command in self.enter_commands_for(context_name):
+                if command not in enter_commands:
+                    enter_commands.append(command)
+        return foreign_context_hint(command_name, owner_contexts, enter_commands)
 
     def foreign_owner_contexts(
         self, normalized_command_name: str, command_name_dict: dict[str, str]
@@ -524,10 +616,19 @@ class CommandNamePrediction:
             # INTENT_DETECTION only: the clarification stages match against a
             # constrained suggestion set, where "not in this context's set" is
             # the normal case rather than a misroute.
+            hint = self.routing_hint_for(normalized_command_name, owner_contexts)
             nlu_trace["matcher_layer"] = MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
             nlu_trace["known_name_foreign_context"] = True
             nlu_trace["known_name_owner_contexts"] = owner_contexts
-            return CommandNamePrediction.Output(command_name=None)
+            # On the span beside the event it belongs to, so a summary can count
+            # how often the hint was given and how often the next call followed
+            # it, without re-deriving the text from the inventory.
+            nlu_trace["known_name_foreign_context_hint"] = hint
+            return CommandNamePrediction.Output(
+                command_name=None,
+                known_name_owner_contexts=owner_contexts,
+                routing_hint=hint,
+            )
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
             # No match is ([], None), never (None, None) — len() here is safe.
