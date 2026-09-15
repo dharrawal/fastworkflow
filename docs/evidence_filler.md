@@ -38,24 +38,13 @@ Two model steps:
    how the agent chose to work, and decomposing it would fill the worksheet with
    tool steps. No task-specific schema exists anywhere in the framework — the
    items come from the request.
-2. **Fill** (one call per group of items, in up to two rounds). For each item,
-   a value copied verbatim out of the evidence with the `O` handle it came from,
-   or `unresolved` with a reason.
+2. **Fill** (one call per group of items). For each item, a value copied
+   verbatim out of the evidence with the `O` handle it came from, or
+   `unresolved` with a reason.
 
 Items whose selected evidence is *identical* are answered in one call; groups
 are independent and run in parallel (`FW_EVIDENCE_FILLER_WORKERS`, default 4).
 Items are never merged into a call that would widen the per-item budget.
-
-**The second round** asks again, once, for the items the *model* said it could
-not answer — never for one the validation rule took away, because asking again
-with more evidence is how one fabrication becomes two. What changes is the
-evidence: the item is selected again with the identifiers already **validated**
-for items that share its words, and those identifiers are passed to the model as
-`known_identifiers`. The reason this matters is structural, not specific to one
-card: a person's name is on the listing that found them, and the rows that
-answer a question about them are on a listing that names only their *account*.
-Without one hop of vocabulary the filler reports "the observations do not
-establish it" over the very rows that establish it.
 
 ### The evidence an item is given
 
@@ -63,22 +52,9 @@ Deterministic and free — no model chooses what to read, so no model can choose
 to read nothing and answer anyway. Every archived observation and every stored
 result page of the turn is cut into pages of `DEFAULT_PAGE_BYTES` (4 KB) on row
 boundaries, and the best `SEARCH_MEMORY_MAX_PAGES` (3) are fed: **the same
-budget `search_memory` works under**, at most 12 KB per item.
-
-Ranking is rarity times saturating frequency — the two halves of every ranking
-function that works — over the item's words:
-
-```
-score(page) = Σ_terms  log(1 + pages / pages containing term) · (1 + log(count))
-```
-
-Both halves are load-bearing, and both were put there by a measurement rather
-than by taste (see *Measured before the first live run*). Counting how many of
-an item's words a page carries makes the 23 KB holder listing win every question
-about a person, because it is the page their *name* is on. Rarity alone then
-makes a one-line "which account is theirs" page beat the 27-row listing of that
-account's entitlements, because the one-liner carries the name *and* the
-identifier. With both, the listing wins.
+budget `search_memory` works under**, at most 12 KB per item. Pages are ranked by
+how many of the item's own words they carry, ties broken by the newest
+observation first.
 
 Stored result pages matter here more than anywhere else: the rows a bounded
 listing did *not* print live only in `result_handle_pages`, and that is exactly
@@ -183,48 +159,10 @@ the filler off is distinguishable from one measured before the filler existed
 | `FW_EVIDENCE_FILLER_TIMEOUT_S` | `60` | wall clock for one run, decomposition included |
 | `FW_EVIDENCE_FILLER_WORKERS` | `4` | fill calls in flight |
 | `FW_EVIDENCE_FILLER_MAX_ITEMS` | `40` | most items one decomposition may produce |
-| `FW_EVIDENCE_FILLER_MAX_CALLS` | `24` | most fill calls per run, both rounds together; items past it are `unresolved`, named |
+| `FW_EVIDENCE_FILLER_MAX_CALLS` | `16` | most fill calls per run; items past it are `unresolved`, named |
 
 Read from the fastworkflow env file first and the process environment second,
 the same order `auto_navigation` reads its flag.
-
-A worksheet line is a deliverable's value, not a record: a copy longer than
-`MAX_VALUE_BYTES` (512) is cut at a whitespace boundary **for presentation**,
-and says how many bytes of that observation it left. Validation has already
-matched the whole copy, and a prefix of a contiguous literal is still one, so
-the line stays checkable.
-
-## Measured before the first live run
-
-Run against a **previous** experiment's archive (the auto-navigation run
-`exp-ido-8ps-9-20260915T152059`, attempt 1: 67 observations, 101,035 bytes) with
-no server and no backend — the whole filler is a pure function of stored text,
-so it can be measured on a finished turn for a few cents. Same request, same
-model route, four successive versions:
-
-| version | items validated of 27 | cost | latency |
-|---|---|---|---|
-| word-count ranking, one round | 5 | $0.017 | 3.8 s |
-| + second round | 6 | $0.016 | 5.0 s |
-| + "the reasoning may cross observations" | 10 | $0.025 | 4.3 s |
-| + rarity × frequency ranking | 13 | $0.024 | 3.5 s |
-| + `known_identifiers` | 13, and the per-person rows are right | $0.030 | 5.2 s |
-
-**Zero downgrades in all five.** On this archive the model never cited an
-unprinted alias and never offered a value the observation did not contain — the
-rule's cost here was nothing, and its value is that the run can say so.
-
-What the same measurement says about the limits, before any live number exists:
-
-* Three of the five people stay unresolved because the stored evidence links a
-  person to their account **only through the order in which the agent typed
-  commands**. `list_accounts` names the account and the person; the entitlement
-  listing names the account; but where the agent reached the account by
-  *navigating* rather than by naming it, no observation carries both. History is
-  the missing link, and this design refuses to use history.
-* A value can be literal and still be the wrong row. "The collection that
-  confers it" was filled with an entitlement row that contains the permission
-  uid. The rule prevents fabrication; it does not prevent misattribution.
 
 ## Known limits
 
