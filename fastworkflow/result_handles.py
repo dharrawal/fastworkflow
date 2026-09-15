@@ -26,7 +26,6 @@ filter columns, page size and ordering policy needed to re-issue the query.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import logging
@@ -72,6 +71,25 @@ DEFAULT_PAGE_SIZE = 25
 UNSORTED_OFFSET = "unsorted-offset"
 
 CURSOR_VERSION = 1
+
+#: A page token is short enough to read off a page and type back without
+#: transcription error: the handle, an optional traversal tag, then the page
+#: ordinal. ``O7/p2`` is page 2 of handle O7; ``O7/f1p2`` is page 2 of the first
+#: filtered traversal of O7. C1 (exp-ido-gqv-8) measured a 150-byte opaque
+#: base64 cursor re-typed by hand in 4 of 15 fetch calls, and the corruption
+#: decoded to a DIFFERENT valid handle. Here the handle is literal in the token
+#: and the ordinal resolves only through the store, so a mistyped token is
+#: refused by name instead of quietly serving another listing's rows.
+CURSOR_TOKEN_EXAMPLE = "O7/p2"
+#: Page 1 is the call that passes no cursor, so the first token a traversal
+#: issues is page 2.
+FIRST_CURSOR_PAGE = 2
+_CURSOR_TOKEN_RE = re.compile(
+    r"^(?P<alias>[OD][1-9]\d*)/(?P<tag>[a-z]\d{1,3})?p(?P<page>[1-9]\d*)$",
+    re.IGNORECASE,
+)
+#: Quoting and punctuation a model wraps a copied value in.
+_CURSOR_TOKEN_TRIM = "`'\"<>[](){} \t\r\n,.;:"
 
 #: Backend pages one fetch call may read before it warns and hands the rest to
 #: the next cursor. A bound on one call, never a cap on enumeration.
@@ -339,6 +357,48 @@ class ResultHandleStore:
                 ON result_handle_pages(scope_id, alias, query_scope, start_offset)
                 """
             )
+            # (ido-986.14.11) The tokens themselves. A token carries no payload:
+            # everything the old base64 cursor spelled out - query scope, offset,
+            # descriptor digest - lives in these rows, so the agent-visible
+            # string can be five characters and still cannot be mangled into a
+            # different query. They live in SQLite beside the pages, so a token
+            # printed before a hot-cache eviction or a process restart still
+            # resolves.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS result_handle_cursor_tags (
+                    scope_id TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    query_scope TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (scope_id, alias, query_scope)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS result_handle_cursors (
+                    scope_id TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    page INTEGER NOT NULL,
+                    query_scope TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    descriptor_sha256 TEXT NOT NULL,
+                    issued_at TEXT NOT NULL,
+                    PRIMARY KEY (scope_id, alias, tag, page)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS result_handle_cursors_position
+                ON result_handle_cursors(
+                    scope_id, alias, tag, position, descriptor_sha256
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0)
@@ -595,6 +655,162 @@ class ResultHandleStore:
             "fetched_at": str(row["fetched_at"]),
         }
 
+    # -- cursor tokens (ido-986.14.11) -------------------------------------
+
+    def cursor_tag(
+        self, scope: RuntimeHandleScope, *, alias: str, query_scope: str
+    ) -> str:
+        """The short tag that stands for this query scope on this handle.
+
+        The base traversal has no tag at all (``O7/p2``), because that is the
+        one the agent pages most and the one it has to type. A filtered
+        traversal gets ``f1``, ``f2``, ... in the order the filters were first
+        seen on this handle in this turn (``O7/f1p2``). The tag is an index into
+        this table, never a hash of the literal: the token has to stay short,
+        and a filter is identified by the row, not by the string.
+        """
+        if not query_scope:
+            return ""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT tag FROM result_handle_cursor_tags
+                WHERE scope_id = ? AND alias = ? AND query_scope = ?
+                """,
+                (scope.scope_id, alias, query_scope),
+            ).fetchone()
+            if row is not None:
+                conn.commit()
+                return str(row["tag"])
+            used = conn.execute(
+                """
+                SELECT COUNT(*) AS used FROM result_handle_cursor_tags
+                WHERE scope_id = ? AND alias = ?
+                """,
+                (scope.scope_id, alias),
+            ).fetchone()
+            tag = "f%d" % (int(used["used"] or 0) + 1)
+            conn.execute(
+                """
+                INSERT INTO result_handle_cursor_tags (
+                    scope_id, alias, query_scope, tag, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(scope_id, alias, query_scope) DO NOTHING
+                """,
+                (scope.scope_id, alias, query_scope, tag, _now()),
+            )
+            conn.commit()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT tag FROM result_handle_cursor_tags
+                WHERE scope_id = ? AND alias = ? AND query_scope = ?
+                """,
+                (scope.scope_id, alias, query_scope),
+            ).fetchone()
+        return "" if row is None else str(row["tag"])
+
+    def issue_cursor(
+        self,
+        scope: RuntimeHandleScope,
+        *,
+        alias: str,
+        tag: str,
+        query_scope: str,
+        position: int,
+        descriptor_sha256: str,
+    ) -> int:
+        """The page ordinal for this resumption point, allocated once.
+
+        Idempotent by position: the same offset of the same traversal is always
+        the same ordinal, so a page re-rendered or a cursor re-issued prints the
+        token the agent already has. Ordinals only ever go up, so a token that
+        was printed keeps meaning what it meant.
+        """
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT page FROM result_handle_cursors
+                WHERE scope_id = ? AND alias = ? AND tag = ? AND position = ?
+                  AND descriptor_sha256 = ?
+                """,
+                (scope.scope_id, alias, tag, int(position),
+                 str(descriptor_sha256)),
+            ).fetchone()
+            if row is not None:
+                conn.commit()
+                return int(row["page"])
+            top = conn.execute(
+                """
+                SELECT MAX(page) AS top FROM result_handle_cursors
+                WHERE scope_id = ? AND alias = ? AND tag = ?
+                """,
+                (scope.scope_id, alias, tag),
+            ).fetchone()
+            page = int(top["top"] or (FIRST_CURSOR_PAGE - 1)) + 1
+            conn.execute(
+                """
+                INSERT INTO result_handle_cursors (
+                    scope_id, alias, tag, page, query_scope, position,
+                    descriptor_sha256, issued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_id, alias, tag, page) DO NOTHING
+                """,
+                (scope.scope_id, alias, tag, page, query_scope, int(position),
+                 str(descriptor_sha256), _now()),
+            )
+            conn.commit()
+        return page
+
+    def get_cursor(
+        self, scope: RuntimeHandleScope, *, alias: str, tag: str, page: int
+    ) -> Optional[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM result_handle_cursors
+                WHERE scope_id = ? AND alias = ? AND tag = ? AND page = ?
+                """,
+                (scope.scope_id, alias, tag, int(page)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "alias": str(row["alias"]),
+            "tag": str(row["tag"]),
+            "page": int(row["page"]),
+            "query_scope": str(row["query_scope"]),
+            "position": int(row["position"]),
+            "descriptor_sha256": str(row["descriptor_sha256"]),
+            "issued_at": str(row["issued_at"]),
+        }
+
+    def list_cursors(
+        self, scope: RuntimeHandleScope, *, alias: str
+    ) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM result_handle_cursors
+                WHERE scope_id = ? AND alias = ?
+                ORDER BY tag, page
+                """,
+                (scope.scope_id, alias),
+            ).fetchall()
+        return [
+            {
+                "alias": str(row["alias"]),
+                "tag": str(row["tag"]),
+                "page": int(row["page"]),
+                "query_scope": str(row["query_scope"]),
+                "position": int(row["position"]),
+                "descriptor_sha256": str(row["descriptor_sha256"]),
+            }
+            for row in rows
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Process-local state: the store handle, the hot rows, the per-turn counters
@@ -605,6 +821,12 @@ _default_store: Optional[ResultHandleStore] = None
 _hot: "dict[str, dict[str, Any]]" = {}
 _pages_served: "dict[str, set[int]]" = {}
 _local_sequence: "dict[str, int]" = {}
+#: Tokens this process has issued or resolved, "<scope_id>|<token>" -> payload.
+#: A write-through mirror of ``result_handle_cursors``: it makes the hot path a
+#: dict read and keeps a token usable for the rest of the turn even if the store
+#: write failed. It is never the only copy that matters - the SQLite row is what
+#: survives a restart, and the tests read tokens back through a fresh store.
+_cursor_tokens: "dict[str, dict[str, Any]]" = {}
 
 
 def hot_rows_max_bytes_from_env(default: int = HOT_ROWS_MAX_BYTES) -> int:
@@ -653,6 +875,7 @@ def reset_result_handle_state() -> None:
         _hot.clear()
         _pages_served.clear()
         _local_sequence.clear()
+        _cursor_tokens.clear()
 
 
 def _hot_key(scope: RuntimeHandleScope, alias: str, query_scope: str) -> str:
@@ -842,31 +1065,222 @@ def normalize_literal(raw: Optional[str]) -> Literal:
 # ---------------------------------------------------------------------------
 
 
-def encode_cursor(*, alias: str, query_scope: str, position: int, descriptor_sha256: str) -> str:
-    payload = {
-        "v": CURSOR_VERSION,
-        "h": alias,
-        "q": query_scope,
-        "p": int(position),
-        "d": descriptor_sha256[:16],
-    }
-    return base64.urlsafe_b64encode(_canonical_json(payload)).decode("ascii").rstrip("=")
+def cursor_token(alias: str, tag: str, page: int) -> str:
+    """``O7/p2``, or ``O7/f1p2`` for the first filtered traversal of O7."""
+    return "%s/%s%s%d" % (alias, tag, "p", int(page))
 
 
-def decode_cursor(cursor: str) -> dict[str, Any]:
-    padded = cursor + "=" * (-len(cursor) % 4)
+def cursor_placeholder(alias: str, tag: str = "", *, pages_at_most: int = 0) -> str:
+    """The widest token this traversal could print, for measuring a header.
+
+    A page is packed against the header it will finally carry, so the cursor the
+    packer measures must never be narrower than the cursor the page prints. The
+    real ordinal is not known until the packer has answered, so the placeholder
+    is all nines at the widest the ordinal could be: an ordinal is only ever
+    allocated for a distinct position, so it cannot exceed the row count plus
+    the one page this call is about to add.
+
+    Callers that measure a header before they know the offset (the IDO bounded
+    listing helper is one) should use this rather than issuing a real token for
+    a position they may never serve.
+    """
+    digits = max(4, len(str(max(int(pages_at_most), 1))))
+    return "%s/%sp%s" % (alias, tag, "9" * digits)
+
+
+def _cursor_tag(
+    scope: RuntimeHandleScope, store_: "ResultHandleStore", alias: str, query_scope: str
+) -> str:
+    if not query_scope:
+        return ""
     try:
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        return store_.cursor_tag(scope, alias=alias, query_scope=query_scope)
     except Exception as error:  # noqa: BLE001
-        raise ResultHandleError(
-            "this cursor is not readable by this build (%s); omit cursor to "
-            "start the same query at its first page" % type(error).__name__
-        ) from error
-    if not isinstance(payload, dict) or int(payload.get("v") or 0) != CURSOR_VERSION:
-        raise ResultHandleError(
-            "this cursor was written by a different version of the page store; "
-            "omit cursor to start the same query at its first page"
+        # A tag this process invented still scopes the token correctly for the
+        # rest of the turn; the refusal path below is what protects the rows.
+        record_event({"kind": "result_handle_cursor_tag_failed",
+                      "scope_id": scope.scope_id, "alias": alias,
+                      "error": type(error).__name__})
+        logger.warning("result handle cursor tag failed: %s", error)
+        return "f1"
+
+
+def _remember_token(scope_id: str, token: str, payload: Mapping[str, Any]) -> None:
+    with _lock:
+        _cursor_tokens["%s|%s" % (scope_id, token)] = dict(payload)
+
+
+def _recall_token(scope_id: str, token: str) -> Optional[dict[str, Any]]:
+    with _lock:
+        payload = _cursor_tokens.get("%s|%s" % (scope_id, token))
+    return None if payload is None else dict(payload)
+
+
+def encode_cursor(
+    *,
+    alias: str,
+    query_scope: str,
+    position: int,
+    descriptor_sha256: str,
+    scope: Optional[RuntimeHandleScope] = None,
+    selected_store: Optional["ResultHandleStore"] = None,
+) -> str:
+    """Issue the short token that resumes ``alias`` at ``position``.
+
+    (ido-986.14.11) The returned string is the whole agent-visible cursor and
+    carries nothing: the query scope, the offset and the descriptor digest are
+    written to the store under the token, which is what makes the token short
+    enough to type and impossible to edit into another query. Issuing is
+    idempotent per position, so the same resumption point always prints the same
+    token.
+
+    ``scope`` and ``selected_store`` are new keyword arguments; both default to
+    the ambient scope and store, so existing keyword calls keep working.
+    """
+    selected_scope = scope or current_scope()
+    store_ = selected_store or store()
+    tag = _cursor_tag(selected_scope, store_, alias, query_scope)
+    digest = str(descriptor_sha256 or "")[:16]
+    try:
+        page = store_.issue_cursor(
+            selected_scope, alias=alias, tag=tag, query_scope=query_scope,
+            position=int(position), descriptor_sha256=digest,
         )
+    except Exception as error:  # noqa: BLE001
+        # The store is the durable copy, not the only one. A page that cannot
+        # write its token still serves its rows and still continues inside this
+        # process; the event says the durability was lost.
+        record_event({"kind": "result_handle_cursor_issue_failed",
+                      "scope_id": selected_scope.scope_id, "alias": alias,
+                      "error": type(error).__name__})
+        logger.warning("result handle cursor could not be stored: %s", error)
+        page = _fallback_page(selected_scope.scope_id, alias, tag, int(position))
+    token = cursor_token(alias, tag, page)
+    _remember_token(
+        selected_scope.scope_id,
+        token,
+        {"v": CURSOR_VERSION, "h": alias, "q": query_scope, "p": int(position),
+         "d": digest},
+    )
+    return token
+
+
+def _fallback_page(scope_id: str, alias: str, tag: str, position: int) -> int:
+    """An ordinal for a token the store refused to write. Process-local only."""
+    prefix = "%s|%s/%sp" % (scope_id, alias, tag)
+    with _lock:
+        for key, payload in _cursor_tokens.items():
+            if key.startswith(prefix) and int(payload.get("p") or 0) == position:
+                return int(str(key).rsplit("p", 1)[-1])
+        issued = [int(str(key).rsplit("p", 1)[-1])
+                  for key in _cursor_tokens if key.startswith(prefix)]
+    return max(issued or [FIRST_CURSOR_PAGE - 1]) + 1
+
+
+def _parse_cursor_token(cursor: str) -> tuple[str, str, int]:
+    """``"O7/f1p2"`` -> ``("O7", "f1", 2)``, or a refusal a caller can act on.
+
+    Deliberately literal. Whitespace and the quoting a model wraps a copied
+    value in are trimmed, and the fixed letters are case-folded, because none of
+    that can change which handle or which traversal the token names. Nothing
+    else is repaired: a token with a different handle, a different tag or a
+    different ordinal is a different token and is refused by name below, never
+    guessed at.
+    """
+    text = str(cursor or "").strip().strip(_CURSOR_TOKEN_TRIM).replace(" ", "")
+    match = _CURSOR_TOKEN_RE.match(text)
+    if match is None:
+        raise ResultHandleError(
+            "%r is not a page token. A page token is short and is printed on the "
+            "page it continues as next_cursor=%s - the result handle, then the "
+            "page. Copy it from that page, or omit cursor to start this query at "
+            "its first page." % (str(cursor)[:40], CURSOR_TOKEN_EXAMPLE)
+        )
+    alias = match.group("alias").upper()
+    tag = (match.group("tag") or "").lower()
+    page = int(match.group("page"))
+    if page < FIRST_CURSOR_PAGE:
+        raise ResultHandleError(
+            "page token %s names page %d; page 1 is the call that passes no "
+            "cursor at all, so omit cursor to read it."
+            % (cursor_token(alias, tag, page), page)
+        )
+    return alias, tag, page
+
+
+def _issued_tokens(
+    scope: RuntimeHandleScope, store_: "ResultHandleStore", alias: str
+) -> list[str]:
+    try:
+        rows = store_.list_cursors(scope, alias=alias)
+    except Exception:  # noqa: BLE001
+        rows = []
+    tokens = [cursor_token(alias, str(row["tag"]), int(row["page"])) for row in rows]
+    prefix = "%s|%s/" % (scope.scope_id, alias)
+    with _lock:
+        tokens.extend(key[len(prefix) - len(alias) - 1:]
+                      for key in _cursor_tokens if key.startswith(prefix))
+    seen: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.append(token)
+    return seen
+
+
+def decode_cursor(
+    cursor: str,
+    *,
+    alias: Optional[str] = None,
+    scope: Optional[RuntimeHandleScope] = None,
+    selected_store: Optional["ResultHandleStore"] = None,
+) -> dict[str, Any]:
+    """Resolve a page token to the resumption point it was issued for.
+
+    (ido-986.14.11) The payload is unchanged - ``v``, ``h``, ``q``, ``p``, ``d``
+    - so every check that read a decoded cursor still reads one; only its source
+    moved, from the string the agent typed to the row the store issued. That is
+    the whole point: a token the store never issued resolves to nothing at all,
+    so a single mistyped character can no longer decode into a valid position on
+    some other handle.
+
+    ``alias``, ``scope`` and ``selected_store`` are new keyword arguments;
+    ``alias`` is the handle the call is for, checked first so the refusal names
+    both handles.
+    """
+    token_alias, tag, page = _parse_cursor_token(cursor)
+    if alias and token_alias != alias:
+        raise ResultHandleError(
+            "this cursor belongs to result handle %s, not %s. Page tokens carry "
+            "their handle, so %s cannot be continued with a token issued for %s; "
+            "omit cursor to start %s at its first page"
+            % (token_alias, alias, alias, token_alias, alias)
+        )
+    selected_scope = scope or current_scope()
+    token = cursor_token(token_alias, tag, page)
+    payload = _recall_token(selected_scope.scope_id, token)
+    if payload is None:
+        store_ = selected_store or store()
+        row = store_.get_cursor(selected_scope, alias=token_alias, tag=tag, page=page)
+        if row is not None:
+            payload = {"v": CURSOR_VERSION, "h": token_alias,
+                       "q": str(row["query_scope"]), "p": int(row["position"]),
+                       "d": str(row["descriptor_sha256"])[:16]}
+            _remember_token(selected_scope.scope_id, token, payload)
+        else:
+            issued = _issued_tokens(selected_scope, store_, token_alias)
+            raise ResultHandleError(
+                "no page token %s has been issued for %s in this turn (%s). A "
+                "page token is only ever printed by the page it continues; it "
+                "cannot be composed. Omit cursor to start this query at its "
+                "first page."
+                % (
+                    token,
+                    token_alias,
+                    ("tokens issued for this handle: " + ", ".join(issued))
+                    if issued
+                    else "no page of this handle has offered a continuation yet",
+                )
+            )
     return payload
 
 
@@ -1570,6 +1984,11 @@ def fetch_page(
     ``contains`` is a literal, not a question: it is normalised and matched, and
     it is never split into tokens to be intersected. A named lookup is one
     filtered call at any page position; paging is for enumeration.
+
+    ``cursor`` is the page token printed on the page it continues (``O7/p2``,
+    or ``O7/f1p2`` for a filtered traversal). It is issued, never composed: a
+    token this turn did not issue, or one issued for another handle or another
+    filter, is refused by name.
     """
     selected_scope = scope or current_scope()
     store_ = selected_store or store()
@@ -1589,7 +2008,8 @@ def fetch_page(
     position = 0
     if cursor:
         position = _check_cursor(
-            decode_cursor(cursor),
+            decode_cursor(cursor, alias=alias, scope=selected_scope,
+                          selected_store=store_),
             alias=alias,
             query_scope=query_scope,
             literal=literal,
@@ -1638,6 +2058,11 @@ def fetch_page(
     if plan == "backend-filter":
         walk = _walk_records(selected_scope, store_, declaration, query_scope)
 
+    # The traversal this page's tokens belong to, resolved once the query is
+    # known to be runnable: an unsupported filter never gets a tag, because it
+    # never gets a page to continue.
+    tag = _cursor_tag(selected_scope, store_, alias, query_scope)
+
     # How many rows this page can show is decided once, by the packer, after
     # every line above the rows is known. Deciding it twice is how a page skips
     # a row: a header that grew by a cursor would push out a row the previous
@@ -1664,8 +2089,10 @@ def fetch_page(
             base=base, walk=walk, plan=plan, literal=literal,
             filter_columns=filter_columns, descriptor=descriptor,
             position=position, scope=selected_scope, notes=notes,
-            warnings=warnings, query_scope=query_scope,
-            descriptor_sha256=descriptor_sha256,
+            warnings=warnings,
+            placeholder_cursor=cursor_placeholder(
+                alias, tag, pages_at_most=len(records) + 2
+            ),
         )
         shown, _ = _pack(probe, budget_bytes=budget)
         if (
@@ -1746,7 +2173,8 @@ def fetch_page(
         page.continuation = "cursor"
         page.next_cursor = encode_cursor(
             alias=alias, query_scope=query_scope, position=position + len(shown),
-            descriptor_sha256=descriptor_sha256,
+            descriptor_sha256=descriptor_sha256, scope=selected_scope,
+            selected_store=store_,
         )
     elif page.matched_complete:
         # Completeness is a property of the query that ran. A filter the backend
@@ -1792,14 +2220,13 @@ def _provisional_page(
     scope: RuntimeHandleScope,
     notes: Sequence[str],
     warnings: Sequence[str],
-    query_scope: str,
-    descriptor_sha256: str,
+    placeholder_cursor: str,
 ) -> ResultPage:
     """The page as it will be, with the widest header it could carry.
 
     Packing happens against this: ``source-incomplete`` is the longest
-    continuation word and the cursor is the longest cursor this query could
-    write, so the real header is never wider than the one the rows were measured
+    continuation word and the cursor is the widest token this traversal could
+    print, so the real header is never wider than the one the rows were measured
     against.
     """
     source_complete = bool(declaration["source_complete"]) or bool(base["complete"])
@@ -1824,10 +2251,7 @@ def _provisional_page(
         # the page finally carries. Both are overwritten before assembly.
         outcome="complete-zero",
         incomplete_reason=stop_reason,
-        next_cursor=encode_cursor(
-            alias=alias, query_scope=query_scope,
-            position=max(len(records), 1), descriptor_sha256=descriptor_sha256,
-        ),
+        next_cursor=placeholder_cursor,
         position=position,
         page_index=_page_index(scope, alias, position),
         parent_alias=alias,
@@ -2001,8 +2425,12 @@ __all__ = [
     "SourceRequest",
     "UNSORTED_OFFSET",
     "WILDCARD_CHARACTERS",
+    "CURSOR_TOKEN_EXAMPLE",
+    "FIRST_CURSOR_PAGE",
     "current_execute_alias",
     "current_scope",
+    "cursor_placeholder",
+    "cursor_token",
     "declare",
     "decode_cursor",
     "encode_cursor",

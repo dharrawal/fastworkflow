@@ -63,11 +63,21 @@ result_handles.handle_declaration(handle, *, scope=None, selected_store=None) ->
 result_handles.parent_handle(handle, *, scope=None, selected_store=None) -> str | None
 result_handles.normalize_literal(text) -> Literal
 result_handles.reset_result_handle_state() -> None
+
+# Page tokens (ido-986.14.11). encode_cursor and decode_cursor keep their names
+# and decode_cursor keeps its payload; both gained keyword arguments.
+result_handles.encode_cursor(*, alias, query_scope, position, descriptor_sha256,
+                             scope=None, selected_store=None) -> str
+result_handles.decode_cursor(cursor, *, alias=None, scope=None,
+                             selected_store=None) -> dict
+result_handles.cursor_token(alias, tag, page) -> str          # "O7/f1p2"
+result_handles.cursor_placeholder(alias, tag="", *, pages_at_most=0) -> str
 ```
 
 `ResultHandleError` is raised for anything the calling command can act on: an
-unknown handle (the message names the handles this turn does store), a cursor
-from another handle or another filter, a cursor this build cannot read, a
+unknown handle (the message names the handles this turn does store), a page
+token from another handle or another filter, a page token that is not a page
+token or that this turn never issued (the message names the tokens it did), a
 descriptor naming a resolver this process has not registered, a redeclaration of
 a different query under a handle that already exists.
 
@@ -144,8 +154,8 @@ reported as such.
 
 ## Storage and retention
 
-Two new tables in the same SQLite file the observation archive uses, so a page
-and the observation that showed it survive together. `observation_offload_handles`
+Four tables in the same SQLite file the observation archive uses, so a page and
+the observation that showed it survive together. `observation_offload_handles`
 is untouched.
 
 `result_handle_declarations`, keyed `(scope_id, alias)`: `scope_json`, `kind`,
@@ -158,6 +168,16 @@ first page), `sample_row_json` (one sample row from the first page),
 `result_handle_pages`, keyed `(scope_id, alias, query_scope, start_offset)`:
 `limit_requested`, `source` (`producer` or `resolver`), `row_count`,
 `backend_total`, `record_json`, `record_sha256`, `fetched_at`.
+
+`result_handle_cursor_tags`, keyed `(scope_id, alias, query_scope)`: `tag`,
+`created_at` — the short tag that stands for a query scope on a handle.
+
+`result_handle_cursors`, keyed `(scope_id, alias, tag, page)`, unique on
+`(scope_id, alias, tag, position, descriptor_sha256)`: `query_scope`,
+`position`, `descriptor_sha256`, `issued_at` — everything the agent-visible
+token does not carry. Issuing is idempotent per position, so a resumption point
+always prints the token it printed the first time, and the row is what lets a
+token survive a hot-cache eviction or a restart.
 
 Pages are **append-only and digest-verifiable**. The insert cannot overwrite and
 the value returned is the read-back, so re-fetching an offset that already
@@ -245,18 +265,55 @@ is sent as "Cooper Alan" and a complete zero for it is a complete zero, not an
 invitation to try the words separately. A filtered fetch never mutates the base
 traversal or the base total.
 
-## Query scopes and cursors
+## Query scopes and page tokens
 
-A cursor is opaque (base64url of a small JSON object) and carries its **query
-scope**: the handle, the normalised literal's digest (empty for the unfiltered
-listing), the position, and the descriptor digest. A cursor from another filter,
-another handle or another descriptor is refused by name, with a message that
-says which query it belongs to and that omitting the cursor restarts the query
-at its first page.
+A cursor is a **page token**: the handle, an optional traversal tag, then the
+page ordinal.
+
+| token | what it continues |
+| --- | --- |
+| `O7/p2` | page 2 of the base (unfiltered) traversal of handle O7 |
+| `O7/p3` | page 3 of the same traversal |
+| `O7/f1p2` | page 2 of the *first* filtered traversal declared on O7 |
+| `O42/f2p11` | page 11 of the second filtered traversal on O42 |
+
+Ten characters at most in practice, no base64, no padding, nothing to decode.
+C1 (`exp-ido-gqv-8`) measured the previous 150-byte opaque cursor being re-typed
+by hand and corrupted in **4 of 15** fetch calls — and the corruption decoded to
+a *different valid handle*, refused only because the handle travelled inside the
+cursor. Four of that attempt's ten `search_memory` calls were spent reading the
+cursor back out of the previous observation. A token the agent can hold in one
+glance removes both costs.
+
+The token carries **no payload**. The query scope, the position and the
+descriptor digest live in `result_handle_cursors` under the token, and
+`decode_cursor` resolves a token to exactly the payload the old base64 cursor
+spelled out (`v`, `h`, `q`, `p`, `d`), so every check downstream is unchanged.
+That is what makes a mistyped token safe rather than merely detectable:
+
+| what the agent typed | what happens |
+| --- | --- |
+| a token for another handle (`O6/p2` on `O7`) | refused, naming both handles — the handle is literal in the token |
+| a token this turn never issued (`O7/p9`) | refused, and the message lists the tokens that *were* issued for that handle |
+| a filtered token on the base traversal, or the reverse | refused as a different query on that handle (unchanged 14.2 scoping) |
+| a token written for a different descriptor | refused, restart at page 1 |
+| `O7/p1`, `O7/p0`, `xyz`, an old base64 cursor | refused as not a page token; page 1 is the call with no cursor |
+| quoting or case (`` `O7/p2` ``, `"O7/p2"`, `o7/P2`) | accepted — none of that changes which handle or traversal is named |
+| any other single-character edit | refused, or a page **of the same handle in the same traversal** — never another listing's rows |
+
+Tokens are stable for the turn and durable: they are rows, so a token printed
+before a hot-cache eviction or a process restart still resolves. Page 1 has no
+token because page 1 is the call that passes no cursor at all.
 
 A filtered fetch never mutates the base traversal or the base total. Filtered
 pages are stored under their own `query_scope`, and `total` on a filtered page is
-still the whole relation while `matched` is the filtered population.
+still the whole relation while `matched` is the filtered population. The base
+traversal is the one an agent pages most, so it is the one that stays untagged.
+
+`cursor_placeholder` exists for callers that measure a header before they know
+the offset: a page is packed against the widest token its traversal could print,
+and a width probe must not issue a real token for a position that may never be
+served.
 
 ## The literal
 
@@ -279,11 +336,13 @@ budget: `RESULT_PAGE_MAX_BYTES` = 3,072 UTF-8 bytes, header line included
 page position, the counts and the continuation state:
 
 ```
-result_handle=O42 page 2 rows 26-50 of 477 matched=477 materialized=50 total=477 source_complete=false matched_complete=true continuation=cursor outcome=rows has_more=true next_cursor=eyJk…
+result_handle=O42 page 2 rows 26-50 of 477 matched=477 materialized=50 total=477 source_complete=false matched_complete=true continuation=cursor outcome=rows has_more=true next_cursor=O42/p3
 ```
 
 The header names the outcome class as well as the counts, so a page with no rows
-can never be read as a zero when it is an unsupported query or a refusal.
+can never be read as a zero when it is an unsupported query or a refusal. The
+`next_cursor` value is printed verbatim and is the whole cursor: it is what the
+next call passes back, with nothing to reconstruct.
 
 Rows are packed **whole**. The packer stops at the last row that fits and the
 next cursor starts at the first one that did not, so a row is never cut, never

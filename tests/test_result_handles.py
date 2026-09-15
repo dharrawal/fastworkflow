@@ -49,8 +49,10 @@ def holders(count: int, *, prefix: str = "uid") -> list[str]:
 
 
 #: Room for the continuation the header will carry once the page is not the
-#: whole listing. The packer reserves the same thing internally.
-CURSOR_ROOM = 128
+#: whole listing. The packer reserves the same thing internally. A page token
+#: (ido-986.14.11) is ten characters where the base64 cursor was a hundred and
+#: fifty, so the same byte budget now buys rows instead of cursor.
+CURSOR_ROOM = 32
 
 
 def one_row_budget(handle, store, *, contains=None, selected_scope=None):
@@ -285,6 +287,243 @@ class CursorTests(unittest.TestCase):
         self.assertEqual(base.total, 12)
 
 
+class PageTokenTests(unittest.TestCase):
+    """ido-986.14.11: the cursor the agent has to type, and what it refuses.
+
+    C1 (exp-ido-gqv-8) measured the previous cursor being re-typed by hand and
+    corrupted in 4 of 15 fetch calls, and the corruption decoding to a different
+    valid handle. These tests hold the two properties that answers that: the
+    token is short enough to copy, and no edit of it reaches another handle.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.temp.name, "h.sqlite3")
+        self.store = ResultHandleStore(self.path)
+        for alias in ("O2", "O3"):
+            declare(
+                ResultHandleSpec(kind="holder", items=holders(12), total=12,
+                                 source_complete=True, page_size=4),
+                scope=scope(), selected_store=self.store, alias=alias,
+            )
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        self.temp.cleanup()
+
+    #: Small enough that twelve rows are several pages, so tokens are really
+    #: issued, re-typed and refused rather than never printed at all.
+    BUDGET = 300
+
+    def page(self, handle="O2", cursor=None, contains=None, store=None):
+        return fetch_page(handle, cursor, contains, scope=scope(),
+                          selected_store=store or self.store,
+                          budget_bytes=self.BUDGET)
+
+    def test_the_token_is_the_handle_and_the_page_and_nothing_else(self):
+        first = self.page()
+        self.assertEqual(first.next_cursor, "O2/p2")
+        self.assertLessEqual(len(first.next_cursor), 10)
+        self.assertRegex(first.next_cursor, r"^O2/p[1-9][0-9]*$")
+        # Nothing to decode, nothing to mis-transcribe: no base64 alphabet, no
+        # padding, no punctuation beyond the one separator.
+        self.assertEqual(set(first.next_cursor) - set("ODfp0123456789/"), set())
+        # And it is printed exactly as it must be typed back.
+        self.assertIn("next_cursor=O2/p2", first.as_observation())
+        second = self.page(cursor="O2/p2")
+        self.assertEqual(second.position, len(first.rows))
+        self.assertEqual(second.rows, holders(12)[len(first.rows):][:len(second.rows)])
+
+    def test_the_ordinals_run_in_order_and_never_move(self):
+        seen, cursor = [], None
+        for index in range(10):
+            page = self.page(cursor=cursor)
+            seen.extend(page.rows)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+            self.assertEqual(cursor, "O2/p%d" % (index + 2))
+        self.assertEqual(seen, holders(12))
+        # A re-read of a token is the same page and prints the same next token.
+        again = self.page(cursor="O2/p2")
+        once_more = self.page(cursor="O2/p2")
+        self.assertEqual(again.rows, once_more.rows)
+        self.assertEqual(again.next_cursor, once_more.next_cursor)
+
+    def test_a_filtered_traversal_carries_its_own_tag(self):
+        filtered = self.page(contains="Cooper")
+        self.assertRegex(filtered.next_cursor, r"^O2/f1p[1-9][0-9]*$")
+        self.assertLessEqual(len(filtered.next_cursor), 12)
+        # The base traversal keeps the untagged token: it is the one the agent
+        # types most, so it stays the shortest.
+        self.assertEqual(self.page().next_cursor, "O2/p2")
+        # A second filter is a second traversal, not a reuse of the first.
+        other = self.page(contains="Coo")
+        self.assertRegex(other.next_cursor, r"^O2/f2p[1-9][0-9]*$")
+        # And returning to the first filter returns to its tag.
+        self.assertRegex(self.page(contains="Cooper").next_cursor, r"^O2/f1p")
+        # Tags are per handle: O3's first filter is f1 on O3, not f3.
+        self.assertRegex(self.page(handle="O3", contains="Cooper").next_cursor,
+                         r"^O3/f1p")
+
+    def test_a_filtered_token_is_refused_on_the_base_traversal(self):
+        filtered = self.page(contains="Cooper")
+        with self.assertRaises(ResultHandleError) as caught:
+            self.page(cursor=filtered.next_cursor)
+        self.assertIn("different query", str(caught.exception))
+        base = self.page()
+        with self.assertRaises(ResultHandleError):
+            self.page(cursor=base.next_cursor, contains="Cooper")
+
+    def test_a_token_naming_another_handle_is_refused_by_both_names(self):
+        token = self.page(handle="O3").next_cursor
+        self.assertEqual(token, "O3/p2")
+        with self.assertRaises(ResultHandleError) as caught:
+            self.page(handle="O2", cursor=token)
+        self.assertIn("O3", str(caught.exception))
+        self.assertIn("O2", str(caught.exception))
+
+    def test_a_token_that_was_never_issued_is_refused_and_says_what_was(self):
+        self.page()  # issues O2/p2 and nothing else
+        with self.assertRaises(ResultHandleError) as caught:
+            self.page(cursor="O2/p9")
+        message = str(caught.exception)
+        self.assertIn("O2/p9", message)
+        self.assertIn("O2/p2", message)
+        # A tag that exists nowhere is not quietly read as the base traversal.
+        with self.assertRaises(ResultHandleError):
+            self.page(cursor="O2/f7p2")
+
+    def test_page_one_and_unreadable_strings_are_refused_not_crashed(self):
+        for bad in ("O2/p1", "!!not-a-token!!", "O2", "O2/", "p2", "/p2",
+                    "O2/p0", "O2/pp2", "eyJkIjoiMDAwIn0", "O2 p2", "02/p2"):
+            with self.assertRaises(ResultHandleError):
+                self.page(cursor=bad)
+        # No cursor at all is still how page 1 is asked for, empty string
+        # included: that is an absent argument, not a mangled token.
+        self.assertEqual(self.page(cursor="").position, 0)
+
+    def test_the_way_a_model_quotes_a_value_is_not_a_different_token(self):
+        first = self.page()
+        self.assertEqual(first.next_cursor, "O2/p2")
+        for spelling in ("O2/p2", " O2/p2 ", "`O2/p2`", "'O2/p2'", '"O2/p2"',
+                         "O2/p2.", "[O2/p2]", "o2/p2", "O2/P2"):
+            served = self.page(cursor=spelling)
+            self.assertEqual(served.handle, "O2")
+            self.assertEqual(served.position, len(first.rows))
+
+    def test_no_single_character_edit_reaches_another_handles_page(self):
+        """The C1 failure, made impossible rather than merely caught.
+
+        Every one-character substitution, deletion and insertion of a valid
+        token is offered to the handle the agent meant. Each one is either
+        refused by name or is a page of that same handle in that same
+        traversal - never another listing's rows, and never a page of a query
+        the caller did not ask for.
+        """
+        self.page(handle="O3")          # O3/p2 exists and is a valid token
+        self.page(handle="O3", contains="Cooper")
+        truth = {}
+        cursor = None
+        while True:
+            page = self.page(cursor=cursor)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+            truth[cursor] = page.position + len(page.rows)
+        self.page(contains="Cooper")    # O2/f1p2 exists too
+        alphabet = "0123456789ODfp/"
+        valid = "O2/p2"
+        mutants = set()
+        for index in range(len(valid)):
+            mutants.add(valid[:index] + valid[index + 1:])
+            for character in alphabet:
+                mutants.add(valid[:index] + character + valid[index + 1:])
+                mutants.add(valid[:index] + character + valid[index:])
+        mutants.discard(valid)
+        served, refused = 0, 0
+        for mutant in sorted(mutants):
+            try:
+                page = self.page(cursor=mutant)
+            except ResultHandleError:
+                refused += 1
+                continue
+            served += 1
+            # Whatever it resolved to, it is this handle, this traversal, and a
+            # position this traversal really issued.
+            self.assertEqual(page.handle, "O2")
+            self.assertIsNone(page.literal)
+            self.assertIn(page.position, set(truth.values()) | {0})
+            self.assertEqual(page.rows,
+                             holders(12)[page.position:][:len(page.rows)])
+        self.assertGreater(refused, 0)
+        self.assertGreater(served, 0)
+
+    def test_a_token_survives_hot_eviction_and_a_fresh_process(self):
+        first = self.page()
+        token = first.next_cursor
+        os.environ[result_handles.HOT_ROWS_MAX_BYTES_ENV] = "1"
+        try:
+            # A new store object on the same file with every process-local cache
+            # dropped: the token can only be coming back out of SQLite.
+            reset_result_handle_state()
+            reopened = ResultHandleStore(self.path)
+            resumed = self.page(cursor=token, store=reopened)
+        finally:
+            os.environ.pop(result_handles.HOT_ROWS_MAX_BYTES_ENV, None)
+        self.assertEqual(resumed.position, len(first.rows))
+        self.assertEqual(resumed.rows,
+                         holders(12)[len(first.rows):][:len(resumed.rows)])
+        self.assertEqual(resumed.next_cursor, "O2/p3")
+
+    def test_the_store_allocates_one_ordinal_per_resumption_point(self):
+        tag = self.store.cursor_tag(scope(), alias="O2", query_scope="")
+        self.assertEqual(tag, "")
+        first = self.store.issue_cursor(scope(), alias="O2", tag="",
+                                        query_scope="", position=4,
+                                        descriptor_sha256="d0")
+        self.assertEqual(first, 2)
+        self.assertEqual(
+            self.store.issue_cursor(scope(), alias="O2", tag="", query_scope="",
+                                    position=4, descriptor_sha256="d0"),
+            first,
+        )
+        second = self.store.issue_cursor(scope(), alias="O2", tag="",
+                                         query_scope="", position=8,
+                                         descriptor_sha256="d0")
+        self.assertEqual(second, 3)
+        stored = self.store.get_cursor(scope(), alias="O2", tag="", page=2)
+        self.assertEqual(stored["position"], 4)
+        self.assertIsNone(self.store.get_cursor(scope(), alias="O2", tag="",
+                                                page=9))
+        # Another turn is another scope: the same token cannot cross into it.
+        self.assertIsNone(
+            self.store.get_cursor(scope("turn-2"), alias="O2", tag="", page=2)
+        )
+
+    def test_the_payload_a_token_resolves_to_is_the_one_the_checks_read(self):
+        self.page()
+        payload = result_handles.decode_cursor(
+            "O2/p2", alias="O2", scope=scope(), selected_store=self.store
+        )
+        self.assertEqual(payload["h"], "O2")
+        self.assertEqual(payload["q"], "")
+        self.assertEqual(payload["p"], 4)
+        self.assertIn("d", payload)
+        token = result_handles.encode_cursor(
+            alias="O2", query_scope="", position=4, descriptor_sha256=payload["d"],
+            scope=scope(), selected_store=self.store,
+        )
+        self.assertEqual(token, "O2/p2")
+
+    def test_a_width_probe_does_not_consume_an_ordinal(self):
+        probe = result_handles.cursor_placeholder("O2", "", pages_at_most=12)
+        self.assertEqual(probe, "O2/p9999")
+        self.assertGreaterEqual(len(probe), len(self.page().next_cursor))
+        self.assertEqual(self.store.list_cursors(scope(), alias="O2")[0]["page"], 2)
+
+
 class ObservationTests(unittest.TestCase):
     """The rendered page: bounded, honest about coverage, never silently short."""
 
@@ -439,13 +678,13 @@ class AliasTests(unittest.TestCase):
         trajectory["observation_0"] = "rows"
         trajectory["tool_name_1"] = "execute_workflow_query"
         with tracing.host_scope(self.host(trajectory)):
-            page = fetch_page("O1", selected_store=self.store, budget_bytes=400)
+            page = fetch_page("O1", selected_store=self.store, budget_bytes=300)
             self.assertEqual(page.page_alias, "O2")
             self.assertEqual(parent_handle("O2", selected_store=self.store), "O1")
             # The page alias resolves to the listing, so the agent can page on
             # either handle and reach the same rows.
             follow = fetch_page("O2", page.next_cursor, selected_store=self.store,
-                                budget_bytes=400)
+                                budget_bytes=300)
             self.assertEqual(follow.handle, "O1")
             self.assertEqual(follow.rows, holders(8)[len(page.rows):])
             self.assertIsNone(parent_handle("O1", selected_store=self.store))
