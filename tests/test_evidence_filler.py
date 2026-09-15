@@ -298,6 +298,75 @@ class EvidenceSelection(unittest.TestCase):
         self.assertTrue(any(i.status == ef.UNRESOLVED for i in sheet.items))
 
 
+class RankingAndRounds(unittest.TestCase):
+    """The two pieces the pre-flight measurement put in (ido-8ps.10)."""
+
+    def pages(self):
+        # The shape that defeats word counting: the person's name is on the
+        # listing that found them, and their rows are on a listing that names
+        # only their account.
+        named = "d1c528f3  Alisha Ochoa account"
+        rows = "\n".join(f"perm{i:02d}  d1c528f3  Right {i}" for i in range(27))
+        holders = "\n".join([f"uid{i:03d}  Person {i}" for i in range(60)]
+                            + ["uid999  Alisha Ochoa"])
+        return [ef.EvidencePage(alias="O45", text=named),
+                ef.EvidencePage(alias="O46", text=rows),
+                ef.EvidencePage(alias="O6", text=holders)]
+
+    def test_rarity_and_frequency_beat_a_page_that_only_carries_the_name(self):
+        pages = self.pages()
+        first = ef.select_evidence("Alisha Ochoa rights", pages)
+        # Nothing yet links her to those rows, so the pages her NAME is on win
+        # and the 27 rows that answer the item are not fed at all - which is the
+        # failure the second round exists to repair.
+        self.assertEqual(first[0].alias, "O45")
+        self.assertNotIn("O46", [page.alias for page in first[:1]])
+        second = ef.select_evidence("Alisha Ochoa rights", pages, ["d1c528f3"])
+        self.assertEqual(second[0].alias, "O46")
+
+    def test_only_a_model_unresolved_row_is_retried(self):
+        answered = {
+            "a": ef.WorksheetItem(item="a", status=ef.FILLED, value="v", alias="O1"),
+            "b": ef.WorksheetItem(item="b", reason="no evidence", retryable=True),
+            "c": ef.WorksheetItem(item="c", reason=ef.VALUE_NOT_IN_CITED_OBSERVATION,
+                                  downgraded_from="made up"),
+            "d": ef.WorksheetItem(item="d", reason="call budget"),
+        }
+        self.assertEqual([k for k, v in answered.items() if v.retryable], ["b"])
+
+    def test_the_expansion_is_only_validated_values_of_the_same_subject(self):
+        answered = {
+            "Alisha Ochoa logins": ef.WorksheetItem(
+                item="Alisha Ochoa logins", status=ef.FILLED, value="d1c528f3",
+                alias="O45"),
+            "Anna Garcia logins": ef.WorksheetItem(
+                item="Anna Garcia logins", status=ef.FILLED, value="f8feaba2",
+                alias="O48"),
+            "Alisha Ochoa collections": ef.WorksheetItem(
+                item="Alisha Ochoa collections", reason="x", downgraded_from="z"),
+        }
+        self.assertEqual(ef._expanded_terms("Alisha Ochoa rights", answered),
+                         ["d1c528f3"])
+
+    def test_a_long_copy_is_bounded_for_presentation_and_says_so(self):
+        value = " ".join(f"row{i:04d}" for i in range(200))
+        bounded = ef.bound_value(value)
+        self.assertLess(len(bounded.encode("utf-8")), len(value.encode("utf-8")))
+        self.assertTrue(value.startswith(bounded.split(" [...")[0]))
+        self.assertIn("more bytes in this observation", bounded)
+        self.assertEqual(ef.bound_value("short"), "short")
+
+    def test_the_bound_is_presentation_only_and_validation_saw_it_all(self):
+        """A bounded line is still a literal prefix of the cited observation."""
+        value = " ".join(f"row{i:04d}" for i in range(200))
+        haystacks = {"O1": ef.normalise("header " + value + " footer")}
+        row = ef.validate_entry(entry("rows", value, "O1"),
+                                printed_aliases={"O1"}, haystacks=haystacks)
+        self.assertEqual(row.status, ef.FILLED)
+        self.assertIn(ef.normalise(row.render().split(" [...")[0].split(": ", 1)[1]),
+                      haystacks["O1"])
+
+
 class ExtractorWiring(unittest.TestCase):
     """The flag decides whether the extract prompt has the field at all."""
 
