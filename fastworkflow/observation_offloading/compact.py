@@ -15,12 +15,14 @@ from fastworkflow.observation_offloading.labels import (
     offload_label,
     offload_saving_bytes,
     printed_alias,
+    printed_context,
     replacement_saves_space,
     strip_alias_line,
 )
 from fastworkflow.observation_offloading.state import (
     archive,
     archived_digest,
+    context_clause_of,
     default_scope,
     env_int,
     evict_hot_handles,
@@ -100,6 +102,7 @@ def annotate_execute_observations(
     *,
     ordinal_offset: int = 0,
     executes: Optional[list[tuple[int, int]]] = None,
+    scope: Optional[RuntimeHandleScope] = None,
 ) -> list[dict[str, Any]]:
     """Print the canonical ``O{n}`` handle on every execute observation, in place.
 
@@ -117,9 +120,20 @@ def annotate_execute_observations(
     An alias, once printed, is never rewritten: a surviving step's ordinal
     cannot change, so a disagreement is a bug, not a renumbering. It is
     recorded as ``alias_conflict`` and the text is left exactly as it stands.
+
+    ``ido-8ps.13``: the line also names the context the command RAN IN and, where
+    the workflow declares one, that context's instance identity. The clause was
+    captured at dispatch (``CommandExecutor._remember_execute_context``) and is
+    read here rather than recomputed, because by now the current context may
+    have moved -- a command that ENTERS a context is printed with the context it
+    ran in, not with the one it entered. A step whose clause was never recorded
+    (no dispatch of ours, an older recording, a capture that failed) prints the
+    plain A1 line: the clause is presentation, and its absence is never guessed
+    at.
     """
     if executes is None:
         executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
+    selected_scope = scope or default_scope()
     annotated: list[dict[str, Any]] = []
     for step_index, ordinal in executes:
         key = f"observation_{step_index}"
@@ -140,8 +154,24 @@ def annotate_execute_observations(
                 }
             )
             continue
-        trajectory[key] = alias_line(alias) + text
-        annotated.append({"alias": alias, "step_index": step_index})
+        clause = context_clause_of(selected_scope, alias) or ""
+        line = alias_line(alias, clause)
+        trajectory[key] = line + text
+        record_event(
+            {
+                "kind": "context_line",
+                "scope_id": selected_scope.scope_id,
+                "alias": alias,
+                "step_index": step_index,
+                "context": printed_context(line) or "",
+                "context_recorded": context_clause_of(selected_scope, alias) is not None,
+                "has_instance": bool(clause and " " in clause),
+                "line_utf8_bytes": len(line.encode("utf-8")),
+                "clause_utf8_bytes": (
+                    len(line.encode("utf-8")) - len(alias_line(alias).encode("utf-8"))),
+            }
+        )
+        annotated.append({"alias": alias, "step_index": step_index, "context": clause})
     return annotated
 
 
@@ -311,7 +341,8 @@ def compact_trajectory(
         return []
     # Print the handle before measuring: the packed target must be checked
     # against the trajectory the agent actually receives.
-    annotate_execute_observations(trajectory, executes=executes)
+    annotate_execute_observations(
+        trajectory, executes=executes, scope=selected_scope)
     # Then make every execute observation durable, whatever the offload
     # decision below turns out to be. Residency and availability are separate:
     # a handle the agent can read inline must resolve too.

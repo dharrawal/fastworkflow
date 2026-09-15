@@ -28,10 +28,12 @@ from fastworkflow.observation_offloading.continuation import (
 )
 from fastworkflow.observation_offloading.labels import (
     alias_line,
+    context_clause,
     is_search_answer_key,
     offload_label,
     offload_saving_bytes,
     printed_alias,
+    printed_context,
     search_answer_key,
     strip_alias_line,
 )
@@ -68,6 +70,7 @@ __all__ = [
     "SEARCH_ANSWER_MAX_BYTES",
     "StructuredContinuationReAct",
     "alias_line",
+    "context_clause",
     "annotate_execute_observations",
     "archive_execute_observations",
     "archived_search_answer",
@@ -87,6 +90,7 @@ __all__ = [
     "offload_saving_bytes",
     "present_answer",
     "printed_alias",
+    "printed_context",
     "replan_trajectory_skeleton",
     "reset_runtime_state",
     "search_answer_key",

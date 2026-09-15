@@ -174,10 +174,17 @@ def build_tool_agent(
         """Answer a question inside ONE earlier execute_workflow_query observation.
 
         alias is the O-number printed on that observation's first line
-        ("Observation O42 (execute_workflow_query)") or named in its offload
-        label. Any printed O-number works, whether its result is still shown in
-        full or was replaced by a label. Never pass a step number. An alias that
-        was never printed is a miss, not another observation.
+        ("Observation O42 (execute_workflow_query)", or
+        "Observation O42 (execute_workflow_query, in Account 28c5aeb5... Alan
+        Cooper)" when the command ran inside a context) or named in its offload
+        label. Pass only the O-number. Any printed O-number works, whether its
+        result is still shown in full or was replaced by a label. Never pass a
+        step number. An alias that was never printed is a miss, not another
+        observation.
+
+        The "in <Context> <instance>" part of that line says WHICH instance the
+        observation is about: a listing produced inside an account belongs to
+        that account even though its rows do not repeat the account's id.
 
         A long answer is bounded to fit the prompt. A bounded answer says so
         and reports how many bytes it left out; treat it as incomplete and ask

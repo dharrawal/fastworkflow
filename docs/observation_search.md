@@ -79,6 +79,58 @@ label or the archive uses for the same observation. Non-execute tool outputs
 (`search_memory`, `ask_user`, `what_can_i_do`, `intent_misunderstood`) get no
 handle: there is nothing to search inside them.
 
+### The context instance the command ran in (`ido-8ps.13`)
+
+When the command ran inside a non-root command context, the line also names that
+context and, where the workflow declares one, that context's instance identity:
+
+> Observation O22 (execute_workflow_query, in Account e8a0c3a1-… Alan Cooper)
+> permission_uid  label
+> 85cde168  Active Directory_Cloud Administrator
+> ...
+
+**Why.** A listing produced by navigating into a context carries no identifier of
+the instance it belongs to: those permission rows do not repeat the account uid,
+and the only thing tying them to Alan Cooper is that the previous step entered
+his account. The link lives in the ORDER of the commands, so a reader that is not
+allowed to use history — the evidence filler, a `search_memory` answer, the
+extract step, a human scrolling a store — cannot recover it. 12 of the 14
+unresolved rows in `ido-8ps.10` had exactly this cause.
+
+**The context is the one the command RAN IN, not the one it entered.** It is
+captured at dispatch (`CommandExecutor._remember_execute_context`), before the
+command can move the context, and filed against the execute step's own `O` alias
+in a turn-scoped table; `annotate_execute_observations` reads it rather than
+recomputing it, because by the time the line is printed the current context has
+already moved. So `open_account_by_uid` reads as the `DirectoryExplorer` command
+it is, and the `list_permissions` that follows it is the one that belongs to the
+account. An observation is evidence about the context it was produced in.
+
+**The instance identity is declared, never derived.** fastWorkflow has no notion
+of a context instance's identity — the current context is an arbitrary
+application object — so `fastworkflow/context_identity.py` reads a declaration
+off the same context callback class that already declares `get_parent` and
+`enter_command`: a classmethod `instance_label(command_context_object) -> str`,
+or an `instance_label_attr = "uid"` naming an attribute to read. A context that
+declares neither prints its NAME alone, and an object that carries no identity
+yields no identity: nothing is invented to fill the gap, for the reason
+`tracing.context_handle` gives for refusing to mint an `instance_key` — a guess
+that looks concrete is worse than an honest absence. The root context prints no
+clause at all, so a root-context line is byte-for-byte the A1 line above.
+
+`context_clause` is the one place the clause is made printable. It removes
+parentheses and newlines and caps the name at 60 and the label at 80 characters,
+which is what lets `ALIAS_LINE_RE` treat the closing `)` as unambiguous and match
+lines printed before the clause existed. Each printed line emits a `context_line`
+event carrying the alias, the clause, whether an instance was named and the bytes
+the clause cost — the line is presentation and reaches neither the step span
+(closed with the raw tool return) nor the archive, so the event is the only place
+it can be measured.
+
+This is not behind a flag. It is an extension of A1, which is not behind a flag
+either, and gating presentation would mean two shapes of printed observation to
+reason about for a change whose whole cost is ~40 bytes per observation.
+
 `annotate_execute_observations` writes the line during the ReAct
 `on_step_complete` hook, before compaction measures the packed target, so the
 byte budget is checked against the trajectory the agent actually receives. The
@@ -88,7 +140,8 @@ defect, recorded as an `alias_conflict` event, with the printed text left as it
 stands. There is no step-number fallback anywhere — an `O` the run never printed
 stays an explicit `no matching offloaded handle` miss.
 
-**Archived text excludes the handle line.** The line is presentation only:
+**Archived text excludes the handle line**, the context clause included. The
+line is presentation only:
 `strip_alias_line` recovers the exact command response, and that response — not
 the printed text — is what the archive stores, what its `text_sha256` covers,
 what the offload label describes, and what the authored-output lookup matches

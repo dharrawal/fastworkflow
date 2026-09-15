@@ -25,6 +25,10 @@ _lock = threading.Lock()
 _handles: dict[str, dict[str, Any]] = {}
 _archived: dict[str, dict[str, Any]] = {}
 _search_answers: dict[str, int] = {}
+#: ido-8ps.13. ``handle_key(scope, alias) -> context clause``, written by
+#: ``CommandExecutor.invoke_command`` BEFORE the command runs and read when
+#: the alias line is printed. Turn-scoped like everything else here.
+_context_clauses: dict[str, str] = {}
 _events: list[dict[str, Any]] = []
 _event_log_failures: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
@@ -214,6 +218,29 @@ def next_search_answer_sequence(scope: RuntimeHandleScope) -> int:
         return _search_answers[scope.scope_id]
 
 
+def record_context_clause(scope: RuntimeHandleScope, alias: str, clause: str) -> None:
+    """Remember the context an execute step's command RAN IN (``ido-8ps.13``).
+
+    Written at dispatch, from the context handle taken BEFORE the command
+    executes, because that is the fact the observation is evidence about: a
+    command that MOVES the context produced its output in the context it ran
+    in, not in the one it entered. The alias line is printed later, in the
+    ``on_step_complete`` hook, by which time the current context has already
+    moved -- so the fact has to be carried, not recomputed.
+
+    An empty clause is stored as an empty clause: "this ran at the root" is a
+    fact, and it must not read as "nothing was captured".
+    """
+    with _lock:
+        _context_clauses[handle_key(scope, alias)] = str(clause or "")
+
+
+def context_clause_of(scope: RuntimeHandleScope, alias: str) -> Optional[str]:
+    """The recorded clause for *alias*, ``""`` at the root, None if unrecorded."""
+    with _lock:
+        return _context_clauses.get(handle_key(scope, alias))
+
+
 def reset_runtime_state() -> None:
     """Drop every process-local cache the offloading runtime holds.
 
@@ -231,6 +258,7 @@ def reset_runtime_state() -> None:
         _handles.clear()
         _archived.clear()
         _search_answers.clear()
+        _context_clauses.clear()
         _events.clear()
         _event_log_failures.clear()
         _default_archive = None

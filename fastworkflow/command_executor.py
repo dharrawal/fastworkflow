@@ -146,6 +146,13 @@ class CommandExecutor(CommandExecutorInterface):
         # whether or not anything is being traced.
         context_name_before = cls._context_name(chat_session)
 
+        # ido-8ps.13: the context this command RAN IN, recorded against the
+        # execute step's own O alias BEFORE the command can move the context.
+        # Outside the span gate for the same reason as the line above: this is
+        # runtime presentation, not capture, and a run with tracing off must
+        # print the same observation.
+        cls._remember_execute_context(chat_session)
+
         # Bound before the try so the error path can still file this dispatch's
         # inner hops when call_scope itself is what raised.
         child_calls: list = []
@@ -283,6 +290,36 @@ class CommandExecutor(CommandExecutorInterface):
             return None if workflow is None else workflow.current_command_context_name
         except Exception:
             return None
+
+    @classmethod
+    def _remember_execute_context(
+        cls, chat_session: 'fastworkflow.ChatSession'
+    ) -> None:
+        """File the context-at-execution for this step's alias line (ido-8ps.13).
+
+        The context is taken here, before dispatch, and the rule this fixes is
+        stated in ``docs/observation_search.md``: a command that MOVES the
+        context is printed with the context it RAN IN. ``open_account_by_uid``
+        therefore reads as the DirectoryExplorer command it is, and the
+        ``list_permissions`` that follows it reads as the account's.
+
+        Silent and best-effort from end to end: with no agent step in flight
+        there is no ``O`` namespace to file under, and a failure to describe a
+        context must never fail the command that ran in it.
+        """
+        try:
+            from fastworkflow.context_identity import context_clause_for
+            from fastworkflow.observation_offloading.state import record_context_clause
+            from fastworkflow.result_handles import current_execute_alias, current_scope
+
+            alias = current_execute_alias()
+            if not alias:
+                return
+            record_context_clause(
+                current_scope(), alias,
+                context_clause_for(cls._active_workflow(chat_session)))
+        except Exception:  # noqa: BLE001 - presentation must never fail a turn
+            pass
 
     @classmethod
     def _remember_context_entry(
