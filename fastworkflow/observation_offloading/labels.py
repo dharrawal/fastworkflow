@@ -84,3 +84,14 @@ def label_alias(text: str) -> str | None:
 def replacement_saves_space(original: str, replacement: str) -> bool:
     return (len(replacement) < len(original)
             and len(replacement.encode('utf-8')) < len(original.encode('utf-8')))
+
+
+def offload_saving_bytes(original: str, replacement: str) -> int:
+    """UTF-8 bytes the trajectory loses by swapping a response for its label.
+
+    This is the quantity offloading exists to buy, so it is what eligibility is
+    decided on: a token estimate of the response alone cannot tell a 3 KB page
+    worth replacing from a 300 B fact whose label is bigger than it is. Negative
+    when the label is the larger of the two.
+    """
+    return len(original.encode("utf-8")) - len(replacement.encode("utf-8"))

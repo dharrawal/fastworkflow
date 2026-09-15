@@ -11,12 +11,14 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleScope,
 )
 from fastworkflow.observation_offloading.compact import (
+    MIN_OFFLOAD_SAVING_BYTES,
     PACKED_TARGET_BYTES,
     RECENT_OBSERVATIONS_PROTECTED,
     annotate_execute_observations,
     archive_execute_observations,
     compact_trajectory,
     execute_ordinals,
+    min_offload_saving_bytes_from_env,
 )
 from fastworkflow.observation_offloading.continuation import (
     MAX_FORCED_REPLANS,
@@ -28,6 +30,7 @@ from fastworkflow.observation_offloading.labels import (
     alias_line,
     is_search_answer_key,
     offload_label,
+    offload_saving_bytes,
     printed_alias,
     search_answer_key,
     strip_alias_line,
@@ -55,6 +58,7 @@ from fastworkflow.observation_offloading.state import (
 
 __all__ = [
     "MAX_FORCED_REPLANS",
+    "MIN_OFFLOAD_SAVING_BYTES",
     "PACKED_TARGET_BYTES",
     "PersistenceError",
     "RECENT_OBSERVATIONS_PROTECTED",
@@ -77,8 +81,10 @@ __all__ = [
     "hot_payload_bytes",
     "install_span_policy",
     "is_search_answer_key",
+    "min_offload_saving_bytes_from_env",
     "observation_inline",
     "offload_label",
+    "offload_saving_bytes",
     "present_answer",
     "printed_alias",
     "replan_trajectory_skeleton",

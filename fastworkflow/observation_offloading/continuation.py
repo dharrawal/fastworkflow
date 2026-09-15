@@ -11,11 +11,16 @@ import dspy
 
 from fastworkflow import tracing
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope, RuntimeHandleArchive
-from fastworkflow.observation_offloading.compact import execute_ordinals, step_indexes
+from fastworkflow.observation_offloading.compact import (
+    execute_ordinals,
+    min_offload_saving_bytes_from_env,
+    step_indexes,
+)
 from fastworkflow.observation_offloading.labels import (
     is_offload_label,
     label_alias,
     offload_label,
+    offload_saving_bytes,
     replacement_saves_space,
     strip_alias_line,
 )
@@ -63,13 +68,23 @@ def replan_trajectory_skeleton(
     trajectory: Mapping[str, Any],
     *,
     greedy_max_bytes: int = REPLAN_OBSERVATION_MAX_BYTES,
+    min_offload_saving_bytes: Optional[int] = None,
     ordinal_offset: int = 0,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
     describe_output: Optional[Callable[[str, str], str]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Label every observation, then inline newest execute slots until the bound."""
+    """Label every eligible observation, then inline newest execute slots until the bound.
 
+    Eligibility is the same rule compaction uses (ido-986.14.6): the label must
+    free at least ``min_offload_saving_bytes``. A skeleton is the one place the
+    agent cannot ask for anything back before it plans, so replacing a 300 B
+    fact with a 400 B pointer to it was always a bad trade; a label merely
+    shorter than its observation is no longer enough.
+    """
+
+    if min_offload_saving_bytes is None:
+        min_offload_saving_bytes = min_offload_saving_bytes_from_env()
     execute_aliases = {
         f"observation_{step_index}": f"O{ordinal}"
         for step_index, ordinal in execute_ordinals(
@@ -101,7 +116,11 @@ def replan_trajectory_skeleton(
             original = strip_alias_line(text)
             label = offload_label(alias=alias, command_name=command, response=original,
                                  description=describe_output(command, original) if describe_output else "")
-            skeleton[key] = (label if key in execute_aliases and replacement_saves_space(original, label)
+            worth_labelling = (
+                replacement_saves_space(original, label)
+                and offload_saving_bytes(original, label) >= min_offload_saving_bytes
+            )
+            skeleton[key] = (label if key in execute_aliases and worth_labelling
                              else value)
 
     execute_keys = [key for key in observation_keys if key in execute_aliases]

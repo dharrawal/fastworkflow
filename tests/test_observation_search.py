@@ -62,11 +62,14 @@ class ObservationSearch(unittest.TestCase):
             # One observation per alias per scope: each case is its own turn.
             scope = RuntimeHandleScope('store', 'channel', 'experiment', 'task', 1, f'turn-{turn}')
             trajectory = {'tool_name_0': 'execute_workflow_query', 'tool_args_0': {'command': command}, 'observation_0': text}
-            decisions = compact_trajectory(trajectory, eligibility_threshold_tokens=0,
+            # min_offload_saving_bytes=0 removes the 1 KB floor entirely, so the
+            # only thing left to refuse these is the swap itself being a loss.
+            decisions = compact_trajectory(trajectory, min_offload_saving_bytes=0,
                 recent_observations_protected=0, packed_target_tokens=1,
                 scope=scope, selected_archive=self.archive)
             self.assertEqual(trajectory['observation_0'], alias_line('O1') + text)
-            self.assertEqual(decisions[0]['reason'], 'replacement_not_smaller')
+            self.assertEqual(decisions[0]['reason'], 'below_min_saving')
+            self.assertLess(decisions[0]['offload_saving_bytes'], 0)
             skeleton, _ = replan_trajectory_skeleton(trajectory, scope=scope, selected_archive=self.archive)
             # An inline copy in the replan skeleton keeps the same printed handle.
             self.assertEqual(skeleton['observation_0'], alias_line('O1') + text)

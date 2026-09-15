@@ -2,8 +2,9 @@
 
 Large, older command results can be saved outside the ReAct prompt. A replacement
 is emitted only when it is shorter than the original in both characters and
-UTF-8 bytes. The existing size threshold, recent-observation protection and
-trajectory budget still apply. Replan copies follow the same savings rule and
+UTF-8 bytes, and only when the swap frees at least 1 KB (see
+[Offload eligibility](#offload-eligibility)). Recent-observation protection and
+the trajectory budget still apply. Replan copies follow the same savings rule and
 persist any newly labelled command observation before returning a pointer.
 Non-command observations in a replan copy stay inline. If this irreducible
 evidence exceeds the byte target, the runtime records the overage and continues.
@@ -17,6 +18,49 @@ field descriptions come from the resolved command's authored `Signature.Output`
 metadata. When those descriptions are unavailable, the label explicitly describes
 the beginning of the command output. Hashes remain in the archive and tracing
 manifest rather than taking space in the prompt label.
+
+## Offload eligibility
+
+An execute observation is eligible for offloading when replacing it with **its
+own label** frees at least `MIN_OFFLOAD_SAVING_BYTES` (1,024) UTF-8 bytes:
+
+```
+utf8_bytes(command response, alias line stripped)
+    - utf8_bytes(that step's actual offload label)  >=  1024
+```
+
+The label is built before the question is asked, because eligibility is a
+property of the swap and not of the observation: the same 1.5 KB of output is
+worth replacing under a 170 B label and is not under a 500 B one, and the label
+carries the step's own alias, the full command argument and the command's
+authored `Output` descriptions. `FW_OFFLOAD_MIN_SAVING_BYTES` overrides the
+minimum (`0` means "offload whenever the label is smaller"); a value that is not
+a non-negative integer logs a warning and falls back to the default.
+
+Nothing else about compaction changes: oldest-first selection, the five most
+recent execute observations protected, the 28,000 B packed target and
+`replacement_saves_space` are as they were. A protected observation is never
+priced, so no label is built for it. `replan_trajectory_skeleton` applies the
+same rule — a label merely shorter than its observation is no longer enough
+there either.
+
+Decision records report `reason: below_min_saving` with the computed
+`offload_saving_bytes` and `label_size`; `response_size` still carries
+`characters`, `utf8_bytes` and `estimated_tokens`, and the `offload` event still
+reports `estimated_tokens` beside the new `offload_saving_bytes`.
+
+**This replaces a 1,000-estimated-token floor** (`ELIGIBILITY_THRESHOLD_TOKENS`,
+~4 KB of ASCII), which asked how big an observation was rather than how much
+residency replacing it would buy. Every listing page between ~1.3 KB and 4 KB
+stayed resident for a whole turn although its label costs a few hundred bytes.
+Replayed over the eleven saved result-search attempts (606 execute observations,
+`ido-986.14.6`), the new rule makes 80 more observations eligible — 1,272 to
+3,555 B of listing pages and portraits — makes **none** ineligible, and would
+have changed 73 actual offload decisions, always by offloading something that had
+stayed resident. End-of-turn packed bytes fall by 1.7–26.8 KB per attempt, and no
+recorded replan skeleton grows. Runs recorded before this change used the token
+floor; their artifacts are unchanged and their numbers are not comparable
+observation-by-observation.
 
 ## Canonical observation handles
 
@@ -50,9 +94,11 @@ the printed text — is what the archive stores, what its `text_sha256` covers,
 what the offload label describes, and what the authored-output lookup matches
 against the action log. Digests of observation text therefore stay comparable
 with observations recorded before handles were printed, and `search_memory`
-answers from the unmodified command output. Offload eligibility, the size
-thresholds and the savings rule are likewise evaluated on the response alone, so
-printing a handle can never be what makes an offload look profitable.
+answers from the unmodified command output. Offload eligibility, the minimum
+saving and the savings rule are likewise evaluated on the response alone, so
+printing a handle can never be what makes an offload look profitable — a
+response that saves 1,023 B stays inline even though the printed text is ~34 B
+longer.
 
 ## Every execute observation is archived
 
@@ -84,9 +130,9 @@ Each first write is recorded as an `observation_archived` event (alias, step,
 digest, bytes, hot-cache evictions) and puts a copy in the bounded hot cache, so
 the existing cap and oldest-first eviction still apply — inline observations now
 compete for that cache too, and an evicted alias simply resolves from SQLite at
-the `sqlite` tier. Compaction policy is untouched: eligibility, the recency
-protection of the newest execute observations, the savings rule and the packed
-target all behave exactly as before.
+the `sqlite` tier. The eager archive is independent of the offload decision, so
+changing the eligibility rule moves only residency: an observation the rule keeps
+inline is archived and searchable exactly like one it offloads.
 
 Persistence is an availability optimisation on the hot path of every agent step,
 so a failure must never cost evidence. A failed write records an
@@ -191,10 +237,13 @@ and the `completion_limit` branch has never been taken. Search answers held
 observations, thoughts and arguments, and `what_can_i_do` output in every run.
 Nothing in the code prevented an 8 KB answer; the runs simply had not produced
 one. Search observations were deliberately **not** made eligible for oldest-first
-compaction: the eligibility threshold is 1,000 estimated tokens, which no
-recorded answer approaches, an offload label is about the size of a typical
-answer so `replacement_saves_space` would usually refuse the swap, and reading a
-label back would cost a paid model call to recover a few hundred bytes.
+compaction: compaction offloads execute observations only, an offload label is
+about the size of a typical answer (median 355 B) so neither
+`replacement_saves_space` nor the 1 KB minimum saving would admit the swap, and
+reading a label back would cost a paid model call to recover a few hundred bytes.
+(That measurement was taken while eligibility was still the 1,000-token floor;
+the 1 KB minimum saving refuses these answers for the same reason, only more
+directly.)
 
 ## Configuration
 
@@ -215,6 +264,16 @@ provider ambient credentials. No fallback to the main agent model is performed.
 The search uses temperature 0, a 2,048-token completion limit, a 120-second
 request timeout and one provider retry. `FW_LM_CACHE=0` disables response caching
 for independent benchmark calls.
+
+Compaction knobs, all optional and all falling back to their default on a value
+that is not a non-negative integer:
+
+| variable | default | meaning |
+|---|---|---|
+| `FW_OFFLOAD_MIN_SAVING_BYTES` | 1024 | minimum UTF-8 bytes an offload must free |
+| `FW_TRAJECTORY_MAX_BYTES` | 28000 | packed-trajectory target and replan bound |
+| `FW_OFFLOAD_HOT_MAX_BYTES` | 262144 | hot handle cache cap |
+| `FW_SEARCH_ANSWER_MAX_BYTES` | 3072 | presentation bound on a search answer |
 
 ## Tool behavior
 
@@ -253,6 +312,17 @@ original saved text remains available. This search supplies evidence; it does no
 by itself guarantee that the main agent's final conclusion is correct.
 
 ## Validation
+
+`MinimumOffloadSaving` covers the 1 KB rule: savings of exactly 1,023 / 1,024 /
+1,025 B, the saving taken from the step's real label rather than a constant (same
+bytes of output, two command arguments, one offload), an authored description
+lengthening both label and decision, a 3 KB listing page older than the protected
+five offloaded when over target, a 1.2 KB result kept, short facts untouched, the
+recency five protected before any label is built, A1's alias line excluded from
+the measured saving, the eager archive holding both the kept and the offloaded
+observation, search answers still never offloaded, the environment override in
+both directions with bad values falling back, and the replan skeleton applying
+the same minimum.
 
 Focused tests cover labels, byte/character savings, replan persistence, scoped
 resolution, required keys, current-step reasoning, archive eviction and existing

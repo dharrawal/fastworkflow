@@ -13,6 +13,7 @@ from fastworkflow.observation_offloading.labels import (
     is_offload_label,
     label_alias,
     offload_label,
+    offload_saving_bytes,
     printed_alias,
     replacement_saves_space,
     strip_alias_line,
@@ -31,10 +32,19 @@ from fastworkflow.observation_offloading.state import (
     remember_handle,
 )
 
-ELIGIBILITY_THRESHOLD_TOKENS = 1_000
+#: An execute observation is worth offloading when replacing it with its own
+#: label frees at least this many UTF-8 bytes of trajectory (ido-986.14.6).
+#: It replaces a 1,000-estimated-token floor (~4 KB) that asked how big the
+#: observation was rather than how much residency the swap would buy: a 3 KB
+#: listing page stayed resident for the whole turn while its label would have
+#: cost ~400 B, and a 300 B fact could never be worth replacing at all because
+#: its label is larger than it is. The label is the actual label for that step,
+#: description and command text included, so the saving is the real one.
+MIN_OFFLOAD_SAVING_BYTES = 1_024
 RECENT_OBSERVATIONS_PROTECTED = 5
 PACKED_TARGET_BYTES = 28_000
 TRAJECTORY_MAX_BYTES_ENV = "FW_TRAJECTORY_MAX_BYTES"
+MIN_OFFLOAD_SAVING_BYTES_ENV = "FW_OFFLOAD_MIN_SAVING_BYTES"
 
 
 _STEP_KEY = re.compile(r"^(?:tool_name|observation)_(\d+)$")
@@ -42,6 +52,13 @@ _STEP_KEY = re.compile(r"^(?:tool_name|observation)_(\d+)$")
 
 def packed_target_bytes_from_env(default: int = PACKED_TARGET_BYTES) -> int:
     return env_int(TRAJECTORY_MAX_BYTES_ENV, default, minimum=1)
+
+
+def min_offload_saving_bytes_from_env(
+    default: int = MIN_OFFLOAD_SAVING_BYTES,
+) -> int:
+    """The minimum saving knob. ``0`` means "offload whenever the label is smaller"."""
+    return env_int(MIN_OFFLOAD_SAVING_BYTES_ENV, default, minimum=0)
 
 
 def step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
@@ -254,7 +271,7 @@ def _over_packed_target(
 def compact_trajectory(
     trajectory: dict[str, Any],
     *,
-    eligibility_threshold_tokens: int = ELIGIBILITY_THRESHOLD_TOKENS,
+    min_offload_saving_bytes: Optional[int] = None,
     recent_observations_protected: int = RECENT_OBSERVATIONS_PROTECTED,
     packed_target_tokens: Optional[int] = None,
     packed_target_bytes: int = PACKED_TARGET_BYTES,
@@ -266,6 +283,14 @@ def compact_trajectory(
 ) -> list[dict[str, Any]]:
     """Mutate trajectory observations in place. Return offload decisions.
 
+    An execute observation is eligible when replacing it with its own label
+    frees at least ``min_offload_saving_bytes`` UTF-8 bytes
+    (``MIN_OFFLOAD_SAVING_BYTES``, or ``FW_OFFLOAD_MIN_SAVING_BYTES``). The
+    label is built first for exactly that reason: eligibility is a property of
+    the swap, not of the observation. Everything around it is unchanged --
+    oldest-first order, the five most recent execute observations protected,
+    the packed target, and ``replacement_saves_space``.
+
     ``ordinal_offset`` counts execute steps the agent has truncated out of the
     trajectory (see ``execute_ordinals``); recency protection is measured over
     the steps still present.
@@ -273,6 +298,8 @@ def compact_trajectory(
 
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
+    if min_offload_saving_bytes is None:
+        min_offload_saving_bytes = min_offload_saving_bytes_from_env()
     if packed_target_tokens is None:
         packed_target_bytes = packed_target_bytes_from_env(packed_target_bytes)
     if hot_handle_max_bytes is None:
@@ -320,7 +347,7 @@ def compact_trajectory(
             "alias": alias,
             "step_index": step_index,
             "action": "kept",
-            "reason": "below_threshold",
+            "reason": "below_min_saving",
             "recency_protected": recency_protected,
             "response_size": size,
         }
@@ -328,13 +355,33 @@ def compact_trajectory(
             decision["reason"] = "already_label"
             decisions.append(decision)
             continue
-        eligible = (
-            size["estimated_tokens"] > eligibility_threshold_tokens and not recency_protected
-        )
         if recency_protected:
             decision["reason"] = "recent_observation_protected"
-        elif not eligible:
-            decision["reason"] = "below_threshold"
+            decisions.append(decision)
+            continue
+        # Eligibility is the saving, so the label has to exist before the
+        # question can be asked. It is the label this step would really get --
+        # same alias, same command text, same authored description -- never a
+        # stand-in, or the measured saving would not be the one taken.
+        args = trajectory.get(f"tool_args_{step_index}")
+        command = ""
+        if isinstance(args, Mapping):
+            command = str(args.get("command") or "")
+        label = offload_label(
+            alias=alias,
+            command_name=command or "execute_workflow_query",
+            response=original,
+            description=describe_output(command, original) if describe_output else "",
+        )
+        saving = offload_saving_bytes(original, label)
+        decision["offload_saving_bytes"] = saving
+        decision["label_size"] = {
+            "characters": len(label),
+            "utf8_bytes": len(label.encode("utf-8")),
+        }
+        if saving < min_offload_saving_bytes:
+            decision["reason"] = "below_min_saving"
+            decision["min_offload_saving_bytes"] = min_offload_saving_bytes
         elif not _over_packed_target(
             packed_text,
             packed_target_bytes=packed_target_bytes,
@@ -342,16 +389,6 @@ def compact_trajectory(
         ):
             decision["reason"] = "eligible_but_target_already_met"
         else:
-            args = trajectory.get(f"tool_args_{step_index}")
-            command = ""
-            if isinstance(args, Mapping):
-                command = str(args.get("command") or "")
-            label = offload_label(
-                alias=alias,
-                command_name=command or "execute_workflow_query",
-                response=original,
-                description=describe_output(command, original) if describe_output else "",
-            )
             if not replacement_saves_space(original, label):
                 decision["reason"] = "replacement_not_smaller"
                 decisions.append(decision)
@@ -415,6 +452,7 @@ def compact_trajectory(
                     "step_index": step_index,
                     "text_sha256": digest,
                     "estimated_tokens": size["estimated_tokens"],
+                    "offload_saving_bytes": saving,
                     "packed_utf8_bytes_before": packed_utf8_bytes_before,
                     "packed_utf8_bytes_after": len(packed_text.encode("utf-8")),
                     "hot_payload_bytes": hot_payload_bytes(selected_scope),

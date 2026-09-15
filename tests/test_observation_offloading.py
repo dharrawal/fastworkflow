@@ -25,11 +25,14 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleScope,
 )
 from fastworkflow.observation_offloading.compact import (
+    MIN_OFFLOAD_SAVING_BYTES,
+    MIN_OFFLOAD_SAVING_BYTES_ENV,
     PACKED_TARGET_BYTES,
     annotate_execute_observations,
     archive_execute_observations,
     compact_trajectory,
     execute_ordinals,
+    min_offload_saving_bytes_from_env,
     packed_target_bytes_from_env,
 )
 from fastworkflow.observation_offloading.continuation import (
@@ -42,10 +45,12 @@ from fastworkflow.observation_offloading.continuation import (
 )
 from fastworkflow.observation_offloading.labels import (
     alias_line,
+    estimated_tokens,
     is_offload_label,
     is_search_answer_key,
     label_alias,
     offload_label,
+    offload_saving_bytes,
     printed_alias,
     strip_alias_line,
 )
@@ -318,15 +323,18 @@ class StructuredContinuation(unittest.TestCase):
 
     def test_greedy_28k_inlines_newest_first_and_never_exceeds_bound(self) -> None:
         trajectory = {}
+        # Each observation is worth labelling on its own: ~2 KB of rows against
+        # a ~350 B label, so the 1 KB minimum saving (ido-986.14.6) is met and
+        # what the skeleton is testing is the greedy order, not eligibility.
         for index in range(4):
             trajectory[f"tool_name_{index}"] = "execute_workflow_query"
             trajectory[f"tool_args_{index}"] = {"command": f"find_{index}"}
-            trajectory[f"observation_{index}"] = str(index) * 600
-        skeleton, metadata = replan_trajectory_skeleton(trajectory, greedy_max_bytes=2_000)
-        self.assertLessEqual(metadata["measured_bytes"], 2_000)
+            trajectory[f"observation_{index}"] = str(index) * 2_000
+        skeleton, metadata = replan_trajectory_skeleton(trajectory, greedy_max_bytes=5_000)
+        self.assertLessEqual(metadata["measured_bytes"], 5_000)
         self.assertEqual(metadata["inlined_aliases"], ["O3", "O4"])
         self.assertEqual(metadata["labeled_aliases"], ["O1", "O2"])
-        self.assertEqual(skeleton["observation_3"], "3" * 600)
+        self.assertEqual(skeleton["observation_3"], "3" * 2_000)
         self.assertIn("Use search_memory tool to search inside Observation", skeleton["observation_1"])
 
     def test_greedy_28k_labels_single_oversized_newest_observation(self) -> None:
@@ -1013,14 +1021,23 @@ class PrintedObservationHandles(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.addCleanup(reset_runtime_state)
         self.archive = RuntimeHandleArchive(str(Path(self.tempdir.name) / "handles.sqlite3"))
-        self.scope = RuntimeHandleScope(
+        self._turns = 0
+        self.scope = self.new_scope()
+
+    def new_scope(self) -> RuntimeHandleScope:
+        """A fresh turn. One text per alias per scope, so each case needs its own."""
+        self._turns += 1
+        return RuntimeHandleScope(
             store_identity="fixture-store",
             channel_id="fixture-channel",
             experiment_id="fixture-experiment",
             task_id="fixture-task",
             attempt=1,
-            turn_key="fixture-turn",
+            turn_key=f"fixture-turn-{self._turns}",
         )
+
+    def describe(self, command: str, response: str) -> str:
+        return self.DESCRIPTION if command.startswith("list_permissions") else ""
 
     def compact(self, trajectory, **kwargs):
         return compact_trajectory(
@@ -1203,7 +1220,17 @@ class PrintedObservationHandles(unittest.TestCase):
                                  packed_target_tokens=1)
         self.assertEqual(decisions[0]["response_size"]["characters"], len(body))
         self.assertEqual(decisions[0]["response_size"]["utf8_bytes"], len(body.encode("utf-8")))
-        self.assertEqual(strip_alias_line(trajectory["observation_0"]), body)
+        # The saving is measured against the response too, so the ~34 B alias
+        # line can neither create eligibility nor inflate the reported saving.
+        label = trajectory["observation_0"]
+        self.assertTrue(is_offload_label(label))
+        self.assertEqual(
+            decisions[0]["offload_saving_bytes"],
+            len(body.encode("utf-8")) - len(label.encode("utf-8")),
+        )
+        self.assertEqual(decisions[0]["label_size"]["utf8_bytes"],
+                         len(label.encode("utf-8")))
+        self.assertEqual(self.archive.get(self.scope, "O1")["text"], body)
 
     def test_error_and_empty_execute_observations_are_still_addressable(self) -> None:
         trajectory: dict = {}
@@ -1260,14 +1287,23 @@ class EagerObservationArchive(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.addCleanup(reset_runtime_state)
         self.archive = RuntimeHandleArchive(str(Path(self.tempdir.name) / "handles.sqlite3"))
-        self.scope = RuntimeHandleScope(
+        self._turns = 0
+        self.scope = self.new_scope()
+
+    def new_scope(self) -> RuntimeHandleScope:
+        """A fresh turn. One text per alias per scope, so each case needs its own."""
+        self._turns += 1
+        return RuntimeHandleScope(
             store_identity="fixture-store",
             channel_id="fixture-channel",
             experiment_id="fixture-experiment",
             task_id="fixture-task",
             attempt=1,
-            turn_key="fixture-turn",
+            turn_key=f"fixture-turn-{self._turns}",
         )
+
+    def describe(self, command: str, response: str) -> str:
+        return self.DESCRIPTION if command.startswith("list_permissions") else ""
 
     def compact(self, trajectory, **kwargs):
         return compact_trajectory(
@@ -1801,3 +1837,369 @@ class BoundedSearchAnswers(unittest.TestCase):
         self.assertTrue(is_offload_label(skeleton["observation_0"]))
         self.assertLessEqual(len(bounded.encode("utf-8")), SEARCH_ANSWER_MAX_BYTES)
         self.assertLess(metadata["measured_bytes"], SEARCH_ANSWER_MAX_BYTES + 500)
+
+
+class MinimumOffloadSaving(unittest.TestCase):
+    """ido-986.14.6: eligibility is what the swap saves, not how big the text is.
+
+    The old floor asked whether an observation was over 1,000 estimated tokens
+    (~4 KB of ASCII). It therefore kept every 1.3-4 KB listing page resident for
+    a whole turn although its label costs a few hundred bytes, and it could in
+    principle have offered to replace a 300 B fact with a 400 B pointer to it.
+    The rule here is the one thing offloading actually buys:
+
+        utf8(response, alias line stripped) - utf8(that step's real label) >= 1024
+    """
+
+    #: A fixed first line keeps output_description's heading -- and so the
+    #: label -- the same length however long the body is, which is what makes
+    #: an exact byte saving constructible.
+    HEAD = "holder uid label\n"
+    #: A realistic authored Output description. The measured corpus
+    #: (evaluation/artifacts/result-search/c1-prep) shows real labels running
+    #: 160-755 B, mostly because of these, so a fixture with no description at
+    #: all would make every page look cheaper to offload than it is.
+    DESCRIPTION = (
+        "permission_uids: The permission_uid of every permission listed, in the "
+        "order shown. Pass one to a command that asks for a permission_uid; "
+        "labels: Human-readable name of each permission, aligned by index with "
+        "permission_uids; total: How many permissions the backend reported."
+    )
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.addCleanup(reset_runtime_state)
+        self.archive = RuntimeHandleArchive(str(Path(self.tempdir.name) / "handles.sqlite3"))
+        self._turns = 0
+        self.scope = self.new_scope()
+
+    def new_scope(self) -> RuntimeHandleScope:
+        """A fresh turn. One text per alias per scope, so each case needs its own."""
+        self._turns += 1
+        return RuntimeHandleScope(
+            store_identity="fixture-store",
+            channel_id="fixture-channel",
+            experiment_id="fixture-experiment",
+            task_id="fixture-task",
+            attempt=1,
+            turn_key=f"fixture-turn-{self._turns}",
+        )
+
+    def describe(self, command: str, response: str) -> str:
+        return self.DESCRIPTION if command.startswith("list_permissions") else ""
+
+    def compact(self, trajectory, **kwargs):
+        return compact_trajectory(
+            trajectory, scope=self.scope, selected_archive=self.archive, **kwargs
+        )
+
+    def label_for(self, body, *, alias="O1", command="show_holders", description=""):
+        return offload_label(alias=alias, command_name=command, response=body,
+                             description=description)
+
+    def body_saving(self, saving, *, alias="O1", command="show_holders", description=""):
+        """A response whose real label frees exactly ``saving`` UTF-8 bytes."""
+        probe = self.HEAD + "x" * 4_000
+        label = self.label_for(probe, alias=alias, command=command, description=description)
+        body = self.HEAD + "x" * (len(label.encode("utf-8")) + saving
+                                  - len(self.HEAD.encode("utf-8")))
+        self.assertEqual(
+            offload_saving_bytes(body, self.label_for(body, alias=alias, command=command,
+                                                      description=description)),
+            saving,
+        )
+        return body
+
+    def one_step(self, body, *, command="show_holders"):
+        return {
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": command},
+            "observation_0": body,
+        }
+
+    def decide(self, body, **kwargs):
+        """One unprotected execute observation, with the target already exceeded."""
+        self.scope = self.new_scope()
+        trajectory = self.one_step(body)
+        decisions = self.compact(trajectory, recent_observations_protected=0,
+                                 packed_target_tokens=1, **kwargs)
+        return trajectory, decisions[0]
+
+    # -- the boundary ------------------------------------------------------
+
+    def test_default_minimum_saving_is_1024_utf8_bytes(self) -> None:
+        self.assertEqual(MIN_OFFLOAD_SAVING_BYTES, 1_024)
+        self.assertEqual(min_offload_saving_bytes_from_env(), 1_024)
+
+    def test_1023_bytes_of_saving_is_kept_and_1024_is_offloaded(self) -> None:
+        trajectory, decision = self.decide(self.body_saving(1_023))
+        self.assertEqual(decision["action"], "kept")
+        self.assertEqual(decision["reason"], "below_min_saving")
+        self.assertEqual(decision["offload_saving_bytes"], 1_023)
+        self.assertEqual(decision["min_offload_saving_bytes"], 1_024)
+        self.assertFalse(is_offload_label(trajectory["observation_0"]))
+
+        trajectory, decision = self.decide(self.body_saving(1_024))
+        self.assertEqual(decision["action"], "offloaded")
+        self.assertEqual(decision["reason"], "oldest_eligible_until_target")
+        self.assertEqual(decision["offload_saving_bytes"], 1_024)
+        self.assertTrue(is_offload_label(trajectory["observation_0"]))
+
+    def test_1025_bytes_of_saving_is_offloaded(self) -> None:
+        trajectory, decision = self.decide(self.body_saving(1_025))
+        self.assertEqual(decision["action"], "offloaded")
+        self.assertEqual(decision["offload_saving_bytes"], 1_025)
+        self.assertTrue(is_offload_label(trajectory["observation_0"]))
+
+    def test_the_old_token_floor_no_longer_decides_anything(self) -> None:
+        """4,000 characters was exactly at the old floor and never offloaded."""
+        body = self.HEAD + "x" * (4_000 - len(self.HEAD))
+        self.assertEqual(estimated_tokens(body), 1_000)  # not > 1000: old = kept
+        trajectory, decision = self.decide(body)
+        self.assertEqual(decision["action"], "offloaded")
+        self.assertGreaterEqual(decision["offload_saving_bytes"], 1_024)
+        self.assertEqual(decision["response_size"]["estimated_tokens"], 1_000)
+
+    def test_the_size_record_still_reports_estimated_tokens(self) -> None:
+        body = self.body_saving(2_000)
+        _trajectory, decision = self.decide(body)
+        self.assertEqual(decision["response_size"],
+                         {"characters": len(body),
+                          "utf8_bytes": len(body.encode("utf-8")),
+                          "estimated_tokens": estimated_tokens(body)})
+
+    # -- the label is this step's real label -------------------------------
+
+    def test_the_saving_uses_this_steps_label_not_a_constant(self) -> None:
+        """Same bytes of output, two labels: only the cheaper label offloads."""
+        body = self.body_saving(1_024)
+        long_command = "who_has_access_to <type>permission</type> " + "a" * 200
+        trajectory = {
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "show_holders"},
+            "observation_0": body,
+            "tool_name_1": "execute_workflow_query",
+            "tool_args_1": {"command": long_command},
+            "observation_1": body,
+        }
+        decisions = self.compact(trajectory, recent_observations_protected=0,
+                                 packed_target_tokens=1)
+        by_alias = {d["alias"]: d for d in decisions}
+        self.assertEqual(by_alias["O1"]["action"], "offloaded")
+        self.assertEqual(by_alias["O1"]["offload_saving_bytes"], 1_024)
+        # The longer command travels in the label, so the same text saves less.
+        self.assertEqual(by_alias["O2"]["action"], "kept")
+        self.assertEqual(by_alias["O2"]["reason"], "below_min_saving")
+        self.assertEqual(
+            by_alias["O2"]["offload_saving_bytes"],
+            1_024 - (len(long_command.encode("utf-8")) - len("show_holders")),
+        )
+        self.assertEqual(by_alias["O2"]["label_size"]["utf8_bytes"],
+                         len(self.label_for(body, alias="O2",
+                                            command=long_command).encode("utf-8")))
+
+    def test_an_authored_description_lengthens_the_label_and_the_decision(self) -> None:
+        """describe_output feeds the same label the offload would write."""
+        description = "identity_uids: every holder listed; labels: their names"
+        body = self.body_saving(1_024, description=description)
+        trajectory, decision = self.decide(
+            body, describe_output=lambda command, response: description
+        )
+        self.assertEqual(decision["action"], "offloaded")
+        self.assertEqual(decision["offload_saving_bytes"], 1_024)
+        self.assertIn(description, trajectory["observation_0"])
+        # Without the description the label is shorter, so the same body saves more.
+        _trajectory, plain = self.decide(body)
+        self.assertGreater(plain["offload_saving_bytes"], 1_024)
+
+    # -- pages, facts, recency ---------------------------------------------
+
+    def _page_trajectory(self, oldest: str) -> dict:
+        """The oldest execute observation, then five newer ones; over target."""
+        trajectory = {
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "list_permissions"},
+            "observation_0": oldest,
+        }
+        for index in range(1, 5):
+            trajectory[f"tool_name_{index}"] = "execute_workflow_query"
+            trajectory[f"tool_args_{index}"] = {"command": f"open_portrait_{index}"}
+            trajectory[f"observation_{index}"] = f"Entered context {index}."
+        # A fresh 30 KB result is what pushes the packed trajectory over target.
+        trajectory["tool_name_5"] = "execute_workflow_query"
+        trajectory["tool_args_5"] = {"command": "show_holders"}
+        trajectory["observation_5"] = "holder uid label\n" + "z" * 30_000
+        return trajectory
+
+    def test_a_3kb_page_older_than_the_protected_five_is_offloaded(self) -> None:
+        page = "permission_uid  label\n" + ("row of a listing page\n" * 140)
+        self.assertGreater(len(page.encode("utf-8")), 3_000)
+        self.assertLess(len(page.encode("utf-8")), 4_000)
+        self.assertLessEqual(estimated_tokens(page), 1_000)  # the old rule kept it
+        trajectory = self._page_trajectory(page)
+        decisions = self.compact(trajectory, describe_output=self.describe)
+        by_alias = {d["alias"]: d for d in decisions}
+        self.assertEqual(by_alias["O1"]["action"], "offloaded")
+        self.assertEqual(label_alias(trajectory["observation_0"]), "O1")
+        # And the newest five are still there, 30 KB result included.
+        self.assertEqual(strip_alias_line(trajectory["observation_5"]),
+                         "holder uid label\n" + "z" * 30_000)
+        for index in range(1, 5):
+            self.assertTrue(by_alias[f"O{index + 1}"]["recency_protected"])
+
+    def test_a_12kb_observation_is_not_offloaded(self) -> None:
+        small = "permission_uid  label\n" + ("row of a listing page\n" * 54)
+        self.assertGreater(len(small.encode("utf-8")), 1_150)
+        self.assertLess(len(small.encode("utf-8")), 1_300)
+        trajectory = self._page_trajectory(small)
+        decisions = self.compact(trajectory, describe_output=self.describe)
+        decision = {d["alias"]: d for d in decisions}["O1"]
+        self.assertEqual(decision["action"], "kept")
+        self.assertEqual(decision["reason"], "below_min_saving")
+        self.assertLess(decision["offload_saving_bytes"], 1_024)
+        self.assertEqual(strip_alias_line(trajectory["observation_0"]), small)
+
+    def test_short_facts_are_untouched_even_over_target(self) -> None:
+        """Facts older than the protected five are kept: their label is bigger."""
+        facts = ["Entered Permission context.", "Context is now '*'", "",
+                 "1 permission(s). Each line below is `permission_uid  label`."]
+        page = "permission_uid  label\n" + ("row of a listing page\n" * 140)
+        trajectory = self._page_trajectory(page)
+        for offset, fact in enumerate(facts):
+            index = 6 + offset
+            trajectory[f"tool_name_{index}"] = "execute_workflow_query"
+            trajectory[f"tool_args_{index}"] = {"command": f"reset_context_{offset}"}
+            trajectory[f"observation_{index}"] = fact
+        decisions = self.compact(trajectory, describe_output=self.describe)
+        by_alias = {d["alias"]: d for d in decisions}
+        # The oldest page goes; every short fact stays, protected or not.
+        self.assertEqual(by_alias["O1"]["action"], "offloaded")
+        unprotected_facts = [a for a in ("O2", "O3", "O4", "O5")
+                             if not by_alias[a]["recency_protected"]]
+        self.assertTrue(unprotected_facts)
+        for alias in unprotected_facts:
+            self.assertEqual(by_alias[alias]["reason"], "below_min_saving")
+            self.assertLess(by_alias[alias]["offload_saving_bytes"], 0)
+        for offset, fact in enumerate(facts):
+            self.assertEqual(strip_alias_line(trajectory[f"observation_{6 + offset}"]), fact)
+
+    def test_the_five_most_recent_are_protected_before_the_saving_is_asked(self) -> None:
+        page = "permission_uid  label\n" + ("row of a listing page\n" * 140)
+        trajectory = {}
+        for index in range(7):
+            trajectory[f"tool_name_{index}"] = "execute_workflow_query"
+            trajectory[f"tool_args_{index}"] = {"command": f"list_permissions_{index}"}
+            trajectory[f"observation_{index}"] = page
+        decisions = self.compact(trajectory, packed_target_bytes=10_000,
+                                 describe_output=self.describe)
+        by_alias = {d["alias"]: d for d in decisions}
+        self.assertEqual({a: d["recency_protected"] for a, d in by_alias.items()},
+                         {"O1": False, "O2": False, "O3": True, "O4": True,
+                          "O5": True, "O6": True, "O7": True})
+        for alias in ("O3", "O4", "O5", "O6", "O7"):
+            self.assertEqual(by_alias[alias]["reason"], "recent_observation_protected")
+            # A protected observation is never priced: no label is built for it.
+            self.assertNotIn("offload_saving_bytes", by_alias[alias])
+        self.assertEqual([by_alias[a]["action"] for a in ("O1", "O2")],
+                         ["offloaded", "offloaded"])
+
+    # -- interaction with A1, A2, A3 ---------------------------------------
+
+    def test_the_printed_alias_line_is_excluded_from_the_measured_saving(self) -> None:
+        """A1's line is ~34 B: counting it would flip this observation."""
+        body = self.body_saving(1_023)
+        trajectory, decision = self.decide(body)
+        printed = trajectory["observation_0"]
+        self.assertEqual(printed_alias(printed), "O1")
+        self.assertGreaterEqual(
+            offload_saving_bytes(printed, self.label_for(body)), 1_024
+        )
+        self.assertEqual(decision["offload_saving_bytes"], 1_023)
+        self.assertEqual(decision["action"], "kept")
+
+    def test_the_eager_archive_is_unaffected_by_the_rule(self) -> None:
+        """A2: availability is unconditional; the rule only moves residency."""
+        kept = self.body_saving(1_023)
+        trajectory = self.one_step(kept)
+        trajectory["tool_name_1"] = "execute_workflow_query"
+        trajectory["tool_args_1"] = {"command": "list_controls"}
+        trajectory["observation_1"] = self.body_saving(4_096, alias="O2",
+                                                       command="list_controls")
+        self.compact(trajectory, recent_observations_protected=0,
+                     packed_target_tokens=1)
+        self.assertFalse(is_offload_label(trajectory["observation_0"]))
+        self.assertTrue(is_offload_label(trajectory["observation_1"]))
+        rows = {row["alias"]: row for row in self.archive.list(self.scope)}
+        self.assertEqual(set(rows), {"O1", "O2"})
+        self.assertEqual(rows["O1"]["text"], kept)
+        self.assertTrue(observation_inline(self.scope, "O1"))
+        self.assertFalse(observation_inline(self.scope, "O2"))
+
+    def test_search_memory_observations_are_still_never_offloaded(self) -> None:
+        """A3 bounds search output; compaction still only ever touches executes."""
+        answer = "answer line\n" + "a" * 5_000
+        trajectory = self._page_trajectory(self.body_saving(4_096))
+        trajectory["tool_name_6"] = "search_memory"
+        trajectory["tool_args_6"] = {"alias": "O1", "question": "who?"}
+        trajectory["observation_6"] = answer
+        decisions = self.compact(trajectory)
+        self.assertEqual(SEARCH_ANSWER_MAX_BYTES, 3_072)
+        self.assertEqual(trajectory["observation_6"], answer)
+        self.assertNotIn("S6", {d["alias"] for d in decisions})
+        self.assertIsNone(printed_alias(trajectory["observation_6"]))
+
+    # -- the knob ----------------------------------------------------------
+
+    def test_env_override_raises_and_lowers_the_minimum(self) -> None:
+        body = self.body_saving(1_024)
+        with patch.dict(os.environ, {MIN_OFFLOAD_SAVING_BYTES_ENV: "2048"}):
+            # Each self.decide() runs in its own scope, so re-offering the same
+            # alias with different text is never the archive refusing a rewrite.
+            self.assertEqual(min_offload_saving_bytes_from_env(), 2_048)
+            _trajectory, decision = self.decide(body)
+            self.assertEqual(decision["reason"], "below_min_saving")
+            self.assertEqual(decision["min_offload_saving_bytes"], 2_048)
+        with patch.dict(os.environ, {MIN_OFFLOAD_SAVING_BYTES_ENV: "0"}):
+            self.assertEqual(min_offload_saving_bytes_from_env(), 0)
+            _trajectory, decision = self.decide(self.body_saving(1))
+            self.assertEqual(decision["action"], "offloaded")
+
+    def test_a_bad_or_negative_override_falls_back_to_the_default(self) -> None:
+        for raw in ("", "   ", "lots", "1_024 bytes", "-1"):
+            with patch.dict(os.environ, {MIN_OFFLOAD_SAVING_BYTES_ENV: raw}):
+                self.assertEqual(min_offload_saving_bytes_from_env(),
+                                 MIN_OFFLOAD_SAVING_BYTES, raw)
+
+    # -- the replan skeleton decides eligibility the same way ---------------
+
+    def test_the_replan_skeleton_uses_the_same_minimum(self) -> None:
+        trajectory = {
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "show_holders"},
+            "observation_0": self.body_saving(1_023),
+            "tool_name_1": "execute_workflow_query",
+            "tool_args_1": {"command": "show_holders"},
+            "observation_1": self.body_saving(1_024, alias="O2"),
+        }
+        skeleton, metadata = replan_trajectory_skeleton(
+            trajectory, greedy_max_bytes=1_000,
+            scope=self.scope, selected_archive=self.archive,
+        )
+        self.assertEqual(metadata["labeled_aliases"], ["O2"])
+        self.assertEqual(metadata["inlined_aliases"], ["O1"])
+        self.assertEqual(skeleton["observation_0"], trajectory["observation_0"])
+        self.assertEqual(label_alias(skeleton["observation_1"]), "O2")
+
+    def test_the_replan_skeleton_honours_the_override(self) -> None:
+        trajectory = {
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "show_holders"},
+            "observation_0": self.body_saving(1_023),
+        }
+        _skeleton, metadata = replan_trajectory_skeleton(
+            trajectory, greedy_max_bytes=1, min_offload_saving_bytes=1_023,
+            scope=self.scope, selected_archive=self.archive,
+        )
+        self.assertEqual(metadata["labeled_aliases"], ["O1"])
