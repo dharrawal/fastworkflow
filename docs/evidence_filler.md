@@ -87,6 +87,33 @@ value cites its listing's `O` handle plus a page token (`O12#p200`), which — l
 a bounded search answer's `O12#a1` — names a record and can never be passed back
 as a searchable handle.
 
+#### Every page says whose it is (`ido-8ps.15`)
+
+Each page is headed with the provenance line the trajectory printed above its
+observation, and **the clause is indexed with the page**:
+
+```
+Observation O27 (execute_workflow_query, in Account 28c5aeb5… Alan Cooper):
+29 permission(s)
+3e3d35f0…  Active Directory_Cloud Administrator
+…
+```
+
+This is the half of `ido-8ps.13` the filler could not previously reach. A
+listing produced by navigating into a context carries no identifier of that
+context — `list_permissions` inside an account prints `permission_uid  label`
+rows and nothing else — so the page that *answers* "Alan Cooper's rights" shares
+not one word with the item, and the page that carries his name is the 23 KB
+roster that does not hold the rows. Over the `ido-8ps.13` archives the filler's
+own selector reached the answering page for **2 of 36 row-attempts**; with the
+clause indexed, **8 of 36** (`evaluation/evidence_filler_context_recheck.py`,
+$0, no model call).
+
+The clause reaches the page from the archive row's `context` metadata (below),
+falling back to the in-process dispatch record. It is never derived from command
+order, and it is never invented: an observation with no recorded clause is shown
+under the plain A1 line.
+
 ## The validation rule
 
 Deterministic, mandatory, and in code rather than in a prompt. A filled value
@@ -97,8 +124,8 @@ survives only when
    not execute ordinals (`O12#a1`) are not in it. Otherwise the reason is
    `alias_not_printed`.
 2. **the value occurs literally in the archived text of that observation**, or in
-   a stored page filed under it, after NFKC, space-like and zero-width repair,
-   whitespace collapse and casefold — the repair `normalize_literal` performs and
+   a stored page filed under it, or in the context clause recorded for it, after
+   NFKC, space-like and zero-width repair, whitespace collapse and casefold — the repair `normalize_literal` performs and
    the case-insensitive comparison `_filter_records` uses, with the constants
    imported from `result_handles` so the two cannot drift. Otherwise the reason
    is `value_not_in_cited_observation`.
@@ -116,6 +143,19 @@ Two deliberate details:
   removing its underscore would let a wrong value match a right one.
 * Matching is against the **whole** cited observation, not against the pages the
   item happened to be fed. The rule is about the evidence, not about the prompt.
+* The **context clause counts as part of the cited observation** (`ido-8ps.15`,
+  a stated choice). The clause is a fact the turn recorded about that
+  observation — the identity of the context its command ran in, captured at
+  dispatch and printed above the text the agent read — so a value the filler can
+  only get from the scope line, such as the account uid a person's listing was
+  produced inside, is evidence the turn holds rather than evidence it invented.
+  Without it the filler would show a page headed `in Account 28c5…` and then
+  have to report that account unresolved. What does *not* change is the rule
+  itself: the value must still be a **literal** substring, under the same
+  normalisation, of the observation whose printed alias it cites. The clause
+  widens the haystack by ~50 bytes of recorded provenance; it licenses no
+  composed, summarised, computed or remembered value, and another observation's
+  clause is not this observation's evidence.
 
 This is `ido-8ps.5` generalised from handles to values, and it is
 what separates this from the `ido-986.6.14` partial-answer arm, which fabricated
@@ -127,10 +167,15 @@ One additional input field on the extract signature, appended last:
 
 ```
 verified_evidence:
-the Cloud Administrator permission uid: 3e3d35f0… (Observation O2)
+the Cloud Administrator permission uid: 3e3d35f0… (Observation O2, in Account 28c5aeb5… Alan Cooper)
 Alan Cooper's account uid: e8a0c3a1… (Observation O1, page O1#p200)
 the collection that confers it: unresolved - no collection row was retrieved
 ```
+
+Since `ido-8ps.15` a filled line also names the **context instance** the cited
+observation was produced in, where one was recorded. That is the only change to
+what the extract step is given: the worksheet carries the provenance, and the
+extract prompt is otherwise exactly what it was.
 
 The instruction ("report these values, report an unresolved item as unresolved")
 lives in the **field description**, not in the signature docstring: `utils/react.py`

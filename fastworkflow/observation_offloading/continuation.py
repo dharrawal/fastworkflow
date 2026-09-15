@@ -23,6 +23,7 @@ from fastworkflow.observation_offloading.labels import (
     label_alias,
     offload_label,
     offload_saving_bytes,
+    printed_context,
     replacement_saves_space,
     strip_alias_line,
 )
@@ -155,7 +156,8 @@ def replan_trajectory_skeleton(
             store.persist(selected_scope, alias=execute_aliases[key],
                           offload_order=int(execute_aliases[key][1:]), command_name=command,
                           step_index=int(suffix), text=text,
-                          text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+                          text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                          context=printed_context(shown))
         except Exception as error:
             skeleton[key] = trajectory[key]
             persistence_failures.append(execute_aliases[key])

@@ -241,6 +241,34 @@ def context_clause_of(scope: RuntimeHandleScope, alias: str) -> Optional[str]:
         return _context_clauses.get(handle_key(scope, alias))
 
 
+def observation_context(
+    scope: RuntimeHandleScope,
+    alias: str,
+    store: Optional[RuntimeHandleArchive] = None,
+) -> Optional[str]:
+    """The clause for *alias*, from this process first and the archive second.
+
+    ``ido-8ps.15``. The two records say the same thing and are written at
+    different times: ``record_context_clause`` files the clause at dispatch, and
+    ``persist`` copies it onto the archive row when the observation becomes
+    durable. A reader inside the turn asks this and gets the answer from
+    whichever record exists -- the in-process one during the step that produced
+    the observation, the stored one afterwards or in another process.
+
+    ``""`` means the command ran at the root context. ``None`` means no clause
+    was ever captured for this alias, which is not the same fact and is never
+    printed as one.
+    """
+    clause = context_clause_of(scope, alias)
+    if clause is not None:
+        return clause
+    try:
+        return (store or archive()).context_clause(scope, alias)
+    except Exception:  # noqa: BLE001 - provenance is presentation; never fail
+        logger.debug("archived context unavailable for %s", alias, exc_info=True)
+        return None
+
+
 def reset_runtime_state() -> None:
     """Drop every process-local cache the offloading runtime holds.
 

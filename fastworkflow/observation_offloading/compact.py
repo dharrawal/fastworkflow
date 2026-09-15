@@ -227,6 +227,13 @@ def archive_execute_observations(
         digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
         if archived_digest(selected_scope, alias) == digest:
             continue
+        # ido-8ps.15: the clause travels with the row, as metadata. Preferred
+        # source is the line actually printed above this text, so the archive
+        # records what the reader saw; the dispatch record answers for an
+        # observation whose line could not be printed.
+        clause = printed_context(shown)
+        if clause is None:
+            clause = context_clause_of(selected_scope, alias)
         args = trajectory.get(f"tool_args_{step_index}")
         command = ""
         if isinstance(args, Mapping):
@@ -240,6 +247,7 @@ def archive_execute_observations(
                 step_index=step_index,
                 text=original,
                 text_sha256=digest,
+                context=clause,
             )
         except Exception as error:  # noqa: BLE001
             record_event(
@@ -435,6 +443,7 @@ def compact_trajectory(
                     step_index=step_index,
                     text=original,
                     text_sha256=digest,
+                    context=context_clause_of(selected_scope, alias),
                 )
             except Exception as error:  # noqa: BLE001
                 decision["reason"] = "persistence_failed_original_retained"

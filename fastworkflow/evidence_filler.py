@@ -20,8 +20,16 @@ survives only when
 
 1. the alias it cites is in this turn's printed ``O`` namespace, and
 2. the value occurs LITERALLY in the archived text of that observation (or in a
-   stored result page belonging to it), after the NFKC / space-like /
-   zero-width / whitespace repair the listing filters use, case-insensitively.
+   stored result page belonging to it, or in its recorded context clause),
+   after the NFKC / space-like / zero-width / whitespace repair the listing
+   filters use, case-insensitively.
+
+``ido-8ps.15`` added the clause to that second test, deliberately: the clause is
+a fact the turn recorded about the observation -- the identity of the context
+the command ran in -- and it is the ONLY record of whose rows a listing fetched
+inside a context holds. Including it lets a person's account uid be cited from
+the scope line of their own listing. The value itself must still be literal; the
+clause widens the evidence, never the rule.
 
 Otherwise the item is downgraded to ``unresolved`` with the reason
 ``alias_not_printed`` or ``value_not_in_cited_observation`` and the value is
@@ -240,6 +248,9 @@ class WorksheetItem:
     alias: str = ""
     page: str = ""
     reason: str = ""
+    #: ido-8ps.15. The context clause of the cited observation, so the line the
+    #: extractor reads says WHOSE evidence this is. "" when none was recorded.
+    context: str = ""
     #: Set when the model filled this item and validation took it away, so the
     #: measurement can separate "the evidence has no answer" from "the filler
     #: made one up".
@@ -255,6 +266,8 @@ class WorksheetItem:
             reason = self.reason or "not established by the archived evidence"
             return f"{self.item}: unresolved - {reason}"
         citation = f"Observation {self.alias}"
+        if self.context:
+            citation = f"{citation}, in {self.context}"
         if self.page:
             citation = f"{citation}, page {self.page}"
         return f"{self.item}: {bound_value(self.value)} ({citation})"
@@ -324,22 +337,49 @@ class Worksheet:
 
 @dataclass(frozen=True)
 class EvidencePage:
-    """One page-sized window on stored text, with the citation it carries."""
+    """One page-sized window on stored text, with the provenance it carries."""
 
     alias: str
     text: str
     #: "" for an archived observation, ``O12#p200`` for a stored result page.
     token: str = ""
     order: int = 0
+    #: ido-8ps.15. The ``ido-8ps.13`` context clause of the observation this
+    #: page came out of: the context the command RAN IN and, where the workflow
+    #: declares one, that instance's identity. "" at the root and whenever no
+    #: clause was recorded -- never a guess.
+    context: str = ""
 
     @property
     def key(self) -> tuple[str, str, int]:
         return (self.alias, self.token, self.order)
 
     def header(self) -> str:
+        """The provenance line this page is shown under.
+
+        Deliberately the SAME clause the trajectory printed above the
+        observation (``labels.alias_line``), so the filler reads the page under
+        the identity the agent read it under: a listing produced inside an
+        account is headed with that account, and the rows below it are that
+        account's rows whether or not any of them says so.
+        """
+        parts = ["execute_workflow_query"]
+        if self.context:
+            parts.append(f"in {self.context}")
         if self.token:
-            return f"Observation {self.alias} (stored page {self.token}):"
-        return f"Observation {self.alias}:"
+            parts.append(f"stored page {self.token}")
+        return f"Observation {self.alias} ({', '.join(parts)}):"
+
+    def indexed_text(self) -> str:
+        """Text as the ranking sees it: the clause counts as part of the page.
+
+        The measured reason (``ido-8ps.13`` re-check, 2 of 36 row-attempts
+        before, 8 after): a question about a person selects pages carrying that
+        person's words, and the listing that ANSWERS it names only the account
+        it was fetched inside. With the clause indexed, the page that is scoped
+        to the subject is the page the subject's question ranks first.
+        """
+        return f"{self.context}\n{self.text}" if self.context else self.text
 
 
 def page_token(alias: str, start_offset: int) -> str:
@@ -352,8 +392,15 @@ def page_token(alias: str, start_offset: int) -> str:
     return f"{alias}#p{int(start_offset)}"
 
 
-def _paginate(alias: str, text: str, *, token: str = "") -> list[EvidencePage]:
-    """Cut stored text into ``search_memory``-sized pages, on row boundaries."""
+def _paginate(alias: str, text: str, *, token: str = "",
+              context: str = "") -> list[EvidencePage]:
+    """Cut stored text into ``search_memory``-sized pages, on row boundaries.
+
+    ``context`` is carried by every page of the observation, not only the first:
+    a page is shown, ranked and cited on its own, so page 3 of a listing must
+    say whose listing it is exactly as page 1 does. It costs no page budget --
+    the clause is a header, and the page bytes are the stored bytes.
+    """
     pages: list[EvidencePage] = []
     start, order = 0, 0
     payload_bytes = len(text.encode("utf-8"))
@@ -362,15 +409,37 @@ def _paginate(alias: str, text: str, *, token: str = "") -> list[EvidencePage]:
         if not page["text"]:
             break
         pages.append(EvidencePage(alias=alias, text=page["text"], token=token,
-                                  order=order))
+                                  order=order, context=context))
         start, order = page["end_byte"], order + 1
     if not pages and text:
-        pages.append(EvidencePage(alias=alias, text=text, token=token, order=0))
+        pages.append(EvidencePage(alias=alias, text=text, token=token, order=0,
+                                  context=context))
     return pages
 
 
 def _alias_order(alias: str) -> int:
     return int(alias[1:]) if ALIAS_RE.match(alias) else 0
+
+
+def _row_context(scope: RuntimeHandleScope, alias: str,
+                 row: Mapping[str, Any]) -> str:
+    """The clause recorded for this archived observation, or ``""``.
+
+    The archive row carries it (``ido-8ps.15`` metadata column); the in-process
+    record answers for an archive written before the metadata existed, and for
+    a store the filler is reading from the same process that wrote it.
+    """
+    clause = row.get("context")
+    if clause:
+        return str(clause)
+    if clause is not None:
+        return ""
+    try:
+        from fastworkflow.observation_offloading.state import observation_context
+
+        return str(observation_context(scope, alias) or "")
+    except Exception:  # noqa: BLE001 - provenance is never worth a failed turn
+        return ""
 
 
 def collect_evidence(
@@ -385,10 +454,24 @@ def collect_evidence(
     * ``pages`` -- what an item may be fed, archived observations first then the
       stored result pages, in alias order.
     * ``haystacks`` -- per alias, the normalised concatenation of the COMPLETE
-      archived observation and every stored page filed under it. Validation
-      matches against this, never against the pages an item happened to be fed:
-      a value is checked against the whole observation it cites, exactly as
-      ido-8ps.5 checks an alias against the whole printed namespace.
+      archived observation, its context clause and every stored page filed
+      under it. Validation matches against this, never against the pages an
+      item happened to be fed: a value is checked against the whole observation
+      it cites, exactly as ido-8ps.5 checks an alias against the whole printed
+      namespace.
+
+      THE CLAUSE IS PART OF THE HAYSTACK (ido-8ps.15, stated because it is a
+      choice). The clause is a recorded fact about the observation -- the
+      identity of the context the command ran in, captured at dispatch and
+      printed above the text the agent read -- so a uid the filler can only get
+      from the scope line is evidence the turn holds, not evidence it invented.
+      Without it the filler could show a page headed "in Account 28c5..." and
+      then have to call that account unresolved, which is the failure this
+      change exists to remove. What does NOT change is the rule: the value must
+      still be a LITERAL substring of that text, after the same normalisation,
+      and it must still cite a printed alias. The clause widens what counts as
+      the cited observation's own text by ~50 bytes of recorded provenance; it
+      does not license a composed, summarised or remembered value.
     * ``printed_aliases`` -- the turn's ``O`` namespace. Archived rows whose key
       is not an execute ordinal (a bounded search answer is filed as ``O12#a1``)
       are not part of it and can never be cited.
@@ -401,21 +484,27 @@ def collect_evidence(
     except Exception as error:  # noqa: BLE001 - evidence is best effort
         logger.warning("evidence filler could not read the archive: %s", error)
         rows = []
+    contexts: dict[str, str] = {}
     for row in sorted(rows, key=lambda r: _alias_order(str(r.get("alias") or ""))):
         alias = str(row.get("alias") or "")
         if not ALIAS_RE.match(alias):
             continue
         printed.add(alias)
         text = str(row.get("text") or "")
+        clause = _row_context(scope, alias, row)
+        contexts[alias] = clause
         haystacks.setdefault(alias, []).append(text)
-        pages.extend(_paginate(alias, text))
+        if clause:
+            haystacks[alias].append(clause)
+        pages.extend(_paginate(alias, text, context=clause))
     for alias, token, text in _stored_pages(scope, handle_store):
         if alias not in printed:
             # A page whose listing observation is not in the namespace cannot be
             # cited, so it is not evidence this run may use.
             continue
         haystacks.setdefault(alias, []).append(text)
-        pages.extend(_paginate(alias, text, token=token))
+        pages.extend(_paginate(alias, text, token=token,
+                               context=contexts.get(alias, "")))
     return (pages,
             {alias: normalise("\n".join(parts)) for alias, parts in haystacks.items()},
             printed)
@@ -475,12 +564,18 @@ class EvidenceIndex:
     expansion (a validated account uid) therefore selects the listing of that
     account rather than the listing of that name.
 
+    ido-8ps.15: a page's CONTEXT CLAUSE is indexed with it (``indexed_text``),
+    so the identity of the context a listing was produced in ranks the listing
+    the same way an identifier printed on its rows does. That is the whole of
+    the selection half of this change, and it is what raised the ido-8ps.13
+    offline re-check from 2 of 36 row-attempts to 8.
+
     Everything here is a substring count over text the turn already stored.
     """
 
     def __init__(self, pages: Sequence[EvidencePage]) -> None:
         self.pages = list(pages)
-        self._lowered = [page.text.casefold() for page in self.pages]
+        self._lowered = [page.indexed_text().casefold() for page in self.pages]
         self._document_frequency: dict[str, int] = {}
 
     def frequency(self, term: str) -> int:
@@ -690,12 +785,19 @@ def validate_entry(
     printed_aliases: Iterable[str],
     haystacks: Mapping[str, str],
     item: str = "",
+    contexts: Optional[Mapping[str, str]] = None,
 ) -> WorksheetItem:
     """Apply the rule. Nothing here consults a model or a prompt.
 
     A value survives only if its alias is in the printed namespace and the value
-    occurs literally in that observation's stored text. Everything else is an
-    ``unresolved`` row that names why.
+    occurs literally in that observation's stored text -- which, since
+    ``ido-8ps.15``, includes the context clause recorded for that observation
+    (``collect_evidence`` puts it in the haystack; the reasoning is stated
+    there). Everything else is an ``unresolved`` row that names why.
+
+    ``contexts`` only decorates a surviving row with the clause of the
+    observation it cites, so the worksheet line names the subject. It is not
+    consulted by the rule.
     """
     if isinstance(entry, EvidenceFillEntry):
         payload: Mapping[str, Any] = entry.model_dump()
@@ -716,7 +818,8 @@ def validate_entry(
         return WorksheetItem(item=label, status=UNRESOLVED,
                              reason=VALUE_NOT_IN_CITED_OBSERVATION,
                              downgraded_from=value)
-    return WorksheetItem(item=label, status=FILLED, value=value, alias=alias)
+    return WorksheetItem(item=label, status=FILLED, value=value, alias=alias,
+                         context=str((contexts or {}).get(alias, "")))
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +921,7 @@ def run(
     if not items:
         raise FillerFailed("decomposition produced no items")
     pages, haystacks, printed = collect_evidence(scope, archive, handle_store)
+    contexts = {page.alias: page.context for page in pages if page.context}
     index = EvidenceIndex(pages)
     if not pages:
         worksheet.items = [WorksheetItem(item=item, status=UNRESOLVED,
@@ -886,7 +990,8 @@ def run(
                         reason="the filler returned no row for this item")
                     continue
                 answered[label] = validate_entry(entry, printed_aliases=printed,
-                                                 haystacks=haystacks, item=label)
+                                                 haystacks=haystacks, item=label,
+                                                 contexts=contexts)
         for label in dropped:
             answered[label] = WorksheetItem(
                 item=label, status=UNRESOLVED, retryable=False,
