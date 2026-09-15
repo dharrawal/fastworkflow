@@ -387,38 +387,5 @@ class AnnotationUsesTheRecordedContext(unittest.TestCase):
         self.assertIsNone(context_clause_of(self.scope, "O1"))
 
 
-class FillerValidationNamespace(unittest.TestCase):
-    """The evidence filler reads the archive, so its namespace cannot move."""
-
-    def setUp(self) -> None:
-        reset_runtime_state()
-        self.addCleanup(reset_runtime_state)
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.archive = RuntimeHandleArchive(
-            str(Path(self.tempdir.name) / "handles.sqlite3"))
-        self.scope = RuntimeHandleScope(
-            store_identity="s", channel_id="c", experiment_id="e",
-            task_id="t", attempt=1, turn_key="turn")
-
-    def test_aliases_and_haystacks_are_unaffected_by_the_clause(self) -> None:
-        from fastworkflow.evidence_filler import collect_evidence
-
-        body = "account_uid  label\ne8a0c3a1  Alan Cooper\n"
-        trajectory: dict = {
-            "thought_0": "t", "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "list_accounts"}, "observation_0": body,
-        }
-        record_context_clause(self.scope, "O1",
-                              context_clause("Account", "28c5aeb5 (Alan Cooper)"))
-        compact_trajectory(trajectory, scope=self.scope, selected_archive=self.archive)
-        pages, haystacks, printed = collect_evidence(self.scope, self.archive)
-        self.assertEqual(printed, {"O1"})
-        self.assertIn("e8a0c3a1", haystacks["O1"])
-        # The clause is presentation: the filler validates against the response.
-        self.assertNotIn("execute_workflow_query", haystacks["O1"])
-        self.assertTrue(pages)
-
-
 if __name__ == "__main__":
     unittest.main()

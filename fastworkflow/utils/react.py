@@ -118,10 +118,6 @@ class fastWorkflowReAct(Module):
 
         self.tools = tools
         self.react = dspy.Predict(react_signature)
-        # Kept so a subclass can build a VARIANT of the extract step without
-        # rebuilding the agent (ido-8ps.10). `self.extract` itself is never
-        # touched: the default path has to stay byte-identical.
-        self.extract_signature = fallback_signature
         self.extract = dspy.ChainOfThought(fallback_signature)
 
         self.inputs = {}
@@ -188,7 +184,9 @@ class fastWorkflowReAct(Module):
         if suspended is not None:
             return suspended
 
-        extract = self._extract_call(trajectory, input_args)
+        extract = self._call_with_potential_trajectory_truncation(
+            self.extract, trajectory, **input_args
+        )
         return dspy.Prediction(
             trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
         )
@@ -225,30 +223,11 @@ class fastWorkflowReAct(Module):
         if suspended is not None:
             return suspended
 
-        extract = self._extract_call(trajectory, input_args)
+        extract = self._call_with_potential_trajectory_truncation(
+            self.extract, trajectory, **input_args
+        )
         return dspy.Prediction(
             trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
-        )
-
-    def _on_finish_selected(
-        self, trajectory: dict[str, Any], input_args: dict[str, Any]
-    ) -> None:
-        """The agent has just selected ``finish``; extraction is what comes next.
-
-        A no-op here. It exists so work that must be ready BEFORE the extract
-        step, and that does not depend on the finish tool's own (constant)
-        observation, can start while the loop is still closing the step
-        (ido-8ps.10's evidence filler). Anything raised by an override would
-        turn a completed run into a failed turn, so overrides swallow their own
-        exceptions.
-        """
-
-    def _extract_call(
-        self, trajectory: dict[str, Any], input_args: dict[str, Any]
-    ) -> Any:
-        """The final extract step. The single place the answer is composed."""
-        return self._call_with_potential_trajectory_truncation(
-            self.extract, trajectory, **input_args
         )
 
     def _run_loop(
@@ -349,11 +328,6 @@ class fastWorkflowReAct(Module):
             self.current_trajectory[f"action_{idx}"] = (
                 f"{pred.next_tool_name}: {pred.next_tool_args}"
             )
-
-            if pred.next_tool_name == "finish":
-                # Before the tool runs: `finish` returns a constant, and the
-                # step's remaining work (the tool call, compaction) is local.
-                self._on_finish_selected(trajectory, input_args)
 
             try:
                 observation = self.tools[pred.next_tool_name](**pred.next_tool_args)

@@ -4,8 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
-import time
 from dataclasses import asdict
 from typing import Any, Callable, Mapping, Optional
 
@@ -209,12 +207,6 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.continuation_scope_id: str | None = None
         self._scope_factory = scope_factory
         self.max_forced_replans = max_forced_replans_from_env()
-        # Evidence filler (ido-8ps.10). One in-flight run at a time; a
-        # replan-time run is superseded by the finish-time one and is never read
-        # by the extractor.
-        self._filler: dict[str, Any] | None = None
-        self._replan_fillers: list[dict[str, Any]] = []
-        self._evidence_extract: Any = None
 
     @property
     def total_segments(self) -> int:
@@ -272,165 +264,14 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             trajectory.pop(f"{prefix}_{oldest}", None)
         return trajectory
 
-    # -- evidence filler (ido-8ps.10) --------------------------------------
-
-    def _filler_arguments(self) -> tuple[Any, Any, Any] | None:
-        """``(scope, observation archive, result-handle store)`` or None."""
-        from fastworkflow.observation_offloading.state import archive as default_archive
-
-        scope = getattr(self, "continuation_scope", None)
-        if scope is None:
-            return None
-        store = getattr(self, "observation_archive", None) or default_archive()
-        try:
-            from fastworkflow import result_handles
-
-            handles = result_handles.store()
-        except Exception:  # noqa: BLE001 - pages are evidence, not a dependency
-            handles = None
-        return scope, store, handles
-
-    def _start_filler(self, input_args: Mapping[str, Any], *, trigger: str):
-        """Start one filler run in the background. Never raises.
-
-        Returns the run box (``thread``/``worksheet``/``error``) or None when
-        the filler is off or there is nothing for it to read.
-        """
-        from fastworkflow import evidence_filler
-
-        if not evidence_filler.evidence_filler_enabled():
-            return None
-        arguments = self._filler_arguments()
-        if arguments is None:
-            return None
-        scope, store, handles = arguments
-        deadline = time.monotonic() + evidence_filler.timeout_seconds()
-        box: dict[str, Any] = {"trigger": trigger, "deadline": deadline,
-                               "started_at": time.monotonic()}
-        request = str(input_args.get("user_query") or "")
-
-        def work() -> None:
-            try:
-                worksheet = evidence_filler.run(
-                    request, scope, store, handles, trigger=trigger,
-                    deadline=deadline,
-                )
-                box["worksheet"] = worksheet
-                record_event({"kind": "filler_finished", "scope_id": scope.scope_id,
-                              **worksheet.measures()})
-            except BaseException as error:  # noqa: BLE001 - a thread must not die loudly
-                box["error"] = type(error).__name__
-                record_event({"kind": "filler_failed", "scope_id": scope.scope_id,
-                              "trigger": trigger, "error": type(error).__name__,
-                              "detail": str(error)[:300]})
-
-        thread = threading.Thread(target=work, name=f"evidence-filler-{trigger}",
-                                  daemon=True)
-        box["thread"] = thread
-        thread.start()
-        return box
-
-    def _on_finish_selected(self, trajectory: dict[str, Any],
-                            input_args: dict[str, Any]) -> None:
-        """Start the finish-time filler while the loop closes the finish step.
-
-        The window is short by construction -- ``finish`` returns a constant and
-        what follows is compaction, which makes no model call -- so the join
-        wait recorded at extract time is very nearly the filler's whole latency.
-        It is measured rather than assumed (``filler_joined.join_wait_ms``).
-        """
-        try:
-            if self._filler is None:
-                self._filler = self._start_filler(input_args, trigger="finish")
-        except Exception as error:  # noqa: BLE001
-            logger.warning("evidence filler could not start: %s: %s",
-                           type(error).__name__, error)
-
-    def _join_filler(self, input_args: Mapping[str, Any]):
-        """The finish-time worksheet, or None if the extractor must run as today."""
-        from fastworkflow import evidence_filler
-
-        scope_id = getattr(self, "continuation_scope_id", None)
-        for box in self._replan_fillers:
-            thread = box.get("thread")
-            if thread is not None and thread.is_alive():
-                record_event({"kind": "filler_superseded", "scope_id": scope_id,
-                              "trigger": box.get("trigger")})
-        self._replan_fillers = []
-        if self._filler is None:
-            # Exhaustion and the replan wall reach extraction without the agent
-            # ever selecting `finish`, so there is no background start to join.
-            self._filler = self._start_filler(input_args, trigger="finish")
-        box = self._filler
-        if box is None:
-            return None
-        thread = box["thread"]
-        started = time.monotonic()
-        remaining = max(0.0, box["deadline"] - started)
-        thread.join(timeout=remaining + 5.0)
-        join_wait_ms = round((time.monotonic() - started) * 1000)
-        record_event({"kind": "filler_joined", "scope_id": scope_id,
-                      "trigger": box.get("trigger"),
-                      "join_wait_ms": join_wait_ms,
-                      "background_window_ms": round(
-                          (started - box["started_at"]) * 1000),
-                      "completed": not thread.is_alive()})
-        worksheet = box.get("worksheet")
-        if worksheet is None or not getattr(worksheet, "items", None):
-            record_event({"kind": "filler_fallback", "scope_id": scope_id,
-                          "trigger": box.get("trigger"),
-                          "reason": ("join_timeout" if thread.is_alive()
-                                     else box.get("error") or "no_worksheet")})
-            return None
-        return worksheet
-
-    def _extract_call(self, trajectory: dict[str, Any],
-                      input_args: dict[str, Any]) -> Any:
-        """The extract step, with the validated worksheet when there is one.
-
-        With the flag off this is the base implementation, reached without
-        building or touching anything: the extract prompt is the one d21883d
-        produced, byte for byte.
-        """
-        from fastworkflow import evidence_filler
-
-        if not evidence_filler.evidence_filler_enabled():
-            return super()._extract_call(trajectory, input_args)
-        worksheet = None
-        try:
-            worksheet = self._join_filler(input_args)
-        except Exception as error:  # noqa: BLE001
-            logger.warning("evidence filler join failed: %s: %s",
-                           type(error).__name__, error)
-            record_event({"kind": "filler_fallback",
-                          "scope_id": getattr(self, "continuation_scope_id", None),
-                          "trigger": "finish", "reason": type(error).__name__})
-        if worksheet is None:
-            return super()._extract_call(trajectory, input_args)
-        if self._evidence_extract is None:
-            self._evidence_extract = dspy.ChainOfThought(
-                evidence_filler.evidence_extract_signature(self.extract_signature))
-        rendered = worksheet.render()
-        extract = self._call_with_potential_trajectory_truncation(
-            self._evidence_extract, trajectory,
-            **{**input_args, "verified_evidence": rendered},
-        )
-        try:
-            answer = str((extract or {}).get("final_answer") or "")
-            record_event({"kind": "answer_used_worksheet",
-                          "scope_id": getattr(self, "continuation_scope_id", None),
-                          "worksheet_utf8_bytes": len(rendered.encode("utf-8")),
-                          **evidence_filler.answer_used_worksheet(worksheet, answer)})
-        except Exception as error:  # noqa: BLE001 - a measure never fails a turn
-            logger.warning("evidence filler measure failed: %s", error)
-        return extract
-
     def _finish_prediction(
         self,
         trajectory: dict[str, Any],
         input_args: dict[str, Any],
     ) -> dspy.Prediction:
-        extract = self._extract_call(trajectory, input_args)
+        extract = self._call_with_potential_trajectory_truncation(
+            self.extract, trajectory, **input_args
+        )
         return dspy.Prediction(
             trajectory=trajectory,
             exhausted=self._exhausted_last_run,
@@ -506,12 +347,6 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.current_trajectory[artifact_key] = artifact
         self.forced_replans += 1
         self.iteration_counter = 0
-        # The worksheet a replan produces is recorded, never read by the
-        # extractor: the finish-time run reads the same archive plus everything
-        # the later segments added, so it supersedes this one by construction.
-        replan_filler = self._start_filler(input_args, trigger="forced_replan")
-        if replan_filler is not None:
-            self._replan_fillers.append(replan_filler)
         record_event(
             {
                 "kind": "forced_replan",
@@ -569,8 +404,6 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.iteration_counter = 0
         self.forced_replans = 0
         self.truncated_execute_steps = 0
-        self._filler = None
-        self._replan_fillers = []
         self.bind_scope()
         trajectory: dict[str, Any] = {}
         max_iters = int(input_args.pop("max_iters", self.max_iters))
