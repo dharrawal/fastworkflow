@@ -207,7 +207,12 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # fw.agent.tool_call gained the §12.1.1 capture keys at its third emission site
 # (workflow_agent.py, previously the only unmigrated one); and fw.nlu.intent's
 # `classifier` attribute gained `topk_scores`.
-SPAN_CONTRACT_VERSION = 3
+#
+# v4: routing. fw.nlu.intent gained R1's known-name refusal keys (ido-8ps.8,
+# declared here for the first time -- the emitter has written them since
+# c976964) and the auto-navigation flag; fw.command.execute gained the four keys
+# an auto-navigated step carries (ido-8ps.9).
+SPAN_CONTRACT_VERSION = 4
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -313,8 +318,13 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             {"agent_query", "attempt", "user_response", "human_wait_ms"}
         ),
     ),
+    # v2 (ido-8ps.9): the four auto-navigation keys. They are present only on a
+    # step the framework composed -- the declared entry command and the command
+    # the agent originally sent -- and absent on every step the agent typed, so
+    # a reader counts auto-navigated executes by the presence of the key rather
+    # than by a value.
     SPAN_COMMAND_EXECUTE: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "raw_command",
@@ -322,6 +332,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "response_text",
                 "success",
                 "error_type",
+                "auto_navigated",
+                "auto_navigation_rule",
+                "auto_navigation_step",
+                "entered_context",
                 ATTR_COMMAND_CALL_ID,
                 ATTR_PARENT_CALL_ID,
                 ATTR_CHILD_CALLS,
@@ -399,14 +413,22 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         version=1,
         attributes=frozenset({"model", "replan_trigger", "plan"}),
     ),
+    # v2: R1's known-name refusal (ido-8ps.8) has written the three
+    # `known_name_*` keys since c976964 without being declared here, and
+    # ido-8ps.9 adds `auto_navigation_enabled` so a measured run's flag is
+    # readable off the routing event rather than off the runner's env file.
     SPAN_NLU_INTENT: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "context",
                 "stage",
                 "utterance",
                 "matcher_layer",
+                "known_name_foreign_context",
+                "known_name_owner_contexts",
+                "known_name_foreign_context_hint",
+                "auto_navigation_enabled",
                 "escalation_outcome",
                 "fuzzy_distance",
                 "fuzzy_threshold",

@@ -221,6 +221,10 @@ def reset_runtime_state() -> None:
     hold rows for the same turn, so leaving them behind would let a new turn
     read a previous one's hot copy. Stored SQLite rows are untouched on both
     sides — this resets residency, never evidence.
+
+    The auto-navigation registry goes with them for the same reason: it is
+    turn-scoped by contract (ido-8ps.9), so a handle written in one turn must
+    never resolve to a context instance another turn entered.
     """
     global _default_archive
     with _lock:
@@ -230,9 +234,10 @@ def reset_runtime_state() -> None:
         _events.clear()
         _event_log_failures.clear()
         _default_archive = None
-    from fastworkflow import result_handles
+    from fastworkflow import auto_navigation, result_handles
 
     result_handles.reset_result_handle_state()
+    auto_navigation.reset_auto_navigation_state()
 
 
 def stored_handles(scope: Optional[RuntimeHandleScope] = None) -> dict[str, dict[str, Any]]:

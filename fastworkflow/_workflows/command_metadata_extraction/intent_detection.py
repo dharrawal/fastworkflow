@@ -22,6 +22,18 @@ from fastworkflow.model_pipeline_training import (
     CommandRouter,
     GLOBAL_CONTEXT_FOLDER,
 )
+# `auto_navigation` owns the entry-command declaration contract (ido-8ps.9
+# part a): one canonical source for "which command enters this context", read
+# by the hint here and by the dispatcher there. Nothing in the routing
+# definition or the context model records the fact, and inferring it from a
+# command's NAME would bake one workflow's spelling conventions into the
+# framework. `CONTEXT_ENTER_COMMAND_ATTRS` is re-exported because this module
+# is where R1's callers already look for it.
+from fastworkflow import auto_navigation
+from fastworkflow.auto_navigation import (
+    CONTEXT_ENTER_COMMAND_ATTRS,
+    declared_entry_commands,
+)
 from fastworkflow.nlu_labels import is_escalation, is_non_routable
 from fastworkflow.train.artifact_versioning import VERSIONS_DIRNAME
 
@@ -81,17 +93,6 @@ _FUZZY_MATCHER_VERSION = "levenshtein-leading-window/1"
 # facts -- this one is a deterministic refusal to answer, and a span that says
 # so is how a misroute is counted after the fact.
 MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT = "known_name_foreign_context"
-
-#: Class attribute a workflow's context callback class may declare to say which
-#: command enters that context, e.g. `enter_command = "open_account_by_uid
-#: <account_uid>"` on the `Account` context, or `enter_command =
-#: "open_controls_monitor"` on a workspace that takes no parameter. It is the
-#: only generic source for that fact: nothing in the routing definition or the
-#: context model records which command sets the current context, and inferring
-#: it from a command's NAME would bake one workflow's spelling conventions into
-#: the framework. Undeclared, the hint names the owning context alone, which is
-#: still the fact the caller was missing.
-CONTEXT_ENTER_COMMAND_ATTRS = ("enter_command", "enter_commands")
 
 # Reported when the classifier artifacts are not under the R4 versioned layout. A
 # tree that has never been trained under versioning has no version to report, and
@@ -454,33 +455,16 @@ class CommandNamePrediction:
     def enter_commands_for(self, context_name: str) -> list[str]:
         """The command(s) a workflow declares as entering *context_name*.
 
-        Read from the context's own callback class (`CONTEXT_ENTER_COMMAND_ATTRS`),
-        which is the only place the fact is recorded. Empty when the workflow
-        declares nothing, when the context has no callback class, or when
-        loading it fails -- a hint that names the context alone is worth more
-        than a failed turn, so nothing here is allowed to raise.
+        Read through `auto_navigation.declared_entry_commands`, which owns the
+        declaration contract; the context's own callback class is the only
+        place the fact is recorded. Empty when the workflow declares nothing,
+        when the context has no callback class, or when loading it fails -- a
+        hint that names the context alone is worth more than a failed turn, so
+        nothing here is allowed to raise.
         """
         if context_name in self._enter_commands:
             return self._enter_commands[context_name]
-        declared: list[str] = []
-        try:
-            app_crd = fastworkflow.RoutingRegistry.get_definition(
-                self.app_workflow_folderpath)
-            context_class = app_crd.context_model.get_context_class(
-                context_name, fastworkflow.ModuleType.CONTEXT_CLASS)
-            for attribute in CONTEXT_ENTER_COMMAND_ATTRS:
-                value = getattr(context_class, attribute, None)
-                if isinstance(value, str) and value.strip():
-                    declared = [value.strip()]
-                    break
-                if isinstance(value, (list, tuple)) and value:
-                    declared = [str(v).strip() for v in value if str(v).strip()]
-                    break
-        except Exception as exc:  # noqa: BLE001 - a hint must not fail a turn
-            logger.debug(
-                f"no enter_command declaration readable for context "
-                f"'{context_name}': {exc!r}")
-            declared = []
+        declared = declared_entry_commands(self.app_workflow_folderpath, context_name)
         self._enter_commands[context_name] = declared
         return declared
 
@@ -624,6 +608,12 @@ class CommandNamePrediction:
             # how often the hint was given and how often the next call followed
             # it, without re-deriving the text from the inventory.
             nlu_trace["known_name_foreign_context_hint"] = hint
+            # ido-8ps.9 part b: the flag is on the routing event whether or not
+            # anything is dispatched, so a measured run's setting is readable
+            # from the trace instead of from the runner's env file.
+            nlu_trace["auto_navigation_enabled"] = (
+                auto_navigation.auto_navigation_enabled()
+            )
             return CommandNamePrediction.Output(
                 command_name=None,
                 known_name_owner_contexts=owner_contexts,

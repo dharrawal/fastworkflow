@@ -1,5 +1,5 @@
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow import auto_navigation, tracing
 from fastworkflow.command_interfaces import CommandExecutorInterface
 
 from fastworkflow import Action, CommandOutput, ChatSession
@@ -11,6 +11,7 @@ from fastworkflow.command_routing import RoutingDefinition
 from typing import Optional
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.auto_navigation import AUTO_NAVIGATION_ARTIFACT
 
 
 # ------------------------------------------------------------------
@@ -66,7 +67,19 @@ class CommandExecutor(CommandExecutorInterface):
         cls,
         chat_session: 'fastworkflow.ChatSession',
         command: str,
+        *,
+        auto_navigation_step: Optional[dict] = None,
     ) -> fastworkflow.CommandOutput:
+        """Run one command as an execute step.
+
+        ``auto_navigation_step`` is set only on the two steps an auto-navigation
+        dispatch composes (ido-8ps.9 part b): the declared entry command, then
+        the command the agent originally sent. Both go through this method, so
+        both get an ordinary ``fw.command.execute`` span, an ordinary execution
+        record and an ordinary observation -- the A1/A2 conventions hold because
+        nothing about the step path is special. The only difference is the four
+        attributes naming the dispatch on the span.
+        """
         claim_check = getattr(
             chat_session, "assert_experiment_claim_current", None
         )
@@ -87,6 +100,23 @@ class CommandExecutor(CommandExecutorInterface):
         call_id = tracing.new_command_call_id()
         parent_call_id = tracing.current_call_id()
 
+        # ido-8ps.9 part b. Written with literal keys, like every other
+        # attribute on this span, so the span-contract scan can recover them
+        # statically -- a key it cannot read is a contract nobody checked. They
+        # are absent on an ordinary step: "the agent typed this" and "the
+        # framework composed this" must be different span shapes, not the same
+        # shape with a False in it.
+        navigation_attributes: dict = {}
+        if auto_navigation_step:
+            navigation_attributes = {
+                "auto_navigated": True,
+                "auto_navigation_rule": auto_navigation_step.get(
+                    "auto_navigation_rule"),
+                "entered_context": auto_navigation_step.get("entered_context"),
+                "auto_navigation_step": auto_navigation_step.get(
+                    "auto_navigation_step"),
+            }
+
         # fw.command.execute boundary span (observability design §3.1, D3).
         # chat_session is duck-typed (WEC, or ChatSession delegating to its
         # core); with no sink or open turn the helpers no-op.
@@ -98,6 +128,7 @@ class CommandExecutor(CommandExecutorInterface):
                 "raw_command": command,
                 tracing.ATTR_COMMAND_CALL_ID: call_id,
                 tracing.ATTR_PARENT_CALL_ID: parent_call_id,
+                **navigation_attributes,
             },
         )
 
@@ -109,6 +140,11 @@ class CommandExecutor(CommandExecutorInterface):
             if span is not None
             else None
         )
+
+        # The context this dispatch started in, by name. Cheap (a class name)
+        # and read outside the span gate, because the registry below needs it
+        # whether or not anything is being traced.
+        context_name_before = cls._context_name(chat_session)
 
         # Bound before the try so the error path can still file this dispatch's
         # inner hops when call_scope itself is what raised.
@@ -188,6 +224,14 @@ class CommandExecutor(CommandExecutorInterface):
         # still be read back through a public API.
         command_output.command_call_id = call_id
 
+        # ido-8ps.9 part a: the turn-scoped registry rule 3 reads. Recorded
+        # unconditionally, not only when a span opened -- the registry is
+        # runtime behaviour, not capture, and a run with tracing off must
+        # resolve the same handles. It is a lookup table from a handle the agent
+        # can WRITE to the context instance it denotes; nothing scans it for
+        # what happened recently.
+        cls._remember_context_entry(chat_session, command_output, context_name_before)
+
         context_after = None
         consequence = None
         if span is not None:
@@ -231,6 +275,52 @@ class CommandExecutor(CommandExecutorInterface):
         )
         return command_output
 
+    @classmethod
+    def _context_name(cls, chat_session: 'fastworkflow.ChatSession') -> Optional[str]:
+        """The current command context's name, or None. Never raises."""
+        try:
+            workflow = cls._active_workflow(chat_session)
+            return None if workflow is None else workflow.current_command_context_name
+        except Exception:
+            return None
+
+    @classmethod
+    def _remember_context_entry(
+        cls,
+        chat_session: 'fastworkflow.ChatSession',
+        command_output: fastworkflow.CommandOutput,
+        context_name_before: Optional[str],
+    ) -> None:
+        """Record a context this command entered, for rule 3 to look up later.
+
+        Only a SUCCESSFUL command that actually moved the context is recorded,
+        and only the three facts rule 3 rebuilds an entry from: the context, the
+        parameter values that entered it, and the ``O`` alias of this step. It is
+        never consulted except to answer "what does this handle denote".
+        """
+        try:
+            if not command_output.success:
+                return
+            context_name_after = cls._context_name(chat_session)
+            if not context_name_after or context_name_after == context_name_before:
+                return
+            parameters = command_output.command_parameters
+            if hasattr(parameters, "model_dump"):
+                parameters = parameters.model_dump()
+            if not isinstance(parameters, dict):
+                parameters = {}
+            from fastworkflow.result_handles import current_execute_alias
+
+            auto_navigation.record_context_entry(
+                auto_navigation.current_scope_id(),
+                context=context_name_after,
+                command_name=(command_output.command_name or "").split("/")[-1],
+                parameters=parameters,
+                alias=current_execute_alias(),
+            )
+        except Exception:  # noqa: BLE001 - never fail a command over the registry
+            pass
+
     @staticmethod
     def _active_workflow(chat_session: 'fastworkflow.ChatSession'):
         """The workflow whose command context this dispatch acts on, or None.
@@ -257,7 +347,17 @@ class CommandExecutor(CommandExecutorInterface):
                 command = command)
         )
 
-        if command_output.command_handled:       
+        if command_output.command_handled:
+            # ido-8ps.9 part b: the CME decided this utterance names a command
+            # owned by a context the walk cannot reach, and that the context
+            # model says how to enter it without guessing. Running the plan is
+            # this frame's job: the CME has the workflow but not the session,
+            # and only the session can put a command through the ordinary step
+            # path.
+            plan = (command_output.command_response.artifacts or {}).get(
+                AUTO_NAVIGATION_ARTIFACT)
+            if plan:
+                return cls._auto_navigate(chat_session, plan)
             # important to clear the current command mode from the workflow context
             if "is_assistant_mode_command" in chat_session.cme_workflow._context:
                 del chat_session.cme_workflow._context["is_assistant_mode_command"]
@@ -325,6 +425,91 @@ class CommandExecutor(CommandExecutorInterface):
             del chat_session.cme_workflow._context["is_assistant_mode_command"]
 
         return command_output
+
+    @classmethod
+    def _auto_navigate(
+        cls,
+        chat_session: 'fastworkflow.ChatSession',
+        plan: dict,
+    ) -> fastworkflow.CommandOutput:
+        """[enter the owning context; run the original command], in that order.
+
+        Both steps go through ``invoke_command``, so each is a real execute step
+        with its own span, its own execution record and its own response text;
+        the agent sees both, labelled, in the observation of the tool call it
+        made. An entry step that fails, or that succeeds WITHOUT moving the
+        context, STOPS the dispatch: the original command is not run in the
+        context that had already declined it.
+
+        ``auto_navigation.dispatching`` marks the two inner steps so that a
+        foreign name declined INSIDE them cannot start a second dispatch: the
+        rule composes two steps, not a search.
+        """
+        rule = plan.get("rule")
+        entered = plan.get("entered_context")
+        entry_utterance = str(plan.get("entry_utterance") or "")
+        original_utterance = str(plan.get("original_utterance") or "")
+        marks = {
+            auto_navigation.ATTR_AUTO_NAVIGATED: True,
+            auto_navigation.ATTR_AUTO_NAVIGATION_RULE: rule,
+            auto_navigation.ATTR_ENTERED_CONTEXT: entered,
+        }
+        banner = (
+            f"[auto-navigation rule {rule}] '{plan.get('command_name')}' is owned by "
+            f"the {entered} context; entered it with '{entry_utterance}'."
+        )
+        context_before = cls._context_name(chat_session)
+        with auto_navigation.dispatching():
+            entry_output = cls.invoke_command(
+                chat_session, entry_utterance,
+                auto_navigation_step={
+                    **marks,
+                    auto_navigation.ATTR_AUTO_NAVIGATION_STEP:
+                        auto_navigation.STEP_ENTRY,
+                },
+            )
+            entry_text = entry_output.command_response.response or ""
+            # The declaration said this command enters that context. Offline,
+            # the validator can only check that the command exists and could be
+            # run from here -- whether it MOVES the context is a runtime fact,
+            # and this is where it becomes one. A declared entry command with an
+            # optional identifier (IDO's `open_finding <finding_uid>`, whose
+            # parameter has a default) succeeds while listing rather than
+            # entering; running the original command after that would be running
+            # it in the context that already declined it. A session that
+            # cannot name its context either way is not evidence of
+            # anything, so the dispatch proceeds.
+            entered_context_name = cls._context_name(chat_session)
+            did_not_move = (
+                context_before is not None
+                and entered_context_name is not None
+                and entered_context_name == context_before
+            )
+            if not entry_output.success or did_not_move:
+                why = "did not enter" if entry_output.success else "could not enter"
+                entry_output.command_response.response = (
+                    f"[auto-navigation rule {rule}] '{entry_utterance}' {why} the "
+                    f"{entered} context, so '{plan.get('command_name')}' was not "
+                    f"run. Enter {entered} yourself, then run it.\n{entry_text}"
+                )
+                entry_output.command_response.artifacts["command_handled"] = True
+                entry_output.command_response.success = False
+                return entry_output
+
+            final_output = cls.invoke_command(
+                chat_session, original_utterance,
+                auto_navigation_step={
+                    **marks,
+                    auto_navigation.ATTR_AUTO_NAVIGATION_STEP:
+                        auto_navigation.STEP_ORIGINAL,
+                },
+            )
+        final_text = final_output.command_response.response or ""
+        final_output.command_response.response = (
+            f"{banner}\n{entry_text}\n\n{final_text}".strip()
+        )
+        final_output.command_response.artifacts.update(marks)
+        return final_output
 
     @classmethod
     def perform_action(

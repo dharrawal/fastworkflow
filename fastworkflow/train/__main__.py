@@ -760,6 +760,27 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
 
     return True
 
+
+def _report_entry_contracts(workflow_path: str) -> None:
+    """Print the auto-navigation entry-contract report for *workflow_path*.
+
+    Never raises: the validator reads a routing definition and some parameter
+    models, and a workflow that cannot be read here will fail louder a moment
+    later in training itself.
+    """
+    try:
+        from fastworkflow.auto_navigation import validate_entry_contracts
+
+        report = validate_entry_contracts(workflow_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"{Fore.YELLOW}entry-contract check skipped: {exc!r}{Style.RESET_ALL}")
+        return
+    if not report.contracts and not report.issues:
+        return
+    colour = Fore.GREEN if report.ok else Fore.YELLOW
+    print(f"{colour}{report.render()}{Style.RESET_ALL}")
+
+
 def train_main(args):
     """Main function to train the workflow."""
     # Resolve the workflow path to absolute path to handle relative paths correctly
@@ -784,6 +805,13 @@ def train_main(args):
         print(f"LITELLM_API_KEY_SYNDATA_GEN password env var not found! OK if this is Bedrock. Otherwise, is the password env file missing or incorrect path? Path: {args.passwords_file_path}")
 
     fastworkflow.init(env_vars=env_vars)
+
+    # ido-8ps.9 part a: check the workflow's `enter_command` declarations while
+    # nothing has been trained yet. Offline and warn-only -- a declaration that
+    # names a command the workflow does not own, or one whose owner this context
+    # cannot reach, disables auto-navigation for that context at runtime; it is
+    # not a reason to refuse to train a router that has nothing to do with it.
+    _report_entry_contracts(workflow_path)
 
     regenerate_utterances = getattr(args, "regenerate_utterances", False)
     # Check if fastworkflow has been trained, and train it if not. The regeneration
