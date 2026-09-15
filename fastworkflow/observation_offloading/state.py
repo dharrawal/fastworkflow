@@ -79,6 +79,44 @@ def archive() -> RuntimeHandleArchive:
     return _default_archive
 
 
+def scope_for_host(host: Any) -> RuntimeHandleScope:
+    """The turn scope of the session this call is running under.
+
+    ``build_tool_agent`` resolves the same scope for the ReAct loop; this is the
+    same computation reached from a command's own frame, where the only handle
+    on the session is the trace host ``CommandExecutor.invoke_command`` bound.
+    Keeping one implementation matters: a scope computed two ways is two scopes
+    the moment either changes, and a handle stored under one of them would be
+    unreachable under the other.
+    """
+    from fastworkflow import state_paths, tracing
+
+    claim = tracing.get_experiment_claim(host)
+    channel_id = str(tracing.get_channel_id(host) or "unbound")
+    turn_key = str(tracing.get_turn_key(host) or channel_id)
+    sink = tracing.get_sink(host)
+    sink_store = getattr(sink, "store", None)
+    identity_value = getattr(sink_store, "store_identity", None)
+    if callable(identity_value):
+        identity_value = identity_value()
+    getter = getattr(host, "get_active_workflow", None)
+    active_workflow = getter() if callable(getter) else None
+    workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
+    store_identity = str(
+        identity_value
+        or getattr(sink, "store_identity", None)
+        or state_paths.observability_db(workflow_path)
+    )
+    return RuntimeHandleScope(
+        store_identity=store_identity,
+        channel_id=channel_id,
+        experiment_id=str(claim.get("experiment_id") or "unbound"),
+        task_id=str(claim.get("task_id") or "unbound"),
+        attempt=int(claim.get("attempt") or 0),
+        turn_key=turn_key,
+    )
+
+
 def handle_key(scope: RuntimeHandleScope, alias: str) -> str:
     return f"{scope.scope_id}:{alias}"
 
@@ -177,6 +215,13 @@ def next_search_answer_sequence(scope: RuntimeHandleScope) -> int:
 
 
 def reset_runtime_state() -> None:
+    """Drop every process-local cache the offloading runtime holds.
+
+    The result-handle caches go with them: they are keyed by the same scope and
+    hold rows for the same turn, so leaving them behind would let a new turn
+    read a previous one's hot copy. Stored SQLite rows are untouched on both
+    sides — this resets residency, never evidence.
+    """
     global _default_archive
     with _lock:
         _handles.clear()
@@ -185,6 +230,9 @@ def reset_runtime_state() -> None:
         _events.clear()
         _event_log_failures.clear()
         _default_archive = None
+    from fastworkflow import result_handles
+
+    result_handles.reset_result_handle_state()
 
 
 def stored_handles(scope: Optional[RuntimeHandleScope] = None) -> dict[str, dict[str, Any]]:

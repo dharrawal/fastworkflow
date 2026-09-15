@@ -6,7 +6,7 @@ import os
 from typing import Any, Callable, Optional
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow import state_paths
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.compact import compact_trajectory
@@ -17,7 +17,11 @@ from fastworkflow.observation_offloading.continuation import (
 )
 from fastworkflow.observation_offloading.manifest import install_span_policy
 from fastworkflow.observation_offloading.search import search_memory
-from fastworkflow.observation_offloading.state import HANDLE_ARCHIVE_ENV, record_event
+from fastworkflow.observation_offloading.state import (
+    HANDLE_ARCHIVE_ENV,
+    record_event,
+    scope_for_host,
+)
 from fastworkflow.utils.react import fastWorkflowReAct
 
 ENABLED_ENV = "FW_OBSERVATION_OFFLOADING"
@@ -31,30 +35,10 @@ def enabled() -> bool:
 
 
 def _scope_for_session(chat_session: Any) -> RuntimeHandleScope:
-    claim = tracing.get_experiment_claim(chat_session)
-    channel_id = str(tracing.get_channel_id(chat_session) or "unbound")
-    turn_key = str(tracing.get_turn_key(chat_session) or channel_id)
-    sink = tracing.get_sink(chat_session)
-    sink_store = getattr(sink, "store", None)
-    identity_value = getattr(sink_store, "store_identity", None)
-    if callable(identity_value):
-        identity_value = identity_value()
-    getter = getattr(chat_session, "get_active_workflow", None)
-    active_workflow = getter() if callable(getter) else None
-    workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
-    store_identity = str(
-        identity_value
-        or getattr(sink, "store_identity", None)
-        or state_paths.observability_db(workflow_path)
-    )
-    return RuntimeHandleScope(
-        store_identity=store_identity,
-        channel_id=channel_id,
-        experiment_id=str(claim.get("experiment_id") or "unbound"),
-        task_id=str(claim.get("task_id") or "unbound"),
-        attempt=int(claim.get("attempt") or 0),
-        turn_key=turn_key,
-    )
+    """The turn scope for this session. One implementation, in state.py, so a
+    handle stored from a command's frame and one stored from the ReAct loop are
+    stored under the same scope."""
+    return scope_for_host(chat_session)
 
 
 def build_compacting_step(

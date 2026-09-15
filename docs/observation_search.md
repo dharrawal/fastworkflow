@@ -100,6 +100,14 @@ printing a handle can never be what makes an offload look profitable — a
 response that saves 1,023 B stays inline even though the printed text is ~34 B
 longer.
 
+**Handles a command can page.** The same `O` alias identifies a stored, pageable
+copy of a listing when the producing command declares one: see
+[Result handles](result_handles.md). Search answers questions inside one
+observation's text; a result handle returns the listing's own rows, a page at a
+time or filtered by a literal, and can continue the query against the backend
+beyond the rows the command materialised. Both are reached with the alias
+printed on the observation.
+
 ## Every execute observation is archived
 
 Persistence no longer waits for an offload decision. When a step completes, the
