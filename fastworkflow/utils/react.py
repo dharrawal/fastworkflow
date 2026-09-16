@@ -488,6 +488,73 @@ class fastWorkflowReAct(Module):
             return trajectory, None, budget, scope_id
         return rehydrated, report, budget, scope_id
 
+    def _cover_for_extract(self, trajectory, scope_id, input_args):
+        """``(trajectory_for_the_extractor, coverage_report)``.
+
+        ``ido-8ps.22`` / ``ido-8ps.23``. Runs immediately AFTER rehydration, on
+        the copy it returned, and adds exactly one key -- first, so the adapter
+        renders the coverage rule before the evidence it governs.
+
+        With ``FW_ANSWER_COVERAGE`` unset or 0 this returns the object it was
+        given and no report, so the extract call is byte-for-byte the call it was
+        at ``4832b3c``. A failure anywhere here falls back to that same call: an
+        answer without a coverage statement is the status quo, and no answer is
+        worse than either.
+        """
+        from fastworkflow import answer_coverage
+        from fastworkflow.observation_offloading.state import record_event
+
+        if not answer_coverage.answer_coverage_enabled():
+            return trajectory, None
+        try:
+            covered, report = answer_coverage.build_statement(
+                trajectory,
+                user_query=input_args.get("user_query"),
+                exhausted=bool(self._exhausted_last_run),
+                scope=getattr(self, "continuation_scope", None),
+                archive=getattr(self, "observation_archive", None),
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "answer coverage skipped: %s: %s", type(error).__name__, error
+            )
+            record_event(
+                {
+                    "kind": "coverage_failed",
+                    "scope_id": scope_id,
+                    "error": type(error).__name__,
+                    "detail": str(error)[:300],
+                }
+            )
+            return trajectory, None
+        record_event(
+            {"kind": "coverage_statement", "scope_id": scope_id, **report.as_event()}
+        )
+        return covered, report
+
+    def _record_coverage_post_check(self, report, prediction, scope_id):
+        """Count unavailability phrasing near the items the statement named.
+
+        Measurement only. It never edits the answer, never retries the call and
+        never fails the turn -- ``ido-8ps.22`` asked for a number, not a gate.
+        """
+        from fastworkflow import answer_coverage
+        from fastworkflow.observation_offloading.state import record_event
+
+        try:
+            answer = _final_answer_text(prediction)
+            check = answer_coverage.post_check(answer, report.unobserved)
+            record_event(
+                {
+                    "kind": "coverage_post_check",
+                    "scope_id": scope_id,
+                    "exhausted": report.exhausted,
+                    **check.as_event(),
+                }
+            )
+        except Exception:  # noqa: BLE001 - a measurement must never fail a turn
+            logger.debug("answer coverage post-check failed", exc_info=True)
+
     def _record_extract_finished(
         self, report, *, budget, scope_id, started, truncations_before
     ):
@@ -521,42 +588,54 @@ class fastWorkflowReAct(Module):
         )
 
     def _extract_prediction(self, trajectory, **input_args):
-        """The extract call, with answer-time rehydration when it is enabled."""
+        """The extract call, with rehydration and the coverage statement."""
         selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
-        if report is None:
+        selected, coverage = self._cover_for_extract(selected, scope_id, input_args)
+        if report is None and coverage is None:
             return self._call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
         truncations_before = getattr(self, "_truncation_count", 0)
         started = time.monotonic()
+        prediction = None
         try:
-            return self._call_with_potential_trajectory_truncation(
+            prediction = self._call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
+            return prediction
         finally:
-            self._record_extract_finished(
-                report, budget=budget, scope_id=scope_id, started=started,
-                truncations_before=truncations_before,
-            )
+            if report is not None:
+                self._record_extract_finished(
+                    report, budget=budget, scope_id=scope_id, started=started,
+                    truncations_before=truncations_before,
+                )
+            if coverage is not None:
+                self._record_coverage_post_check(coverage, prediction, scope_id)
 
     async def _async_extract_prediction(self, trajectory, **input_args):
         """``_extract_prediction`` for the async loop, same rules."""
         selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
-        if report is None:
+        selected, coverage = self._cover_for_extract(selected, scope_id, input_args)
+        if report is None and coverage is None:
             return await self._async_call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
         truncations_before = getattr(self, "_truncation_count", 0)
         started = time.monotonic()
+        prediction = None
         try:
-            return await self._async_call_with_potential_trajectory_truncation(
+            prediction = await self._async_call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
+            return prediction
         finally:
-            self._record_extract_finished(
-                report, budget=budget, scope_id=scope_id, started=started,
-                truncations_before=truncations_before,
-            )
+            if report is not None:
+                self._record_extract_finished(
+                    report, budget=budget, scope_id=scope_id, started=started,
+                    truncations_before=truncations_before,
+                )
+            if coverage is not None:
+                self._record_coverage_post_check(coverage, prediction, scope_id)
 
     def _call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
         for _ in range(3):
@@ -595,7 +674,14 @@ class fastWorkflowReAct(Module):
 
         Users can override this method to implement their own truncation logic.
         """
-        keys = list(trajectory.keys())
+        from fastworkflow.answer_coverage import COVERAGE_KEY
+
+        # The coverage statement is a rule ABOUT the trajectory, not a step of
+        # it, and it is the one key whose whole job is to be read. Dropping it as
+        # "the oldest tool call information" would be a bug. It exists only on
+        # the extractor's copy and only with the flag on, so with the flag off
+        # this line selects exactly the keys it always did.
+        keys = [key for key in trajectory if key != COVERAGE_KEY]
         if len(keys) < 4:
             # Every tool call has 4 keys: thought, tool_name, tool_args, and observation.
             raise ValueError(
@@ -607,6 +693,28 @@ class fastWorkflowReAct(Module):
             trajectory.pop(key)
 
         return trajectory
+
+
+def _final_answer_text(prediction: Any) -> str:
+    """The answer text of an extract prediction, for measurement only.
+
+    The signature's output field is ``final_answer``; a signature without one
+    falls back to every string output it has. Either way this is read to be
+    counted, never to be changed.
+    """
+    if prediction is None:
+        return ""
+    answer = getattr(prediction, "final_answer", None)
+    if isinstance(answer, str) and answer:
+        return answer
+    try:
+        values = prediction.toDict()
+    except Exception:  # noqa: BLE001
+        return ""
+    return "\n".join(
+        str(value) for key, value in values.items()
+        if key != "trajectory" and isinstance(value, str)
+    )
 
 
 def _extract_prompt_tokens() -> int | None:

@@ -114,6 +114,11 @@ def _env_value(name: str) -> str:
     return str(value or "").strip()
 
 
+#: The same reader under a public name, so a sibling module (``answer_coverage``)
+#: reads its own flag by exactly this rule rather than growing a second one.
+env_value = _env_value
+
+
 def answer_rehydration_enabled() -> bool:
     """True when ``FW_ANSWER_REHYDRATION`` is set to a truthy value."""
     return _env_value(ANSWER_REHYDRATION_ENV).lower() in {"1", "true", "yes", "on"}
@@ -492,6 +497,7 @@ def _declaration(store: Any, scope: RuntimeHandleScope, alias: str) -> Optional[
 
 __all__ = [
     "ANSWER_REHYDRATION_ENV",
+    "env_value",
     "ANSWER_REHYDRATION_MAX_BYTES_ENV",
     "DEFAULT_MAX_BYTES",
     "KIND_LABEL",
