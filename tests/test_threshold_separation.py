@@ -1,0 +1,166 @@
+"""R3 (ido-8ps.25): the tier threshold and the tiny ambiguity threshold must not collapse.
+
+No mocks (repo rule `.cursor/rules/testing_rules.mdc`): every test calls the real
+writer `model_pipeline_training.write_ambiguity_thresholds` and reads the real JSON
+files back off disk. What is *not* rebuilt here is TinyBERT and DistilBERT -- the
+writer takes the confidence statistics the trainer measures, so the statistics are
+supplied directly and the arithmetic, the invariant and the files are the real ones.
+
+The context table below is not invented. It is the confidence statistics implied by
+IDO's published router `20260905T132341Z-a0605e`, whose 18 contexts every one had
+`tiny_ambiguous <= tier` -- 7 of them byte-identical -- which is the state that made
+the tiny tier structurally incapable of reporting an ambiguity.
+"""
+
+import json
+import os
+
+import pytest
+
+from fastworkflow.model_pipeline_training import (
+    SINGLE_LABEL_RESOLUTION_FLOOR,
+    TIER_AMBIGUITY_MIN_SEPARATION,
+    floored_large_ambiguous_threshold,
+    separated_tiny_ambiguous_threshold,
+    write_ambiguity_thresholds,
+)
+
+
+def _stats(failed_mean, successful_mean):
+    """The shape `evaluate_confidence_stats` returns; only the means are read."""
+    return {
+        'failed': {'min': None, 'max': None, 'mean': failed_mean, 'median': None},
+        'successful': {'min': None, 'max': None, 'mean': successful_mean, 'median': None},
+    }
+
+
+# context -> (tier threshold, tiny failed mean, tiny successful mean, large failed mean)
+# Tier thresholds and the large failed means are the exact floats published in
+# 20260905T132341Z-a0605e; the tiny failed mean is that version's published
+# tiny_ambiguous_threshold, which the old writer set to precisely that statistic.
+PUBLISHED_CONTEXTS = {
+    "Account": (0.5476, 0.4452, 0.8123, 0.6387),
+    "Application": (0.66119, 0.54636, 0.8641, 0.6063),
+    "ControlCatalog": (0.34679, 0.30996, 0.7412, 0.42157),
+    "ControlFinding": (0.63501, 0.63501, 0.8802, 0.72594),
+    "ControlsMonitor": (0.43638, 0.43638, 0.7955, 0.59442),
+    "Directory": (0.32766, 0.25068, 0.7003, 0.41043),
+    "DirectoryExplorer": (0.27662, 0.27662, 0.6891, 0.54595),
+    "EntityLookup": (0.23795, 0.23795, 0.6502, 0.43015),
+    "Group": (0.36315, 0.36315, 0.7314, 0.51176),
+    "Identity": (0.505, 0.39996, 0.8210, 0.62953),
+    "Organization": (0.47206, 0.39985, 0.8004, 0.6626),
+    "Permission": (0.50255, 0.50255, 0.8455, 0.71277),
+    "ReconciliationWorkspace": (0.47805, 0.46631, 0.7788, 0.60528),
+    "Repository": (0.54802, 0.41738, 0.8339, 0.68464),
+    "Resource": (0.31921, 0.30061, 0.7120, 0.73566),
+    "Subscription": (0.56268, 0.47072, 0.8520, 0.62518),
+    "SubscriptionManager": (0.47951, 0.47306, 0.8091, 0.55976),
+    "global": (0.33307, 0.33307, 0.7266, 0.53095),
+}
+
+
+def test_every_written_context_separates_its_thresholds(tmp_path):
+    """The headline invariant, over every context of a real published workflow.
+
+    `tiny_ambiguous > tier` is what gives the tiny tier an ambiguity band at all:
+    `ModelPipeline` keeps a prediction on the tiny tier when `confidence >= tier`
+    and `CommandRouter` calls it confident when `confidence > tiny_ambiguous`, so an
+    ambiguity is reachable only in the open interval between the two.
+    """
+    written = {}
+    for ctx, (tier, tiny_failed, tiny_ok, large_failed) in PUBLISHED_CONTEXTS.items():
+        ctx_dir = tmp_path / ctx
+        written[ctx] = write_ambiguity_thresholds(
+            str(ctx_dir), tier, _stats(tiny_failed, tiny_ok), _stats(large_failed, 0.9)
+        )
+
+    assert len(written) == len(PUBLISHED_CONTEXTS)
+    for ctx, (tier, *_rest) in PUBLISHED_CONTEXTS.items():
+        tiny_amb, large_amb = written[ctx]
+        on_disk = {
+            name: json.load(open(tmp_path / ctx / name))['confidence_threshold']
+            for name in ("tiny_ambiguous_threshold.json", "large_ambiguous_threshold.json")
+        }
+        assert on_disk["tiny_ambiguous_threshold.json"] == tiny_amb, ctx
+        assert on_disk["large_ambiguous_threshold.json"] == large_amb, ctx
+        assert tiny_amb > tier, f"{ctx}: tiny ambiguity band is empty"
+        assert tiny_amb >= tier + TIER_AMBIGUITY_MIN_SEPARATION, ctx
+        assert tiny_amb >= SINGLE_LABEL_RESOLUTION_FLOOR, ctx
+        assert large_amb >= SINGLE_LABEL_RESOLUTION_FLOOR, ctx
+
+
+def test_the_seven_collapsed_contexts_are_the_ones_that_move_most():
+    """Regression pin on the defect's own signature.
+
+    These seven published contexts had `threshold.json` and
+    `tiny_ambiguous_threshold.json` byte-identical. Equality is the unmistakable
+    form of the bug, so the fix has to move exactly these off equality -- and it has
+    to move the other eleven too, since `tiny_ambiguous <= tier` collapses the band
+    just as completely as equality does.
+    """
+    collapsed = [
+        ctx for ctx, (tier, tiny_failed, *_r) in PUBLISHED_CONTEXTS.items()
+        if tier == tiny_failed
+    ]
+    assert len(collapsed) == 7
+
+    for ctx, (tier, tiny_failed, tiny_ok, _large) in PUBLISHED_CONTEXTS.items():
+        assert tiny_failed <= tier, f"{ctx} was not actually collapsed before R3"
+        assert separated_tiny_ambiguous_threshold(tier, _stats(tiny_failed, tiny_ok)) > tier
+
+
+def test_the_margin_is_the_sweep_midpoint_when_that_is_the_binding_term():
+    """The preferred margin is the midpoint of the interval the tier sweep ran over."""
+    tier, failed_mean, successful_mean = 0.40, 0.40, 0.90
+    assert separated_tiny_ambiguous_threshold(
+        tier, _stats(failed_mean, successful_mean)
+    ) == pytest.approx(0.65)
+
+
+def test_a_high_tier_threshold_still_gets_a_band():
+    """When the sweep lands above the midpoint, the minimum separation carries it."""
+    assert separated_tiny_ambiguous_threshold(0.80, _stats(0.40, 0.90)) == pytest.approx(
+        0.80 + TIER_AMBIGUITY_MIN_SEPARATION
+    )
+
+
+def test_no_tier_resolves_a_single_label_below_the_floor():
+    """The floor is absolute: it binds when both measured terms are under it.
+
+    A top-1 probability at or below 0.5 puts at least as much posterior mass outside
+    the winning label as in it, so a single-label resolution is not supported by the
+    model's own distribution whichever tier produced it.
+    """
+    assert separated_tiny_ambiguous_threshold(0.10, _stats(0.10, 0.30)) == pytest.approx(
+        SINGLE_LABEL_RESOLUTION_FLOOR
+    )
+    assert floored_large_ambiguous_threshold(_stats(0.41043, 0.9)) == pytest.approx(
+        SINGLE_LABEL_RESOLUTION_FLOOR
+    )
+    assert floored_large_ambiguous_threshold(_stats(0.71277, 0.9)) == pytest.approx(0.71277)
+
+
+def test_missing_statistics_fall_back_to_the_floor_not_to_zero():
+    """A context with no failures (or no successes) used to be written 0.0, which is
+    the most permissive value there is. The floor is the safe direction."""
+    assert separated_tiny_ambiguous_threshold(-1, _stats(None, None)) == pytest.approx(
+        SINGLE_LABEL_RESOLUTION_FLOOR
+    )
+    assert floored_large_ambiguous_threshold(_stats(None, None)) == pytest.approx(
+        SINGLE_LABEL_RESOLUTION_FLOOR
+    )
+
+
+def test_the_writer_refuses_to_publish_a_collapsed_pair(tmp_path, monkeypatch):
+    """The guard is in the writer, so a future change to the margin arithmetic cannot
+    republish the defect quietly."""
+    monkeypatch.setattr(
+        "fastworkflow.model_pipeline_training.separated_tiny_ambiguous_threshold",
+        lambda tier, stats: tier,
+    )
+    with pytest.raises(ValueError, match="never report an ambiguity"):
+        write_ambiguity_thresholds(
+            str(tmp_path / "Broken"), 0.6, _stats(0.6, 0.9), _stats(0.7, 0.95)
+        )
+    assert not os.path.exists(tmp_path / "Broken" / "tiny_ambiguous_threshold.json")

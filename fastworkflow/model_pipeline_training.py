@@ -366,6 +366,115 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
     }
     return stats, all_confidences, all_predictions, all_labels, failed_cases
 
+# ---------------------------------------------------------------------------
+# R3 (ido-8ps.25): tier threshold vs ambiguity threshold must not collapse.
+#
+# `ModelPipeline.predict` escalates to the large model when
+# `confidence < confidence_threshold` (the TIER threshold), and
+# `CommandRouter.predict_with_details` then reports a single confident label when
+# `confidence > ambiguous_threshold`. If the tiny tier's ambiguity threshold is at
+# or below its tier threshold, every prediction the tiny tier keeps is by
+# construction above the ambiguity threshold, so the tier can never report an
+# ambiguity: it either escalates or resolves outright, and a wrong resolution is
+# silent. Measured on IDO's published router 20260905T132341Z-a0605e this held in
+# ALL 18 trained contexts (7 of them with the two files byte-identical), because
+# `find_optimal_threshold` sweeps upward from `tiny_stats['failed']['mean']` while
+# the writer used that same failed-mean as the ambiguity threshold.
+#
+# The fix gives the tiny tier a real ambiguity band by placing its ambiguity
+# threshold strictly above the tier threshold, and refuses single-label resolution
+# below an absolute floor at either tier.
+#
+# MARGIN — the preferred separation is the midpoint of the interval the tier sweep
+# itself ran over, `(failed_mean + successful_mean) / 2`: the sweep's own endpoints
+# are the model's measured "typically wrong" and "typically right" confidences, so
+# the midpoint is the point the training data says stops being evidence for the top
+# label and is not a constant invented from outside. `TIER_AMBIGUITY_MIN_SEPARATION`
+# is the fallback when the sweep picked a tier threshold at or above that midpoint;
+# 0.05 is far above float noise and narrow enough not to undo a deliberately high
+# tier threshold.
+#
+# FLOOR — `SINGLE_LABEL_RESOLUTION_FLOOR = 0.5` is the point at which the model
+# stops putting more posterior mass on the winning label than on everything else
+# combined. Below it a "confident" single label is not supported by the model's own
+# distribution, so the runtime must show candidates instead. It is applied to the
+# large tier as well, because the rule is about single-label resolution, not about
+# which tier produced it. The cost is deliberate: more ambiguity turns and more
+# DistilBERT calls, traded for the silent misroutes this band makes loud.
+# ---------------------------------------------------------------------------
+TIER_AMBIGUITY_MIN_SEPARATION = 0.05
+SINGLE_LABEL_RESOLUTION_FLOOR = 0.5
+MAX_AMBIGUITY_THRESHOLD = 0.99
+
+
+def separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats) -> float:
+    """The tiny tier's ambiguity threshold, guaranteed strictly above *tier_threshold*.
+
+    Returns the largest of the sweep-interval midpoint, `tier_threshold +
+    TIER_AMBIGUITY_MIN_SEPARATION` and `SINGLE_LABEL_RESOLUTION_FLOOR`, clamped below
+    `MAX_AMBIGUITY_THRESHOLD` so a context can still resolve something. A missing
+    statistic (no failures, or no successes, in the held-out split) drops that term
+    rather than the whole computation; the floor is always present, so the result is
+    a usable threshold even when `find_optimal_threshold` returned its -1 sentinel.
+    """
+    failed_mean = tiny_stats['failed']['mean']
+    successful_mean = tiny_stats['successful']['mean']
+
+    candidates = [SINGLE_LABEL_RESOLUTION_FLOOR]
+    if tier_threshold is not None and tier_threshold >= 0:
+        candidates.append(float(tier_threshold) + TIER_AMBIGUITY_MIN_SEPARATION)
+    if failed_mean is not None and successful_mean is not None:
+        candidates.append((float(failed_mean) + float(successful_mean)) / 2.0)
+
+    return min(max(candidates), MAX_AMBIGUITY_THRESHOLD)
+
+
+def floored_large_ambiguous_threshold(large_stats) -> float:
+    """The large tier's ambiguity threshold, never below the single-label floor."""
+    failed_mean = large_stats['failed']['mean']
+    measured = 0.0 if failed_mean is None else float(failed_mean)
+    return min(max(measured, SINGLE_LABEL_RESOLUTION_FLOOR), MAX_AMBIGUITY_THRESHOLD)
+
+
+def write_ambiguity_thresholds(
+    context_artifacts_dir, tier_threshold, tiny_stats, large_stats
+) -> tuple:
+    """Write both ambiguity thresholds for one context and return ``(tiny, large)``.
+
+    Takes the context's artifact directory rather than a workflow path so the
+    invariant it establishes -- ``tiny_ambiguous > tier`` and both ambiguity
+    thresholds at or above `SINGLE_LABEL_RESOLUTION_FLOOR` -- can be exercised over
+    real files for every context without loading a model or a routing definition.
+    Raises `ValueError` rather than publishing a collapsed pair, because a silently
+    collapsed threshold is the exact defect R3 exists to prevent and it survived
+    unnoticed in a published artifact set for a fortnight.
+    """
+    tiny_ambiguous_threshold = separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats)
+    large_ambiguous_threshold = floored_large_ambiguous_threshold(large_stats)
+
+    if tier_threshold is not None and tiny_ambiguous_threshold <= tier_threshold:
+        raise ValueError(
+            f"tiny ambiguity threshold {tiny_ambiguous_threshold} does not sit above "
+            f"tier threshold {tier_threshold}: the tiny tier could never report an "
+            f"ambiguity in {context_artifacts_dir}"
+        )
+    if min(tiny_ambiguous_threshold, large_ambiguous_threshold) < SINGLE_LABEL_RESOLUTION_FLOOR:
+        raise ValueError(
+            f"ambiguity threshold below the single-label floor "
+            f"{SINGLE_LABEL_RESOLUTION_FLOOR} in {context_artifacts_dir}"
+        )
+
+    os.makedirs(context_artifacts_dir, exist_ok=True)
+    for filename, value in (
+        ("tiny_ambiguous_threshold.json", tiny_ambiguous_threshold),
+        ("large_ambiguous_threshold.json", large_ambiguous_threshold),
+    ):
+        with open(os.path.join(context_artifacts_dir, filename), 'w') as f:
+            json.dump({'confidence_threshold': value}, f)
+
+    return tiny_ambiguous_threshold, large_ambiguous_threshold
+
+
 def find_optimal_threshold(tiny_stats, test_loader, pipeline):
     # Generate threshold range based on confidence statistics
     min_threshold = tiny_stats['failed']['mean']
@@ -2013,23 +2122,16 @@ def train(
 
 
         
-        if large_stats['failed']['mean'] is not None:
-            large_ambiguous_threshold = large_stats['failed']['mean']
-        else:
-            large_ambiguous_threshold = 0.0
-        # Save paths updated to use context-specific folders
-        large_ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "large_ambiguous_threshold.json")
-        with open(large_ambiguous_threshold_path, 'w') as f:
-            json.dump({'confidence_threshold': large_ambiguous_threshold}, f)
-        
-        if tiny_stats['failed']['mean'] is not None:
-            tiny_ambiguous_threshold = tiny_stats['failed']['mean']
-        else:
-            tiny_ambiguous_threshold = 0.0
-        # Save paths updated to use context-specific folders
-        tiny_ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "tiny_ambiguous_threshold.json")
-        with open(tiny_ambiguous_threshold_path, 'w') as f:
-            json.dump({'confidence_threshold': tiny_ambiguous_threshold}, f)
+        # R3: one writer for both ambiguity thresholds, so the separation invariant is
+        # established where the files are produced rather than asserted afterwards.
+        tiny_ambiguous_threshold, large_ambiguous_threshold = write_ambiguity_thresholds(
+            os.path.dirname(threshold_path), threshold, tiny_stats, large_stats
+        )
+        print(
+            f"Ambiguity thresholds (R3): tier={threshold:.4f} "
+            f"tiny_ambiguous={tiny_ambiguous_threshold:.4f} "
+            f"large_ambiguous={large_ambiguous_threshold:.4f}"
+        )
 
     
         text = "list commands"

@@ -487,8 +487,17 @@ def generate_utterances_for_personas(
                     model=model,  # Corrected model name
                     messages=messages,
                     max_tokens=1000,
+                    # Temperature only. Sending `temperature` and `top_p` together is
+                    # rejected outright by the current Bedrock Claude models -- "`temperature`
+                    # and `top_p` cannot both be specified for this model. Please use only
+                    # one." -- which made every utterance-generation call a hard
+                    # BadRequestError and blocked training entirely (found 16 Sep 2026,
+                    # ido-8ps.25). The API forces a choice and temperature is the one that
+                    # carries the intent here: this call wants diverse phrasings of a known
+                    # request, which is what temperature 1.0 asks for, while nucleus
+                    # truncation at 0.9 was only trimming the tail of that same
+                    # distribution.
                     temperature=1.0,
-                    top_p=0.9,
                     stop=["<|end_of_text|>"]
                 ),
                 description=(

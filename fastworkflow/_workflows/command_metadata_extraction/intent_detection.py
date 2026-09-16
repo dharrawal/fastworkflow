@@ -98,6 +98,16 @@ MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT = "known_name_foreign_context"
 # tree that has never been trained under versioning has no version to report, and
 # saying so is better than inventing one that would look comparable across runs.
 _UNVERSIONED_ARTIFACT = "unversioned"
+# Threshold-semantics generation of the classifier signal. Bumped to "r3" by
+# ido-8ps.25, which changed what `tiny_ambiguous_threshold.json` /
+# `large_ambiguous_threshold.json` MEAN: before r3 the tiny tier's ambiguity
+# threshold sat at or below its tier threshold, so "confident" was structurally
+# unfalsifiable there; from r3 it sits strictly above, with an absolute floor on
+# single-label resolution at either tier. A confidence and a `confident` flag from
+# either side are therefore not the same measurement even when the model weights
+# and the artifact version are identical, which is exactly what signal_version
+# exists to say. Version the semantics, not just the bytes.
+_SIGNAL_SEMANTICS_VERSION = "r3"
 
 # Reported when the router did not say which model answered. Named rather than
 # defaulted to "tiny", because a signal_version that claims the wrong tier is worse
@@ -181,7 +191,10 @@ def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str
         if os.path.basename(versions_parent) == VERSIONS_DIRNAME
         else _UNVERSIONED_ARTIFACT
     )
-    return f"intent-classifier/{version}/{os.path.basename(resolved)}/{model_tier}"
+    return (
+        f"intent-classifier/{_SIGNAL_SEMANTICS_VERSION}/{version}"
+        f"/{os.path.basename(resolved)}/{model_tier}"
+    )
 
 
 def _topk_margin_signals(
