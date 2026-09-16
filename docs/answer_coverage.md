@@ -26,8 +26,25 @@ read after 60 KB of evidence is a rule read too late.
 Coverage of this run: the loop ended normally. These named items from the
 request appear in no retrieved observation: Christopher Hubbard. For each of
 them report "not retrieved" and nothing else - no value, no unavailability, no
-absence. For items that appear, report only what the observations show.
+absence. These named items of the request DO appear in this run's observations:
+Alan Cooper; Brandon Miller. Every other named item of the request WAS
+retrieved: it appears in this run's observations and must be reported from them.
+Do not write "not retrieved", "not available", "no data", or any other statement
+of absence about an item that is not named in the unobserved list above. For
+items that appear, report only what the observations show.
 ```
+
+**Sentences four and five are `ido-8ps.24`.** The first version of the block
+named the unobserved set and then said only "For items that appear, report only
+what the observations show". In the D3+D4 cell
+(`exp-ido-gqv-5-20260916T035444`) one attempt read that as licence to write
+"not retrieved" against three identity uids that were in its own holder pages:
+naming a set is not the same claim as saying what the REST of the set is. The
+block now says what the rest of the set is, names it where the names fit
+(`OBSERVED_LIST_MAX_BYTES`, 1,024 bytes, after which the rule stands alone), and
+forbids the phrasing explicitly. Only kinds that are ever INSTRUCTED as "not
+retrieved" are listed back, so the two lists partition one set — a quoted
+request phrase is measured and never instructed, in either direction.
 
 Exhausted instead:
 
@@ -155,7 +172,7 @@ same `FW_OFFLOAD_EVENTS` file every other measure does.
 | Event | Carries |
 |---|---|
 | `coverage_statement` | `exhausted`, `steps`, `entities_total` / `entities_observed` / `entities_unobserved`, `observed`, `unobserved`, `entity_kinds`, `phrases_total`, `phrases_unmatched`, `complete`, `incomplete_reason`, `archived_observations`, `aliased_executes`, `statement_bytes`, `haystack_bytes`, `request_bytes` |
-| `coverage_post_check` | `answer_bytes`, `unobserved_total`, `unobserved_mentioned`, **`unavailability_claim_on_unobserved`**, `not_retrieved_on_unobserved`, `silent_on_unobserved`, `per_item` |
+| `coverage_post_check` | `answer_bytes`, `unobserved_total`, `unobserved_mentioned`, **`unavailability_claim_on_unobserved`**, `not_retrieved_on_unobserved`, `silent_on_unobserved`, `per_item`, and the `ido-8ps.24` direction: `observed_total`, `observed_mentioned`, `unavailability_claim_on_observed`, `not_retrieved_on_observed`, **`misuse_on_observed`**, `per_observed_item` |
 | `coverage_failed` | the exception type and detail; the extract call then runs on the trajectory it was handed |
 
 ## Where it is wired

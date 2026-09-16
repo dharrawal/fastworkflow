@@ -72,6 +72,40 @@ UNSORTED_OFFSET = "unsorted-offset"
 
 CURSOR_VERSION = 1
 
+#: Marker key of the raw-page REFERENCE a declaration returns for its artifacts
+#: (bead ido-986.14.3, D). It is deliberately NOT the observability store's
+#: ``__fw_artifact_ref__`` envelope, which points at a row of the turn's own
+#: ``artifacts`` table: that envelope's lifetime is the turn record and its
+#: payload is an opaque blob, while a listing page is owned by THIS store, is
+#: keyed by ``(scope_id, alias, query_scope, start_offset)``, and outlives the
+#: turn exactly as long as the archive file does. Pointing one at the other
+#: would let a mutable listing collection masquerade as an immutable blob, which
+#: is the thing ido-986.14.3 forbids in as many words.
+RESULT_PAGES_REF_KEY = "__fw_result_pages__"
+
+
+def result_pages_reference(
+    *,
+    scope_id: str,
+    alias: str,
+    descriptor_sha256: str,
+    pages: "Sequence[Mapping[str, Any]]" = (),
+) -> dict[str, Any]:
+    """The durable pointer a listing artifact carries instead of copies of rows.
+
+    Everything in it is a KEY or a DIGEST: nothing that has to be kept in step
+    with the rows. Reading it back is `ResultHandleStore.get_page` plus a
+    sha256, which is what makes a missing or edited page a refusal rather than a
+    silently shorter listing.
+    """
+    return {
+        RESULT_PAGES_REF_KEY: True,
+        "scope_id": str(scope_id),
+        "alias": str(alias),
+        "descriptor_sha256": str(descriptor_sha256),
+        "pages": [dict(page) for page in pages],
+    }
+
 #: A page token is short enough to read off a page and type back without
 #: transcription error: the handle, an optional traversal tag, then the page
 #: ordinal. ``O7/p2`` is page 2 of handle O7; ``O7/f1p2`` is page 2 of the first
@@ -1559,6 +1593,7 @@ def declare(
         "cursor_position": int(cursor_position),
         "scope_id": selected_scope.scope_id,
     }
+    stored_pages: list[dict[str, Any]] = []
     try:
         store_ = selected_store or store()
         store_.put_declaration(selected_scope, handle, payload)
@@ -1566,15 +1601,28 @@ def declare(
             # Only when there are rows. A zero-row producer page stored at the
             # walk's first offset would be read back as the empty page that ends
             # a walk, and the walk would stop before it started.
-            store_.put_page(
+            start_offset = int(descriptor.start_offset) if descriptor else 0
+            stored = store_.put_page(
                 selected_scope,
                 alias=handle,
                 query_scope="",
-                start_offset=int(descriptor.start_offset) if descriptor else 0,
+                start_offset=start_offset,
                 limit_requested=len(items),
                 source="producer",
                 record={"rows": [], "records": _records_from_items(items)},
                 backend_total=int(spec.total or len(items)),
+            )
+            # `put_page` reads the row back and re-digests it, so this sha256 is
+            # the STORED bytes and not the bytes this process meant to store.
+            stored_pages.append(
+                {
+                    "query_scope": "",
+                    "start_offset": start_offset,
+                    "limit_requested": len(items),
+                    "records": len(items),
+                    "source": "producer",
+                    "sha256": str(stored["record_sha256"]),
+                }
             )
     except ResultHandleError:
         raise
@@ -1588,7 +1636,17 @@ def declare(
                 "reason": "persistence_failed_response_retained",
             }
         )
-        return {**payload, "declared": False, "error": type(error).__name__}
+        return {
+            **payload,
+            "declared": False,
+            "error": type(error).__name__,
+            "raw_pages": result_pages_reference(
+                scope_id=selected_scope.scope_id,
+                alias=handle,
+                descriptor_sha256=descriptor_sha256,
+                pages=stored_pages,
+            ),
+        }
     record_event(
         {
             "kind": "result_handle_declared",
@@ -1602,7 +1660,20 @@ def declare(
             "parent_alias": parent_alias,
         }
     )
-    return {**payload, "declared": True}
+    return {
+        **payload,
+        "declared": True,
+        # D (ido-986.14.3): the artifact's pointer at the immutable rows. The
+        # declaration payload keeps its own `descriptor` because
+        # `put_declaration` reads it out of this dict; what the ARTIFACT keeps
+        # is the digest beside this reference, never a second copy of either.
+        "raw_pages": result_pages_reference(
+            scope_id=selected_scope.scope_id,
+            alias=handle,
+            descriptor_sha256=descriptor_sha256,
+            pages=stored_pages,
+        ),
+    }
 
 
 def handle_declaration(
@@ -2442,6 +2513,7 @@ __all__ = [
     "Literal",
     "RESULT_PAGE_MAX_BYTES",
     "RESULT_PAGE_MAX_BYTES_ENV",
+    "RESULT_PAGES_REF_KEY",
     "ResultHandleError",
     "ResultHandleSpec",
     "ResultHandleStore",
@@ -2468,6 +2540,7 @@ __all__ = [
     "PAGE_WARNING_AFTER",
     "register_resolver",
     "registered_resolvers",
+    "result_pages_reference",
     "reset_result_handle_state",
     "resolver_for",
     "store",

@@ -543,7 +543,14 @@ class fastWorkflowReAct(Module):
 
         try:
             answer = _final_answer_text(prediction)
-            check = answer_coverage.post_check(answer, report.unobserved)
+            check = answer_coverage.post_check(
+                answer,
+                report.unobserved,
+                # ido-8ps.24: the other direction, and the one that was
+                # measured as a defect - absence phrasing about an item the run
+                # DID retrieve. Measured the same way, counted separately.
+                getattr(report, "observed_named", ()) or (),
+            )
             record_event(
                 {
                     "kind": "coverage_post_check",

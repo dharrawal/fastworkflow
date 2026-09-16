@@ -237,9 +237,58 @@ class Block(unittest.TestCase):
             'Coverage of this run: the loop ended normally. These named items from '
             'the request appear in no retrieved observation: Christopher Hubbard. '
             'For each of them report "not retrieved" and nothing else - no value, '
-            'no unavailability, no absence. For items that appear, report only what '
-            'the observations show.',
+            'no unavailability, no absence. '
+            'Every other named item of the request WAS retrieved: it appears in '
+            "this run's observations and must be reported from them. "
+            'Do not write "not retrieved", "not available", "no data", or any '
+            'other statement of absence about an item that is not named in the '
+            'unobserved list above. '
+            'For items that appear, report only what the observations show.',
         )
+
+    # ------------------------------------------------------------- ido-8ps.24
+    def test_the_retrieved_rule_is_present_with_or_without_an_observed_list(
+        self,
+    ) -> None:
+        for observed in ([], ["Alan Cooper"]):
+            with self.subTest(observed=observed):
+                block = coverage_block(unobserved=["Christopher Hubbard"],
+                                       exhausted=False, steps=9,
+                                       observed=observed)
+                self.assertIn("WAS retrieved", block)
+                self.assertIn('Do not write "not retrieved", "not available"',
+                              block)
+
+    def test_observed_items_are_named_back(self) -> None:
+        block = coverage_block(unobserved=["Christopher Hubbard"],
+                               exhausted=False, steps=9,
+                               observed=["Alan Cooper", "Brandon Miller"])
+        self.assertIn(
+            "These named items of the request DO appear in this run's "
+            "observations: Alan Cooper; Brandon Miller.",
+            block,
+        )
+
+    def test_an_observed_name_is_never_also_in_the_unobserved_list(self) -> None:
+        block = coverage_block(unobserved=["Christopher Hubbard"],
+                               exhausted=False, steps=9,
+                               observed=["Alan Cooper"])
+        head, _, tail = block.partition("DO appear")
+        self.assertIn("Christopher Hubbard", head)
+        self.assertNotIn("Christopher Hubbard", tail)
+
+    def test_duplicate_observed_names_are_listed_once(self) -> None:
+        block = coverage_block(unobserved=[], exhausted=False, steps=1,
+                               observed=["Alan Cooper", "Alan Cooper"])
+        self.assertEqual(block.count("Alan Cooper"), 1)
+
+    def test_an_oversized_observed_list_falls_back_to_the_rule_alone(self) -> None:
+        names = ["Person %04d" % index for index in range(200)]
+        block = coverage_block(unobserved=[], exhausted=False, steps=1,
+                               observed=names)
+        self.assertNotIn("DO appear in this run's observations", block)
+        self.assertIn("WAS retrieved", block)
+        self.assertLess(len(block.encode("utf-8")), 1024)
 
     def test_exhausted_ending_names_the_step_count(self) -> None:
         block = coverage_block(unobserved=[], exhausted=True, steps=96)
@@ -400,6 +449,38 @@ class PostCheckCounts(unittest.TestCase):
         check = post_check("anything", [])
         self.assertEqual(check.unobserved_total, 0)
         self.assertEqual(check.unavailability_claim_on_unobserved, 0)
+
+    # ------------------------------------------------------------- ido-8ps.24
+    def test_absence_phrasing_about_a_retrieved_item_is_counted(self) -> None:
+        check = post_check(
+            "Alan Cooper: not retrieved. " + "filler. " * 60
+            + "Brandon Miller: no data is available.",
+            [],
+            ["Alan Cooper", "Brandon Miller"],
+        )
+        self.assertEqual(check.observed_total, 2)
+        self.assertEqual(check.observed_mentioned, 2)
+        self.assertEqual(check.not_retrieved_on_observed, 1)
+        self.assertEqual(check.unavailability_claim_on_observed, 1)
+        self.assertEqual(check.misuse_on_observed, 2)
+
+    def test_a_clean_report_of_a_retrieved_item_counts_nothing(self) -> None:
+        check = post_check("Alan Cooper holds Cloud Administrator.", [],
+                           ["Alan Cooper"])
+        self.assertEqual(check.observed_mentioned, 1)
+        self.assertEqual(check.misuse_on_observed, 0)
+
+    def test_the_observed_direction_is_off_unless_it_is_asked_for(self) -> None:
+        check = post_check("Alan Cooper: not retrieved.", [])
+        self.assertEqual(check.observed_total, 0)
+        self.assertEqual(check.misuse_on_observed, 0)
+
+    def test_both_directions_are_in_the_event(self) -> None:
+        event = post_check("Alan Cooper: not available.", ["X Y"],
+                           ["Alan Cooper"]).as_event()
+        self.assertEqual(event["misuse_on_observed"], 1)
+        self.assertEqual(event["observed_total"], 1)
+        self.assertIn("per_observed_item", event)
 
 
 class ExtractHook(unittest.TestCase):

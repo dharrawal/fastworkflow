@@ -116,6 +116,71 @@ class ResultHandleStoreTests(unittest.TestCase):
         page = fetch_page("O4", scope=scope(), selected_store=reopened)
         self.assertEqual(page.rows, holders(6))
 
+    # ------------------------------------------------------- ido-986.14.3 (D)
+    def test_the_declaration_returns_a_reference_to_the_stored_page(self):
+        payload = self.declare_listing()
+        reference = payload["raw_pages"]
+        self.assertTrue(reference[result_handles.RESULT_PAGES_REF_KEY])
+        self.assertEqual(reference["alias"], "O4")
+        self.assertEqual(reference["scope_id"], scope().scope_id)
+        self.assertEqual(reference["descriptor_sha256"],
+                         payload["descriptor_sha256"])
+        self.assertEqual(len(reference["pages"]), 1)
+        page = reference["pages"][0]
+        self.assertEqual(page["query_scope"], "")
+        self.assertEqual(page["start_offset"], 0)
+        self.assertEqual(page["records"], 6)
+        self.assertEqual(page["source"], "producer")
+        self.assertRegex(page["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_the_reference_digest_is_the_digest_of_the_stored_bytes(self):
+        import hashlib
+
+        payload = self.declare_listing()
+        reference = payload["raw_pages"]["pages"][0]
+        reopened = ResultHandleStore(self.path)
+        stored = reopened.get_page(scope(), alias="O4", query_scope="",
+                                   start_offset=0)
+        self.assertEqual(reference["sha256"], stored["record_sha256"])
+        # And it really is a digest OVER THE BYTES, recomputable by anyone.
+        import json as _json
+
+        raw = _json.dumps(stored["record"], ensure_ascii=False,
+                          separators=(",", ":"), sort_keys=True,
+                          default=str).encode("utf-8")
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), reference["sha256"])
+
+    def test_the_reference_carries_no_row(self):
+        payload = self.declare_listing()
+        blob = repr(payload["raw_pages"])
+        for row in holders(6):
+            self.assertNotIn(row, blob)
+
+    def test_a_zero_row_declaration_references_no_page(self):
+        payload = declare(
+            ResultHandleSpec(
+                kind="holder", summary="No holders.", items=[],
+                ordering=result_handles.UNSORTED_OFFSET, total=0,
+                source_complete=True, page_size=3, classification="user-text",
+                presentation=True, filters={},
+            ),
+            scope=scope(), selected_store=self.store, alias="O9",
+        )
+        self.assertEqual(payload["raw_pages"]["pages"], [])
+        self.assertEqual(payload["raw_pages"]["alias"], "O9")
+
+    def test_the_reference_start_offset_follows_the_descriptor(self):
+        source = SourceDescriptor(
+            resolver="test.resolver", view="v", params={},
+            filter_columns=(), uid_field="uid", label_fields=("label",),
+            page_size=3, start_offset=12, materialized=6,
+        )
+        payload = self.declare_listing(alias="O7", source=source)
+        self.assertEqual(payload["raw_pages"]["pages"][0]["start_offset"], 12)
+        stored = ResultHandleStore(self.path).get_page(
+            scope(), alias="O7", query_scope="", start_offset=12)
+        self.assertIsNotNone(stored)
+
     def test_pages_are_immutable_and_refetch_is_idempotent(self):
         self.declare_listing()
         first = self.store.get_page(scope(), alias="O4", query_scope="", start_offset=0)

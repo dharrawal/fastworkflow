@@ -22,7 +22,21 @@ and the turn's own stores and prepended to the extract input:
     Christopher Hubbard.
     For each of them report "not retrieved" and nothing else - no value, no
     unavailability, no absence.
+    These named items of the request DO appear in this run's observations:
+    Alan Cooper; Brandon Miller.
+    Every other named item of the request WAS retrieved: it appears in this
+    run's observations and must be reported from them. Do not write "not
+    retrieved", "not available", "no data", or any other statement of absence
+    about an item that is not named in the unobserved list above.
     For items that appear, report only what the observations show.
+
+``ido-8ps.24`` is the third and fourth sentences, added after the D3+D4 cell
+(``exp-ido-gqv-5-20260916T035444``) measured the first version. That version
+named the unobserved set and then said only "For items that appear, report only
+what the observations show"; one attempt read it as licence to write "not
+retrieved" against three identity uids that were in its own holder pages. Naming
+a set is not the same claim as saying what the REST of the set is, so the block
+now says what the rest of the set is, and names it where it fits.
 
 Rules this module does not bend:
 
@@ -435,24 +449,74 @@ NORMAL_ENDING = "the loop ended normally"
 EXHAUSTED_ENDING = "the loop ended at the iteration limit after {steps} steps"
 NONE_MARKER = "none"
 
+#: How many bytes of OBSERVED names the block will spell out before it falls
+#: back to the general sentence. The observed list is a convenience -- the rule
+#: it illustrates ("everything not in the unobserved list was retrieved") is
+#: complete without it -- so it must never be the reason a coverage statement
+#: grows without bound. Entities come from a regex over one request, so this is
+#: a backstop and not a budget.
+OBSERVED_LIST_MAX_BYTES = 1024
 
-def coverage_block(*, unobserved: Iterable[str], exhausted: bool, steps: int) -> str:
+#: The sentence ido-8ps.24 exists for. Kept as a constant because the post-check
+#: and the offline replay both quote it, and a wording that drifts between the
+#: instruction and the measure would make the measure meaningless.
+RETRIEVED_RULE = (
+    "Every other named item of the request WAS retrieved: it appears in this "
+    "run's observations and must be reported from them. "
+    'Do not write "not retrieved", "not available", "no data", or any other '
+    "statement of absence about an item that is not named in the unobserved "
+    "list above."
+)
+
+
+def coverage_block(
+    *,
+    unobserved: Iterable[str],
+    exhausted: bool,
+    steps: int,
+    observed: Iterable[str] = (),
+) -> str:
     """The exact text prepended to the extract input.
 
     One paragraph, no markup, always the same sentences in the same order, so
     two runs of the same turn produce the same block byte for byte.
+
+    ``ido-8ps.24`` is the fourth and fifth sentences. The first version of this
+    block named the unobserved items and then said only "For items that appear,
+    report only what the observations show", which one D3+D4 attempt read as
+    permission to apply "not retrieved" to three identity uids that were in its
+    own holder pages. Naming the unobserved set is not the same claim as saying
+    what the rest of the set IS, and the block now says it: everything else was
+    retrieved, must be reported from the observations, and may not be called
+    absent. The observed names are spelled out where they fit, because the
+    failure was about specific items and a list is harder to misread than a
+    quantifier.
     """
     ending = (
         EXHAUSTED_ENDING.format(steps=int(steps)) if exhausted else NORMAL_ENDING
     )
     names = [str(name).strip() for name in unobserved if str(name).strip()]
     listed = "; ".join(names) if names else NONE_MARKER
+    seen: list[str] = []
+    for name in observed:
+        text = str(name).strip()
+        if text and text not in seen:
+            seen.append(text)
+    shown = "; ".join(seen)
+    named = (
+        f"These named items of the request DO appear in this run's "
+        f"observations: {shown}. "
+        if seen and len(shown.encode("utf-8")) <= OBSERVED_LIST_MAX_BYTES
+        else ""
+    )
     return (
         f"Coverage of this run: {ending}. "
         f"These named items from the request appear in no retrieved observation: "
         f"{listed}. "
         'For each of them report "not retrieved" and nothing else - no value, no '
         "unavailability, no absence. "
+        f"{named}"
+        f"{RETRIEVED_RULE} "
         "For items that appear, report only what the observations show."
     )
 
@@ -468,6 +532,10 @@ class CoverageReport:
     entities_observed: int = 0
     entities_unobserved: int = 0
     observed: list[str] = field(default_factory=list)
+    #: The observed items the statement NAMED back (ido-8ps.24) -- the
+    #: instructed kinds only, so `observed_named` and `unobserved` partition one
+    #: set and the post-check can measure both halves of the same instruction.
+    observed_named: list[str] = field(default_factory=list)
     unobserved: list[str] = field(default_factory=list)
     phrases_total: int = 0
     phrases_unmatched: list[str] = field(default_factory=list)
@@ -563,6 +631,13 @@ def build_statement(
         unobserved=instructed,
         exhausted=bool(exhausted),
         steps=steps,
+        # ido-8ps.24: only the kinds that are ever INSTRUCTED as "not retrieved"
+        # are listed back as retrieved, so the two lists partition one set. A
+        # quoted request phrase is measured and never instructed, and naming one
+        # here would turn a measure into an instruction by the back door.
+        observed=[
+            entity.text for entity in observed if entity.kind in INSTRUCTED_KINDS
+        ],
     )
 
     kinds: dict[str, int] = {}
@@ -576,6 +651,9 @@ def build_statement(
         entities_observed=len(observed),
         entities_unobserved=len(instructed),
         observed=[entity.text for entity in observed],
+        observed_named=[
+            entity.text for entity in observed if entity.kind in INSTRUCTED_KINDS
+        ],
         unobserved=instructed,
         phrases_total=sum(
             1 for entity in entities if entity.kind not in INSTRUCTED_KINDS
@@ -640,7 +718,13 @@ def _windows(haystack: str, needle: str) -> list[str]:
 
 @dataclass
 class PostCheck:
-    """What the finished answer said about the items the statement named."""
+    """What the finished answer said about the items the statement named.
+
+    Two directions, and ``ido-8ps.24`` is the second one. ``*_on_unobserved``
+    counts the items the run really never retrieved; ``*_on_observed`` counts
+    the opposite and worse error, an absence claim about an item that IS in the
+    run's own observations. Both are counts, never gates.
+    """
 
     answer_bytes: int = 0
     unobserved_total: int = 0
@@ -648,7 +732,19 @@ class PostCheck:
     unavailability_claim_on_unobserved: int = 0
     not_retrieved_on_unobserved: int = 0
     silent_on_unobserved: int = 0
+    observed_total: int = 0
+    observed_mentioned: int = 0
+    unavailability_claim_on_observed: int = 0
+    not_retrieved_on_observed: int = 0
     details: list[dict[str, Any]] = field(default_factory=list)
+    observed_details: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def misuse_on_observed(self) -> int:
+        """The ido-8ps.24 number: absence phrasing about a retrieved item."""
+        return (
+            self.unavailability_claim_on_observed + self.not_retrieved_on_observed
+        )
 
     def as_event(self) -> dict[str, Any]:
         return {
@@ -658,16 +754,28 @@ class PostCheck:
             "unavailability_claim_on_unobserved": self.unavailability_claim_on_unobserved,
             "not_retrieved_on_unobserved": self.not_retrieved_on_unobserved,
             "silent_on_unobserved": self.silent_on_unobserved,
+            "observed_total": self.observed_total,
+            "observed_mentioned": self.observed_mentioned,
+            "unavailability_claim_on_observed": self.unavailability_claim_on_observed,
+            "not_retrieved_on_observed": self.not_retrieved_on_observed,
+            "misuse_on_observed": self.misuse_on_observed,
             "per_item": list(self.details),
+            "per_observed_item": list(self.observed_details),
         }
 
 
-def post_check(answer: Any, unobserved: Iterable[str]) -> PostCheck:
-    """Count unavailability phrasing near each unobserved item. Measurement only.
+def post_check(
+    answer: Any,
+    unobserved: Iterable[str],
+    observed: Iterable[str] = (),
+) -> PostCheck:
+    """Count absence phrasing near each named item. Measurement only.
 
     Nothing here changes the answer, retries the call, or fails the turn. It
     exists so ``ido-8ps.22`` can be scored by a number rather than by reading
     five answers by hand, and so a later run can be compared to this one.
+    ``observed`` is ``ido-8ps.24``: the same window test applied to the items
+    the statement said WERE retrieved, where any hit at all is a defect.
     """
     text = normalise(answer)
     check = PostCheck(answer_bytes=len(str(answer or "").encode("utf-8")))
@@ -689,6 +797,25 @@ def post_check(answer: Any, unobserved: Iterable[str]) -> PostCheck:
         check.not_retrieved_on_unobserved += marked
         check.details.append({"item": name, "mentioned": True,
                               "unavailability_claims": claims, "not_retrieved": marked})
+    for name in observed:
+        key = normalise(name)
+        check.observed_total += 1
+        if not key:
+            continue
+        windows = _windows(text, key)
+        if not windows:
+            check.observed_details.append({"item": name, "mentioned": False,
+                                           "unavailability_claims": 0,
+                                           "not_retrieved": 0})
+            continue
+        check.observed_mentioned += 1
+        claims = sum(1 for window in windows if _UNAVAILABILITY_RE.search(window))
+        marked = sum(1 for window in windows if _NOT_RETRIEVED_RE.search(window))
+        check.unavailability_claim_on_observed += claims
+        check.not_retrieved_on_observed += marked
+        check.observed_details.append({"item": name, "mentioned": True,
+                                       "unavailability_claims": claims,
+                                       "not_retrieved": marked})
     return check
 
 
@@ -697,6 +824,8 @@ __all__ = [
     "COVERAGE_KEY",
     "CLAIM_WINDOW_CHARS",
     "CoverageReport",
+    "OBSERVED_LIST_MAX_BYTES",
+    "RETRIEVED_RULE",
     "Entity",
     "INSTRUCTED_KINDS",
     "MAX_ENTITIES",
