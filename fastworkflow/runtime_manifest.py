@@ -283,7 +283,18 @@ def canonical_content_hash(entries: Iterable[tuple[str, bytes]]) -> str:
 #
 # Bumping this means saying what changed about the selection, since declining to
 # compare is the only thing a consumer can do with a version it does not know.
-WORKFLOW_SCOPE_RULE_VERSION = 1
+#
+# v1: the rules below including ``FRAMEWORK_ARTIFACT_PREFIX`` and the dot rule.
+# v2 (16 September 2026, bead ido-gxc): two classes leave the selection - a
+#     ``benchmarks`` tree directly under the workflow root, and the runtime
+#     observability store at the root. Both are things a workflow accumulates
+#     rather than things that determine what it does, and on the IDO tree that
+#     forced the decision five of the six benchmark files were git-ignored, so
+#     the declared identity could not be reproduced from a clean clone - the one
+#     property this hash exists to have. A value declared under v1 therefore
+#     reads as ``incomparable`` here, not as stale: the tree it described did not
+#     drift, it was a different question.
+WORKFLOW_SCOPE_RULE_VERSION = 2
 
 # What determines what a workflow does. Deliberately narrow: command sources,
 # the context models and the manifest-adjacent JSON, and the guidance markdown
@@ -318,6 +329,29 @@ DEFAULT_EXCLUDED_FILES: frozenset[str] = frozenset({
     "fastworkflow.passwords.env.example",
 })
 
+# Excluded directly under the workflow root only, unlike DEFAULT_EXCLUDED_TREES
+# above, which matches at any depth. ``benchmarks`` is an ordinary word and a
+# workflow may legitimately have a command package called that, so excluding it
+# at every depth would quietly drop source from the workflow's identity. At the
+# root it is the corpus a workflow is *measured with*: it changes when the
+# measurements change and not when the workflow does, and it is routinely
+# git-ignored, which made the declared identity unreproducible from a clean
+# clone (bead ido-gxc, scope rule v2).
+DEFAULT_EXCLUDED_ROOT_TREES: frozenset[str] = frozenset({
+    "benchmarks",
+})
+
+# The runtime observability store ``fastworkflow.observability.store`` writes
+# under the workflow root, named here rather than left to the suffix rule.
+# Nothing it writes today carries a content suffix, so this exclusion changes no
+# selection on any tree that exists - and that is the argument for stating it:
+# ``observability.sqlite3``, its ``-wal`` and ``-shm`` sidecars and
+# ``observability.sqlite3.offload-handles.sqlite3`` are one store under several
+# names, and an exclusion that holds only "in practice" is the same latent
+# divergence in a smaller box, waiting for the first sidecar somebody writes as
+# JSON. Matched as a name prefix, and at the root only, for that reason.
+RUNTIME_STORE_PREFIX = "observability.sqlite3"
+
 
 def workflow_content_entries(
     workflow_folderpath: str,
@@ -325,6 +359,8 @@ def workflow_content_entries(
     suffixes: Iterable[str] = DEFAULT_CONTENT_SUFFIXES,
     excluded_trees: Iterable[str] = DEFAULT_EXCLUDED_TREES,
     excluded_files: Iterable[str] = DEFAULT_EXCLUDED_FILES,
+    excluded_root_trees: Iterable[str] = DEFAULT_EXCLUDED_ROOT_TREES,
+    runtime_store_prefix: str = RUNTIME_STORE_PREFIX,
 ) -> list[tuple[str, bytes]]:
     """``(relative posix path, bytes)`` for the files that define this workflow.
 
@@ -343,7 +379,17 @@ def workflow_content_entries(
     bookkeeping file from doing it again, and it does so without core needing to
     know any particular workflow's filenames.
 
-    With that rule, this function selects exactly the 134 files IDO's generator
+    **Two classes are excluded at the root and only at the root** (scope rule
+    v2, bead ido-gxc): a ``benchmarks`` directory, and any file whose name
+    begins with ``RUNTIME_STORE_PREFIX``. Root-relative because both are
+    conventions about what sits *beside* a workflow rather than names that mean
+    the same thing wherever they appear: ``_commands/benchmarks/`` is as much
+    source as its neighbours, and a nested file named after the store is not the
+    store. Excluding them at any depth would drop real source, which is the
+    error that does not announce itself — a hash that stays still while
+    behaviour moves.
+
+    With that rule, this function selects exactly the files IDO's generator
     selects on the current tree, so the hash it produces equals the
     ``workflow_fingerprint`` IDO declares — which is what makes
     ``verify_workflow_fingerprint`` usable at all.
@@ -385,18 +431,24 @@ def workflow_content_entries(
     suffix_tuple = tuple(suffixes)
     excluded_tree_set = frozenset(excluded_trees)
     excluded_file_set = frozenset(excluded_files)
+    excluded_root_tree_set = frozenset(excluded_root_trees)
 
     entries: list[tuple[str, bytes]] = []
     for dirpath, dirnames, filenames in os.walk(root):
+        at_root = os.path.relpath(dirpath, root) == os.curdir
         dirnames[:] = sorted(
             name
             for name in dirnames
             if name not in excluded_tree_set
+            and not (at_root and name in excluded_root_tree_set)
             and not name.startswith(".")
             and not name.startswith(FRAMEWORK_ARTIFACT_PREFIX)
         )
         for filename in sorted(filenames):
             if filename.startswith("."):
+                continue
+            if (at_root and runtime_store_prefix
+                    and filename.startswith(runtime_store_prefix)):
                 continue
             full = Path(dirpath) / filename
             relative = full.relative_to(root).as_posix()

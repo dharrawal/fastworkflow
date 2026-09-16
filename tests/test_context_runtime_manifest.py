@@ -45,6 +45,7 @@ from fastworkflow.runtime_manifest import (
     CommandDeclaration,
     ContextDeclaration,
     EffectContract,
+    FingerprintVerification,
     ManifestConformanceError,
     NavigationEffect,
     RuntimeManifest,
@@ -479,6 +480,8 @@ _IDO_EXCLUDED_FILES = (
     "fastworkflow.env.example",
     "fastworkflow.passwords.env.example",
 )
+_IDO_EXCLUDED_ROOT_TREES = ("benchmarks",)
+_IDO_RUNTIME_STORE_PREFIX = "observability.sqlite3"
 _IDO_SUFFIXES = (".py", ".json", ".md")
 _IDO_CRUFT_DIRNAMES = frozenset({"__pycache__", ".pytest_cache"})
 _IDO_FRAMEWORK_ARTIFACT_PREFIX = "___"
@@ -517,13 +520,18 @@ def _ido_fingerprint_included(relpath):
     """Transcribed from ``gen_ido_scaffold._fingerprint_included``.
 
     Their ``os.sep`` split and their loop shape are kept, so a future diff
-    against their source stays readable. The rule: excluded tree names and
-    cruft names match at any depth, a dot prefix excludes a file or a
-    directory, ``___`` excludes a directory segment only, the excluded-file
-    list matches the whole root-relative path, and what survives must carry a
-    content suffix.
+    against their source stays readable. The rule: a ``benchmarks`` directory
+    directly under the root and a root file named after the runtime store are
+    excluded (scope rule v2), excluded tree names and cruft names match at any
+    depth, a dot prefix excludes a file or a directory, ``___`` excludes a
+    directory segment only, the excluded-file list matches the whole
+    root-relative path, and what survives must carry a content suffix.
     """
     segments = relpath.split(os.sep)
+    if len(segments) > 1 and segments[0] in _IDO_EXCLUDED_ROOT_TREES:
+        return False
+    if len(segments) == 1 and segments[0].startswith(_IDO_RUNTIME_STORE_PREFIX):
+        return False
     for position, segment in enumerate(segments):
         if segment in _IDO_EXCLUDED_TREES or segment in _IDO_CRUFT_DIRNAMES:
             return False
@@ -609,6 +617,29 @@ _SCOPE_CASES: dict[str, bool] = {
     # for is worth marking as such rather than counting as coverage.
     "fastworkflow.env": False,
     "_commands/notes.txt": False,
+    # Scope rule v2. The benchmark corpus directly under the root is what a
+    # workflow is measured with rather than what it is, and on the tree that
+    # forced this decision most of it was git-ignored - so a fingerprint over it
+    # could not be reproduced from a clean clone.
+    "benchmarks/g2e-tuning/v1.json": False,
+    "benchmarks/ad-admin-selfcompact-pilot/analysis.json": False,
+    # Root-relative, unlike every other exclusion here. A command package called
+    # ``benchmarks`` is source like any other, and dropping it would be the
+    # invisible direction of error: a hash that holds still while behaviour
+    # moves.
+    "_commands/benchmarks/case.py": True,
+    # The runtime observability store. Neither of these has a content suffix, so
+    # both sides drop them whatever the prefix rule says - marked as such rather
+    # than counted as coverage of it.
+    "observability.sqlite3": False,
+    "observability.sqlite3-wal": False,
+    # The case the prefix rule is actually for: a sidecar written beside the
+    # store in a format the suffix rule would otherwise admit.
+    "observability.sqlite3.offload-handles.json": False,
+    # Near misses, so the rule cannot grow into "anything called observability"
+    # or follow the store's name into a subdirectory.
+    "observability.md": True,
+    "_commands/observability.sqlite3.notes.md": True,
 }
 
 
@@ -670,6 +701,64 @@ def test_the_scope_rule_version_agrees_with_ido():
     generator = _import_ido_generator()
     assert generator.WORKFLOW_SCOPE_RULE_VERSION == WORKFLOW_SCOPE_RULE_VERSION
     assert generator.FRAMEWORK_ARTIFACT_PREFIX == FRAMEWORK_ARTIFACT_PREFIX
+
+
+def test_a_benchmarks_tree_is_excluded_at_the_root_and_kept_below_it(tmp_path):
+    """Scope rule v2, stated on its own rather than only inside the table.
+
+    Two assertions in one test because the pair is the rule: excluding at the
+    root is the decision, and keeping it below the root is what stops the
+    decision from eating source.
+    """
+    root = _write_workflow(
+        tmp_path / "wf",
+        {
+            "benchmarks/corpus/case.json": "measured with\n",
+            "_commands/benchmarks/case.py": "measured by\n",
+        },
+    )
+    assert _fw_selection(root) == {"_commands/benchmarks/case.py"}
+
+
+def test_the_runtime_store_and_its_sidecars_are_excluded_at_the_root(tmp_path):
+    """The prefix rule, on the names the store actually takes.
+
+    ``.json`` because that is the only one of these the suffix rule would admit
+    on its own; the others are here to say that one store under four names is
+    one exclusion.
+    """
+    root = _write_workflow(
+        tmp_path / "wf",
+        {
+            "observability.sqlite3": "store\n",
+            "observability.sqlite3-wal": "sidecar\n",
+            "observability.sqlite3-shm": "sidecar\n",
+            "observability.sqlite3.offload-handles.json": "sidecar\n",
+            "observability.md": "documentation\n",
+            "README.md": "source\n",
+        },
+    )
+    assert _fw_selection(root) == {"observability.md", "README.md"}
+
+
+def test_a_fingerprint_declared_under_the_previous_rule_is_incomparable():
+    """What the bump to v2 buys the records already written.
+
+    Every provenance record written before the benchmark corpus left the scope
+    declares a v1 digest over a larger file set. Under v2 those digests differ,
+    and the difference is not evidence that the workflow drifted - so the reader
+    declines the comparison instead of reporting a stale manifest, which is the
+    whole reason the selection carries a version.
+    """
+    assert WORKFLOW_SCOPE_RULE_VERSION > 1
+    verification = FingerprintVerification(
+        declared="sha256:" + "a" * 64,
+        computed="sha256:" + "b" * 64,
+        declared_scope_rule_version=1,
+    )
+    assert not verification.matches
+    assert verification.incomparable
+    assert "different questions" in verification.problem()
 
 
 def test_scope_rules_select_the_same_files_on_the_live_ido_tree():
