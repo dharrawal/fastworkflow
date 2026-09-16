@@ -82,6 +82,12 @@ logger = logging.getLogger(__name__)
 #: The feature flag. Off is the ``ido-8ps.18`` accepted stack, unchanged.
 ANSWER_COVERAGE_ENV = "FW_ANSWER_COVERAGE"
 
+#: ``ido-8ps.27``. The roster nudge is a SECOND flag over the same machinery,
+#: because it changes the LOOP and the coverage statement does not. Off is
+#: ``9e5e9d9`` behaviour exactly: the finish action ends the loop, as it always
+#: did, and nothing is computed, recorded or injected.
+ROSTER_NUDGE_ENV = "FW_ROSTER_NUDGE"
+
 #: The key the statement is stored under in the extractor's trajectory copy.
 #: Deliberately not an ``observation_`` key: it is a statement ABOUT the run, not
 #: a tool result, and it is inserted FIRST so the adapter renders it before the
@@ -129,6 +135,14 @@ def answer_coverage_enabled() -> bool:
     read one way.
     """
     return _env_value(ANSWER_COVERAGE_ENV).lower() in {"1", "true", "yes", "on"}
+
+
+def roster_nudge_enabled() -> bool:
+    """True when ``FW_ROSTER_NUDGE`` is set to a truthy value.
+
+    Read by the same rule as every other flag in this stack, file first.
+    """
+    return _env_value(ROSTER_NUDGE_ENV).lower() in {"1", "true", "yes", "on"}
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +352,34 @@ def aliased_executes(trajectory: Mapping[str, Any]) -> set[str]:
     return found
 
 
+def issued_commands(trajectory: Mapping[str, Any]) -> str:
+    """Every command this run ISSUED, normalised, as one haystack.
+
+    ``ido-8ps.27`` (b). The archive keeps command RESPONSES and never commands,
+    which is what makes ``retrieved_corpus`` sound. This is the deliberate other
+    half, read for one purpose only: an item that is in no response but IS in a
+    command was asked for and did not come back, and that is a different fact
+    from an item nobody asked for. It can never make an item look retrieved --
+    it is consulted only about items ``split_by_presence`` already put in the
+    unobserved list.
+
+    The trajectory handed to ``build_statement`` is the extractor's copy, so a
+    step the context-window fallback truncated is gone from it. A truncated
+    attempt therefore reads as "never attempted", which is the wording this
+    module already used before ``ido-8ps.27`` and never a new claim.
+    """
+    parts: list[str] = []
+    for key, value in trajectory.items():
+        name = str(key)
+        if not name.startswith("tool_args_"):
+            continue
+        if isinstance(value, Mapping):
+            parts.extend(str(item) for item in value.values())
+        else:
+            parts.append(str(value))
+    return normalise("\n".join(parts))
+
+
 def retrieved_corpus(
     *,
     scope: Optional[RuntimeHandleScope] = None,
@@ -430,6 +472,54 @@ def retrieved_text(
     return retrieved_corpus(scope=scope, archive=archive, handle_store=handle_store)[0]
 
 
+def subject_corpus(
+    *,
+    scope: Optional[RuntimeHandleScope] = None,
+    archive: Optional[RuntimeHandleArchive] = None,
+) -> str:
+    """The CONTEXT CLAUSES of this turn's observations, normalised, as one haystack.
+
+    ``ido-8ps.27``. ``retrieved_corpus`` answers "does this name appear anywhere
+    in what the run retrieved". The roster diagnosis
+    (``evaluation/artifacts/result-search/roster-diagnosis.md``) showed that is
+    the wrong question for a finish-time check: ``find_identity <name>`` puts a
+    name in the corpus, so three attempts that audited ONE person and closed four
+    others as "not retrieved" reported zero or one unobserved names.
+
+    The clause answers the right question. ``ido-8ps.13`` records, per archived
+    observation, the context INSTANCE the command ran against -- "Identity
+    28c5aeb5... Alan Cooper", "Account e8a0c3a1... Alan Cooper". A name in a
+    clause is a name the run made the SUBJECT of a command; a name only in
+    observation text is a row in somebody else's listing. Replayed over the ten
+    stored pinned attempts the clause test fired on 7 of 7 voluntary early stops
+    and on neither attempt that completed the roster.
+
+    Clauses only. No observation text, no stored rows: this haystack may never
+    be the reason a name is called retrieved, and it never is -- it is read only
+    to decide whether the agent has yet turned to that subject.
+    """
+    selected = scope or default_scope()
+    if archive is None:
+        from fastworkflow.observation_offloading import state as offload_state
+
+        archive = offload_state.archive()
+    try:
+        rows = archive.list(selected)
+    except Exception:  # noqa: BLE001 - an unreadable archive is an empty one
+        logger.debug("roster nudge could not list the archive", exc_info=True)
+        rows = []
+    aliases: list[str] = []
+    for handle in rows:
+        alias = str(handle.get("alias") or "")
+        if alias and alias not in aliases and not is_search_answer_key(alias):
+            aliases.append(alias)
+    for alias in stored_handles(selected):
+        if alias and alias not in aliases and not is_search_answer_key(alias):
+            aliases.append(alias)
+    parts = [context_clause_of(selected, alias) or "" for alias in aliases]
+    return normalise("\n".join(parts))
+
+
 def split_by_presence(
     entities: Iterable[Entity], haystack: str
 ) -> tuple[list[Entity], list[Entity]]:
@@ -469,12 +559,25 @@ RETRIEVED_RULE = (
 )
 
 
+#: ``ido-8ps.27`` (b). The two reasons an item can be missing from the corpus,
+#: as one deterministic sentence. It is emitted only when the second kind
+#: actually occurred, so a run where every missing item was simply never
+#: attempted -- seven of the eight in the roster diagnosis -- gets the block it
+#: got at ``9e5e9d9``, byte for byte.
+ATTEMPT_SPLIT = (
+    "Of those, these WERE attempted and the attempt returned nothing about "
+    "them: {unavailable}. The rest were never attempted - no command of this "
+    "run named them: {never}. "
+)
+
+
 def coverage_block(
     *,
     unobserved: Iterable[str],
     exhausted: bool,
     steps: int,
     observed: Iterable[str] = (),
+    unavailable: Iterable[str] = (),
 ) -> str:
     """The exact text prepended to the extract input.
 
@@ -491,12 +594,28 @@ def coverage_block(
     absent. The observed names are spelled out where they fit, because the
     failure was about specific items and a list is harder to misread than a
     quantifier.
+
+    ``ido-8ps.27`` is ``unavailable``: the subset of ``unobserved`` the run DID
+    name in a command. An item that was asked for and did not come back is a
+    different fact about the run from an item nobody ever asked for, the
+    extractor is now told which is which, and ``post_check`` counts the two
+    separately. The sentence appears only when the second kind exists, so the
+    common case is unchanged text.
     """
     ending = (
         EXHAUSTED_ENDING.format(steps=int(steps)) if exhausted else NORMAL_ENDING
     )
     names = [str(name).strip() for name in unobserved if str(name).strip()]
     listed = "; ".join(names) if names else NONE_MARKER
+    tried = [str(name).strip() for name in unavailable if str(name).strip()]
+    tried = [name for name in tried if name in names]
+    split = ""
+    if tried:
+        untried = [name for name in names if name not in tried]
+        split = ATTEMPT_SPLIT.format(
+            unavailable="; ".join(tried),
+            never="; ".join(untried) if untried else NONE_MARKER,
+        )
     seen: list[str] = []
     for name in observed:
         text = str(name).strip()
@@ -513,12 +632,152 @@ def coverage_block(
         f"Coverage of this run: {ending}. "
         f"These named items from the request appear in no retrieved observation: "
         f"{listed}. "
+        f"{split}"
         'For each of them report "not retrieved" and nothing else - no value, no '
         "unavailability, no absence. "
         f"{named}"
         f"{RETRIEVED_RULE} "
         "For items that appear, report only what the observations show."
     )
+
+
+# ---------------------------------------------------------------------------
+# The roster nudge (ido-8ps.27)
+# ---------------------------------------------------------------------------
+
+#: The nudge is bounded like the observed list and for the same reason: it is
+#: built from a regex over one request, so this is a backstop, not a budget. A
+#: list that does not fit is cut and counted, never dropped silently.
+NUDGE_MAX_BYTES = 1024
+
+#: The nudge costs one iteration and is worthless unless the agent can act on
+#: it. Below this many further actions the loop ends as it always did.
+NUDGE_MIN_ITERS_LEFT = 2
+
+NUDGE_HEAD = (
+    "Harness check before this turn ends. You selected finish, and this run "
+    "has not made the following named items of the request the subject of any "
+    "command, so nothing about them has been retrieved: "
+)
+NUDGE_TAIL = (
+    ". You have {left} more actions available before this turn ends - the "
+    "budget is not spent. Retrieve for each of them what the request asks, or "
+    "select finish again and say in your final answer why you could not. This "
+    "note is from the harness, not from the user: do not ask the user about "
+    "it, and it is shown once per turn."
+)
+NUDGE_MORE = "; and {count} more"
+
+
+def nudge_block(names: Iterable[str], iterations_left: int) -> tuple[str, int]:
+    """``(text, named)`` -- the nudge, capped at ``NUDGE_MAX_BYTES``.
+
+    Deterministic: the same missing set and the same budget produce the same
+    bytes. Names are taken in order until the cap is reached and the remainder
+    is counted, so a request naming forty people still yields one bounded note.
+    """
+    wanted = [str(name).strip() for name in names if str(name).strip()]
+    if not wanted:
+        return "", 0
+    tail = NUDGE_TAIL.format(left=max(0, int(iterations_left)))
+    frame = len(NUDGE_HEAD.encode("utf-8")) + len(tail.encode("utf-8"))
+    room = NUDGE_MAX_BYTES - frame
+    taken: list[str] = []
+    for name in wanted:
+        candidate = "; ".join([*taken, name])
+        dropped = len(wanted) - len(taken) - 1
+        suffix = NUDGE_MORE.format(count=dropped) if dropped else ""
+        if len(candidate.encode("utf-8")) + len(suffix.encode("utf-8")) > room:
+            break
+        taken.append(name)
+    if not taken:
+        return "", 0
+    listed = "; ".join(taken)
+    if len(taken) < len(wanted):
+        listed += NUDGE_MORE.format(count=len(wanted) - len(taken))
+    return f"{NUDGE_HEAD}{listed}{tail}", len(taken)
+
+
+@dataclass
+class NudgeReport:
+    """What the finish-time check saw, whether or not it fired."""
+
+    flag: bool = True
+    fired: bool = False
+    reason: str = ""
+    entities_total: int = 0
+    subjects_total: int = 0
+    subjects_missing: list[str] = field(default_factory=list)
+    subjects_named: int = 0
+    iterations_left: int = 0
+    text_bytes: int = 0
+    clause_bytes: int = 0
+
+    def as_event(self) -> dict[str, Any]:
+        return {
+            "flag": self.flag,
+            "fired": self.fired,
+            "reason": self.reason,
+            "entities_total": self.entities_total,
+            "subjects_total": self.subjects_total,
+            "subjects_missing": list(self.subjects_missing),
+            "subjects_named": self.subjects_named,
+            "iterations_left": self.iterations_left,
+            "text_bytes": self.text_bytes,
+            "clause_bytes": self.clause_bytes,
+        }
+
+
+def build_nudge(
+    *,
+    user_query: Any,
+    iterations_left: int,
+    scope: Optional[RuntimeHandleScope] = None,
+    archive: Optional[RuntimeHandleArchive] = None,
+    clauses: Optional[str] = None,
+) -> tuple[str, NudgeReport]:
+    """``(text, report)``. ``text`` is ``""`` when nothing should be injected.
+
+    The whole decision, in one deterministic place, so the loop's own code is a
+    call and a branch. Nothing here calls a model, reads a backend or consults
+    the user; it reads the request by the same regex ``build_statement`` uses
+    and the same context clauses the archive already holds.
+    """
+    report = NudgeReport(iterations_left=int(iterations_left))
+    if int(iterations_left) < NUDGE_MIN_ITERS_LEFT:
+        report.reason = "no room to act"
+        return "", report
+    entities = named_entities(request_text(user_query))
+    instructed = [e for e in entities if e.kind in INSTRUCTED_KINDS]
+    report.entities_total = len(entities)
+    report.subjects_total = len(instructed)
+    if not instructed:
+        report.reason = "the request names no items"
+        return "", report
+    haystack = (
+        clauses if clauses is not None
+        else subject_corpus(scope=scope, archive=archive)
+    )
+    report.clause_bytes = len(haystack.encode("utf-8"))
+    if not haystack:
+        # No clause was recorded at all, so "never the subject of a command" is
+        # a statement about the archive rather than about the run. Say nothing,
+        # exactly as build_statement names nothing on an incomplete archive.
+        report.reason = "no context clauses recorded"
+        return "", report
+    _, missing = split_by_presence(instructed, haystack)
+    report.subjects_missing = [entity.text for entity in missing]
+    if not missing:
+        report.reason = "every named item was already a subject"
+        return "", report
+    text, named = nudge_block(report.subjects_missing, iterations_left)
+    if not text:
+        report.reason = "the note would not fit its byte cap"
+        return "", report
+    report.fired = True
+    report.subjects_named = named
+    report.text_bytes = len(text.encode("utf-8"))
+    return text, report
 
 
 @dataclass
@@ -537,6 +796,10 @@ class CoverageReport:
     #: set and the post-check can measure both halves of the same instruction.
     observed_named: list[str] = field(default_factory=list)
     unobserved: list[str] = field(default_factory=list)
+    #: ido-8ps.27 (b): the two halves of ``unobserved``. ``unavailable`` is the
+    #: subset the run named in a command; ``never_attempted`` is the rest.
+    unavailable: list[str] = field(default_factory=list)
+    never_attempted: list[str] = field(default_factory=list)
     phrases_total: int = 0
     phrases_unmatched: list[str] = field(default_factory=list)
     kinds: dict[str, int] = field(default_factory=dict)
@@ -559,6 +822,8 @@ class CoverageReport:
             "entities_unobserved": self.entities_unobserved,
             "observed": list(self.observed),
             "unobserved": list(self.unobserved),
+            "unavailable": list(self.unavailable),
+            "never_attempted": list(self.never_attempted),
             "phrases_total": self.phrases_total,
             "phrases_unmatched": list(self.phrases_unmatched),
             "entity_kinds": dict(self.kinds),
@@ -627,10 +892,21 @@ def build_statement(
         logger.warning("answer coverage names no items: %s", reason)
         instructed = []
         phrases = []
+    # ido-8ps.27 (b): split the instructed list by whether the run ever named
+    # the item in a command. Order is preserved on both sides so the block is
+    # deterministic.
+    issued = issued_commands(trajectory)
+    by_text = {entity.text: entity for entity in unobserved}
+    unavailable = [
+        text for text in instructed
+        if (key := getattr(by_text.get(text), "key", "")) and key in issued
+    ]
+    never_attempted = [text for text in instructed if text not in unavailable]
     statement = coverage_block(
         unobserved=instructed,
         exhausted=bool(exhausted),
         steps=steps,
+        unavailable=unavailable,
         # ido-8ps.24: only the kinds that are ever INSTRUCTED as "not retrieved"
         # are listed back as retrieved, so the two lists partition one set. A
         # quoted request phrase is measured and never instructed, and naming one
@@ -655,6 +931,8 @@ def build_statement(
             entity.text for entity in observed if entity.kind in INSTRUCTED_KINDS
         ],
         unobserved=instructed,
+        unavailable=unavailable,
+        never_attempted=never_attempted,
         phrases_total=sum(
             1 for entity in entities if entity.kind not in INSTRUCTED_KINDS
         ),
@@ -732,6 +1010,16 @@ class PostCheck:
     unavailability_claim_on_unobserved: int = 0
     not_retrieved_on_unobserved: int = 0
     silent_on_unobserved: int = 0
+    #: ido-8ps.27 (b): the same three counts, split by WHY the item is missing.
+    #: They partition the ``*_on_unobserved`` totals above.
+    unavailable_total: int = 0
+    unavailable_mentioned: int = 0
+    unavailability_claim_on_unavailable: int = 0
+    not_retrieved_on_unavailable: int = 0
+    never_attempted_total: int = 0
+    never_attempted_mentioned: int = 0
+    unavailability_claim_on_never_attempted: int = 0
+    not_retrieved_on_never_attempted: int = 0
     observed_total: int = 0
     observed_mentioned: int = 0
     unavailability_claim_on_observed: int = 0
@@ -754,6 +1042,14 @@ class PostCheck:
             "unavailability_claim_on_unobserved": self.unavailability_claim_on_unobserved,
             "not_retrieved_on_unobserved": self.not_retrieved_on_unobserved,
             "silent_on_unobserved": self.silent_on_unobserved,
+            "unavailable_total": self.unavailable_total,
+            "unavailable_mentioned": self.unavailable_mentioned,
+            "unavailability_claim_on_unavailable": self.unavailability_claim_on_unavailable,
+            "not_retrieved_on_unavailable": self.not_retrieved_on_unavailable,
+            "never_attempted_total": self.never_attempted_total,
+            "never_attempted_mentioned": self.never_attempted_mentioned,
+            "unavailability_claim_on_never_attempted": self.unavailability_claim_on_never_attempted,
+            "not_retrieved_on_never_attempted": self.not_retrieved_on_never_attempted,
             "observed_total": self.observed_total,
             "observed_mentioned": self.observed_mentioned,
             "unavailability_claim_on_observed": self.unavailability_claim_on_observed,
@@ -768,6 +1064,7 @@ def post_check(
     answer: Any,
     unobserved: Iterable[str],
     observed: Iterable[str] = (),
+    unavailable: Iterable[str] = (),
 ) -> PostCheck:
     """Count absence phrasing near each named item. Measurement only.
 
@@ -776,18 +1073,28 @@ def post_check(
     five answers by hand, and so a later run can be compared to this one.
     ``observed`` is ``ido-8ps.24``: the same window test applied to the items
     the statement said WERE retrieved, where any hit at all is a defect.
+    ``unavailable`` is ``ido-8ps.27`` (b): the subset of ``unobserved`` the run
+    did name in a command, counted separately from the ones it never asked for.
     """
     text = normalise(answer)
     check = PostCheck(answer_bytes=len(str(answer or "").encode("utf-8")))
+    tried = {normalise(name) for name in unavailable if normalise(name)}
     for name in unobserved:
         key = normalise(name)
         check.unobserved_total += 1
+        # ido-8ps.27 (b): every unobserved item belongs to exactly one kind, so
+        # the two sets of counts partition the totals above.
+        kind = "unavailable" if key in tried else "never_attempted"
+        if kind == "unavailable":
+            check.unavailable_total += 1
+        else:
+            check.never_attempted_total += 1
         if not key:
             continue
         windows = _windows(text, key)
         if not windows:
             check.silent_on_unobserved += 1
-            check.details.append({"item": name, "mentioned": False,
+            check.details.append({"item": name, "mentioned": False, "kind": kind,
                                   "unavailability_claims": 0, "not_retrieved": 0})
             continue
         check.unobserved_mentioned += 1
@@ -795,7 +1102,15 @@ def post_check(
         marked = sum(1 for window in windows if _NOT_RETRIEVED_RE.search(window))
         check.unavailability_claim_on_unobserved += claims
         check.not_retrieved_on_unobserved += marked
-        check.details.append({"item": name, "mentioned": True,
+        if kind == "unavailable":
+            check.unavailable_mentioned += 1
+            check.unavailability_claim_on_unavailable += claims
+            check.not_retrieved_on_unavailable += marked
+        else:
+            check.never_attempted_mentioned += 1
+            check.unavailability_claim_on_never_attempted += claims
+            check.not_retrieved_on_never_attempted += marked
+        check.details.append({"item": name, "mentioned": True, "kind": kind,
                               "unavailability_claims": claims, "not_retrieved": marked})
     for name in observed:
         key = normalise(name)
@@ -821,6 +1136,7 @@ def post_check(
 
 __all__ = [
     "ANSWER_COVERAGE_ENV",
+    "ATTEMPT_SPLIT",
     "COVERAGE_KEY",
     "CLAIM_WINDOW_CHARS",
     "CoverageReport",
@@ -831,17 +1147,26 @@ __all__ = [
     "MAX_ENTITIES",
     "MAX_ENTITY_CHARS",
     "MIN_ENTITY_CHARS",
+    "NUDGE_MAX_BYTES",
+    "NUDGE_MIN_ITERS_LEFT",
+    "NudgeReport",
     "PLAN_MARKER",
     "PostCheck",
+    "ROSTER_NUDGE_ENV",
     "aliased_executes",
     "answer_coverage_enabled",
+    "build_nudge",
     "build_statement",
     "coverage_block",
+    "issued_commands",
     "named_entities",
     "normalise",
+    "nudge_block",
     "post_check",
     "request_text",
     "retrieved_corpus",
     "retrieved_text",
+    "roster_nudge_enabled",
     "split_by_presence",
+    "subject_corpus",
 ]

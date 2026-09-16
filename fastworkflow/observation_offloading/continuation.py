@@ -406,6 +406,9 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.iteration_counter = 0
         self.forced_replans = 0
         self.truncated_execute_steps = 0
+        # ido-8ps.27: one roster nudge per TURN, and a turn here is a forward()
+        # across all of its segments, not a segment.
+        self._roster_nudges_fired = 0
         self.bind_scope()
         trajectory: dict[str, Any] = {}
         max_iters = int(input_args.pop("max_iters", self.max_iters))

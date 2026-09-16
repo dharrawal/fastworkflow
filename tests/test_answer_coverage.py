@@ -20,16 +20,24 @@ from fastworkflow.answer_coverage import (
     ANSWER_COVERAGE_ENV,
     COVERAGE_KEY,
     INSTRUCTED_KINDS,
+    NUDGE_MAX_BYTES,
+    NUDGE_MIN_ITERS_LEFT,
+    ROSTER_NUDGE_ENV,
     aliased_executes,
     answer_coverage_enabled,
+    build_nudge,
     build_statement,
     coverage_block,
+    issued_commands,
     named_entities,
     normalise,
+    nudge_block,
     post_check,
     request_text,
     retrieved_corpus,
+    roster_nudge_enabled,
     split_by_presence,
+    subject_corpus,
 )
 from fastworkflow.answer_rehydration import ANSWER_REHYDRATION_ENV
 from fastworkflow.observation_offloading.archive import (
@@ -620,6 +628,339 @@ class ExtractHook(unittest.TestCase):
         kinds = [e["kind"] for e in snapshot_events()]
         self.assertLess(kinds.index("rehydration_started"),
                         kinds.index("coverage_statement"))
+
+
+class WhyAnItemIsMissing(unittest.TestCase):
+    """ido-8ps.27 (b): never attempted is not the same fact as unavailable."""
+
+    def test_a_name_in_a_command_is_found(self) -> None:
+        issued = issued_commands(
+            {"tool_args_0": {"command": "find_identity <name>Anna Garcia</name>"},
+             "tool_args_1": "fetch_result_page O5"}
+        )
+        self.assertIn(normalise("Anna Garcia"), issued)
+        self.assertIn(normalise("fetch_result_page"), issued)
+
+    def test_an_observation_is_not_a_command(self) -> None:
+        issued = issued_commands(
+            {"observation_0": "1 identity. uid-1 Anna Garcia",
+             "thought_0": "look for Anna Garcia"}
+        )
+        self.assertEqual(issued, "")
+
+    def test_the_block_is_unchanged_when_nothing_was_attempted(self) -> None:
+        self.assertEqual(
+            coverage_block(unobserved=["Anna Garcia"], exhausted=False, steps=3),
+            coverage_block(unobserved=["Anna Garcia"], exhausted=False, steps=3,
+                           unavailable=[]),
+        )
+
+    def test_the_two_kinds_are_named_apart(self) -> None:
+        block = coverage_block(
+            unobserved=["Anna Garcia", "Christopher Hubbard"],
+            exhausted=False, steps=9, unavailable=["Christopher Hubbard"],
+        )
+        self.assertIn("WERE attempted and the attempt returned nothing about "
+                      "them: Christopher Hubbard", block)
+        self.assertIn("never attempted - no command of this run named them: "
+                      "Anna Garcia", block)
+        self.assertIn('report "not retrieved" and nothing else', block)
+
+    def test_an_unavailable_item_outside_the_list_is_ignored(self) -> None:
+        block = coverage_block(unobserved=["Anna Garcia"], exhausted=False,
+                               steps=1, unavailable=["Someone Else"])
+        self.assertNotIn("WERE attempted", block)
+
+    def test_every_missing_item_may_be_the_attempted_kind(self) -> None:
+        block = coverage_block(unobserved=["Anna Garcia"], exhausted=False,
+                               steps=1, unavailable=["Anna Garcia"])
+        self.assertIn("The rest were never attempted - no command of this run "
+                      "named them: none.", block)
+
+    def test_build_statement_splits_from_the_trajectory(self) -> None:
+        trajectory = {
+            "thought_0": "look",
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "find_identity <name>Anna Garcia</name>"},
+            "observation_0": "complete-zero: no rows",
+        }
+        _, report = build_statement(
+            trajectory, user_query=CARD, exhausted=False,
+            haystack=normalise("nothing was retrieved"),
+        )
+        self.assertIn("Anna Garcia", report.unavailable)
+        self.assertIn("Alan Cooper", report.never_attempted)
+        self.assertEqual(
+            sorted(report.unavailable + report.never_attempted),
+            sorted(report.unobserved),
+        )
+        self.assertIn("WERE attempted", report.statement)
+
+    def test_the_post_check_counts_the_two_kinds_separately(self) -> None:
+        check = post_check(
+            "Anna Garcia: not retrieved. Alan Cooper: no record is available.",
+            ["Anna Garcia", "Alan Cooper"],
+            (),
+            ["Anna Garcia"],
+        )
+        self.assertEqual(check.unavailable_total, 1)
+        self.assertEqual(check.never_attempted_total, 1)
+        self.assertEqual(check.not_retrieved_on_unavailable, 1)
+        self.assertEqual(check.unavailability_claim_on_never_attempted, 1)
+        self.assertEqual(
+            check.unavailable_total + check.never_attempted_total,
+            check.unobserved_total,
+        )
+        self.assertEqual(
+            [detail["kind"] for detail in check.details],
+            ["unavailable", "never_attempted"],
+        )
+
+    def test_the_kinds_are_in_the_event(self) -> None:
+        check = post_check("nothing", ["Anna Garcia"], (), ["Anna Garcia"])
+        event = check.as_event()
+        self.assertEqual(event["unavailable_total"], 1)
+        self.assertEqual(event["never_attempted_total"], 0)
+
+
+class SubjectOfACommand(unittest.TestCase):
+    """ido-8ps.27: the context clause, not the corpus, answers "did you go there"."""
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.addCleanup(reset_runtime_state)
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.scope = scope_for(self.directory.name)
+        self.archive = RuntimeHandleArchive(
+            os.path.join(self.directory.name, "obs.sqlite3"))
+
+    def _archive(self, alias: str, text: str, clause: str = "") -> None:
+        self.archive.persist(
+            self.scope, alias=alias, offload_order=int(alias[1:]),
+            command_name="find_identity", step_index=int(alias[1:]), text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        record_context_clause(self.scope, alias, clause)
+
+    def test_a_listing_row_is_not_a_subject(self) -> None:
+        self._archive("O1", "5 identities.\nuid-2  Anna Garcia", "DirectoryExplorer")
+        haystack = subject_corpus(scope=self.scope, archive=self.archive)
+        self.assertNotIn(normalise("Anna Garcia"), haystack)
+
+    def test_a_context_instance_is_a_subject(self) -> None:
+        self._archive("O1", "3 accounts.", "Identity 3f22  Anna Garcia")
+        haystack = subject_corpus(scope=self.scope, archive=self.archive)
+        self.assertIn(normalise("Anna Garcia"), haystack)
+
+    def _rights(self) -> None:
+        """The two rights and their application, opened as every attempt does."""
+        self._archive("O8", "477 holders.",
+                      "Permission 85cd  Active Directory_Cloud Administrator")
+        self._archive("O9", "513 holders.",
+                      "Permission 3e3d  Active Directory_Compliance Officer")
+
+    def test_the_nudge_names_the_people_the_run_never_opened(self) -> None:
+        self._archive("O1", "1 identity.\nuid-1  Alan Cooper", "DirectoryExplorer")
+        self._archive("O2", "29 permissions.", "Identity 28c5  Alan Cooper")
+        self._rights()
+        text, report = build_nudge(
+            user_query=CARD, iterations_left=10,
+            scope=self.scope, archive=self.archive,
+        )
+        self.assertTrue(report.fired)
+        self.assertNotIn("Alan Cooper", text)
+        for name in ("Alisha Ochoa", "Anna Garcia", "Barbara Sanchez",
+                     "Brandon Miller", "Christopher Hubbard"):
+            self.assertIn(name, text)
+        self.assertIn("10 more actions", text)
+        self.assertIn("do not ask the user", text)
+        self.assertEqual(report.subjects_named, 5)
+
+    def test_a_run_that_reached_everyone_is_not_nudged(self) -> None:
+        for index, name in enumerate(
+            ["Alan Cooper", "Alisha Ochoa", "Anna Garcia", "Barbara Sanchez",
+             "Brandon Miller", "Christopher Hubbard"], start=1
+        ):
+            self._archive(f"O{index}", "rows", f"Identity uid-{index}  {name}")
+        self._rights()
+        text, report = build_nudge(
+            user_query=CARD, iterations_left=10,
+            scope=self.scope, archive=self.archive,
+        )
+        self.assertEqual(text, "")
+        self.assertFalse(report.fired)
+        self.assertEqual(report.reason, "every named item was already a subject")
+
+    def test_no_recorded_clause_says_nothing(self) -> None:
+        text, report = build_nudge(
+            user_query=CARD, iterations_left=10,
+            scope=self.scope, archive=self.archive,
+        )
+        self.assertEqual(text, "")
+        self.assertEqual(report.reason, "no context clauses recorded")
+
+    def test_a_turn_with_no_room_is_never_nudged(self) -> None:
+        text, report = build_nudge(
+            user_query=CARD, iterations_left=NUDGE_MIN_ITERS_LEFT - 1,
+            clauses=normalise("DirectoryExplorer"),
+        )
+        self.assertEqual(text, "")
+        self.assertEqual(report.reason, "no room to act")
+
+    def test_the_note_is_bounded_and_counts_what_it_cut(self) -> None:
+        names = [f"Personname Number{index:03d}" for index in range(120)]
+        text, named = nudge_block(names, 5)
+        self.assertLessEqual(len(text.encode("utf-8")), NUDGE_MAX_BYTES)
+        self.assertLess(named, len(names))
+        self.assertIn(f"and {len(names) - named} more", text)
+
+    def test_the_same_state_always_gives_the_same_note(self) -> None:
+        clauses = normalise("Identity 28c5  Alan Cooper")
+        first, _ = build_nudge(user_query=CARD, iterations_left=7, clauses=clauses)
+        second, _ = build_nudge(user_query=CARD, iterations_left=7, clauses=clauses)
+        self.assertEqual(first, second)
+        self.assertNotEqual("", first)
+
+
+class Stub:
+    """Stands in for ``self.react``: replays a fixed list of actions."""
+
+    def __init__(self, actions) -> None:
+        self.actions = list(actions)
+        self.calls: list[str] = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs["trajectory"])
+        name, args = self.actions[min(len(self.calls) - 1, len(self.actions) - 1)]
+        return dspy.Prediction(next_thought="t", next_tool_name=name,
+                               next_tool_args=args)
+
+
+class LoopHook(unittest.TestCase):
+    """ido-8ps.27 (a): the finish action, the flag, and one nudge per turn."""
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.addCleanup(reset_runtime_state)
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        os.environ.pop(ROSTER_NUDGE_ENV, None)
+        self.addCleanup(lambda: os.environ.pop(ROSTER_NUDGE_ENV, None))
+        from fastworkflow.utils.react import fastWorkflowReAct
+
+        def a_tool(value: str = "") -> str:
+            """A tool."""
+            return f"observed {value}"
+
+        self.scope = scope_for(self.directory.name)
+        self.archive = RuntimeHandleArchive(
+            os.path.join(self.directory.name, "obs.sqlite3"))
+        text = "1 identity.\nuid-1  Alan Cooper"
+        self.archive.persist(
+            self.scope, alias="O1", offload_order=1, command_name="find_identity",
+            step_index=0, text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        for alias, clause in (
+            ("O8", "Permission 85cd  Active Directory_Cloud Administrator"),
+            ("O9", "Permission 3e3d  Active Directory_Compliance Officer"),
+        ):
+            self.archive.persist(
+                self.scope, alias=alias, offload_order=int(alias[1:]),
+                command_name="show_holders", step_index=int(alias[1:]),
+                text="holders", text_sha256=hashlib.sha256(b"holders").hexdigest(),
+            )
+            record_context_clause(self.scope, alias, clause)
+        self.agent = fastWorkflowReAct("user_query -> final_answer",
+                                       tools=[a_tool], max_iters=12)
+        self.agent.continuation_scope = self.scope
+        self.agent.observation_archive = self.archive
+
+    def _run(self, actions):
+        self.agent.react = Stub(actions)
+        trajectory: dict = {}
+        self.agent._roster_nudges_fired = 0
+        self.agent.iteration_counter = 0
+        self.agent._run_loop(trajectory, 0, {"user_query": CARD}, 12, 0)
+        return trajectory
+
+    def test_flag_off_is_the_loop_it_was(self) -> None:
+        """The ido-8ps.24 identity proof, applied to the loop.
+
+        Three claims, because "off" has to mean all three: the trajectory the
+        turn recorded is the one it recorded at 9e5e9d9 (a finish action ends
+        it, observation "Completed."), nothing is measured, and the check is
+        not even consulted -- ``build_nudge`` is never called, so no archive is
+        read and no request is parsed.
+        """
+        with mock.patch.object(answer_coverage, "build_nudge") as never:
+            trajectory = self._run([("finish", {}), ("a_tool", {"value": "x"})])
+        self.assertFalse(never.called)
+        self.assertEqual(
+            trajectory,
+            {"thought_0": "t", "tool_name_0": "finish", "tool_args_0": {},
+             "observation_0": "Completed."},
+        )
+        self.assertEqual(snapshot_events(), [])
+        self.assertFalse(roster_nudge_enabled())
+
+    def test_flag_on_returns_control_to_the_loop(self) -> None:
+        os.environ[ROSTER_NUDGE_ENV] = "1"
+        trajectory = self._run([("finish", {}), ("a_tool", {"value": "more"}),
+                                ("finish", {})])
+        self.assertIn("Harness check before this turn ends",
+                      trajectory["observation_0"])
+        self.assertIn("Brandon Miller", trajectory["observation_0"])
+        self.assertNotIn("Alan Cooper", trajectory["observation_0"])
+        self.assertEqual(trajectory["observation_1"], "observed more")
+        self.assertEqual(trajectory["tool_name_2"], "finish")
+        self.assertEqual(trajectory["observation_2"], "Completed.")
+
+    def test_at_most_one_nudge_per_turn(self) -> None:
+        os.environ[ROSTER_NUDGE_ENV] = "1"
+        trajectory = self._run([("finish", {})])
+        self.assertIn("Harness check", trajectory["observation_0"])
+        self.assertEqual(trajectory["observation_1"], "Completed.")
+        self.assertNotIn("observation_2", trajectory)
+        fired = [event for event in snapshot_events()
+                 if event["kind"] == "roster_nudge" and event["fired"]]
+        self.assertEqual(len(fired), 1)
+
+    def test_the_event_carries_what_the_summarizer_counts(self) -> None:
+        os.environ[ROSTER_NUDGE_ENV] = "1"
+        self._run([("finish", {})])
+        event = [e for e in snapshot_events() if e["kind"] == "roster_nudge"][0]
+        self.assertTrue(event["fired"])
+        self.assertEqual(event["subjects_total"], 9)
+        self.assertEqual(event["subjects_named"], 5)
+        self.assertIn("Brandon Miller", event["subjects_missing"])
+        self.assertGreater(event["text_bytes"], 0)
+        self.assertLessEqual(event["text_bytes"], NUDGE_MAX_BYTES)
+        self.assertGreater(event["iterations_left"], 0)
+
+    def test_never_on_a_turn_with_no_room(self) -> None:
+        os.environ[ROSTER_NUDGE_ENV] = "1"
+        self.agent.react = Stub([("finish", {})])
+        trajectory: dict = {}
+        self.agent._roster_nudges_fired = 0
+        self.agent.iteration_counter = 11  # max_iters is 12: nothing left to do
+        self.agent._run_loop(trajectory, 0, {"user_query": CARD}, 12, 0)
+        self.assertEqual(trajectory["observation_0"], "Completed.")
+        self.assertFalse(self.agent._exhausted_last_run)
+        event = [e for e in snapshot_events() if e["kind"] == "roster_nudge"][0]
+        self.assertFalse(event["fired"])
+        self.assertEqual(event["reason"], "no room to act")
+
+    def test_a_failure_leaves_the_loop_alone(self) -> None:
+        os.environ[ROSTER_NUDGE_ENV] = "1"
+        with mock.patch.object(answer_coverage, "build_nudge",
+                               side_effect=RuntimeError("boom")):
+            trajectory = self._run([("finish", {})])
+        self.assertEqual(trajectory["observation_0"], "Completed.")
+        self.assertEqual([e["kind"] for e in snapshot_events()],
+                         ["roster_nudge_failed"])
 
 
 if __name__ == "__main__":

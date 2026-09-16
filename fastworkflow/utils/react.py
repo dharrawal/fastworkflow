@@ -128,6 +128,9 @@ class fastWorkflowReAct(Module):
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
+        # ido-8ps.27: how many roster nudges this TURN has injected. The cap is
+        # one, so a turn can be reminded and can then still decide it is done.
+        self._roster_nudges_fired = 0
         # How many times the context-window fallback has truncated a trajectory
         # in this process. Only read as a delta around one call (ido-8ps.18, to
         # tell an extract that overflowed from one that did not); it changes
@@ -149,6 +152,7 @@ class fastWorkflowReAct(Module):
             "max_iters": self._suspended["max_iters"],
             "clarification": self._suspended.get("clarification"),
             "iteration_counter": self.iteration_counter,
+            "roster_nudges_fired": getattr(self, "_roster_nudges_fired", 0),
         }
 
     def import_suspended(self, data: dict[str, Any]) -> None:
@@ -161,6 +165,7 @@ class fastWorkflowReAct(Module):
             "clarification": data.get("clarification"),
         }
         self.iteration_counter = data.get("iteration_counter", 0)
+        self._roster_nudges_fired = data.get("roster_nudges_fired", 0)
 
     def _format_trajectory(self, trajectory: dict[str, Any]):
         adapter = dspy.settings.adapter or dspy.ChatAdapter()
@@ -178,6 +183,7 @@ class fastWorkflowReAct(Module):
         # working `trajectory` below (which is what gets stashed in _suspended),
         # so mirroring into it never corrupts suspend/resume bookkeeping.
         self.current_trajectory = {}
+        self._roster_nudges_fired = 0
 
         trajectory: dict[str, Any] = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
@@ -380,6 +386,24 @@ class fastWorkflowReAct(Module):
                 )
                 raise
 
+            # ido-8ps.27: the one interception point. The finish action has
+            # been recognised and its "Completed." observation written, the
+            # answer has NOT been extracted yet, and the loop is by definition
+            # not exhausted. If named items of the request were never the
+            # subject of any command and there is budget to reach them, the
+            # observation of this step becomes a bounded note saying so and the
+            # loop continues. At most one per turn; never on exhaustion; never
+            # an ask_user round. With FW_ROSTER_NUDGE off this computes
+            # nothing, records nothing and returns "".
+            nudge = ""
+            if pred.next_tool_name == "finish":
+                nudge = self._roster_nudge(input_args, max_iters)
+                if nudge:
+                    trajectory[f"observation_{idx}"] = nudge
+                    self.current_trajectory[f"observation_{idx}"] = nudge
+                    step_attributes["observation"] = nudge
+                    step_attributes["roster_nudge"] = True
+
             tracing.end_span(
                 host, step_span, status=step_status, attributes=step_attributes
             )
@@ -394,7 +418,7 @@ class fastWorkflowReAct(Module):
             if on_step_complete and not on_step_complete(idx, trajectory):
                 break
 
-            if pred.next_tool_name == "finish":
+            if pred.next_tool_name == "finish" and not nudge:
                 break
 
             idx += 1
@@ -430,6 +454,62 @@ class fastWorkflowReAct(Module):
 
         extract = await self._async_extract_prediction(trajectory, **input_args)
         return dspy.Prediction(trajectory=trajectory, **extract)
+
+    def _roster_nudge(self, input_args, max_iters) -> str:
+        """The bounded note, or ``""``. ``ido-8ps.27``.
+
+        Called from ``_run_loop`` at the one place a finish action is
+        recognised, before answer extraction. Off by default: with
+        ``FW_ROSTER_NUDGE`` unset or 0 this returns ``""`` before reading
+        anything, so the loop is the loop it was at ``9e5e9d9``, byte for byte,
+        and no event is recorded.
+
+        ``iterations_left`` is what the agent would still have AFTER spending
+        this step on the note: the loop increments the counter once more and
+        stops at ``max_iters``. ``build_nudge`` refuses below
+        ``NUDGE_MIN_ITERS_LEFT``, which is how "never on exhaustion" is kept --
+        a turn with no room is a turn the note cannot help.
+        """
+        from fastworkflow import answer_coverage
+
+        if not answer_coverage.roster_nudge_enabled():
+            return ""
+        if getattr(self, "_roster_nudges_fired", 0) >= 1:
+            return ""
+
+        from fastworkflow.observation_offloading.state import record_event
+
+        scope = getattr(self, "continuation_scope", None)
+        scope_id = getattr(scope, "scope_id", None)
+        left = int(max_iters) - int(getattr(self, "iteration_counter", 0)) - 1
+        try:
+            text, report = answer_coverage.build_nudge(
+                user_query=input_args.get("user_query"),
+                iterations_left=left,
+                scope=scope,
+                archive=getattr(self, "observation_archive", None),
+            )
+        except Exception as error:  # noqa: BLE001 - a nudge must never fail a turn
+            logger.warning(
+                "roster nudge skipped: %s: %s", type(error).__name__, error
+            )
+            record_event(
+                {
+                    "kind": "roster_nudge_failed",
+                    "scope_id": scope_id,
+                    "error": type(error).__name__,
+                    "detail": str(error)[:300],
+                }
+            )
+            return ""
+        record_event(
+            {"kind": "roster_nudge", "scope_id": scope_id, **report.as_event()}
+        )
+        if text:
+            self._roster_nudges_fired = (
+                getattr(self, "_roster_nudges_fired", 0) + 1
+            )
+        return text
 
     def _rehydrate_for_extract(self, trajectory):
         """``(trajectory_for_the_extractor, report, budget, scope_id)``.
