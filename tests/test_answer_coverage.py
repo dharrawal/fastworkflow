@@ -18,16 +18,23 @@ import dspy
 from fastworkflow import answer_coverage
 from fastworkflow.answer_coverage import (
     ANSWER_COVERAGE_ENV,
+    ANSWER_EVIDENCE_ENV,
     COVERAGE_KEY,
+    EVIDENCE_HEAD,
+    EVIDENCE_LIST_MAX_BYTES,
     INSTRUCTED_KINDS,
     NUDGE_MAX_BYTES,
     NUDGE_MIN_ITERS_LEFT,
+    RETRIEVED_RULE,
     ROSTER_NUDGE_ENV,
     aliased_executes,
     answer_coverage_enabled,
+    answer_evidence_enabled,
     build_nudge,
     build_statement,
     coverage_block,
+    evidence_by_subject,
+    evidence_sentence,
     issued_commands,
     named_entities,
     normalise,
@@ -589,6 +596,49 @@ class ExtractHook(unittest.TestCase):
         self.assertGreater(statement[0]["statement_bytes"], 0)
         self.assertEqual(check[0]["unavailability_claim_on_unobserved"], 1)
 
+    def test_the_evidence_sentence_is_off_in_the_rendered_call(self) -> None:
+        """ido-8ps.28. FW_ANSWER_EVIDENCE unset: the extract call is the call
+        the accepted stack made at 90a1565, sentence and all."""
+        os.environ[ANSWER_COVERAGE_ENV] = "1"
+        os.environ.pop(ANSWER_EVIDENCE_ENV, None)
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        recorder = Recorder()
+        self.agent.extract = recorder
+        with self._patch_store():
+            self.agent._extract_prediction(self.trajectory, user_query=CARD)
+        self.assertNotIn(EVIDENCE_HEAD, recorder.calls[0])
+        self.assertIn(STATEMENT_AT_90A1565, recorder.calls[0])
+
+    def test_the_evidence_sentence_reaches_the_extract_call(self) -> None:
+        os.environ[ANSWER_COVERAGE_ENV] = "1"
+        os.environ[ANSWER_EVIDENCE_ENV] = "1"
+        self.addCleanup(lambda: os.environ.pop(ANSWER_EVIDENCE_ENV, None))
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        text = "Active Directory_Compliance Officer"
+        self.archive.persist(
+            self.scope, alias="O2", offload_order=2,
+            command_name="list_entitlements", step_index=1, text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        record_context_clause(self.scope, "O2", "Identity 3f22  Alisha Ochoa")
+        self.agent.extract = mock.Mock(
+            return_value=dspy.Prediction(
+                final_answer="| Alisha Ochoa | Active Directory_Cloud "
+                             "Administrator |"))
+        with self._patch_store():
+            self.agent._extract_prediction(self.trajectory, user_query=CARD)
+        events = snapshot_events()
+        statement = [e for e in events if e["kind"] == "coverage_statement"][0]
+        check = [e for e in events if e["kind"] == "coverage_post_check"][0]
+        self.assertTrue(statement["evidence_flag"])
+        self.assertEqual(statement["evidence_named"], ["Alisha Ochoa"])
+        self.assertGreater(statement["evidence_bytes"], 0)
+        self.assertEqual(check["evidence_claims_unlisted"], 1)
+        self.assertEqual(
+            check["per_evidence_subject"][-1]["claimed_unlisted"],
+            ["Active Directory_Cloud Administrator"],
+        )
+
     def test_a_failure_falls_back_to_the_plain_call(self) -> None:
         os.environ[ANSWER_COVERAGE_ENV] = "1"
         expected = self.agent._format_trajectory(self.trajectory)
@@ -965,3 +1015,311 @@ class LoopHook(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+#: ido-8ps.28. The statement this fixture produced at 90a1565, byte for byte.
+#: Frozen here, not recomputed, because "the flag off changes nothing" is a
+#: claim about bytes a model received on a day and a recomputed expectation
+#: would move with the code it is meant to pin.
+STATEMENT_AT_90A1565 = (
+    "Coverage of this run: the loop ended normally. These named items from the "
+    "request appear in no retrieved observation: Active Directory; Active "
+    "Directory_Cloud Administrator; Active Directory_Compliance Officer; "
+    "Alisha Ochoa; Anna Garcia; Barbara Sanchez; Brandon Miller; Christopher "
+    'Hubbard. For each of them report "not retrieved" and nothing else - no '
+    "value, no unavailability, no absence. These named items of the request DO "
+    "appear in this run's observations: Alan Cooper. Every other named item of "
+    "the request WAS retrieved: it appears in this run's observations and must "
+    'be reported from them. Do not write "not retrieved", "not available", "no '
+    'data", or any other statement of absence about an item that is not named '
+    "in the unobserved list above. For items that appear, report only what the "
+    "observations show."
+)
+
+
+class EvidenceSentenceText(unittest.TestCase):
+    """ido-8ps.28: the sentence itself, as bytes. No store, no flag, no run."""
+
+    def test_nothing_to_state_is_silence(self) -> None:
+        self.assertEqual(evidence_sentence([]), ("", 0, 0))
+        self.assertEqual(evidence_sentence([("Anna Garcia", [])]), ("", 0, 0))
+
+    def test_a_subject_with_no_items_is_never_printed_empty(self) -> None:
+        """The one rule this sentence cannot bend: no absence, in any spelling."""
+        text, subjects, items = evidence_sentence(
+            [("Alan Cooper", ["Active Directory_Cloud Administrator"]),
+             ("Anna Garcia", []),
+             ("Barbara Sanchez", ["Active Directory_Cloud Administrator"])]
+        )
+        self.assertNotIn("Anna Garcia", text)
+        self.assertEqual((subjects, items), (2, 2))
+        self.assertNotIn("none", text)
+        self.assertNotIn("not", text.removeprefix(EVIDENCE_HEAD))
+
+    def test_the_shape_is_subject_colon_items(self) -> None:
+        text, subjects, items = evidence_sentence(
+            [("Alan Cooper", ["Right A", "Right B"]),
+             ("Alisha Ochoa", ["Right B"])]
+        )
+        self.assertEqual(
+            text,
+            EVIDENCE_HEAD + "Alan Cooper: Right A, Right B; Alisha Ochoa: Right B. ",
+        )
+        self.assertEqual((subjects, items), (2, 3))
+
+    def test_it_is_deterministic(self) -> None:
+        pairs = [("A Name", ["Item One"]), ("B Name", ["Item Two"])]
+        self.assertEqual(evidence_sentence(pairs), evidence_sentence(list(pairs)))
+
+    def test_whole_subjects_only_and_the_rest_are_counted(self) -> None:
+        """A half-written subject would read as a short list, and a short list
+        is how a positive statement turns into an absence."""
+        pairs = [(f"Subject Number {index}", ["A Long Property Literal Here"] * 3)
+                 for index in range(40)]
+        text, subjects, _ = evidence_sentence(pairs)
+        listed = text.removeprefix(EVIDENCE_HEAD)
+        self.assertLessEqual(len(listed.encode("utf-8")), EVIDENCE_LIST_MAX_BYTES + 2)
+        self.assertLess(subjects, 40)
+        self.assertIn(f"; and {40 - subjects} more subjects", text)
+        for entry in listed.split("; and ")[0].split("; "):
+            self.assertEqual(entry.count("A Long Property Literal Here"), 3)
+
+
+class EvidenceBySubject(unittest.TestCase):
+    """ido-8ps.28: which named items a subject's OWN observations contain."""
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.addCleanup(reset_runtime_state)
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.scope = scope_for(self.directory.name)
+        self.archive = RuntimeHandleArchive(
+            os.path.join(self.directory.name, "obs.sqlite3"))
+
+    def _archive(self, alias: str, text: str, clause: str = "") -> None:
+        self.archive.persist(
+            self.scope, alias=alias, offload_order=int(alias[1:]),
+            command_name="list_entitlements", step_index=int(alias[1:]), text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        record_context_clause(self.scope, alias, clause)
+
+    def _items(self):
+        return [entity for entity in named_entities(CARD)
+                if entity.kind in INSTRUCTED_KINDS]
+
+    def _evidence(self):
+        return [
+            (subject.text, [item.text for item in items])
+            for subject, items in evidence_by_subject(
+                self._items(), scope=self.scope, archive=self.archive,
+                handle_store=None,
+            )
+        ]
+
+    def test_only_a_stamped_subject_appears_at_all(self) -> None:
+        self._archive("O1", "5 identities.\nuid-2  Anna Garcia", "DirectoryExplorer")
+        self.assertEqual(self._evidence(), [])
+
+    def test_a_subject_gets_what_its_own_observations_contain(self) -> None:
+        self._archive("O1", "Active Directory_Compliance Officer",
+                      "Identity 3f22  Alisha Ochoa")
+        self._archive("O2", "Active Directory_Cloud Administrator\n"
+                            "Active Directory_Compliance Officer",
+                      "Identity 28c5  Alan Cooper")
+        by_subject = dict(self._evidence())
+        self.assertEqual(by_subject["Alisha Ochoa"],
+                         ["Active Directory", "Active Directory_Compliance Officer"])
+        self.assertEqual(by_subject["Alan Cooper"],
+                         ["Active Directory", "Active Directory_Cloud Administrator",
+                          "Active Directory_Compliance Officer"])
+
+    def test_another_subjects_rows_are_not_this_subjects_evidence(self) -> None:
+        """The premise-copy failure, stated as the evidence question."""
+        self._archive("O1", "Active Directory_Cloud Administrator\n"
+                            "Active Directory_Compliance Officer",
+                      "Identity 28c5  Alan Cooper")
+        self._archive("O2", "Active Directory_Compliance Officer",
+                      "Identity 3f22  Alisha Ochoa")
+        by_subject = dict(self._evidence())
+        self.assertNotIn("Active Directory_Cloud Administrator",
+                         by_subject["Alisha Ochoa"])
+
+    def test_a_stamped_subject_with_nothing_is_still_reported_to_the_caller(self) -> None:
+        """The reader returns it; the SENTENCE is what refuses to print it."""
+        self._archive("O1", "0 entitlements.", "Identity 9a11  Barbara Sanchez")
+        self.assertEqual(self._evidence(), [("Barbara Sanchez", [])])
+        self.assertEqual(evidence_sentence(self._evidence()), ("", 0, 0))
+
+    def test_a_subject_is_never_its_own_item(self) -> None:
+        self._archive("O1", "Alan Cooper holds nothing here.",
+                      "Identity 28c5  Alan Cooper")
+        self.assertEqual(dict(self._evidence())["Alan Cooper"], [])
+
+
+class EvidenceInTheBlock(unittest.TestCase):
+    """ido-8ps.28: where the sentence sits, and the flag that gates it."""
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.addCleanup(reset_runtime_state)
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        for name in (ANSWER_EVIDENCE_ENV,):
+            os.environ.pop(name, None)
+        self.addCleanup(lambda: os.environ.pop(ANSWER_EVIDENCE_ENV, None))
+        self.scope = scope_for(self.directory.name)
+        path = os.path.join(self.directory.name, "obs.sqlite3")
+        self.archive = RuntimeHandleArchive(path)
+        self.store = ResultHandleStore(path)
+        text = "1 identity.\nuid-1  Alan Cooper"
+        self.archive.persist(
+            self.scope, alias="O1", offload_order=1, command_name="find_identity",
+            step_index=0, text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        self.trajectory = {
+            "thought_0": "look",
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "find_identity"},
+            "observation_0": alias_line("O1") + text,
+        }
+
+    def _build(self):
+        return build_statement(
+            self.trajectory, user_query=CARD, exhausted=False,
+            scope=self.scope, archive=self.archive, handle_store=self.store,
+        )
+
+    def test_the_flag_is_read_env_file_first(self) -> None:
+        self.assertFalse(answer_evidence_enabled())
+        with mock.patch.dict("fastworkflow._env_vars",
+                             {ANSWER_EVIDENCE_ENV: "1"}, clear=False):
+            self.assertTrue(answer_evidence_enabled())
+        os.environ[ANSWER_EVIDENCE_ENV] = "yes"
+        self.assertTrue(answer_evidence_enabled())
+
+    def test_flag_off_is_byte_identical_to_90a1565(self) -> None:
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        _, report = self._build()
+        self.assertEqual(report.statement, STATEMENT_AT_90A1565)
+        self.assertEqual(report.statement_bytes, 815)
+        self.assertFalse(report.evidence_flag)
+        self.assertEqual(report.evidence, [])
+        self.assertEqual(report.evidence_bytes, 0)
+
+    def test_flag_off_never_reads_the_evidence(self) -> None:
+        from fastworkflow import answer_attribution
+
+        with mock.patch.object(answer_attribution, "observations") as reader:
+            self._build()
+        reader.assert_not_called()
+
+    def _ochoa(self) -> None:
+        """One further observation, stamped against a second subject, whose text
+        carries one of the request's other named items."""
+        text = "Active Directory_Compliance Officer"
+        self.archive.persist(
+            self.scope, alias="O2", offload_order=2,
+            command_name="list_entitlements", step_index=1, text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        record_context_clause(self.scope, "O2", "Identity 3f22  Alisha Ochoa")
+
+    def test_the_sentence_sits_after_the_observed_items_rule(self) -> None:
+        os.environ[ANSWER_EVIDENCE_ENV] = "1"
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        self._ochoa()
+        _, report = self._build()
+        statement = report.statement
+        self.assertIn(EVIDENCE_HEAD, statement)
+        self.assertLess(statement.index(RETRIEVED_RULE),
+                        statement.index(EVIDENCE_HEAD))
+        self.assertLess(statement.index(EVIDENCE_HEAD),
+                        statement.index("For items that appear, report only"))
+
+    def test_the_sentence_states_the_subjects_own_items(self) -> None:
+        os.environ[ANSWER_EVIDENCE_ENV] = "1"
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        self._ochoa()
+        _, report = self._build()
+        self.assertTrue(report.evidence_flag)
+        self.assertIn("Alisha Ochoa: Active Directory, "
+                      "Active Directory_Compliance Officer", report.statement)
+        self.assertNotIn("Alisha Ochoa: Active Directory, Active "
+                         "Directory_Cloud Administrator", report.statement)
+        self.assertEqual(report.evidence_named, ["Alisha Ochoa"])
+        self.assertGreater(report.evidence_bytes, 0)
+
+    def test_no_subject_has_anything_and_the_sentence_is_absent(self) -> None:
+        os.environ[ANSWER_EVIDENCE_ENV] = "1"
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        _, report = self._build()
+        self.assertTrue(report.evidence_flag)
+        self.assertEqual(report.evidence, [("Alan Cooper", [])])
+        self.assertEqual(report.statement, STATEMENT_AT_90A1565)
+
+    def test_no_clause_recorded_says_nothing(self) -> None:
+        os.environ[ANSWER_EVIDENCE_ENV] = "1"
+        _, report = self._build()
+        self.assertEqual(report.evidence, [])
+        self.assertEqual(report.statement, STATEMENT_AT_90A1565)
+
+    def test_a_failure_in_the_reader_costs_the_sentence_and_nothing_else(self) -> None:
+        os.environ[ANSWER_EVIDENCE_ENV] = "1"
+        record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
+        from fastworkflow import answer_attribution
+
+        with mock.patch.object(answer_attribution, "observations",
+                               side_effect=RuntimeError("boom")):
+            _, report = self._build()
+        self.assertEqual(report.statement, STATEMENT_AT_90A1565)
+        self.assertEqual(report.evidence, [])
+
+
+class EvidenceMeasure(unittest.TestCase):
+    """ido-8ps.28: per subject, claimed items the sentence listed vs not."""
+
+    def test_a_claim_the_sentence_listed_and_one_it_did_not(self) -> None:
+        answer = (
+            "| Alisha Ochoa | Active Directory_Cloud Administrator, "
+            "Active Directory_Compliance Officer |"
+        )
+        check = post_check(
+            answer, [], [],
+            evidence=[("Alisha Ochoa", ["Active Directory_Compliance Officer"])],
+            items=["Active Directory_Cloud Administrator",
+                   "Active Directory_Compliance Officer"],
+        )
+        event = check.as_event()
+        self.assertEqual(event["evidence_subjects_total"], 1)
+        self.assertEqual(event["evidence_subjects_mentioned"], 1)
+        self.assertEqual(event["evidence_claims_listed"], 1)
+        self.assertEqual(event["evidence_claims_unlisted"], 1)
+        row = event["per_evidence_subject"][0]
+        self.assertEqual(row["claimed_unlisted"],
+                         ["Active Directory_Cloud Administrator"])
+
+    def test_a_subject_the_answer_never_names(self) -> None:
+        check = post_check("nothing at all", [], [],
+                           evidence=[("Anna Garcia", ["Right A"])],
+                           items=["Right A"])
+        event = check.as_event()
+        self.assertEqual(event["evidence_subjects_total"], 1)
+        self.assertEqual(event["evidence_subjects_mentioned"], 0)
+        self.assertEqual(event["evidence_claims_listed"], 0)
+        self.assertFalse(event["per_evidence_subject"][0]["mentioned"])
+
+    def test_it_measures_a_subject_the_sentence_did_not_print(self) -> None:
+        """The sentence may not print an empty subject; the measure may count it."""
+        check = post_check("Barbara Sanchez - Right A.", [], [],
+                           evidence=[("Barbara Sanchez", [])], items=["Right A"])
+        event = check.as_event()
+        self.assertEqual(event["evidence_claims_unlisted"], 1)
+        self.assertEqual(event["evidence_claims_listed"], 0)
+
+    def test_the_measure_is_absent_when_nothing_is_passed(self) -> None:
+        event = post_check("anything", ["Anna Garcia"]).as_event()
+        self.assertEqual(event["evidence_subjects_total"], 0)
+        self.assertEqual(event["evidence_claims_unlisted"], 0)

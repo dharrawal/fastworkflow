@@ -52,8 +52,20 @@ Rules this module does not bend:
   phrasing near unobserved items in the finished answer and records the count.
   It never edits, rejects or retries an answer.
 
-Flag: ``FW_ANSWER_COVERAGE=1`` (default ``0`` -- off, and with it off the extract
-call receives byte-for-byte what it received at ``4832b3c``).
+``ido-8ps.28`` is one further sentence, behind its own flag, added after the
+observed-items rule: for each named item of the request this run made the
+SUBJECT of a command, the other named items of the request that appear in that
+subject's own observations. Positive half only -- what a subject's evidence
+lacks is never stated, because a bounded portrait would make that a false
+absence -- and no conclusion is instructed. It answers the failure the
+attribution replay measured: the run retrieves the right rows for a person and
+the answer still credits that person with a property their own rows do not
+carry.
+
+Flags: ``FW_ANSWER_COVERAGE=1`` (default ``0`` -- off, and with it off the
+extract call receives byte-for-byte what it received at ``4832b3c``);
+``FW_ROSTER_NUDGE=1`` for the loop check; ``FW_ANSWER_EVIDENCE=1`` for the
+evidence sentence (default off, and off is ``90a1565`` byte for byte).
 """
 from __future__ import annotations
 
@@ -87,6 +99,13 @@ ANSWER_COVERAGE_ENV = "FW_ANSWER_COVERAGE"
 #: ``9e5e9d9`` behaviour exactly: the finish action ends the loop, as it always
 #: did, and nothing is computed, recorded or injected.
 ROSTER_NUDGE_ENV = "FW_ROSTER_NUDGE"
+
+#: ``ido-8ps.28``. The evidence sentence is a THIRD flag over the same
+#: machinery. It changes neither the loop nor the unobserved list: it adds one
+#: sentence to the block, saying per subject which OTHER named items of the
+#: request that subject's own observations contain. Off is ``90a1565``
+#: behaviour, byte for byte, and nothing is computed.
+ANSWER_EVIDENCE_ENV = "FW_ANSWER_EVIDENCE"
 
 #: The key the statement is stored under in the extractor's trajectory copy.
 #: Deliberately not an ``observation_`` key: it is a statement ABOUT the run, not
@@ -143,6 +162,14 @@ def roster_nudge_enabled() -> bool:
     Read by the same rule as every other flag in this stack, file first.
     """
     return _env_value(ROSTER_NUDGE_ENV).lower() in {"1", "true", "yes", "on"}
+
+
+def answer_evidence_enabled() -> bool:
+    """True when ``FW_ANSWER_EVIDENCE`` is set to a truthy value.
+
+    Read by the same rule as every other flag in this stack, file first.
+    """
+    return _env_value(ANSWER_EVIDENCE_ENV).lower() in {"1", "true", "yes", "on"}
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +547,37 @@ def subject_corpus(
     return normalise("\n".join(parts))
 
 
+def evidence_by_subject(
+    entities: Iterable[Entity],
+    *,
+    scope: Optional[RuntimeHandleScope] = None,
+    archive: Optional[RuntimeHandleArchive] = None,
+    handle_store: Any = None,
+    observations: Optional[Iterable[Any]] = None,
+) -> list[tuple[Entity, list[Entity]]]:
+    """``ido-8ps.28``: per subject, the other *entities* its own observations contain.
+
+    One line of work, because the reader already exists.
+    ``answer_attribution.observations`` is ``retrieved_corpus``'s three readers
+    kept PER ALIAS instead of concatenated -- archived observation text, stored
+    handle pages, and the ``ido-8ps.13`` context clause -- which is exactly what
+    "in that subject's own observations" needs and what one haystack cannot
+    give. A third reader would be a third thing to keep true.
+
+    Imported inside the function: ``answer_attribution`` imports this module, and
+    the dependency only ever runs one way at import time.
+    """
+    from fastworkflow import answer_attribution
+
+    found = (
+        observations if observations is not None
+        else answer_attribution.observations(
+            scope=scope, archive=archive, handle_store=handle_store
+        )
+    )
+    return answer_attribution.subject_evidence(entities, found)
+
+
 def split_by_presence(
     entities: Iterable[Entity], haystack: str
 ) -> tuple[list[Entity], list[Entity]]:
@@ -559,6 +617,81 @@ RETRIEVED_RULE = (
 )
 
 
+#: ``ido-8ps.28``. How many bytes of EVIDENCE the block will spell out. Its own
+#: constant, sized like ``OBSERVED_LIST_MAX_BYTES`` and for the same reason: the
+#: sentence is built from a regex over one request crossed with the subjects
+#: that request named, so this is a backstop and not a budget. Whole subjects are
+#: taken in order until the cap is reached and the rest are COUNTED, never
+#: silently dropped -- a half-written subject would read as a short list for that
+#: subject, and a short list is how a positive statement turns into an absence.
+EVIDENCE_LIST_MAX_BYTES = 1024
+
+#: The ``ido-8ps.28`` sentence. It states evidence back and instructs nothing.
+#:
+#: The failure it answers is not retrieval and not coverage: the run retrieves
+#: the right rows for a person and the answer still credits that person with a
+#: property their own rows do not carry, copied off the request's premise. The
+#: attribution replay
+#: (``evaluation/artifacts/result-search/attribution-replay.md``) measured that
+#: after the fact and reached 6 of the 9 rows, missing every answer that asserts
+#: the property without naming it. Asked FORWARD, of the evidence alone, the same
+#: question has no such blind spot: the writer is told which named items of the
+#: request each subject's own observations contain before it writes anything.
+#:
+#: POSITIVE HALF ONLY, and this is the whole of the ``ido-8ps.22`` lesson. What a
+#: subject's evidence LACKS is never stated, because a bounded portrait or an
+#: unpaged listing makes "not in the evidence" a claim about the run dressed as a
+#: claim about the world -- exactly the false absence ``ido-8ps.24`` repaired. So
+#: a subject whose evidence contains none of the other items is not listed with
+#: an empty list; it is not listed at all.
+#:
+#: And no conclusion is instructed (the ``ido-8ps.24`` pattern). The sentence
+#: does not say to drop a claim, to prefer the evidence, or to check anything. It
+#: says what the observations of each subject contain, and stops.
+EVIDENCE_HEAD = (
+    "Evidence by subject - for each named item of the request that this run "
+    "made the subject of a command, the OTHER named items of the request that "
+    "appear in that subject's own observations: "
+)
+EVIDENCE_MORE = "; and {count} more subjects"
+
+
+def evidence_sentence(
+    evidence: Iterable[tuple[str, Iterable[str]]]
+) -> tuple[str, int, int]:
+    """``(text, subjects_listed, items_listed)``; ``("", 0, 0)`` when silent.
+
+    Deterministic: the same subjects with the same items produce the same bytes.
+    A subject with no items is dropped here rather than printed empty -- see
+    ``EVIDENCE_HEAD`` for why that is the one rule this sentence cannot bend.
+    """
+    wanted: list[tuple[str, list[str]]] = []
+    for subject, items in evidence:
+        name = str(subject).strip()
+        found = [str(item).strip() for item in items if str(item).strip()]
+        if name and found:
+            wanted.append((name, found))
+    if not wanted:
+        return "", 0, 0
+    taken: list[str] = []
+    counted = 0
+    for name, found in wanted:
+        entry = f"{name}: {', '.join(found)}"
+        dropped = len(wanted) - len(taken) - 1
+        suffix = EVIDENCE_MORE.format(count=dropped) if dropped else ""
+        candidate = "; ".join([*taken, entry]) + suffix
+        if len(candidate.encode("utf-8")) > EVIDENCE_LIST_MAX_BYTES:
+            break
+        taken.append(entry)
+        counted += len(found)
+    if not taken:
+        return "", 0, 0
+    listed = "; ".join(taken)
+    if len(taken) < len(wanted):
+        listed += EVIDENCE_MORE.format(count=len(wanted) - len(taken))
+    return f"{EVIDENCE_HEAD}{listed}. ", len(taken), counted
+
+
 #: ``ido-8ps.27`` (b). The two reasons an item can be missing from the corpus,
 #: as one deterministic sentence. It is emitted only when the second kind
 #: actually occurred, so a run where every missing item was simply never
@@ -578,6 +711,7 @@ def coverage_block(
     steps: int,
     observed: Iterable[str] = (),
     unavailable: Iterable[str] = (),
+    evidence: Iterable[tuple[str, Iterable[str]]] = (),
 ) -> str:
     """The exact text prepended to the extract input.
 
@@ -601,6 +735,13 @@ def coverage_block(
     extractor is now told which is which, and ``post_check`` counts the two
     separately. The sentence appears only when the second kind exists, so the
     common case is unchanged text.
+
+    ``ido-8ps.28`` is ``evidence``: one further sentence, after the rule about
+    the observed items, saying per subject which OTHER named items of the
+    request that subject's own observations contain. Positive half only, no
+    conclusion instructed, and emitted only when at least one subject has at
+    least one item -- so an empty ``evidence`` leaves this block byte for byte
+    what it was at ``90a1565``.
     """
     ending = (
         EXHAUSTED_ENDING.format(steps=int(steps)) if exhausted else NORMAL_ENDING
@@ -628,6 +769,7 @@ def coverage_block(
         if seen and len(shown.encode("utf-8")) <= OBSERVED_LIST_MAX_BYTES
         else ""
     )
+    stated, _, _ = evidence_sentence(evidence)
     return (
         f"Coverage of this run: {ending}. "
         f"These named items from the request appear in no retrieved observation: "
@@ -637,6 +779,7 @@ def coverage_block(
         "unavailability, no absence. "
         f"{named}"
         f"{RETRIEVED_RULE} "
+        f"{stated}"
         "For items that appear, report only what the observations show."
     )
 
@@ -800,6 +943,18 @@ class CoverageReport:
     #: subset the run named in a command; ``never_attempted`` is the rest.
     unavailable: list[str] = field(default_factory=list)
     never_attempted: list[str] = field(default_factory=list)
+    #: ido-8ps.28. ``evidence`` is EVERY subject this run stamped a command
+    #: against, with the other named items its own observations contain --
+    #: including subjects whose list is empty, because post_check measures those
+    #: too and a measure is allowed to know what a sentence may not say.
+    #: ``evidence_named`` is the subset the block actually PRINTED: non-empty,
+    #: inside the byte cap, positive half only.
+    evidence_flag: bool = False
+    evidence: list[tuple[str, list[str]]] = field(default_factory=list)
+    evidence_named: list[str] = field(default_factory=list)
+    evidence_subjects: int = 0
+    evidence_items: int = 0
+    evidence_bytes: int = 0
     phrases_total: int = 0
     phrases_unmatched: list[str] = field(default_factory=list)
     kinds: dict[str, int] = field(default_factory=dict)
@@ -811,6 +966,18 @@ class CoverageReport:
     statement_bytes: int = 0
     haystack_bytes: int = 0
     request_bytes: int = 0
+
+    @property
+    def instructed_items(self) -> list[str]:
+        """Every named item of the INSTRUCTED kinds, both halves of the split.
+
+        ``observed_named`` and ``unobserved`` partition one set by construction
+        (``ido-8ps.24``), so their union is the request's named items and is the
+        candidate set the ``ido-8ps.28`` measure tests claims against.
+        """
+        out: list[str] = list(self.observed_named)
+        out.extend(item for item in self.unobserved if item not in out)
+        return out
 
     def as_event(self) -> dict[str, Any]:
         return {
@@ -824,6 +991,15 @@ class CoverageReport:
             "unobserved": list(self.unobserved),
             "unavailable": list(self.unavailable),
             "never_attempted": list(self.never_attempted),
+            "evidence_flag": self.evidence_flag,
+            "evidence": [
+                {"subject": subject, "items": list(items)}
+                for subject, items in self.evidence
+            ],
+            "evidence_named": list(self.evidence_named),
+            "evidence_subjects": self.evidence_subjects,
+            "evidence_items": self.evidence_items,
+            "evidence_bytes": self.evidence_bytes,
             "phrases_total": self.phrases_total,
             "phrases_unmatched": list(self.phrases_unmatched),
             "entity_kinds": dict(self.kinds),
@@ -850,6 +1026,7 @@ def build_statement(
     archive: Optional[RuntimeHandleArchive] = None,
     handle_store: Any = None,
     haystack: Optional[str] = None,
+    observations: Optional[Iterable[Any]] = None,
 ) -> tuple[dict[str, Any], CoverageReport]:
     """``(trajectory_copy_with_the_block_first, report)``.
 
@@ -902,6 +1079,37 @@ def build_statement(
         if (key := getattr(by_text.get(text), "key", "")) and key in issued
     ]
     never_attempted = [text for text in instructed if text not in unavailable]
+
+    # ido-8ps.28. Computed only behind its own flag, so with FW_ANSWER_EVIDENCE
+    # unset nothing here runs and the block below is byte for byte 90a1565's.
+    # A failure is an empty list and never a failed turn: this sentence adds
+    # evidence to a statement that is already complete without it.
+    #
+    # It is NOT gated on `complete`. The completeness refusal exists because
+    # "appears in no retrieved observation" would otherwise be a claim about the
+    # archive; a statement that only ever says what IS in an observation cannot
+    # make that mistake, and on a partial archive it simply says less.
+    evidence: list[tuple[str, list[str]]] = []
+    flagged = answer_evidence_enabled()
+    if flagged:
+        try:
+            evidence = [
+                (subject.text, [item.text for item in items])
+                for subject, items in evidence_by_subject(
+                    [e for e in entities if e.kind in INSTRUCTED_KINDS],
+                    scope=scope,
+                    archive=archive,
+                    handle_store=handle_store,
+                    observations=observations,
+                )
+            ]
+        except Exception:  # noqa: BLE001 - a sentence must never fail a turn
+            logger.debug("answer coverage could not read subject evidence",
+                         exc_info=True)
+            evidence = []
+    printed = [(subject, items) for subject, items in evidence if items]
+    stated, stated_subjects, stated_items = evidence_sentence(printed)
+
     statement = coverage_block(
         unobserved=instructed,
         exhausted=bool(exhausted),
@@ -914,6 +1122,7 @@ def build_statement(
         observed=[
             entity.text for entity in observed if entity.kind in INSTRUCTED_KINDS
         ],
+        evidence=printed,
     )
 
     kinds: dict[str, int] = {}
@@ -933,6 +1142,12 @@ def build_statement(
         unobserved=instructed,
         unavailable=unavailable,
         never_attempted=never_attempted,
+        evidence_flag=flagged,
+        evidence=evidence,
+        evidence_named=[subject for subject, _ in printed][:stated_subjects],
+        evidence_subjects=stated_subjects,
+        evidence_items=stated_items,
+        evidence_bytes=len(stated.encode("utf-8")),
         phrases_total=sum(
             1 for entity in entities if entity.kind not in INSTRUCTED_KINDS
         ),
@@ -1024,8 +1239,20 @@ class PostCheck:
     observed_mentioned: int = 0
     unavailability_claim_on_observed: int = 0
     not_retrieved_on_observed: int = 0
+    #: ido-8ps.28. Per subject, the items the answer CLAIMS of that subject,
+    #: split by whether the evidence sentence listed that item for that subject.
+    #: An item is claimed of a subject when it is written within
+    #: ``CLAIM_WINDOW_CHARS`` of the subject's name -- the same proximity test
+    #: every other count in this class uses, and it is a count and not a
+    #: judgement: "unlisted" is where the premise-copy rows live, not a verdict
+    #: that any one of them is wrong.
+    evidence_subjects_total: int = 0
+    evidence_subjects_mentioned: int = 0
+    evidence_claims_listed: int = 0
+    evidence_claims_unlisted: int = 0
     details: list[dict[str, Any]] = field(default_factory=list)
     observed_details: list[dict[str, Any]] = field(default_factory=list)
+    evidence_details: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def misuse_on_observed(self) -> int:
@@ -1055,8 +1282,13 @@ class PostCheck:
             "unavailability_claim_on_observed": self.unavailability_claim_on_observed,
             "not_retrieved_on_observed": self.not_retrieved_on_observed,
             "misuse_on_observed": self.misuse_on_observed,
+            "evidence_subjects_total": self.evidence_subjects_total,
+            "evidence_subjects_mentioned": self.evidence_subjects_mentioned,
+            "evidence_claims_listed": self.evidence_claims_listed,
+            "evidence_claims_unlisted": self.evidence_claims_unlisted,
             "per_item": list(self.details),
             "per_observed_item": list(self.observed_details),
+            "per_evidence_subject": list(self.evidence_details),
         }
 
 
@@ -1065,6 +1297,8 @@ def post_check(
     unobserved: Iterable[str],
     observed: Iterable[str] = (),
     unavailable: Iterable[str] = (),
+    evidence: Iterable[tuple[str, Iterable[str]]] = (),
+    items: Iterable[str] = (),
 ) -> PostCheck:
     """Count absence phrasing near each named item. Measurement only.
 
@@ -1075,6 +1309,15 @@ def post_check(
     the statement said WERE retrieved, where any hit at all is a defect.
     ``unavailable`` is ``ido-8ps.27`` (b): the subset of ``unobserved`` the run
     did name in a command, counted separately from the ones it never asked for.
+
+    ``evidence`` and ``items`` are ``ido-8ps.28``: every subject the run stamped
+    a command against with the items its own observations contain, and the
+    request's named items as the candidates. Per subject, each candidate written
+    within ``CLAIM_WINDOW_CHARS`` of that subject's name is counted as claimed of
+    it, and split by whether the evidence sentence listed it for that subject.
+    Both halves are counts. The unlisted half is where a claim copied off the
+    request's premise lands, but a proximity test is not a judgement and this
+    number is never read as one.
     """
     text = normalise(answer)
     check = PostCheck(answer_bytes=len(str(answer or "").encode("utf-8")))
@@ -1131,15 +1374,54 @@ def post_check(
         check.observed_details.append({"item": name, "mentioned": True,
                                        "unavailability_claims": claims,
                                        "not_retrieved": marked})
+    candidates = [(str(item), normalise(item)) for item in items]
+    for subject, listed in evidence:
+        name = str(subject)
+        key = normalise(name)
+        shown = {normalise(item) for item in listed if normalise(item)}
+        check.evidence_subjects_total += 1
+        if not key:
+            continue
+        windows = _windows(text, key)
+        if not windows:
+            check.evidence_details.append(
+                {"subject": name, "mentioned": False,
+                 "listed": [str(item) for item in listed],
+                 "claimed_listed": [], "claimed_unlisted": []}
+            )
+            continue
+        check.evidence_subjects_mentioned += 1
+        claimed_listed: list[str] = []
+        claimed_unlisted: list[str] = []
+        for spelling, candidate in candidates:
+            if not candidate or candidate == key:
+                continue
+            if not any(candidate in window for window in windows):
+                continue
+            (claimed_listed if candidate in shown else claimed_unlisted).append(
+                spelling
+            )
+        check.evidence_claims_listed += len(claimed_listed)
+        check.evidence_claims_unlisted += len(claimed_unlisted)
+        check.evidence_details.append(
+            {"subject": name, "mentioned": True,
+             "listed": [str(item) for item in listed],
+             "claimed_listed": claimed_listed,
+             "claimed_unlisted": claimed_unlisted}
+        )
     return check
 
 
 __all__ = [
     "ANSWER_COVERAGE_ENV",
+    "ANSWER_EVIDENCE_ENV",
     "ATTEMPT_SPLIT",
     "COVERAGE_KEY",
     "CLAIM_WINDOW_CHARS",
     "CoverageReport",
+    "EVIDENCE_HEAD",
+    "EVIDENCE_LIST_MAX_BYTES",
+    "EVIDENCE_MORE",
     "OBSERVED_LIST_MAX_BYTES",
     "RETRIEVED_RULE",
     "Entity",
@@ -1155,9 +1437,12 @@ __all__ = [
     "ROSTER_NUDGE_ENV",
     "aliased_executes",
     "answer_coverage_enabled",
+    "answer_evidence_enabled",
     "build_nudge",
     "build_statement",
     "coverage_block",
+    "evidence_by_subject",
+    "evidence_sentence",
     "issued_commands",
     "named_entities",
     "normalise",

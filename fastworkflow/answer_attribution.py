@@ -511,6 +511,101 @@ def pairs_of(unit: str, mentions: Sequence[_Mention]) -> list[tuple[_Mention, _M
     ]
 
 
+# ---------------------------------------------------------------------------
+# Subjects, and what each subject's own evidence contains
+# ---------------------------------------------------------------------------
+
+def _normalised(observations: Iterable[Observation]) -> list[Observation]:
+    """The evidence in the one comparison form.
+
+    Idempotent, so a caller that has already normalised loses nothing by asking
+    again and a caller that has not cannot get a wrong answer.
+    """
+    return [
+        Observation(alias=item.alias, clause=normalise(item.clause),
+                    text=normalise(item.text))
+        for item in observations
+    ]
+
+
+def subject_index(
+    entities: Iterable[Entity],
+    observations: Iterable[Observation],
+    *,
+    allow_segments: bool = True,
+) -> dict[str, list[Observation]]:
+    """``{entity key: the observations this turn stamped against it}``.
+
+    An observation belongs to a subject when the subject is written in that
+    observation's CLAUSE -- the per-observation context-instance line, the stamp
+    recording which thing the command ran against. Observation TEXT is never
+    read here, so a name that merely appears in somebody else's listing is not
+    thereby a subject.
+
+    Every entity gets an entry; an entity no clause names gets an empty list,
+    which is the only honest thing to say about it. Generic: this function knows
+    nothing about what a subject or a property means in any workflow.
+    """
+    evidence = _normalised(observations)
+    return {
+        entity.key: [
+            item for item in evidence
+            if item.clause and any(
+                form in item.clause
+                for form in match_forms(entity, allow_segments=allow_segments)
+            )
+        ]
+        for entity in entities
+    }
+
+
+def subject_evidence(
+    entities: Iterable[Entity],
+    observations: Iterable[Observation],
+    *,
+    allow_segments: bool = True,
+) -> list[tuple[Entity, list[Entity]]]:
+    """``[(subject, the OTHER given items that subject's own observations contain)]``.
+
+    The question :func:`check_attribution` asks of a finished answer -- "does
+    this property literal appear in an observation whose subject is this
+    subject?" -- asked FORWARD, of the evidence alone. No answer is read and no
+    claim is judged: this reports what the run's own evidence says per subject.
+
+    Subjects keep the order they were given in, and only subjects some
+    observation was stamped against appear at all: an item no clause names has
+    no evidence OF ITS OWN to report, and that is not the same as evidence that
+    contains nothing. A subject that IS stamped but whose evidence contains none
+    of the other items is returned with an empty list, because the difference
+    between the two cases is real and belongs to the caller. Nothing here
+    phrases anything, and nothing here decides what an empty list means.
+    """
+    items = list(entities)
+    evidence = _normalised(observations)
+    index = subject_index(items, evidence, allow_segments=allow_segments)
+    forms = {
+        entity.key: match_forms(entity, allow_segments=allow_segments)
+        for entity in items
+    }
+    out: list[tuple[Entity, list[Entity]]] = []
+    for entity in items:
+        where = index.get(entity.key) or []
+        if not where:
+            continue
+        out.append((
+            entity,
+            [
+                other for other in items
+                if other.key != entity.key
+                and any(
+                    any(form in item.text for form in forms[other.key])
+                    for item in where
+                )
+            ],
+        ))
+    return out
+
+
 def check_attribution(
     *,
     request: Any,
@@ -522,11 +617,7 @@ def check_attribution(
 
     No store is opened here, no model is called, no clock is read.
     """
-    evidence = [
-        Observation(alias=item.alias, clause=normalise(item.clause),
-                    text=normalise(item.text))
-        for item in observations
-    ]
+    evidence = _normalised(observations)
     raw_answer = str(answer or "")
     report = AttributionReport(
         answer_bytes=len(raw_answer.encode("utf-8")),
@@ -547,11 +638,7 @@ def check_attribution(
     forms = {key: match_forms(entity, allow_segments=allow_segments)
              for key, entity in entities.items()}
 
-    def observed_subject(key: str) -> list[Observation]:
-        return [item for item in evidence
-                if item.clause and any(form in item.clause for form in forms[key])]
-
-    subjects = {key: observed_subject(key) for key in entities}
+    subjects = subject_index(items, evidence, allow_segments=allow_segments)
     report.subjects_observed = sum(1 for key in subjects if subjects[key])
 
     seen: set[tuple[str, str, str]] = set()
@@ -657,6 +744,8 @@ __all__ = [
     "attribution_report",
     "check_attribution",
     "match_forms",
+    "subject_evidence",
+    "subject_index",
     "enumeration_groups",
     "observations",
     "pairs_of",

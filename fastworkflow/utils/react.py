@@ -630,6 +630,12 @@ class fastWorkflowReAct(Module):
                 # measured as a defect - absence phrasing about an item the run
                 # DID retrieve. Measured the same way, counted separately.
                 getattr(report, "observed_named", ()) or (),
+                # ido-8ps.28: per subject, the items the answer claims of it,
+                # split by whether the evidence sentence listed them. Empty
+                # unless FW_ANSWER_EVIDENCE is on, so with the flag off the
+                # counts are zeros and the answer is untouched either way.
+                evidence=getattr(report, "evidence", ()) or (),
+                items=getattr(report, "instructed_items", ()) or (),
             )
             record_event(
                 {

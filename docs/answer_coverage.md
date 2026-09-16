@@ -46,6 +46,46 @@ forbids the phrasing explicitly. Only kinds that are ever INSTRUCTED as "not
 retrieved" are listed back, so the two lists partition one set — a quoted
 request phrase is measured and never instructed, in either direction.
 
+**The last sentence before the closer is `ido-8ps.28`, and it is off by
+default** (`FW_ANSWER_EVIDENCE`). With it on the block gains one further
+sentence, after the observed-items rule:
+
+```
+… not named in the unobserved list above. Evidence by subject - for each named
+item of the request that this run made the subject of a command, the OTHER named
+items of the request that appear in that subject's own observations: Alan
+Cooper: Right A, Right B; Alisha Ochoa: Right B. For items that appear, report
+only what the observations show.
+```
+
+It answers a failure that is neither retrieval nor coverage: the run retrieves
+the right rows for a subject and the answer still credits that subject with a
+property its own rows do not carry, copied off the request's premise. The
+attribution check (`fastworkflow/answer_attribution.py`) measures that after the
+fact and is blind to every answer that asserts the property without naming it;
+asked **forward**, of the evidence alone, the same question has no such blind
+spot.
+
+Three rules it does not bend:
+
+* **Positive half only.** What a subject's evidence LACKS is never stated. A
+  bounded portrait or an unpaged listing would make "not in the evidence" a
+  claim about the run dressed as a claim about the world — the `ido-8ps.22`
+  false absence `ido-8ps.24` repaired. A subject whose evidence contains none of
+  the other items is therefore **not listed at all**, never listed empty.
+* **No conclusion is instructed** (the `ido-8ps.24` pattern). It does not say to
+  drop a claim, to prefer the evidence, or to check anything. It says what each
+  subject's observations contain, and stops.
+* **Bounded and whole-subject.** `EVIDENCE_LIST_MAX_BYTES` (1,024, its own
+  constant) caps the list; subjects are taken in order until it is reached and
+  the remainder is COUNTED (`; and N more subjects`), because a half-written
+  subject would read as a short list for that subject.
+
+A subject is one the run stamped a command against — the same per-observation
+context clause the roster nudge reads, but per alias rather than concatenated,
+through `answer_attribution.observations` / `subject_evidence`. There is no
+third reader.
+
 Exhausted instead:
 
 ```
@@ -153,6 +193,7 @@ move.
 | Variable | Default | Meaning |
 |---|---|---|
 | `FW_ANSWER_COVERAGE` | `0` | `1`/`true`/`yes`/`on` turns the statement on. Off, the extract call receives byte-for-byte what it received at `4832b3c` (the `ido-8ps.18` stack) — the same module, the same trajectory *object*, the same truncation fallback. |
+| `FW_ANSWER_EVIDENCE` | `0` | `ido-8ps.28`. `1`/`true`/`yes`/`on` adds the evidence sentence after the observed-items rule. Off, nothing is computed and the block is byte-for-byte what it was at `90a1565` (the `ido-8ps.27` stack). |
 
 Read **env file first, then the process environment**, the rule
 `auto_navigation` and `answer_rehydration` use
@@ -162,7 +203,10 @@ process but absent from the workflow env file would otherwise read as the
 default.
 
 `tests/test_answer_coverage.py::ExtractHook::test_flag_off_is_byte_identical`
-asserts the default.
+asserts the coverage default;
+`EvidenceInTheBlock::test_flag_off_is_byte_identical_to_90a1565` pins the
+statement the `ido-8ps.27` stack produced, and
+`test_flag_off_never_reads_the_evidence` asserts the reader is not even called.
 
 ## Events
 
@@ -171,8 +215,8 @@ same `FW_OFFLOAD_EVENTS` file every other measure does.
 
 | Event | Carries |
 |---|---|
-| `coverage_statement` | `exhausted`, `steps`, `entities_total` / `entities_observed` / `entities_unobserved`, `observed`, `unobserved`, `entity_kinds`, `phrases_total`, `phrases_unmatched`, `complete`, `incomplete_reason`, `archived_observations`, `aliased_executes`, `statement_bytes`, `haystack_bytes`, `request_bytes` |
-| `coverage_post_check` | `answer_bytes`, `unobserved_total`, `unobserved_mentioned`, **`unavailability_claim_on_unobserved`**, `not_retrieved_on_unobserved`, `silent_on_unobserved`, `per_item`, and the `ido-8ps.24` direction: `observed_total`, `observed_mentioned`, `unavailability_claim_on_observed`, `not_retrieved_on_observed`, **`misuse_on_observed`**, `per_observed_item` |
+| `coverage_statement` | `exhausted`, `steps`, `entities_total` / `entities_observed` / `entities_unobserved`, `observed`, `unobserved`, `entity_kinds`, `phrases_total`, `phrases_unmatched`, `complete`, `incomplete_reason`, `archived_observations`, `aliased_executes`, `statement_bytes`, `haystack_bytes`, `request_bytes`, and the `ido-8ps.28` sentence: `evidence_flag`, `evidence` (every stamped subject with the items its own observations contain, including the empty ones the sentence may not print), `evidence_named`, `evidence_subjects`, `evidence_items`, `evidence_bytes` |
+| `coverage_post_check` | `answer_bytes`, `unobserved_total`, `unobserved_mentioned`, **`unavailability_claim_on_unobserved`**, `not_retrieved_on_unobserved`, `silent_on_unobserved`, `per_item`, and the `ido-8ps.24` direction: `observed_total`, `observed_mentioned`, `unavailability_claim_on_observed`, `not_retrieved_on_observed`, **`misuse_on_observed`**, `per_observed_item`, and the `ido-8ps.28` measure: `evidence_subjects_total`, `evidence_subjects_mentioned`, **`evidence_claims_listed`** / **`evidence_claims_unlisted`** (per subject, the request's named items written within `CLAIM_WINDOW_CHARS` of it, split by whether the sentence listed them for that subject), `per_evidence_subject` |
 | `coverage_failed` | the exception type and detail; the extract call then runs on the trajectory it was handed |
 
 ## Where it is wired
