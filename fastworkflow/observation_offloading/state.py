@@ -49,32 +49,6 @@ _default_scope = RuntimeHandleScope(
 )
 
 
-def env_int(name: str, default: int, *, minimum: int = 0) -> int:
-    """Read a non-negative integer knob, falling back to ``default`` on bad input.
-
-    These parsers run on the compaction hot path of every agent step, so a
-    mistyped export must degrade to the default with a warning rather than
-    abort the turn.
-    """
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "%s=%r is not an integer; using default %d", name, raw, default
-        )
-        return default
-    if value < minimum:
-        logger.warning(
-            "%s=%d is below the minimum %d; using default %d",
-            name, value, minimum, default,
-        )
-        return default
-    return value
-
-
 def hot_handle_max_bytes_from_env() -> int:
     """The hot-cache cap for this run. See ``fastworkflow.context_budget``."""
     return context_budget.offload_hot_max_bytes()

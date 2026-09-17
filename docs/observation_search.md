@@ -93,9 +93,9 @@ context and, where the workflow declares one, that context's instance identity:
 the instance it belongs to: those permission rows do not repeat the account uid,
 and the only thing tying them to Alan Cooper is that the previous step entered
 his account. The link lives in the ORDER of the commands, so a reader that is not
-allowed to use history — the evidence filler, a `search_memory` answer, the
+allowed to use history — a `search_memory` answer, answer-time rehydration, the
 extract step, a human scrolling a store — cannot recover it. 12 of the 14
-unresolved rows in `ido-8ps.10` had exactly this cause.
+unresolved rows in the `ido-8ps.10` cell had exactly this cause.
 
 **The context is the one the command RAN IN, not the one it entered.** It is
 captured at dispatch (`CommandExecutor._remember_execute_context`), before the
