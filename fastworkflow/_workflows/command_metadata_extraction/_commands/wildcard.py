@@ -12,8 +12,8 @@ from ..parameter_extraction import ParameterExtraction
 AUTO_NAVIGATION_ARTIFACT = auto_navigation.AUTO_NAVIGATION_ARTIFACT
 
 
-def _record_auto_navigation(decision, enabled: bool) -> None:
-    """File the routing event for a declined KNOWN name, flag included.
+def _record_auto_navigation(decision) -> None:
+    """File the routing event for a declined KNOWN name.
 
     Only for a name the workflow really owns: ordinary free text that no context
     could route is not an auto-navigation opportunity, and an event per
@@ -25,7 +25,7 @@ def _record_auto_navigation(decision, enabled: bool) -> None:
     try:
         from fastworkflow.observation_offloading.state import record_event
 
-        record_event(decision.event(enabled=enabled))
+        record_event(decision.event())
     except Exception:  # noqa: BLE001 - a measure must never fail a turn
         pass
 
@@ -160,9 +160,7 @@ class ResponseGenerator:
                             utterance=command,
                             owner_contexts=owner_contexts or [],
                         )
-                        auto_navigation_enabled = (
-                            auto_navigation.auto_navigation_enabled())
-                        _record_auto_navigation(decision, auto_navigation_enabled)
+                        _record_auto_navigation(decision)
 
                         if decision.dispatches:
                             # The two steps run through the ordinary command

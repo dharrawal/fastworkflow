@@ -675,20 +675,26 @@ class TestArtifactValidation:
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
-        monkeypatch.delenv("FW_EAGER_ARTIFACT_VALIDATION", raising=False)
 
         with pytest.warns(UserWarning, match="Unserializable command artifacts"):
             ctx.append_turn_output(self._bad_output())
 
-    def test_warning_suppressed_when_validation_disabled(
+    def test_a_serializable_output_warns_about_nothing(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
+        """ido-pyw.1 removed FW_EAGER_ARTIFACT_VALIDATION: validation is what
+        `append_turn_output` does. What is left to pin is that it is quiet on
+        artifacts it accepts, and that the output is appended either way."""
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
-        monkeypatch.setenv("FW_EAGER_ARTIFACT_VALIDATION", "0")
+        good = CommandOutput(
+            command_name="good_cmd",
+            command_response=
+                CommandResponse(response="x", artifacts={"ok": [1, "two", None]}),
+        )
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # any warning becomes a failure
-            ctx.append_turn_output(self._bad_output())
+            ctx.append_turn_output(good)
 
         assert len(ctx._turn_outputs) == 1  # still appended
 

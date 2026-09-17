@@ -1,8 +1,7 @@
-"""Build the workflow tool agent, with Arm D offloading when enabled."""
+"""Build the workflow tool agent. Observation offloading is how it is built."""
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Callable, Optional
 
 import fastworkflow
@@ -12,26 +11,17 @@ from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, Ru
 from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.continuation import (
     DEFAULT_MAX_ITERS,
+    MAX_FORCED_REPLANS,
     StructuredContinuationReAct,
-    max_forced_replans_from_env,
 )
 from fastworkflow.observation_offloading.manifest import install_span_policy
 from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import (
-    HANDLE_ARCHIVE_ENV,
     record_event,
     scope_for_host,
 )
-from fastworkflow.utils.react import fastWorkflowReAct
-
-ENABLED_ENV = "FW_OBSERVATION_OFFLOADING"
 
 logger = logging.getLogger(__name__)
-
-
-def enabled() -> bool:
-    raw = os.environ.get(ENABLED_ENV, "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
 
 
 def _scope_for_session(chat_session: Any) -> RuntimeHandleScope:
@@ -131,30 +121,24 @@ def build_tool_agent(
     max_iters: int,
     on_step_complete=None,
 ) -> Any:
-    """Construct the ReAct agent once, offloading-aware when enabled.
+    """Construct the ReAct agent once: a StructuredContinuationReAct.
 
     The DSPy signature build (tool wrapping, instruction assembly, the react and
-    extract predictors) happens exactly once: either a stock fastWorkflowReAct
-    or a StructuredContinuationReAct with search_memory appended to ``tools``.
+    extract predictors) happens exactly once, with ``search_memory`` appended to
+    ``tools``. Unconditional since ``ido-pyw.1``: observation offloading is how
+    fastWorkflow runs a tool agent, not a mode it can be put into.
     """
-    if not enabled():
-        return fastWorkflowReAct(
-            signature,
-            tools=tools,
-            max_iters=max_iters,
-            on_step_complete=on_step_complete,
-        )
     install_span_policy()
     # The scope is re-resolved by the agent at every forward(), so the turn_key
     # it carries is the turn actually running. This one is only the fallback
     # for a step that fires before the first forward() bound a scope.
     scope = _scope_for_session(chat_session)
-    archive_path = os.environ.get(HANDLE_ARCHIVE_ENV, "").strip()
-    if not archive_path:
-        getter = getattr(chat_session, "get_active_workflow", None)
-        active_workflow = getter() if callable(getter) else None
-        workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
-        archive_path = state_paths.observability_db(workflow_path) + ".offload-handles.sqlite3"
+    # Beside the workflow's own observability database, so the evidence a turn
+    # can be replayed from lives where the turn's record lives.
+    getter = getattr(chat_session, "get_active_workflow", None)
+    active_workflow = getter() if callable(getter) else None
+    workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
+    archive_path = state_paths.observability_db(workflow_path) + ".offload-handles.sqlite3"
     selected_archive = RuntimeHandleArchive(archive_path)
     agent: Any = None
 
@@ -208,7 +192,7 @@ def build_tool_agent(
         {
             "kind": "agent_installed",
             "max_iters": agent.max_iters,
-            "max_forced_replans": max_forced_replans_from_env(),
+            "max_forced_replans": MAX_FORCED_REPLANS,
             "tools": sorted(agent.tools),
             "scope_id": scope.scope_id,
         }

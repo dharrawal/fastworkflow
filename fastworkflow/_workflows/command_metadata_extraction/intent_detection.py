@@ -621,12 +621,6 @@ class CommandNamePrediction:
             # how often the hint was given and how often the next call followed
             # it, without re-deriving the text from the inventory.
             nlu_trace["known_name_foreign_context_hint"] = hint
-            # ido-8ps.9 part b: the flag is on the routing event whether or not
-            # anything is dispatched, so a measured run's setting is readable
-            # from the trace instead of from the runner's env file.
-            nlu_trace["auto_navigation_enabled"] = (
-                auto_navigation.auto_navigation_enabled()
-            )
             return CommandNamePrediction.Output(
                 command_name=None,
                 known_name_owner_contexts=owner_contexts,

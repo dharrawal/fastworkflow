@@ -19,7 +19,6 @@ from litellm import ContextWindowExceededError
 
 from fastworkflow import answer_rehydration
 from fastworkflow.answer_rehydration import (
-    ANSWER_REHYDRATION_ENV,
     ANSWER_REHYDRATION_MAX_BYTES_ENV,
     DEFAULT_MAX_BYTES,
     KIND_LABEL,
@@ -28,7 +27,6 @@ from fastworkflow.answer_rehydration import (
     MIN_MAX_BYTES,
     NOT_REHYDRATED_KEY,
     NOT_REHYDRATED_PREFIX,
-    answer_rehydration_enabled,
     max_bytes_from_env,
     rehydrate,
     trajectory_bytes,
@@ -153,44 +151,40 @@ class Fixture:
         }
 
 
-class FlagAndBudget(unittest.TestCase):
-    """The flag and the knob, read env-file-then-process like auto-navigation."""
+class Budget(unittest.TestCase):
+    """The budget: derived from the window, overridable, defended.
+
+    ``ido-pyw.1`` removed ``FW_ANSWER_REHYDRATION``; rehydration is what the
+    extract step does. What is left here is the byte budget, which is now a
+    fraction of the model's context window with the old name as a tuning
+    override. ``tests/test_context_budget.py`` owns the derivation; this owns
+    the module's view of it.
+    """
 
     def setUp(self) -> None:
-        for name in (ANSWER_REHYDRATION_ENV, ANSWER_REHYDRATION_MAX_BYTES_ENV):
-            os.environ.pop(name, None)
+        os.environ.pop(ANSWER_REHYDRATION_MAX_BYTES_ENV, None)
 
     tearDown = setUp
 
-    def test_off_by_default(self) -> None:
-        self.assertFalse(answer_rehydration_enabled())
+    def test_the_derived_budget_is_the_accepted_value(self) -> None:
         self.assertEqual(max_bytes_from_env(), DEFAULT_MAX_BYTES)
+        self.assertEqual(DEFAULT_MAX_BYTES, 250_000)
 
-    def test_the_process_environment_is_read(self) -> None:
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
-        self.assertTrue(answer_rehydration_enabled())
-
-    def test_the_env_file_is_read_first(self) -> None:
-        import fastworkflow
-
-        with mock.patch.dict(fastworkflow._env_vars,
-                             {ANSWER_REHYDRATION_ENV: "1"}, clear=False):
-            self.assertTrue(answer_rehydration_enabled())
-
-    def test_truthiness_vocabulary(self) -> None:
-        for raw, expected in (("1", True), ("true", True), ("on", True),
-                              ("yes", True), ("0", False), ("off", False),
-                              ("", False), ("maybe", False)):
-            os.environ[ANSWER_REHYDRATION_ENV] = raw
-            self.assertEqual(answer_rehydration_enabled(), expected, raw)
-
-    def test_the_budget_is_read_and_defended(self) -> None:
+    def test_the_override_is_read_and_defended(self) -> None:
         os.environ[ANSWER_REHYDRATION_MAX_BYTES_ENV] = "60000"
         self.assertEqual(max_bytes_from_env(), 60_000)
         os.environ[ANSWER_REHYDRATION_MAX_BYTES_ENV] = "not-a-number"
         self.assertEqual(max_bytes_from_env(), DEFAULT_MAX_BYTES)
         os.environ[ANSWER_REHYDRATION_MAX_BYTES_ENV] = str(MIN_MAX_BYTES - 1)
         self.assertEqual(max_bytes_from_env(), DEFAULT_MAX_BYTES)
+
+    def test_the_env_file_is_read_first(self) -> None:
+        import fastworkflow
+
+        with mock.patch.dict(fastworkflow._env_vars,
+                             {ANSWER_REHYDRATION_MAX_BYTES_ENV: "60000"},
+                             clear=False):
+            self.assertEqual(max_bytes_from_env(), 60_000)
 
 
 class RehydratesEachKind(unittest.TestCase):
@@ -415,11 +409,9 @@ class ExtractHook(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.addCleanup(reset_runtime_state)
-        for name in (ANSWER_REHYDRATION_ENV, ANSWER_REHYDRATION_MAX_BYTES_ENV):
-            os.environ.pop(name, None)
-        self.addCleanup(lambda: [os.environ.pop(name, None) for name in
-                                 (ANSWER_REHYDRATION_ENV,
-                                  ANSWER_REHYDRATION_MAX_BYTES_ENV)])
+        os.environ.pop(ANSWER_REHYDRATION_MAX_BYTES_ENV, None)
+        self.addCleanup(
+            lambda: os.environ.pop(ANSWER_REHYDRATION_MAX_BYTES_ENV, None))
         self.fixture = Fixture(self.directory.name)
         self.agent = build_agent()
         self.agent.continuation_scope = self.fixture.scope
@@ -429,17 +421,8 @@ class ExtractHook(unittest.TestCase):
         return mock.patch("fastworkflow.result_handles.store",
                           return_value=self.fixture.store)
 
-    def test_flag_off_is_byte_identical(self) -> None:
-        trajectory = self.fixture.trajectory()
-        expected = self.agent._format_trajectory(trajectory)
-        recorder = Recorder()
-        self.agent.extract = recorder
-        self.agent._extract_prediction(trajectory, user_query="q")
-        self.assertEqual(recorder.calls, [expected])
-        self.assertEqual(snapshot_events(), [])
-
-    def test_flag_on_hands_the_extractor_the_evidence(self) -> None:
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
+    def test_the_extractor_is_handed_the_evidence(self) -> None:
+        """ido-pyw.1: nothing set, and the extract call still gets the rows."""
         trajectory = self.fixture.trajectory()
         plain = self.agent._format_trajectory(trajectory)
         recorder = Recorder()
@@ -451,7 +434,6 @@ class ExtractHook(unittest.TestCase):
         self.assertIn(self.fixture.listing_rows[-1], recorder.calls[0])
 
     def test_the_react_trajectory_is_unchanged_after_extraction(self) -> None:
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
         trajectory = self.fixture.trajectory()
         before = dict(trajectory)
         self.agent.extract = Recorder()
@@ -460,7 +442,6 @@ class ExtractHook(unittest.TestCase):
         self.assertEqual(trajectory, before)
 
     def test_the_events_carry_the_measures(self) -> None:
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
         os.environ[ANSWER_REHYDRATION_MAX_BYTES_ENV] = "80000"
         self.agent.extract = Recorder()
         with self._patch_store():
@@ -471,7 +452,6 @@ class ExtractHook(unittest.TestCase):
         self.assertEqual(len(started), 1)
         self.assertEqual(len(finished), 1)
         self.assertEqual(started[0]["budget_bytes"], 80_000)
-        self.assertTrue(started[0]["flag"])
         self.assertGreater(finished[0]["bytes_after"], finished[0]["bytes_before"])
         self.assertEqual(finished[0]["rehydrated_labels"], 1)
         self.assertEqual(finished[0]["rehydrated_pages"], 1)
@@ -481,7 +461,6 @@ class ExtractHook(unittest.TestCase):
         self.assertIsInstance(finished[0]["extract_duration_ms"], float)
 
     def test_the_overflow_fallback_still_truncates_and_is_recorded(self) -> None:
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
         trajectory = self.fixture.trajectory()
         recorder = Recorder(fail_times=1)
         self.agent.extract = recorder
@@ -497,21 +476,27 @@ class ExtractHook(unittest.TestCase):
         # The fallback truncated the COPY; the loop's trajectory still has step 0.
         self.assertIn("observation_0", trajectory)
 
-    def test_a_broken_store_falls_back_to_the_plain_call(self) -> None:
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
+    def test_a_broken_store_costs_the_evidence_and_not_the_answer(self) -> None:
+        """The extract call still happens, over the pointers it already had.
+
+        It is no longer byte-identical to the un-rehydrated call, because the
+        coverage statement (ido-8ps.22, unconditional since ido-pyw.1) is
+        prepended to every extract call whether rehydration worked or not. What
+        the fallback owes is the answer, and the record of why: no stored row
+        reaches the extractor and ``rehydration_failed`` is filed.
+        """
         trajectory = self.fixture.trajectory()
-        expected = self.agent._format_trajectory(trajectory)
         recorder = Recorder()
         self.agent.extract = recorder
         with mock.patch("fastworkflow.result_handles.store",
                         side_effect=RuntimeError("no store")):
             self.agent._extract_prediction(trajectory, user_query="q")
-        self.assertEqual(recorder.calls, [expected])
+        self.assertEqual(len(recorder.calls), 1)
+        self.assertNotIn(self.fixture.o1_text, recorder.calls[0])
         self.assertTrue([e for e in snapshot_events()
                          if e["kind"] == "rehydration_failed"])
 
     def test_the_async_site_behaves_the_same(self) -> None:
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
         recorder = Recorder()
         self.agent.extract = recorder
         with self._patch_store():

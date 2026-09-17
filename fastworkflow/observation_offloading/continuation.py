@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import dspy
 
-from fastworkflow import tracing
+from fastworkflow import context_budget, tracing
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope, RuntimeHandleArchive
 from fastworkflow.observation_offloading.compact import (
     execute_ordinals,
@@ -28,7 +28,6 @@ from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
     archive,
     default_scope,
-    env_int,
     record_event,
 )
 from fastworkflow.utils.dspy_logger import DSPyForward
@@ -38,14 +37,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ITERS = 25
 DEFAULT_CONTINUATION_PLAN = "Continue unfinished requested work."
+#: How many times the harness may force a replan before the turn stops making
+#: segments. 2 forced replans is 3 segments, which at ``DEFAULT_MAX_ITERS`` is a
+#: 75-step ceiling. A constant since ``ido-pyw.1``: it is a property of the
+#: continuation design, not a deployment setting.
 MAX_FORCED_REPLANS = 2
 MAX_REPLAN_CHARS = 2_000
-REPLAN_OBSERVATION_MAX_BYTES = 28_000
-MAX_FORCED_REPLANS_ENV = "FW_MAX_FORCED_REPLANS"
-
-
-def max_forced_replans_from_env(default: int = MAX_FORCED_REPLANS) -> int:
-    return env_int(MAX_FORCED_REPLANS_ENV, default)
+#: The replan skeleton is the next segment's trajectory, so it gets the
+#: trajectory's budget. The constant is the value at the reference context
+#: window; ``replan_trajectory_skeleton`` resolves the effective one per call.
+REPLAN_OBSERVATION_MAX_BYTES = context_budget.REFERENCE_TRAJECTORY_MAX_BYTES
 
 
 class ContinuationPlanSignature(dspy.Signature):
@@ -67,7 +68,7 @@ class ContinuationPlanSignature(dspy.Signature):
 def replan_trajectory_skeleton(
     trajectory: Mapping[str, Any],
     *,
-    greedy_max_bytes: int = REPLAN_OBSERVATION_MAX_BYTES,
+    greedy_max_bytes: Optional[int] = None,
     min_offload_saving_bytes: Optional[int] = None,
     ordinal_offset: int = 0,
     scope: Optional[RuntimeHandleScope] = None,
@@ -85,6 +86,8 @@ def replan_trajectory_skeleton(
 
     if min_offload_saving_bytes is None:
         min_offload_saving_bytes = min_offload_saving_bytes_from_env()
+    if greedy_max_bytes is None:
+        greedy_max_bytes = context_budget.trajectory_max_bytes()
     execute_aliases = {
         f"observation_{step_index}": f"O{ordinal}"
         for step_index, ordinal in execute_ordinals(
@@ -206,7 +209,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.continuation_scope: RuntimeHandleScope | None = None
         self.continuation_scope_id: str | None = None
         self._scope_factory = scope_factory
-        self.max_forced_replans = max_forced_replans_from_env()
+        self.max_forced_replans = MAX_FORCED_REPLANS
 
     @property
     def total_segments(self) -> int:

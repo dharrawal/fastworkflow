@@ -39,10 +39,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope
 from fastworkflow.observation_offloading.state import (
     default_scope,
-    env_int,
     record_event,
     scope_for_host,
 )
@@ -52,15 +52,15 @@ logger = logging.getLogger(__name__)
 #: A page observation is a listing observation, so it gets the listing budget:
 #: 3 KB of the ReAct prompt, header line included. Rows that do not fit are not
 #: dropped — they stay in the store and the next cursor returns them.
-RESULT_PAGE_MAX_BYTES = 3_072
-RESULT_PAGE_MAX_BYTES_ENV = "FW_RESULT_PAGE_MAX_BYTES"
+RESULT_PAGE_MAX_BYTES = context_budget.REFERENCE_RESULT_PAGE_MAX_BYTES
+RESULT_PAGE_MAX_BYTES_ENV = context_budget.RESULT_PAGE.override_env
 #: Below this the header alone would consume the budget it is describing.
-RESULT_PAGE_MIN_BYTES = 512
+RESULT_PAGE_MIN_BYTES = context_budget.RESULT_PAGE.floor
 
 #: Rows held in this process. The durable copy is SQLite, so eviction costs a
 #: re-read and never loses a stored page.
-HOT_ROWS_MAX_BYTES = 262_144
-HOT_ROWS_MAX_BYTES_ENV = "FW_RESULT_HANDLE_HOT_MAX_BYTES"
+HOT_ROWS_MAX_BYTES = context_budget.REFERENCE_RESULT_HANDLE_HOT_MAX_BYTES
+HOT_ROWS_MAX_BYTES_ENV = context_budget.RESULT_HANDLE_HOT.override_env
 
 DEFAULT_PAGE_SIZE = 25
 
@@ -888,12 +888,14 @@ _local_sequence: "dict[str, int]" = {}
 _cursor_tokens: "dict[str, dict[str, Any]]" = {}
 
 
-def hot_rows_max_bytes_from_env(default: int = HOT_ROWS_MAX_BYTES) -> int:
-    return env_int(HOT_ROWS_MAX_BYTES_ENV, default)
+def hot_rows_max_bytes_from_env() -> int:
+    """The hot-row cache cap for this run. See ``fastworkflow.context_budget``."""
+    return context_budget.result_handle_hot_max_bytes()
 
 
-def page_max_bytes_from_env(default: int = RESULT_PAGE_MAX_BYTES) -> int:
-    return env_int(RESULT_PAGE_MAX_BYTES_ENV, default, minimum=RESULT_PAGE_MIN_BYTES)
+def page_max_bytes_from_env() -> int:
+    """The page-observation budget for this run. See ``fastworkflow.context_budget``."""
+    return context_budget.result_page_max_bytes()
 
 
 def store() -> ResultHandleStore:

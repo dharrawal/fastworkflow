@@ -146,13 +146,10 @@ def validate_artifacts_serializable(command_output: "CommandOutput") -> list[str
 def warn_on_unserializable_artifacts(command_output: "CommandOutput") -> None:
     """Warn (never raise) if a command output carries unserializable artifacts.
 
-    Controlled by the ``FW_EAGER_ARTIFACT_VALIDATION`` environment variable
-    (on by default; set to ``"0"`` to disable). In v2.21 this only emits a
+    Unconditional since ``ido-pyw.1``. In v2.21 this only emits a
     ``warnings.warn``; from v3.0 the same problems are rejected when the turn
     record is filed. [X3a]
     """
-    if os.environ.get("FW_EAGER_ARTIFACT_VALIDATION", "1") == "0":
-        return
     if problems := validate_artifacts_serializable(command_output):
         warnings.warn(
             "Unserializable command artifacts detected: "

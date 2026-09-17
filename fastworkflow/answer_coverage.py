@@ -52,7 +52,7 @@ Rules this module does not bend:
   phrasing near unobserved items in the finished answer and records the count.
   It never edits, rejects or retries an answer.
 
-``ido-8ps.28`` is one further sentence, behind its own flag, added after the
+``ido-8ps.28`` is one further sentence, added after the
 observed-items rule: for each named item of the request this run made the
 SUBJECT of a command, the other named items of the request that appear in that
 subject's own observations. Positive half only -- what a subject's evidence
@@ -62,10 +62,9 @@ attribution replay measured: the run retrieves the right rows for a person and
 the answer still credits that person with a property their own rows do not
 carry.
 
-Flags: ``FW_ANSWER_COVERAGE=1`` (default ``0`` -- off, and with it off the
-extract call receives byte-for-byte what it received at ``4832b3c``);
-``FW_ROSTER_NUDGE=1`` for the loop check; ``FW_ANSWER_EVIDENCE=1`` for the
-evidence sentence (default off, and off is ``90a1565`` byte for byte).
+Unconditional since ``ido-pyw.1``: the coverage statement, the roster nudge and
+the evidence sentence are what an answer-time extract call gets, for every
+workflow. See ``docs/answer_coverage.md``.
 """
 from __future__ import annotations
 
@@ -90,22 +89,6 @@ from fastworkflow.observation_offloading.state import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: The feature flag. Off is the ``ido-8ps.18`` accepted stack, unchanged.
-ANSWER_COVERAGE_ENV = "FW_ANSWER_COVERAGE"
-
-#: ``ido-8ps.27``. The roster nudge is a SECOND flag over the same machinery,
-#: because it changes the LOOP and the coverage statement does not. Off is
-#: ``9e5e9d9`` behaviour exactly: the finish action ends the loop, as it always
-#: did, and nothing is computed, recorded or injected.
-ROSTER_NUDGE_ENV = "FW_ROSTER_NUDGE"
-
-#: ``ido-8ps.28``. The evidence sentence is a THIRD flag over the same
-#: machinery. It changes neither the loop nor the unobserved list: it adds one
-#: sentence to the block, saying per subject which OTHER named items of the
-#: request that subject's own observations contain. Off is ``90a1565``
-#: behaviour, byte for byte, and nothing is computed.
-ANSWER_EVIDENCE_ENV = "FW_ANSWER_EVIDENCE"
 
 #: The key the statement is stored under in the extractor's trajectory copy.
 #: Deliberately not an ``observation_`` key: it is a statement ABOUT the run, not
@@ -138,39 +121,6 @@ MAX_ENTITIES = 64
 #: itself prints. Instructing "not retrieved" on framing would manufacture the
 #: very false absence ``ido-8ps.22`` is about.
 INSTRUCTED_KINDS = frozenset({"name", "uid", "email"})
-
-# ---------------------------------------------------------------------------
-# Flag
-# ---------------------------------------------------------------------------
-
-from fastworkflow.answer_rehydration import env_value as _env_value  # noqa: E402
-
-
-def answer_coverage_enabled() -> bool:
-    """True when ``FW_ANSWER_COVERAGE`` is set to a truthy value.
-
-    Read env file first, then the process environment -- the rule
-    ``auto_navigation`` and ``answer_rehydration`` use, so one run's flags are
-    read one way.
-    """
-    return _env_value(ANSWER_COVERAGE_ENV).lower() in {"1", "true", "yes", "on"}
-
-
-def roster_nudge_enabled() -> bool:
-    """True when ``FW_ROSTER_NUDGE`` is set to a truthy value.
-
-    Read by the same rule as every other flag in this stack, file first.
-    """
-    return _env_value(ROSTER_NUDGE_ENV).lower() in {"1", "true", "yes", "on"}
-
-
-def answer_evidence_enabled() -> bool:
-    """True when ``FW_ANSWER_EVIDENCE`` is set to a truthy value.
-
-    Read by the same rule as every other flag in this stack, file first.
-    """
-    return _env_value(ANSWER_EVIDENCE_ENV).lower() in {"1", "true", "yes", "on"}
-
 
 # ---------------------------------------------------------------------------
 # Normalisation
@@ -845,7 +795,6 @@ def nudge_block(names: Iterable[str], iterations_left: int) -> tuple[str, int]:
 class NudgeReport:
     """What the finish-time check saw, whether or not it fired."""
 
-    flag: bool = True
     fired: bool = False
     reason: str = ""
     entities_total: int = 0
@@ -858,7 +807,6 @@ class NudgeReport:
 
     def as_event(self) -> dict[str, Any]:
         return {
-            "flag": self.flag,
             "fired": self.fired,
             "reason": self.reason,
             "entities_total": self.entities_total,
@@ -927,7 +875,6 @@ def build_nudge(
 class CoverageReport:
     """What the statement said, and what it cost."""
 
-    flag: bool = True
     exhausted: bool = False
     steps: int = 0
     entities_total: int = 0
@@ -949,7 +896,6 @@ class CoverageReport:
     #: too and a measure is allowed to know what a sentence may not say.
     #: ``evidence_named`` is the subset the block actually PRINTED: non-empty,
     #: inside the byte cap, positive half only.
-    evidence_flag: bool = False
     evidence: list[tuple[str, list[str]]] = field(default_factory=list)
     evidence_named: list[str] = field(default_factory=list)
     evidence_subjects: int = 0
@@ -981,7 +927,6 @@ class CoverageReport:
 
     def as_event(self) -> dict[str, Any]:
         return {
-            "flag": self.flag,
             "exhausted": self.exhausted,
             "steps": self.steps,
             "entities_total": self.entities_total,
@@ -991,7 +936,6 @@ class CoverageReport:
             "unobserved": list(self.unobserved),
             "unavailable": list(self.unavailable),
             "never_attempted": list(self.never_attempted),
-            "evidence_flag": self.evidence_flag,
             "evidence": [
                 {"subject": subject, "items": list(items)}
                 for subject, items in self.evidence
@@ -1080,33 +1024,29 @@ def build_statement(
     ]
     never_attempted = [text for text in instructed if text not in unavailable]
 
-    # ido-8ps.28. Computed only behind its own flag, so with FW_ANSWER_EVIDENCE
-    # unset nothing here runs and the block below is byte for byte 90a1565's.
-    # A failure is an empty list and never a failed turn: this sentence adds
-    # evidence to a statement that is already complete without it.
+    # ido-8ps.28. A failure is an empty list and never a failed turn: this
+    # sentence adds evidence to a statement that is already complete without it.
     #
     # It is NOT gated on `complete`. The completeness refusal exists because
     # "appears in no retrieved observation" would otherwise be a claim about the
     # archive; a statement that only ever says what IS in an observation cannot
     # make that mistake, and on a partial archive it simply says less.
     evidence: list[tuple[str, list[str]]] = []
-    flagged = answer_evidence_enabled()
-    if flagged:
-        try:
-            evidence = [
-                (subject.text, [item.text for item in items])
-                for subject, items in evidence_by_subject(
-                    [e for e in entities if e.kind in INSTRUCTED_KINDS],
-                    scope=scope,
-                    archive=archive,
-                    handle_store=handle_store,
-                    observations=observations,
-                )
-            ]
-        except Exception:  # noqa: BLE001 - a sentence must never fail a turn
-            logger.debug("answer coverage could not read subject evidence",
-                         exc_info=True)
-            evidence = []
+    try:
+        evidence = [
+            (subject.text, [item.text for item in items])
+            for subject, items in evidence_by_subject(
+                [e for e in entities if e.kind in INSTRUCTED_KINDS],
+                scope=scope,
+                archive=archive,
+                handle_store=handle_store,
+                observations=observations,
+            )
+        ]
+    except Exception:  # noqa: BLE001 - a sentence must never fail a turn
+        logger.debug("answer coverage could not read subject evidence",
+                     exc_info=True)
+        evidence = []
     printed = [(subject, items) for subject, items in evidence if items]
     stated, stated_subjects, stated_items = evidence_sentence(printed)
 
@@ -1142,7 +1082,6 @@ def build_statement(
         unobserved=instructed,
         unavailable=unavailable,
         never_attempted=never_attempted,
-        evidence_flag=flagged,
         evidence=evidence,
         evidence_named=[subject for subject, _ in printed][:stated_subjects],
         evidence_subjects=stated_subjects,
@@ -1413,8 +1352,6 @@ def post_check(
 
 
 __all__ = [
-    "ANSWER_COVERAGE_ENV",
-    "ANSWER_EVIDENCE_ENV",
     "ATTEMPT_SPLIT",
     "COVERAGE_KEY",
     "CLAIM_WINDOW_CHARS",
@@ -1434,10 +1371,7 @@ __all__ = [
     "NudgeReport",
     "PLAN_MARKER",
     "PostCheck",
-    "ROSTER_NUDGE_ENV",
     "aliased_executes",
-    "answer_coverage_enabled",
-    "answer_evidence_enabled",
     "build_nudge",
     "build_statement",
     "coverage_block",
@@ -1451,7 +1385,6 @@ __all__ = [
     "request_text",
     "retrieved_corpus",
     "retrieved_text",
-    "roster_nudge_enabled",
     "split_by_presence",
     "subject_corpus",
 ]

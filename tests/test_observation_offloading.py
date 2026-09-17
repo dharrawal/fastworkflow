@@ -15,7 +15,6 @@ import dspy
 
 from fastworkflow import tracing
 from fastworkflow.observation_offloading.agent import (
-    ENABLED_ENV,
     build_compacting_step,
     build_tool_agent,
 )
@@ -40,7 +39,6 @@ from fastworkflow.observation_offloading.continuation import (
     MAX_FORCED_REPLANS,
     REPLAN_OBSERVATION_MAX_BYTES,
     StructuredContinuationReAct,
-    max_forced_replans_from_env,
     replan_trajectory_skeleton,
 )
 from fastworkflow.observation_offloading.labels import (
@@ -71,7 +69,6 @@ from fastworkflow.observation_offloading.search import (
     text_page,
 )
 from fastworkflow.observation_offloading.state import (
-    HANDLE_ARCHIVE_ENV,
     HOT_HANDLE_MAX_BYTES,
     clear_hot_handles,
     hot_handle_max_bytes_from_env,
@@ -315,10 +312,13 @@ class StructuredContinuation(unittest.TestCase):
         reset_runtime_state()
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        from fastworkflow.observation_offloading.state import HANDLE_ARCHIVE_ENV
-        env = patch.dict(os.environ, {HANDLE_ARCHIVE_ENV: str(Path(self.tempdir.name) / "replan.sqlite3")})
-        env.start()
-        self.addCleanup(env.stop)
+        # ido-pyw.1 removed FW_OFFLOAD_HANDLE_ARCHIVE. The process-default
+        # archive is now one temp file per PID, which these tests share; they
+        # all write alias O1 under the same process-wide default scope, so each
+        # one gets its own archive object instead.
+        from fastworkflow.observation_offloading import state as offload_state
+        offload_state._default_archive = RuntimeHandleArchive(
+            str(Path(self.tempdir.name) / "replan.sqlite3"))
         self.addCleanup(reset_runtime_state)
 
     def test_greedy_28k_inlines_newest_first_and_never_exceeds_bound(self) -> None:
@@ -460,9 +460,12 @@ class StructuredContinuation(unittest.TestCase):
         self.assertIn("segment 2 of 3", trajectory["replan_1"])
         self.assertNotIn("x" * 1000, captured["trajectory_skeleton"])
 
-    def test_env_override_reports_actual_segment_total(self) -> None:
+    def test_segment_total_reports_the_replans_actually_allowed(self) -> None:
         """Ultrareview normal finding: the artifact and events said "of 3"
-        while FW_MAX_FORCED_REPLANS gated a different number of segments."""
+        while the agent's own `max_forced_replans` gated a different number of
+        segments. ido-pyw.1 made the bound a constant; the attribute is still
+        what `total_segments` and the replan text have to agree with, so the
+        agent is built with a different one and both are checked."""
         class ScriptedAgent(StructuredContinuationReAct):
             def _run_loop(self, trajectory, idx, input_args, max_iters, exception_count):
                 self.segment_calls.append(max_iters)
@@ -478,16 +481,13 @@ class StructuredContinuation(unittest.TestCase):
         def fake_predict(_signature):
             return lambda **kwargs: SimpleNamespace(next_steps="Keep going.")
 
-        env = patch.dict(os.environ, {"FW_MAX_FORCED_REPLANS": "4"})
-        env.start()
-        self.addCleanup(env.stop)
         agent = ScriptedAgent.__new__(ScriptedAgent)
         agent.max_iters = 25
         agent.forced_replans = 0
         agent.iteration_counter = 0
         agent.current_trajectory = {}
         agent.segment_calls = []
-        agent.max_forced_replans = max_forced_replans_from_env()
+        agent.max_forced_replans = 4
         self.assertEqual(agent.total_segments, 5)
         trajectory = {}
         with patch(
@@ -892,13 +892,11 @@ class HookIsolation(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0]["error"], "ValueError")
 
-    def test_malformed_numeric_env_falls_back_to_defaults(self) -> None:
+    def test_malformed_numeric_override_falls_back_to_the_derived_budget(self) -> None:
         self._set_env("FW_TRAJECTORY_MAX_BYTES", "28k")
         self._set_env("FW_OFFLOAD_HOT_MAX_BYTES", "-5")
-        self._set_env("FW_MAX_FORCED_REPLANS", "two")
         self.assertEqual(packed_target_bytes_from_env(), PACKED_TARGET_BYTES)
         self.assertEqual(hot_handle_max_bytes_from_env(), HOT_HANDLE_MAX_BYTES)
-        self.assertEqual(max_forced_replans_from_env(), MAX_FORCED_REPLANS)
         trajectory = {
             "tool_name_0": "execute_workflow_query",
             "tool_args_0": {"command": "show"},
@@ -935,7 +933,9 @@ class AgentConstruction(unittest.TestCase):
         reset_runtime_state()
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self._set_env(HANDLE_ARCHIVE_ENV, str(Path(self.tempdir.name) / "handles.sqlite3"))
+        # The agent's archive now lands beside the workflow's observability DB;
+        # the state root is what moves it into this test's temp dir.
+        self._set_env("FASTWORKFLOW_STATE_ROOT", self.tempdir.name)
 
     def _set_env(self, name: str, value: str) -> None:
         previous = os.environ.get(name)
@@ -954,8 +954,8 @@ class AgentConstruction(unittest.TestCase):
         """Return the command unchanged."""
         return command
 
-    def test_enabled_builds_one_continuation_agent_with_search_memory(self) -> None:
-        self._set_env(ENABLED_ENV, "1")
+    def test_the_agent_is_a_continuation_agent_with_search_memory(self) -> None:
+        """ido-pyw.1: no setting reaches this; it is what build_tool_agent does."""
         agent = build_tool_agent(
             SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
         )
@@ -965,14 +965,17 @@ class AgentConstruction(unittest.TestCase):
         installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
         self.assertEqual(len(installed), 1)
 
-    def test_disabled_builds_a_stock_react_without_search_memory(self) -> None:
-        self._set_env(ENABLED_ENV, "0")
+    def test_the_replan_bound_is_the_module_constant(self) -> None:
+        """ido-pyw.1: FW_MAX_FORCED_REPLANS is gone, and the agent the framework
+        builds carries the constant -- 2 forced replans, 3 segments."""
         agent = build_tool_agent(
             SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
         )
-        self.assertIsInstance(agent, fastWorkflowReAct)
-        self.assertNotIsInstance(agent, StructuredContinuationReAct)
-        self.assertEqual(set(agent.tools), {"noop_tool", "finish"})
+        self.assertEqual(agent.max_forced_replans, MAX_FORCED_REPLANS)
+        self.assertEqual(MAX_FORCED_REPLANS, 2)
+        self.assertEqual(agent.total_segments, 3)
+        installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
+        self.assertEqual(installed[0]["max_forced_replans"], 2)
 
 
 class PlannerFailure(unittest.TestCase):

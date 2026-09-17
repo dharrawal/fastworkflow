@@ -1,10 +1,15 @@
-"""Arm D observation offloading: compact, archive, search_memory, continuation.
+"""Observation offloading: compact, archive, search_memory, continuation.
 
-Enabled by default. Set ``FW_OBSERVATION_OFFLOADING=0`` to restore stock ReAct.
+Unconditional since ``ido-pyw.1``: this is how fastWorkflow runs a tool agent.
+``build_tool_agent`` always returns a ``StructuredContinuationReAct``, execute
+observations always carry their canonical ``O`` alias, compaction always swaps
+an observation that is no longer worth its residency for its own label, and the
+text behind every label stays reachable through ``search_memory`` and through
+answer-time rehydration. See ``docs/observation_search.md``.
 """
 from __future__ import annotations
 
-from fastworkflow.observation_offloading.agent import build_tool_agent, enabled
+from fastworkflow.observation_offloading.agent import build_tool_agent
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
     RuntimeHandleArchive,
@@ -79,7 +84,6 @@ __all__ = [
     "classify_against_steps",
     "clear_hot_handles",
     "compact_trajectory",
-    "enabled",
     "execute_ordinals",
     "hot_payload_bytes",
     "install_span_policy",

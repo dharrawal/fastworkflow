@@ -414,11 +414,12 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         attributes=frozenset({"model", "replan_trigger", "plan"}),
     ),
     # v2: R1's known-name refusal (ido-8ps.8) has written the three
-    # `known_name_*` keys since c976964 without being declared here, and
-    # ido-8ps.9 adds `auto_navigation_enabled` so a measured run's flag is
-    # readable off the routing event rather than off the runner's env file.
+    # `known_name_*` keys since c976964 without being declared here.
+    # v3 (ido-pyw.1): `auto_navigation_enabled` is gone with the flag it
+    # recorded -- auto-navigation is unconditional, so there is no setting for a
+    # measured run to carry.
     SPAN_NLU_INTENT: SpanContract(
-        version=2,
+        version=3,
         attributes=frozenset(
             {
                 "context",
@@ -428,7 +429,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "known_name_foreign_context",
                 "known_name_owner_contexts",
                 "known_name_foreign_context_hint",
-                "auto_navigation_enabled",
                 "escalation_outcome",
                 "fuzzy_distance",
                 "fuzzy_threshold",
@@ -522,7 +522,14 @@ STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 STATUS_AWAITING_USER = "awaiting_user"
 
-_DEFAULT_MAX_ATTR_BYTES = 16384
+#: The cap on ONE span-attribute value written to the observability store, in
+#: UTF-8 bytes. A constant since ``ido-pyw.1``: it bounds a database row, not a
+#: model prompt, so it is not one of the context-window budgets in
+#: ``fastworkflow.context_budget`` and does not scale with a model.
+MAX_ATTR_BYTES = 16384
+#: The pre-``ido-pyw.1`` name, kept as an alias for readers of the provenance
+#: record.
+_DEFAULT_MAX_ATTR_BYTES = MAX_ATTR_BYTES
 
 
 def is_control_signal(exc: BaseException) -> bool:
@@ -649,15 +656,8 @@ def root_span_id(turn_key: str) -> str:
     return deterministic_span_id(turn_key, SPAN_TURN, 0)
 
 
-def _max_attr_bytes() -> int:
-    try:
-        return int(os.environ.get("FW_OBS_MAX_ATTR_BYTES", "") or _DEFAULT_MAX_ATTR_BYTES)
-    except ValueError:
-        return _DEFAULT_MAX_ATTR_BYTES
-
-
 def cap_attr_value(value: Any) -> Any:
-    """Cap one attribute value at FW_OBS_MAX_ATTR_BYTES.
+    """Cap one attribute value at ``MAX_ATTR_BYTES``.
 
     Truncation is lossy-and-counted ([R10]): an over-limit string becomes an
     envelope carrying ``truncated: True``, the original byte length, and the
@@ -665,7 +665,7 @@ def cap_attr_value(value: Any) -> Any:
     """
     if not isinstance(value, str):
         return value
-    limit = _max_attr_bytes()
+    limit = MAX_ATTR_BYTES
     raw = value.encode("utf-8")
     if len(raw) <= limit:
         return value

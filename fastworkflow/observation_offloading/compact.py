@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any, Callable, Mapping, Optional
 
+from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import (
     alias_line,
@@ -24,7 +25,6 @@ from fastworkflow.observation_offloading.state import (
     archived_digest,
     context_clause_of,
     default_scope,
-    env_int,
     evict_hot_handles,
     hot_handle_max_bytes_from_env,
     hot_payload_bytes,
@@ -42,25 +42,29 @@ from fastworkflow.observation_offloading.state import (
 #: cost ~400 B, and a 300 B fact could never be worth replacing at all because
 #: its label is larger than it is. The label is the actual label for that step,
 #: description and command text included, so the saving is the real one.
-MIN_OFFLOAD_SAVING_BYTES = 1_024
+#: The value at the reference context window. The effective one is a fraction of
+#: the model's window (``context_budget.OFFLOAD_MIN_SAVING``).
+MIN_OFFLOAD_SAVING_BYTES = context_budget.REFERENCE_OFFLOAD_MIN_SAVING_BYTES
 RECENT_OBSERVATIONS_PROTECTED = 5
-PACKED_TARGET_BYTES = 28_000
-TRAJECTORY_MAX_BYTES_ENV = "FW_TRAJECTORY_MAX_BYTES"
-MIN_OFFLOAD_SAVING_BYTES_ENV = "FW_OFFLOAD_MIN_SAVING_BYTES"
+#: The packed-trajectory target at the reference context window
+#: (``context_budget.TRAJECTORY``).
+PACKED_TARGET_BYTES = context_budget.REFERENCE_TRAJECTORY_MAX_BYTES
+#: The tuning overrides. The budgets themselves come from the window.
+TRAJECTORY_MAX_BYTES_ENV = context_budget.TRAJECTORY.override_env
+MIN_OFFLOAD_SAVING_BYTES_ENV = context_budget.OFFLOAD_MIN_SAVING.override_env
 
 
 _STEP_KEY = re.compile(r"^(?:tool_name|observation)_(\d+)$")
 
 
-def packed_target_bytes_from_env(default: int = PACKED_TARGET_BYTES) -> int:
-    return env_int(TRAJECTORY_MAX_BYTES_ENV, default, minimum=1)
+def packed_target_bytes_from_env() -> int:
+    """The packed-trajectory target for this run. See ``fastworkflow.context_budget``."""
+    return context_budget.trajectory_max_bytes()
 
 
-def min_offload_saving_bytes_from_env(
-    default: int = MIN_OFFLOAD_SAVING_BYTES,
-) -> int:
-    """The minimum saving knob. ``0`` means "offload whenever the label is smaller"."""
-    return env_int(MIN_OFFLOAD_SAVING_BYTES_ENV, default, minimum=0)
+def min_offload_saving_bytes_from_env() -> int:
+    """The minimum saving an offload must buy. ``0`` means "whenever the label is smaller"."""
+    return context_budget.offload_min_saving_bytes()
 
 
 def step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
@@ -304,7 +308,7 @@ def compact_trajectory(
     min_offload_saving_bytes: Optional[int] = None,
     recent_observations_protected: int = RECENT_OBSERVATIONS_PROTECTED,
     packed_target_tokens: Optional[int] = None,
-    packed_target_bytes: int = PACKED_TARGET_BYTES,
+    packed_target_bytes: Optional[int] = None,
     hot_handle_max_bytes: Optional[int] = None,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
@@ -330,8 +334,8 @@ def compact_trajectory(
     store = selected_archive or archive()
     if min_offload_saving_bytes is None:
         min_offload_saving_bytes = min_offload_saving_bytes_from_env()
-    if packed_target_tokens is None:
-        packed_target_bytes = packed_target_bytes_from_env(packed_target_bytes)
+    if packed_target_tokens is None and packed_target_bytes is None:
+        packed_target_bytes = packed_target_bytes_from_env()
     if hot_handle_max_bytes is None:
         hot_handle_max_bytes = hot_handle_max_bytes_from_env()
     if hot_handle_max_bytes < 0:

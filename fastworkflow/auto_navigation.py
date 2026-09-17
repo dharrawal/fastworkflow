@@ -38,16 +38,15 @@ which context instance that handle denotes, the same way the command inventory
 says which context owns a name. No entry is ever selected because it is recent,
 because it is the only one, or because a plan mentioned it.
 
-Feature flag. ``FW_AUTO_NAVIGATION=1`` enables dispatch; the default (``0``) is
-the declaration-only behaviour shipped in 74c348a, so the predecessor
-measurement stays reproducible. The flag's value is recorded on the routing
-event either way.
+Unconditional since ``ido-pyw.1``: a workflow that declares ``enter_command`` on
+a context callback class gets two-step dispatch and the blocking clarification;
+one that declares nothing gets the declaration-and-hint behaviour, because
+``decide`` has no entry contract to act on. The declaration is the switch.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import re
 import threading
 from dataclasses import dataclass, field
@@ -57,20 +56,15 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Flag and knobs
+# Bounds
 # ---------------------------------------------------------------------------
 
-#: 0 (default) = declaration and hint only, exactly the 74c348a behaviour.
-#: 1 = the two-step dispatch and the blocking clarification in this module.
-AUTO_NAVIGATION_ENV = "FW_AUTO_NAVIGATION"
 #: How many of the most recent execute observations a clarification may read
-#: candidate values off. Convenience only -- candidates are listed, never chosen.
-CANDIDATE_STEPS_ENV = "FW_AUTO_NAVIGATION_CANDIDATE_STEPS"
+#: candidate values off. Convenience only -- candidates are listed, never chosen,
+#: so this is a presentation bound and not a policy.
+CANDIDATE_STEPS = 3
 #: Most candidate values one clarification may list.
-CANDIDATE_MAX_ENV = "FW_AUTO_NAVIGATION_CANDIDATE_MAX"
-
-DEFAULT_CANDIDATE_STEPS = 3
-DEFAULT_CANDIDATE_MAX = 10
+CANDIDATE_MAX = 10
 
 #: Class attributes a workflow's context callback class may declare to say which
 #: command enters that context. THE canonical source for the fact: nothing in the
@@ -88,55 +82,6 @@ DEFAULT_CANDIDATE_MAX = 10
 CONTEXT_ENTER_COMMAND_ATTRS = ("enter_command", "enter_commands")
 
 
-def _env_value(name: str) -> str:
-    """The raw setting of *name*, from the fastworkflow env file or the process.
-
-    ``fastworkflow.get_env_var`` short-circuits on its ``default`` before it
-    consults ``os.environ``, so a variable exported into the process but absent
-    from the env file would read as the default. Both are checked here, file
-    first, and a missing variable is silent -- this is read on the routing path
-    of every declined name.
-    """
-    value = None
-    try:
-        import fastworkflow
-
-        value = fastworkflow._env_vars.get(name)
-    except Exception:  # noqa: BLE001 - a knob must never fail a turn
-        value = None
-    if value is None:
-        value = os.environ.get(name)
-    return str(value or "").strip()
-
-
-def auto_navigation_enabled() -> bool:
-    """True when ``FW_AUTO_NAVIGATION`` is set to a truthy value."""
-    return _env_value(AUTO_NAVIGATION_ENV).lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
-    raw = _env_value(name)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("%s=%r is not an integer; using %d", name, raw, default)
-        return default
-    if value < minimum:
-        logger.warning("%s=%d is below %d; using %d", name, value, minimum, default)
-        return default
-    return value
-
-
-def candidate_steps() -> int:
-    return _env_int(CANDIDATE_STEPS_ENV, DEFAULT_CANDIDATE_STEPS, minimum=0)
-
-
-def candidate_max() -> int:
-    return _env_int(CANDIDATE_MAX_ENV, DEFAULT_CANDIDATE_MAX, minimum=0)
-
-
 # ---------------------------------------------------------------------------
 # Vocabulary
 # ---------------------------------------------------------------------------
@@ -152,12 +97,11 @@ CLARIFY = "clarify"
 NONE = "none"
 
 #: Span attributes. ``auto_navigated`` marks the two execute steps a dispatch
-#: produced; ``auto_navigation_enabled`` goes on the routing event whether or not
-#: anything was dispatched, so a run's flag setting is readable from the trace.
+#: produced; the decision and its rule go on the routing event whether or not
+#: anything was dispatched, so a run's routing is readable from the trace.
 ATTR_AUTO_NAVIGATED = "auto_navigated"
 ATTR_AUTO_NAVIGATION_RULE = "auto_navigation_rule"
 ATTR_ENTERED_CONTEXT = "entered_context"
-ATTR_AUTO_NAVIGATION_ENABLED = "auto_navigation_enabled"
 ATTR_AUTO_NAVIGATION_DECISION = "auto_navigation_decision"
 ATTR_AUTO_NAVIGATION_STEP = "auto_navigation_step"
 
@@ -173,7 +117,6 @@ AUTO_NAVIGATION_ARTIFACT = "auto_navigation_plan"
 
 #: Reasons a decision came out the way it did. One vocabulary, so a summary can
 #: count them without parsing prose.
-REASON_FLAG_OFF = "flag_off"
 REASON_NOT_A_KNOWN_NAME = "not_a_known_name"
 REASON_NO_ENTRY_DECLARATION = "no_entry_declaration"
 REASON_SEVERAL_OWNING_CONTEXTS = "several_owning_contexts"
@@ -510,11 +453,10 @@ class AutoNavigationDecision:
     def dispatches(self) -> bool:
         return self.kind == DISPATCH
 
-    def event(self, *, enabled: bool) -> dict[str, Any]:
-        """The routing-event payload. The flag is on it either way (part b)."""
+    def event(self) -> dict[str, Any]:
+        """The routing-event payload, filed for every declined KNOWN name."""
         return {
             "kind": "auto_navigation",
-            ATTR_AUTO_NAVIGATION_ENABLED: bool(enabled),
             ATTR_AUTO_NAVIGATION_DECISION: self.kind,
             "reason": self.reason,
             "command_name": self.command_name,
@@ -542,7 +484,6 @@ def decide(
     owner_contexts: Sequence[str],
     contracts: Mapping[str, EntryContract],
     entries: Sequence[ContextEntry] = (),
-    enabled: bool = True,
 ) -> AutoNavigationDecision:
     """Rule 1, 2, 3 or a blocking clarification. A pure function.
 
@@ -560,11 +501,6 @@ def decide(
     )
     if not owners:
         return nothing
-    if not enabled:
-        return AutoNavigationDecision(
-            kind=NONE, reason=REASON_FLAG_OFF,
-            command_name=command_name, owner_contexts=owners,
-        )
     if len(owners) > 1:
         # Two contexts own the name and the framework has no ground to prefer
         # one. The R1 hint already names them all; that stays the answer.
@@ -691,21 +627,18 @@ def plan(
             kind=NONE, reason=REASON_DISPATCH_IN_FLIGHT,
             command_name=command_name, owner_contexts=owners,
         )
-    enabled = auto_navigation_enabled()
     contracts: dict[str, EntryContract] = {}
-    if enabled:
-        for owner in owners:
-            contract = entry_contract_for(workflow_folderpath, owner)
-            if contract is not None:
-                contracts[owner] = contract
-    entries = context_entries(scope_id or current_scope_id()) if enabled else ()
+    for owner in owners:
+        contract = entry_contract_for(workflow_folderpath, owner)
+        if contract is not None:
+            contracts[owner] = contract
+    entries = context_entries(scope_id or current_scope_id())
     return decide(
         command_name=command_name,
         utterance=utterance,
         owner_contexts=owners,
         contracts=contracts,
         entries=entries,
-        enabled=enabled,
     )
 
 
@@ -727,7 +660,7 @@ def recent_execute_observations(agent: Any = None, steps: Optional[int] = None) 
     Read off the live ReAct trajectory. Used ONLY to list candidate values in a
     clarification; no decision in this module is given this text.
     """
-    limit = candidate_steps() if steps is None else steps
+    limit = CANDIDATE_STEPS if steps is None else steps
     if limit <= 0:
         return []
     try:
@@ -761,7 +694,7 @@ def candidate_values(observations: Sequence[str], *, limit: Optional[int] = None
     it prints them and waits. That is the whole difference between this and
     inferring a parameter from the action log.
     """
-    maximum = candidate_max() if limit is None else limit
+    maximum = CANDIDATE_MAX if limit is None else limit
     if maximum <= 0:
         return []
     found: list[str] = []

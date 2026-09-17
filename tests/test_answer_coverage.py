@@ -17,8 +17,6 @@ import dspy
 
 from fastworkflow import answer_coverage
 from fastworkflow.answer_coverage import (
-    ANSWER_COVERAGE_ENV,
-    ANSWER_EVIDENCE_ENV,
     COVERAGE_KEY,
     EVIDENCE_HEAD,
     EVIDENCE_LIST_MAX_BYTES,
@@ -26,10 +24,7 @@ from fastworkflow.answer_coverage import (
     NUDGE_MAX_BYTES,
     NUDGE_MIN_ITERS_LEFT,
     RETRIEVED_RULE,
-    ROSTER_NUDGE_ENV,
     aliased_executes,
-    answer_coverage_enabled,
-    answer_evidence_enabled,
     build_nudge,
     build_statement,
     coverage_block,
@@ -42,11 +37,9 @@ from fastworkflow.answer_coverage import (
     post_check,
     request_text,
     retrieved_corpus,
-    roster_nudge_enabled,
     split_by_presence,
     subject_corpus,
 )
-from fastworkflow.answer_rehydration import ANSWER_REHYDRATION_ENV
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
@@ -499,17 +492,18 @@ class PostCheckCounts(unittest.TestCase):
 
 
 class ExtractHook(unittest.TestCase):
-    """The flag, the byte-identical default, and the events."""
+    """What the extract call receives, and the events it leaves behind.
+
+    ``ido-pyw.1`` removed ``FW_ANSWER_COVERAGE``: the statement is what an
+    answer-time extract call gets, so the tests that pinned the flag-off call
+    against ``4832b3c`` are gone and these assert the behaviour instead.
+    """
 
     def setUp(self) -> None:
         reset_runtime_state()
         self.addCleanup(reset_runtime_state)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        for name in (ANSWER_COVERAGE_ENV, ANSWER_REHYDRATION_ENV):
-            os.environ.pop(name, None)
-        self.addCleanup(lambda: [os.environ.pop(name, None) for name in
-                                 (ANSWER_COVERAGE_ENV, ANSWER_REHYDRATION_ENV)])
         from fastworkflow.utils.react import fastWorkflowReAct
 
         def a_tool(value: str) -> str:
@@ -541,24 +535,8 @@ class ExtractHook(unittest.TestCase):
         return mock.patch("fastworkflow.result_handles.store",
                           return_value=self.store)
 
-    def test_the_flag_is_read_env_file_first(self) -> None:
-        self.assertFalse(answer_coverage_enabled())
-        with mock.patch.dict("fastworkflow._env_vars",
-                             {ANSWER_COVERAGE_ENV: "1"}, clear=False):
-            self.assertTrue(answer_coverage_enabled())
-        os.environ[ANSWER_COVERAGE_ENV] = "yes"
-        self.assertTrue(answer_coverage_enabled())
-
-    def test_flag_off_is_byte_identical(self) -> None:
-        expected = self.agent._format_trajectory(self.trajectory)
-        recorder = Recorder()
-        self.agent.extract = recorder
-        self.agent._extract_prediction(self.trajectory, user_query=CARD)
-        self.assertEqual(recorder.calls, [expected])
-        self.assertEqual(snapshot_events(), [])
-
-    def test_flag_on_prepends_the_block(self) -> None:
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
+    def test_the_block_is_prepended_with_nothing_set(self) -> None:
+        """ido-pyw.1: no setting, no override -- the block is simply there."""
         recorder = Recorder()
         self.agent.extract = recorder
         with self._patch_store():
@@ -570,7 +548,6 @@ class ExtractHook(unittest.TestCase):
                         rendered.index("thought_0"))
 
     def test_the_loop_trajectory_is_unchanged(self) -> None:
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
         before = dict(self.trajectory)
         self.agent.extract = Recorder()
         with self._patch_store():
@@ -578,7 +555,6 @@ class ExtractHook(unittest.TestCase):
         self.assertEqual(self.trajectory, before)
 
     def test_the_events_carry_the_measures(self) -> None:
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
         self.agent.extract = mock.Mock(
             return_value=dspy.Prediction(
                 final_answer="Christopher Hubbard: no record is available."))
@@ -596,11 +572,11 @@ class ExtractHook(unittest.TestCase):
         self.assertGreater(statement[0]["statement_bytes"], 0)
         self.assertEqual(check[0]["unavailability_claim_on_unobserved"], 1)
 
-    def test_the_evidence_sentence_is_off_in_the_rendered_call(self) -> None:
-        """ido-8ps.28. FW_ANSWER_EVIDENCE unset: the extract call is the call
-        the accepted stack made at 90a1565, sentence and all."""
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
-        os.environ.pop(ANSWER_EVIDENCE_ENV, None)
+    def test_a_subject_with_nothing_to_state_leaves_the_sentence_out(self) -> None:
+        """ido-8ps.28 / ido-pyw.1. The sentence is computed unconditionally, and
+        a run whose only subject has nothing to state still renders the block
+        the accepted stack rendered at 90a1565 -- the positive-half-only rule,
+        not a flag, is what keeps it silent."""
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
         recorder = Recorder()
         self.agent.extract = recorder
@@ -610,9 +586,6 @@ class ExtractHook(unittest.TestCase):
         self.assertIn(STATEMENT_AT_90A1565, recorder.calls[0])
 
     def test_the_evidence_sentence_reaches_the_extract_call(self) -> None:
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
-        os.environ[ANSWER_EVIDENCE_ENV] = "1"
-        self.addCleanup(lambda: os.environ.pop(ANSWER_EVIDENCE_ENV, None))
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
         text = "Active Directory_Compliance Officer"
         self.archive.persist(
@@ -630,7 +603,6 @@ class ExtractHook(unittest.TestCase):
         events = snapshot_events()
         statement = [e for e in events if e["kind"] == "coverage_statement"][0]
         check = [e for e in events if e["kind"] == "coverage_post_check"][0]
-        self.assertTrue(statement["evidence_flag"])
         self.assertEqual(statement["evidence_named"], ["Alisha Ochoa"])
         self.assertGreater(statement["evidence_bytes"], 0)
         self.assertEqual(check["evidence_claims_unlisted"], 1)
@@ -639,19 +611,19 @@ class ExtractHook(unittest.TestCase):
             ["Active Directory_Cloud Administrator"],
         )
 
-    def test_a_failure_falls_back_to_the_plain_call(self) -> None:
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
-        expected = self.agent._format_trajectory(self.trajectory)
+    def test_a_failure_costs_the_block_and_not_the_answer(self) -> None:
+        """The extract call still happens, with no coverage block in it."""
         recorder = Recorder()
         self.agent.extract = recorder
         with mock.patch.object(answer_coverage, "build_statement",
                                side_effect=RuntimeError("boom")):
             self.agent._extract_prediction(self.trajectory, user_query=CARD)
-        self.assertEqual(recorder.calls, [expected])
-        self.assertEqual([e["kind"] for e in snapshot_events()], ["coverage_failed"])
+        self.assertEqual(len(recorder.calls), 1)
+        self.assertNotIn("Coverage of this run:", recorder.calls[0])
+        self.assertIn("coverage_failed",
+                      [e["kind"] for e in snapshot_events()])
 
     def test_truncation_never_drops_the_block(self) -> None:
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
         copy, _ = build_statement(
             dict(self.trajectory), user_query=CARD, exhausted=False,
             haystack=normalise("nothing"),
@@ -661,8 +633,6 @@ class ExtractHook(unittest.TestCase):
         self.assertNotIn("thought_0", truncated)
 
     def test_it_runs_after_rehydration_on_the_rehydrated_copy(self) -> None:
-        os.environ[ANSWER_COVERAGE_ENV] = "1"
-        os.environ[ANSWER_REHYDRATION_ENV] = "1"
         label = offload_label(
             alias="O1", command_name="find_identity",
             response="1 identity.\nuid-1  Alan Cooper", description="the identity",
@@ -888,15 +858,18 @@ class Stub:
 
 
 class LoopHook(unittest.TestCase):
-    """ido-8ps.27 (a): the finish action, the flag, and one nudge per turn."""
+    """ido-8ps.27 (a): the finish action and one nudge per turn.
+
+    ``ido-pyw.1`` removed ``FW_ROSTER_NUDGE``. The loop check is unconditional,
+    so "the loop it was at 9e5e9d9" is no longer a claim these tests can make;
+    what replaces it is the run that has nothing to be nudged about.
+    """
 
     def setUp(self) -> None:
         reset_runtime_state()
         self.addCleanup(reset_runtime_state)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        os.environ.pop(ROSTER_NUDGE_ENV, None)
-        self.addCleanup(lambda: os.environ.pop(ROSTER_NUDGE_ENV, None))
         from fastworkflow.utils.react import fastWorkflowReAct
 
         def a_tool(value: str = "") -> str:
@@ -936,28 +909,25 @@ class LoopHook(unittest.TestCase):
         self.agent._run_loop(trajectory, 0, {"user_query": CARD}, 12, 0)
         return trajectory
 
-    def test_flag_off_is_the_loop_it_was(self) -> None:
-        """The ido-8ps.24 identity proof, applied to the loop.
-
-        Three claims, because "off" has to mean all three: the trajectory the
-        turn recorded is the one it recorded at 9e5e9d9 (a finish action ends
-        it, observation "Completed."), nothing is measured, and the check is
-        not even consulted -- ``build_nudge`` is never called, so no archive is
-        read and no request is parsed.
-        """
-        with mock.patch.object(answer_coverage, "build_nudge") as never:
-            trajectory = self._run([("finish", {}), ("a_tool", {"value": "x"})])
-        self.assertFalse(never.called)
+    def test_a_request_with_no_named_items_ends_at_the_finish_action(self) -> None:
+        """ido-pyw.1. The check runs on every finish action and this is what it
+        does when there is nothing to say: the trajectory is the one a finish
+        action always produced, the nudge is recorded as not fired, and the
+        reason names why rather than naming a setting."""
+        self.agent.react = Stub([("finish", {}), ("a_tool", {"value": "x"})])
+        trajectory: dict = {}
+        self.agent._roster_nudges_fired = 0
+        self.agent.iteration_counter = 0
+        self.agent._run_loop(trajectory, 0, {"user_query": "list everything"}, 12, 0)
         self.assertEqual(
             trajectory,
             {"thought_0": "t", "tool_name_0": "finish", "tool_args_0": {},
              "observation_0": "Completed."},
         )
-        self.assertEqual(snapshot_events(), [])
-        self.assertFalse(roster_nudge_enabled())
+        event = [e for e in snapshot_events() if e["kind"] == "roster_nudge"][0]
+        self.assertFalse(event["fired"])
 
-    def test_flag_on_returns_control_to_the_loop(self) -> None:
-        os.environ[ROSTER_NUDGE_ENV] = "1"
+    def test_the_nudge_returns_control_to_the_loop(self) -> None:
         trajectory = self._run([("finish", {}), ("a_tool", {"value": "more"}),
                                 ("finish", {})])
         self.assertIn("Harness check before this turn ends",
@@ -969,7 +939,6 @@ class LoopHook(unittest.TestCase):
         self.assertEqual(trajectory["observation_2"], "Completed.")
 
     def test_at_most_one_nudge_per_turn(self) -> None:
-        os.environ[ROSTER_NUDGE_ENV] = "1"
         trajectory = self._run([("finish", {})])
         self.assertIn("Harness check", trajectory["observation_0"])
         self.assertEqual(trajectory["observation_1"], "Completed.")
@@ -979,7 +948,6 @@ class LoopHook(unittest.TestCase):
         self.assertEqual(len(fired), 1)
 
     def test_the_event_carries_what_the_summarizer_counts(self) -> None:
-        os.environ[ROSTER_NUDGE_ENV] = "1"
         self._run([("finish", {})])
         event = [e for e in snapshot_events() if e["kind"] == "roster_nudge"][0]
         self.assertTrue(event["fired"])
@@ -991,7 +959,6 @@ class LoopHook(unittest.TestCase):
         self.assertGreater(event["iterations_left"], 0)
 
     def test_never_on_a_turn_with_no_room(self) -> None:
-        os.environ[ROSTER_NUDGE_ENV] = "1"
         self.agent.react = Stub([("finish", {})])
         trajectory: dict = {}
         self.agent._roster_nudges_fired = 0
@@ -1004,7 +971,6 @@ class LoopHook(unittest.TestCase):
         self.assertEqual(event["reason"], "no room to act")
 
     def test_a_failure_leaves_the_loop_alone(self) -> None:
-        os.environ[ROSTER_NUDGE_ENV] = "1"
         with mock.patch.object(answer_coverage, "build_nudge",
                                side_effect=RuntimeError("boom")):
             trajectory = self._run([("finish", {})])
@@ -1017,10 +983,11 @@ if __name__ == "__main__":
     unittest.main()
 
 
-#: ido-8ps.28. The statement this fixture produced at 90a1565, byte for byte.
-#: Frozen here, not recomputed, because "the flag off changes nothing" is a
-#: claim about bytes a model received on a day and a recomputed expectation
-#: would move with the code it is meant to pin.
+#: ido-8ps.28. The statement this fixture produced at 90a1565, byte for byte --
+#: which is also the statement it produces now whenever no subject has anything
+#: to state. Frozen here, not recomputed, because it is a claim about bytes a
+#: model received on a day and a recomputed expectation would move with the code
+#: it is meant to pin.
 STATEMENT_AT_90A1565 = (
     "Coverage of this run: the loop ended normally. These named items from the "
     "request appear in no retrieved observation: Active Directory; Active "
@@ -1038,7 +1005,7 @@ STATEMENT_AT_90A1565 = (
 
 
 class EvidenceSentenceText(unittest.TestCase):
-    """ido-8ps.28: the sentence itself, as bytes. No store, no flag, no run."""
+    """ido-8ps.28: the sentence itself, as bytes. No store, no run."""
 
     def test_nothing_to_state_is_silence(self) -> None:
         self.assertEqual(evidence_sentence([]), ("", 0, 0))
@@ -1159,16 +1126,18 @@ class EvidenceBySubject(unittest.TestCase):
 
 
 class EvidenceInTheBlock(unittest.TestCase):
-    """ido-8ps.28: where the sentence sits, and the flag that gates it."""
+    """ido-8ps.28: where the sentence sits, and when it says nothing.
+
+    ``ido-pyw.1`` removed ``FW_ANSWER_EVIDENCE``; what kept the sentence honest
+    was never the flag but the positive-half-only rule, and that is what these
+    now test.
+    """
 
     def setUp(self) -> None:
         reset_runtime_state()
         self.addCleanup(reset_runtime_state)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        for name in (ANSWER_EVIDENCE_ENV,):
-            os.environ.pop(name, None)
-        self.addCleanup(lambda: os.environ.pop(ANSWER_EVIDENCE_ENV, None))
         self.scope = scope_for(self.directory.name)
         path = os.path.join(self.directory.name, "obs.sqlite3")
         self.archive = RuntimeHandleArchive(path)
@@ -1192,29 +1161,16 @@ class EvidenceInTheBlock(unittest.TestCase):
             scope=self.scope, archive=self.archive, handle_store=self.store,
         )
 
-    def test_the_flag_is_read_env_file_first(self) -> None:
-        self.assertFalse(answer_evidence_enabled())
-        with mock.patch.dict("fastworkflow._env_vars",
-                             {ANSWER_EVIDENCE_ENV: "1"}, clear=False):
-            self.assertTrue(answer_evidence_enabled())
-        os.environ[ANSWER_EVIDENCE_ENV] = "yes"
-        self.assertTrue(answer_evidence_enabled())
-
-    def test_flag_off_is_byte_identical_to_90a1565(self) -> None:
+    def test_a_lone_subject_with_nothing_to_state_is_90a1565(self) -> None:
+        """The sentence is computed, the subject is known, and the block is the
+        one the accepted stack rendered -- because the subject's own
+        observations contain no OTHER named item of the request."""
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
         _, report = self._build()
         self.assertEqual(report.statement, STATEMENT_AT_90A1565)
         self.assertEqual(report.statement_bytes, 815)
-        self.assertFalse(report.evidence_flag)
-        self.assertEqual(report.evidence, [])
+        self.assertEqual(report.evidence, [("Alan Cooper", [])])
         self.assertEqual(report.evidence_bytes, 0)
-
-    def test_flag_off_never_reads_the_evidence(self) -> None:
-        from fastworkflow import answer_attribution
-
-        with mock.patch.object(answer_attribution, "observations") as reader:
-            self._build()
-        reader.assert_not_called()
 
     def _ochoa(self) -> None:
         """One further observation, stamped against a second subject, whose text
@@ -1228,7 +1184,6 @@ class EvidenceInTheBlock(unittest.TestCase):
         record_context_clause(self.scope, "O2", "Identity 3f22  Alisha Ochoa")
 
     def test_the_sentence_sits_after_the_observed_items_rule(self) -> None:
-        os.environ[ANSWER_EVIDENCE_ENV] = "1"
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
         self._ochoa()
         _, report = self._build()
@@ -1240,11 +1195,9 @@ class EvidenceInTheBlock(unittest.TestCase):
                         statement.index("For items that appear, report only"))
 
     def test_the_sentence_states_the_subjects_own_items(self) -> None:
-        os.environ[ANSWER_EVIDENCE_ENV] = "1"
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
         self._ochoa()
         _, report = self._build()
-        self.assertTrue(report.evidence_flag)
         self.assertIn("Alisha Ochoa: Active Directory, "
                       "Active Directory_Compliance Officer", report.statement)
         self.assertNotIn("Alisha Ochoa: Active Directory, Active "
@@ -1253,21 +1206,17 @@ class EvidenceInTheBlock(unittest.TestCase):
         self.assertGreater(report.evidence_bytes, 0)
 
     def test_no_subject_has_anything_and_the_sentence_is_absent(self) -> None:
-        os.environ[ANSWER_EVIDENCE_ENV] = "1"
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
         _, report = self._build()
-        self.assertTrue(report.evidence_flag)
         self.assertEqual(report.evidence, [("Alan Cooper", [])])
         self.assertEqual(report.statement, STATEMENT_AT_90A1565)
 
     def test_no_clause_recorded_says_nothing(self) -> None:
-        os.environ[ANSWER_EVIDENCE_ENV] = "1"
         _, report = self._build()
         self.assertEqual(report.evidence, [])
         self.assertEqual(report.statement, STATEMENT_AT_90A1565)
 
     def test_a_failure_in_the_reader_costs_the_sentence_and_nothing_else(self) -> None:
-        os.environ[ANSWER_EVIDENCE_ENV] = "1"
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
         from fastworkflow import answer_attribution
 

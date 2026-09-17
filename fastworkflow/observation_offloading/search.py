@@ -10,12 +10,12 @@ import dspy
 
 from fastworkflow.utils.dspy_utils import get_lm
 
+from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import is_search_answer_key, search_answer_key
 from fastworkflow.observation_offloading.state import (
     archive,
     default_scope,
-    env_int,
     next_search_answer_sequence,
     observation_inline,
     record_event,
@@ -32,14 +32,15 @@ SEARCH_MEMORY_MAX_PAGES = 3
 # answer body. Recorded answers are far below this (max 1,855 B over 27 answers
 # in the h1-control, A1+A2 smoke and ido-5uv stores), so the bound is a tail
 # guard: under budget the observation is byte-identical to an unbounded one.
-SEARCH_ANSWER_MAX_BYTES = 3_072
-SEARCH_ANSWER_MAX_BYTES_ENV = "FW_SEARCH_ANSWER_MAX_BYTES"
+SEARCH_ANSWER_MAX_BYTES = context_budget.REFERENCE_SEARCH_ANSWER_MAX_BYTES
+SEARCH_ANSWER_MAX_BYTES_ENV = context_budget.SEARCH_ANSWER.override_env
 # Below this the marking would not fit inside the budget it is describing.
-SEARCH_ANSWER_MIN_BYTES = 1_024
+SEARCH_ANSWER_MIN_BYTES = context_budget.SEARCH_ANSWER.floor
 
 
-def search_answer_max_bytes_from_env(default: int = SEARCH_ANSWER_MAX_BYTES) -> int:
-    return env_int(SEARCH_ANSWER_MAX_BYTES_ENV, default, minimum=SEARCH_ANSWER_MIN_BYTES)
+def search_answer_max_bytes_from_env() -> int:
+    """The presentation bound on one search answer. See ``fastworkflow.context_budget``."""
+    return context_budget.search_answer_max_bytes()
 
 
 class InvalidPageBoundary(ValueError):

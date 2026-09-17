@@ -371,10 +371,9 @@ def pruning_suppressed() -> bool:
 # nobody set, which a scan cannot see. A run whose provenance omits
 # FW_OBS_RETENTION_DAYS because it was unset is a run nobody can reproduce.
 #
-# FW_OBS_MAX_ATTR_BYTES lives in tracing.py and reads os.environ directly rather
-# than through _env, so a value set only in a workflow env file does NOT take
-# effect there. It is listed here with the resolution tracing actually performs,
-# so provenance records the truth rather than the intent.
+# FW_OBS_MAX_ATTR_BYTES was removed in ido-pyw.1: the per-attribute cap is the
+# constant tracing.MAX_ATTR_BYTES. It is still reported below, because
+# provenance records the value in effect and that value is now fixed.
 _OBS_CONFIG_VARS: tuple[tuple[str, str], ...] = (
     ("FW_OBSERVABILITY", "1"),
     (CAPTURE_PROFILE_VAR, _DEFAULT_CAPTURE_PROFILE),
@@ -392,9 +391,7 @@ _OBS_CONFIG_VARS: tuple[tuple[str, str], ...] = (
 def observability_config() -> dict[str, str]:
     """The FW_OBS_* values in effect, defaults included (§12.4)."""
     config = {name: _env(name, default) for name, default in _OBS_CONFIG_VARS}
-    config["FW_OBS_MAX_ATTR_BYTES"] = str(
-        os.environ.get("FW_OBS_MAX_ATTR_BYTES") or tracing._DEFAULT_MAX_ATTR_BYTES
-    )
+    config["FW_OBS_MAX_ATTR_BYTES"] = str(tracing.MAX_ATTR_BYTES)
     return config
 
 

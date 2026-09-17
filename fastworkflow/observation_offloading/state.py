@@ -14,9 +14,16 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleScope,
 )
 
-HOT_HANDLE_MAX_BYTES = 262_144
-HANDLE_ARCHIVE_ENV = "FW_OFFLOAD_HANDLE_ARCHIVE"
-HOT_HANDLE_MAX_BYTES_ENV = "FW_OFFLOAD_HOT_MAX_BYTES"
+from fastworkflow import context_budget
+
+#: The hot-cache cap at the reference context window. The effective cap is a
+#: fraction of the model's window (``context_budget.OFFLOAD_HOT``).
+HOT_HANDLE_MAX_BYTES = context_budget.REFERENCE_OFFLOAD_HOT_MAX_BYTES
+HOT_HANDLE_MAX_BYTES_ENV = context_budget.OFFLOAD_HOT.override_env
+#: The diagnostic event log. A DESTINATION, not a feature switch: the events are
+#: always recorded in process (``snapshot_events``), and this says where a copy
+#: is appended for a run that wants one on disk. It is what the evaluation
+#: harness reads every offloading, coverage and search measure out of.
 EVENTS_ENV = "FW_OFFLOAD_EVENTS"
 
 logger = logging.getLogger(__name__)
@@ -68,18 +75,23 @@ def env_int(name: str, default: int, *, minimum: int = 0) -> int:
     return value
 
 
-def hot_handle_max_bytes_from_env(default: int = HOT_HANDLE_MAX_BYTES) -> int:
-    return env_int(HOT_HANDLE_MAX_BYTES_ENV, default)
+def hot_handle_max_bytes_from_env() -> int:
+    """The hot-cache cap for this run. See ``fastworkflow.context_budget``."""
+    return context_budget.offload_hot_max_bytes()
 
 
 def archive() -> RuntimeHandleArchive:
+    """The process-default archive, for a caller with no archive of its own.
+
+    ``build_tool_agent`` always passes the workflow's archive, beside its
+    observability database; this per-process file is the fallback for a
+    direct call from a command frame before an agent has been built.
+    """
     global _default_archive
     if _default_archive is None:
-        raw = os.environ.get(HANDLE_ARCHIVE_ENV, "").strip()
-        path = raw or os.path.join(
+        _default_archive = RuntimeHandleArchive(os.path.join(
             tempfile.gettempdir(), f"fw-offload-handles-{os.getpid()}.sqlite3"
-        )
-        _default_archive = RuntimeHandleArchive(path)
+        ))
     return _default_archive
 
 

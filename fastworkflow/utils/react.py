@@ -393,8 +393,7 @@ class fastWorkflowReAct(Module):
             # subject of any command and there is budget to reach them, the
             # observation of this step becomes a bounded note saying so and the
             # loop continues. At most one per turn; never on exhaustion; never
-            # an ask_user round. With FW_ROSTER_NUDGE off this computes
-            # nothing, records nothing and returns "".
+            # an ask_user round.
             nudge = ""
             if pred.next_tool_name == "finish":
                 nudge = self._roster_nudge(input_args, max_iters)
@@ -459,10 +458,7 @@ class fastWorkflowReAct(Module):
         """The bounded note, or ``""``. ``ido-8ps.27``.
 
         Called from ``_run_loop`` at the one place a finish action is
-        recognised, before answer extraction. Off by default: with
-        ``FW_ROSTER_NUDGE`` unset or 0 this returns ``""`` before reading
-        anything, so the loop is the loop it was at ``9e5e9d9``, byte for byte,
-        and no event is recorded.
+        recognised, before answer extraction.
 
         ``iterations_left`` is what the agent would still have AFTER spending
         this step on the note: the loop increments the counter once more and
@@ -472,8 +468,6 @@ class fastWorkflowReAct(Module):
         """
         from fastworkflow import answer_coverage
 
-        if not answer_coverage.roster_nudge_enabled():
-            return ""
         if getattr(self, "_roster_nudges_fired", 0) >= 1:
             return ""
 
@@ -514,13 +508,7 @@ class fastWorkflowReAct(Module):
     def _rehydrate_for_extract(self, trajectory):
         """``(trajectory_for_the_extractor, report, budget, scope_id)``.
 
-        ``ido-8ps.18``. With ``FW_ANSWER_REHYDRATION`` unset or 0 this returns
-        the trajectory OBJECT it was given and no report, so every extract call
-        site is exactly the call it was before -- same module, same object, same
-        truncation fallback -- and an extract prompt measured at ``e16b6c5``
-        reproduces byte for byte.
-
-        With the flag on it returns a COPY in which offload labels, bounded
+        ``ido-8ps.18``. It returns a COPY in which offload labels, bounded
         listing observations and page observations carry the stored evidence
         behind them (see ``fastworkflow.answer_rehydration``). The loop's own
         trajectory is then never the object passed on, so neither rehydration nor
@@ -531,9 +519,6 @@ class fastWorkflowReAct(Module):
         from fastworkflow import answer_rehydration
         from fastworkflow.observation_offloading.state import record_event
 
-        if not answer_rehydration.answer_rehydration_enabled():
-            return trajectory, None, 0, None
-
         budget = answer_rehydration.max_bytes_from_env()
         scope = getattr(self, "continuation_scope", None)
         scope_id = getattr(scope, "scope_id", None)
@@ -541,7 +526,6 @@ class fastWorkflowReAct(Module):
             {
                 "kind": "rehydration_started",
                 "scope_id": scope_id,
-                "flag": True,
                 "budget_bytes": budget,
                 "bytes_before": answer_rehydration.trajectory_bytes(trajectory),
             }
@@ -575,17 +559,13 @@ class fastWorkflowReAct(Module):
         the copy it returned, and adds exactly one key -- first, so the adapter
         renders the coverage rule before the evidence it governs.
 
-        With ``FW_ANSWER_COVERAGE`` unset or 0 this returns the object it was
-        given and no report, so the extract call is byte-for-byte the call it was
-        at ``4832b3c``. A failure anywhere here falls back to that same call: an
-        answer without a coverage statement is the status quo, and no answer is
-        worse than either.
+        A failure anywhere here falls back to the plain extract call: an answer
+        without a coverage statement is the status quo, and no answer is worse
+        than either.
         """
         from fastworkflow import answer_coverage
         from fastworkflow.observation_offloading.state import record_event
 
-        if not answer_coverage.answer_coverage_enabled():
-            return trajectory, None
         try:
             covered, report = answer_coverage.build_statement(
                 trajectory,
@@ -631,9 +611,7 @@ class fastWorkflowReAct(Module):
                 # DID retrieve. Measured the same way, counted separately.
                 getattr(report, "observed_named", ()) or (),
                 # ido-8ps.28: per subject, the items the answer claims of it,
-                # split by whether the evidence sentence listed them. Empty
-                # unless FW_ANSWER_EVIDENCE is on, so with the flag off the
-                # counts are zeros and the answer is untouched either way.
+                # split by whether the evidence sentence listed them.
                 evidence=getattr(report, "evidence", ()) or (),
                 items=getattr(report, "instructed_items", ()) or (),
             )
@@ -672,7 +650,6 @@ class fastWorkflowReAct(Module):
             {
                 "kind": "rehydration_finished",
                 "scope_id": scope_id,
-                "flag": True,
                 "extract_duration_ms": duration_ms,
                 "extract_prompt_tokens": _extract_prompt_tokens(),
                 "rehydration_overflow": overflowed,

@@ -35,18 +35,18 @@ Rules this module does not bend:
   replacement that would not fit, and say which aliases were left as pointers so
   the extractor can name them unresolved instead of guessing.
 
-Flag: ``FW_ANSWER_REHYDRATION=1`` (default ``0`` -- off, and with it off the
-extract call receives byte-for-byte what it received at ``e16b6c5``).
-Budget: ``FW_ANSWER_REHYDRATION_MAX_BYTES`` (default 250,000 UTF-8 bytes, sized
-from the control's ~80k-token answer-time prompt).
+Unconditional since ``ido-pyw.1``: rehydration is what the extract step does,
+for every workflow. The budget is derived from the model's context window
+(``fastworkflow.context_budget``); ``FW_ANSWER_REHYDRATION_MAX_BYTES`` remains
+as a tuning override.
 """
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
+from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
@@ -65,17 +65,17 @@ from fastworkflow.observation_offloading.state import (
 
 logger = logging.getLogger(__name__)
 
-#: The feature flag. Off is the ``ido-8ps.17`` accepted stack, unchanged.
-ANSWER_REHYDRATION_ENV = "FW_ANSWER_REHYDRATION"
-#: The extraction byte budget, in UTF-8 bytes of the whole extractor trajectory.
-ANSWER_REHYDRATION_MAX_BYTES_ENV = "FW_ANSWER_REHYDRATION_MAX_BYTES"
-#: ~250 KB of UTF-8, about the 80k-token answer-time prompt the control cells of
-#: ``ido-8ps.17`` answered from. It is a ceiling, not a target: a run whose
-#: evidence is smaller produces a smaller prompt.
-DEFAULT_MAX_BYTES = 250_000
+#: The tuning override for the extraction byte budget, in UTF-8 bytes of the
+#: whole extractor trajectory. The budget itself is a fraction of the model's
+#: context window (``context_budget.ANSWER_REHYDRATION``).
+ANSWER_REHYDRATION_MAX_BYTES_ENV = context_budget.ANSWER_REHYDRATION.override_env
+#: ~250 KB of UTF-8 at the reference window -- about the 80k-token answer-time
+#: prompt the control cells of ``ido-8ps.17`` answered from. It is a ceiling,
+#: not a target: a run whose evidence is smaller produces a smaller prompt.
+DEFAULT_MAX_BYTES = context_budget.REFERENCE_ANSWER_REHYDRATION_MAX_BYTES
 #: Below this a budget could not hold one page of evidence, so it is refused and
-#: the default stands rather than silently producing a pointer-only prompt.
-MIN_MAX_BYTES = 4_096
+#: the derived budget stands rather than silently producing a pointer-only prompt.
+MIN_MAX_BYTES = context_budget.ANSWER_REHYDRATION.floor
 
 #: The key the drop line is appended under. Deliberately not an observation key:
 #: it is a statement about the trajectory, not a tool result, and the extractor
@@ -91,59 +91,17 @@ KIND_PAGE = "page"          # (c)
 
 
 # ---------------------------------------------------------------------------
-# Flag and budget
+# The budget
 # ---------------------------------------------------------------------------
 
-def _env_value(name: str) -> str:
-    """The raw setting of *name*, from the fastworkflow env file or the process.
+def max_bytes_from_env() -> int:
+    """The effective extraction byte budget for this run.
 
-    ``fastworkflow.get_env_var`` short-circuits on its ``default`` before it
-    consults ``os.environ``, so a variable exported into the process but absent
-    from the env file would read as the default. Both are checked, file first --
-    the same rule ``auto_navigation`` uses, so one run's flags are read one way.
+    A fraction of the model's context window, unless
+    ``FW_ANSWER_REHYDRATION_MAX_BYTES`` overrides it. See
+    ``fastworkflow.context_budget``.
     """
-    value = None
-    try:
-        import fastworkflow
-
-        value = fastworkflow._env_vars.get(name)
-    except Exception:  # noqa: BLE001 - a knob must never fail a turn
-        value = None
-    if value is None:
-        value = os.environ.get(name)
-    return str(value or "").strip()
-
-
-#: The same reader under a public name, so a sibling module (``answer_coverage``)
-#: reads its own flag by exactly this rule rather than growing a second one.
-env_value = _env_value
-
-
-def answer_rehydration_enabled() -> bool:
-    """True when ``FW_ANSWER_REHYDRATION`` is set to a truthy value."""
-    return _env_value(ANSWER_REHYDRATION_ENV).lower() in {"1", "true", "yes", "on"}
-
-
-def max_bytes_from_env(default: int = DEFAULT_MAX_BYTES) -> int:
-    """The effective extraction byte budget."""
-    raw = _env_value(ANSWER_REHYDRATION_MAX_BYTES_ENV)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "%s=%r is not an integer; using %d",
-            ANSWER_REHYDRATION_MAX_BYTES_ENV, raw, default,
-        )
-        return default
-    if value < MIN_MAX_BYTES:
-        logger.warning(
-            "%s=%d is below the %d-byte minimum; using %d",
-            ANSWER_REHYDRATION_MAX_BYTES_ENV, value, MIN_MAX_BYTES, default,
-        )
-        return default
-    return value
+    return context_budget.answer_rehydration_max_bytes()
 
 
 # ---------------------------------------------------------------------------
@@ -496,8 +454,6 @@ def _declaration(store: Any, scope: RuntimeHandleScope, alias: str) -> Optional[
 
 
 __all__ = [
-    "ANSWER_REHYDRATION_ENV",
-    "env_value",
     "ANSWER_REHYDRATION_MAX_BYTES_ENV",
     "DEFAULT_MAX_BYTES",
     "KIND_LABEL",
@@ -507,7 +463,6 @@ __all__ = [
     "NOT_REHYDRATED_KEY",
     "NOT_REHYDRATED_PREFIX",
     "RehydrationReport",
-    "answer_rehydration_enabled",
     "archived_observation",
     "max_bytes_from_env",
     "rehydrate",

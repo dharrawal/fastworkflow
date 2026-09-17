@@ -549,25 +549,21 @@ class TestTheHintIsComposedAndRecorded:
             "Identity", "list_permissions", INTENT_DETECTION, nlu_trace)
         assert "Enter it with" not in nlu_trace["known_name_foreign_context_hint"]
 
-    @pytest.mark.parametrize("enabled", [True, False])
-    def test_the_guard_records_the_auto_navigation_flag(
-        self, ido_predictor, monkeypatch, setup_test_environment, enabled
+    def test_the_guard_declines_and_records_no_flag(
+        self, ido_predictor, monkeypatch, setup_test_environment
     ):
-        """ido-8ps.9: whether a measured run had auto-navigation enabled is
-        readable from the routing event itself, not only from the runner's env
-        file. The flag does not change what the guard does -- it still declines
-        and the walk still runs; it changes what happens after the walk."""
+        """ido-8ps.9, as ido-pyw.1 left it. Auto-navigation is unconditional, so
+        there is no setting for the routing event to carry and the guard's own
+        record says only what the guard did: it declined, at the known-name
+        foreign-context layer, and the walk runs."""
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
-        monkeypatch.setattr(
-            intent_detection.auto_navigation, "auto_navigation_enabled",
-            lambda: enabled)
         nlu_trace: dict = {}
         output = ido_predictor._predict_impl(
             "Identity", "list_permissions", INTENT_DETECTION, nlu_trace)
 
         assert output.command_name is None
-        assert nlu_trace["auto_navigation_enabled"] is enabled
+        assert "auto_navigation_enabled" not in nlu_trace
         assert nlu_trace["matcher_layer"] == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
 
     def test_a_resolved_prediction_carries_no_hint(

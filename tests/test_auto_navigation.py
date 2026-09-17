@@ -271,14 +271,16 @@ class TestRuleThreeAnExplicitHandle:
 # ---------------------------------------------------------------------------
 
 class TestWhenNothingIsDispatched:
-    def test_the_flag_off_leaves_the_r1_hint_alone(self):
+    def test_a_context_with_no_entry_declaration_leaves_the_r1_hint_alone(self):
+        """ido-pyw.1: the declaration is the switch. A workflow that declares no
+        `enter_command` gets the declaration-and-hint behaviour the flag used to
+        pin, and gets it because there is nothing to dispatch."""
         decision = decide(
             command_name="list_findings", utterance="list_findings",
-            owner_contexts=["ControlsMonitor"],
-            contracts={"ControlsMonitor": CONTROLS_MONITOR}, enabled=False,
+            owner_contexts=["ControlsMonitor"], contracts={},
         )
         assert decision.kind == NONE
-        assert decision.reason == auto_navigation.REASON_FLAG_OFF
+        assert decision.reason == auto_navigation.REASON_NO_ENTRY_DECLARATION
 
     def test_a_name_no_context_owns_is_not_this_mechanism_s_business(self):
         decision = decide(
@@ -710,7 +712,6 @@ class TestTheWildcardSeam:
     def test_a_dispatchable_name_leaves_a_plan_for_the_executor(
         self, declining_wildcard, monkeypatch, setup_test_environment
     ):
-        monkeypatch.setattr(auto_navigation, "auto_navigation_enabled", lambda: True)
         monkeypatch.setattr(
             auto_navigation, "entry_contract_for",
             lambda folderpath, context: CONTROLS_MONITOR if context == "ControlsMonitor" else None)
@@ -727,7 +728,6 @@ class TestTheWildcardSeam:
     def test_a_blocking_case_says_what_it_needs_instead_of_planning(
         self, declining_wildcard, monkeypatch, setup_test_environment
     ):
-        monkeypatch.setattr(auto_navigation, "auto_navigation_enabled", lambda: True)
         monkeypatch.setattr(
             auto_navigation, "entry_contract_for",
             lambda folderpath, context: ACCOUNT if context == "Account" else None)
@@ -741,10 +741,13 @@ class TestTheWildcardSeam:
         assert "open_account_by_uid" in response
         assert output.success is False
 
-    def test_with_the_flag_off_the_r1_hint_is_exactly_what_it_was(
+    def test_a_context_with_no_declaration_keeps_the_r1_hint_exactly(
         self, declining_wildcard, monkeypatch, setup_test_environment
     ):
-        monkeypatch.setattr(auto_navigation, "auto_navigation_enabled", lambda: False)
+        """ido-pyw.1. `entry_contract_for` finds nothing, so the dispatcher
+        declines and the R1 hint is what the agent is told, byte for byte."""
+        monkeypatch.setattr(
+            auto_navigation, "entry_contract_for", lambda folderpath, context: None)
         hint = intent_detection.foreign_context_hint(
             "list_findings", ["ControlsMonitor"], ["open_controls_monitor"])
 
@@ -753,12 +756,11 @@ class TestTheWildcardSeam:
         assert auto_navigation.AUTO_NAVIGATION_ARTIFACT not in output.command_response.artifacts
         assert output.command_response.response.endswith(hint)
 
-    def test_free_text_is_untouched_with_the_flag_on(
+    def test_free_text_is_untouched(
         self, declining_wildcard, monkeypatch, setup_test_environment
     ):
         """A name the workflow does not own has no owners, so there is nothing
         to navigate to and the ordinary message stands."""
-        monkeypatch.setattr(auto_navigation, "auto_navigation_enabled", lambda: True)
         output = declining_wildcard(
             "which identities hold the compliance officer permission", [], hint=None)
         assert output.command_response.response == (
@@ -792,7 +794,6 @@ class TestARootCommandIsUnaffected:
     ):
         """A resolved prediction leaves the post-walk block unreached; the
         response carries no plan."""
-        monkeypatch.setattr(auto_navigation, "auto_navigation_enabled", lambda: True)
 
         class Resolving:
             def __init__(self, cme_workflow):
@@ -1015,15 +1016,14 @@ class TestTheTwoStepDispatch:
 # ---------------------------------------------------------------------------
 
 class TestTheRoutingEvent:
-    def test_the_flag_is_on_the_event_whichever_way_it_is_set(self):
+    def test_the_event_names_the_decision_and_its_reason(self):
         decision = decide(
             command_name="list_findings", utterance="list_findings",
             owner_contexts=["ControlsMonitor"],
             contracts={"ControlsMonitor": CONTROLS_MONITOR},
         )
-        for enabled in (True, False):
-            event = decision.event(enabled=enabled)
-            assert event[auto_navigation.ATTR_AUTO_NAVIGATION_ENABLED] is enabled
+        event = decision.event()
+        assert event[auto_navigation.ATTR_AUTO_NAVIGATION_DECISION] == decision.kind
         assert event[auto_navigation.ATTR_AUTO_NAVIGATION_RULE] == RULE_STATELESS
         assert event[auto_navigation.ATTR_ENTERED_CONTEXT] == "ControlsMonitor"
         assert event["reason"] == auto_navigation.REASON_STATELESS
@@ -1043,7 +1043,8 @@ class TestTheRoutingEvent:
             auto_navigation.ATTR_AUTO_NAVIGATION_STEP,
         ):
             assert constant in declared
-        assert auto_navigation.ATTR_AUTO_NAVIGATION_ENABLED in (
+        # ido-pyw.1: the flag attribute is gone from the NLU span with the flag.
+        assert "auto_navigation_enabled" not in (
             tracing.SPAN_CONTRACTS[tracing.SPAN_NLU_INTENT].attributes)
 
     def test_a_clarification_event_names_what_was_missing(self):
@@ -1051,7 +1052,7 @@ class TestTheRoutingEvent:
             command_name="list_permissions", utterance="list_permissions",
             owner_contexts=["Account"], contracts={"Account": ACCOUNT},
         )
-        event = decision.event(enabled=True)
+        event = decision.event()
         assert event[auto_navigation.ATTR_AUTO_NAVIGATION_DECISION] == CLARIFY
         assert event["missing_parameters"] == ["account_uid"]
         assert event["entry_command"] == "open_account_by_uid"
