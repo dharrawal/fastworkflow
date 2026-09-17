@@ -40,6 +40,25 @@ for the whole item, on both sides of the test, when it is at least
 ``MIN_SEGMENT_CHARS`` long. It is a property of how qualified names are written,
 not of any one workflow, and it is a flag on the function so a caller can
 measure the check with and without it.
+
+A tail only stands for its item when it stands for NOTHING ELSE the request
+named (``ido-rf3``). "Okta_Cloud Administrator" and "Active Directory_Cloud
+Administrator" share the tail "Cloud Administrator", so the tail names neither
+of them, and reading it as either would make two different rights
+interchangeable: a subject holding only the Okta right would be credited with
+the Active Directory one. So a tail that occurs in any OTHER item of the same
+request is dropped, and the item is then matched by its full name alone. The
+convenience survives wherever it is unambiguous, which is the only place it was
+ever sound. Uniqueness is a property of the request's item SET, so the forms are
+built for the whole set at once by :func:`match_forms_index`; ``match_forms``
+keeps its per-entity signature and takes the set as ``among``.
+
+The SET is not the whole ambiguity, because the evidence and the answer contain
+qualified names the request never mentions. So a tail is also read as its item
+only where the text writes the item unqualified: "Cloud Administrator" inside
+"SCOM_Cloud Administrator" is the SCOM right written in full, and crediting the
+requested Active Directory right with it would be the same false support from
+the other side. :func:`writes` is the one containment test both halves use.
 """
 from __future__ import annotations
 
@@ -235,23 +254,94 @@ def observations(
 # Match forms
 # ---------------------------------------------------------------------------
 
-def match_forms(entity: Entity, *, allow_segments: bool = True) -> list[str]:
+def match_forms(
+    entity: Entity,
+    *,
+    allow_segments: bool = True,
+    among: Optional[Iterable[Entity]] = None,
+) -> list[str]:
     """The normalised strings that count as writing *entity*.
 
     The item itself always; and, when ``allow_segments``, its last segment after
     ``_``, ``/``, ``:`` or ``\\`` if that segment is long enough to be a handle
     on its own. Nothing else: no stemming, no synonyms, no abbreviation table.
+
+    ``among`` is the other named items of the same request. A tail that occurs
+    in any of their full names is ambiguous -- it does not say WHICH item was
+    written -- so it is dropped and the item keeps its full name only
+    (``ido-rf3``). Callers that hold the whole set should use
+    :func:`match_forms_index`, which applies this to every item at once.
     """
     forms = [entity.key]
     if not allow_segments:
         return forms
+    tail = _segment_tail(entity)
+    if not tail:
+        return forms
+    for other in among or ():
+        if other.key != entity.key and tail in other.key:
+            return forms
+    forms.append(tail)
+    return forms
+
+
+def _segment_tail(entity: Entity) -> str:
+    """The last segment of *entity* when it is long enough to stand alone."""
     tail = entity.key
     for separator in _SEGMENT_SEPARATORS:
         tail = tail.rsplit(separator, 1)[-1]
     tail = tail.strip()
     if tail and tail != entity.key and len(tail) >= MIN_SEGMENT_CHARS:
-        forms.append(tail)
-    return forms
+        return tail
+    return ""
+
+
+def match_forms_index(
+    entities: Iterable[Entity], *, allow_segments: bool = True
+) -> dict[str, list[str]]:
+    """``{entity key: its match forms}`` for a whole request at once.
+
+    The one place segment tails are tested for ambiguity, so the forward
+    evidence sentence and the after-the-fact check can never disagree about what
+    a tail means.
+    """
+    items = list(entities)
+    return {
+        entity.key: match_forms(entity, allow_segments=allow_segments, among=items)
+        for entity in items
+    }
+
+
+def _tail_of_a_longer_name(text: str, at: int) -> bool:
+    """Is the match at *at* the last segment of some OTHER qualified name?
+
+    ``ido-rf3``. A tail stands for its item only where the item is written
+    unqualified. "Cloud Administrator" inside "SCOM_Cloud Administrator" is the
+    SCOM right written in full, not the Active Directory right written short, so
+    reading it as the requested item would credit a claim to evidence that says
+    something else. The prefix is not compared to anything: ANY prefix means the
+    text named a different qualified thing.
+    """
+    return at > 0 and text[at - 1] in _SEGMENT_SEPARATORS
+
+
+def writes(text: str, forms: Sequence[str]) -> bool:
+    """Does *text* write the item whose match ``forms`` are?
+
+    ``forms[0]`` is the item's full name and any other form is a tail
+    (:func:`match_forms`), and a tail only counts where it is not itself the tail
+    of a longer qualified name. The one containment test of this module, so the
+    clause side, the evidence side and the answer side cannot disagree.
+    """
+    for index, form in enumerate(forms):
+        if not form:
+            continue
+        at = text.find(form)
+        while at >= 0:
+            if index == 0 or not _tail_of_a_longer_name(text, at):
+                return True
+            at = text.find(form, at + 1)
+    return False
 
 
 @dataclass(frozen=True)
@@ -271,12 +361,13 @@ def _mentions(unit: str, forms: Mapping[str, list[str]],
     """
     found: list[_Mention] = []
     for key, entity in entities.items():
-        for form in forms[key]:
+        for index, form in enumerate(forms[key]):
             if not form:
                 continue
             at = unit.find(form)
             while at >= 0:
-                found.append(_Mention(entity, at, at + len(form)))
+                if index == 0 or not _tail_of_a_longer_name(unit, at):
+                    found.append(_Mention(entity, at, at + len(form)))
                 at = unit.find(form, at + 1)
     found.sort(key=lambda m: (m.start, -(m.end - m.start)))
     kept: list[_Mention] = []
@@ -546,16 +637,15 @@ def subject_index(
     which is the only honest thing to say about it. Generic: this function knows
     nothing about what a subject or a property means in any workflow.
     """
+    items = list(entities)
     evidence = _normalised(observations)
+    forms = match_forms_index(items, allow_segments=allow_segments)
     return {
         entity.key: [
             item for item in evidence
-            if item.clause and any(
-                form in item.clause
-                for form in match_forms(entity, allow_segments=allow_segments)
-            )
+            if item.clause and writes(item.clause, forms[entity.key])
         ]
-        for entity in entities
+        for entity in items
     }
 
 
@@ -583,10 +673,7 @@ def subject_evidence(
     items = list(entities)
     evidence = _normalised(observations)
     index = subject_index(items, evidence, allow_segments=allow_segments)
-    forms = {
-        entity.key: match_forms(entity, allow_segments=allow_segments)
-        for entity in items
-    }
+    forms = match_forms_index(items, allow_segments=allow_segments)
     out: list[tuple[Entity, list[Entity]]] = []
     for entity in items:
         where = index.get(entity.key) or []
@@ -597,10 +684,7 @@ def subject_evidence(
             [
                 other for other in items
                 if other.key != entity.key
-                and any(
-                    any(form in item.text for form in forms[other.key])
-                    for item in where
-                )
+                and any(writes(item.text, forms[other.key]) for item in where)
             ],
         ))
     return out
@@ -635,8 +719,7 @@ def check_attribution(
         return report
 
     entities = {entity.key: entity for entity in items}
-    forms = {key: match_forms(entity, allow_segments=allow_segments)
-             for key, entity in entities.items()}
+    forms = match_forms_index(items, allow_segments=allow_segments)
 
     subjects = subject_index(items, evidence, allow_segments=allow_segments)
     report.subjects_observed = sum(1 for key in subjects if subjects[key])
@@ -680,7 +763,7 @@ def check_attribution(
                 report.pairs_subject_not_observed += 1
                 reason = REASON_SUBJECT_NOT_OBSERVED
             elif any(
-                any(form in item.text for form in forms[property_mention.entity.key])
+                writes(item.text, forms[property_mention.entity.key])
                 for item in where
             ):
                 report.pairs_supported += 1
@@ -744,6 +827,8 @@ __all__ = [
     "attribution_report",
     "check_attribution",
     "match_forms",
+    "match_forms_index",
+    "writes",
     "subject_evidence",
     "subject_index",
     "enumeration_groups",

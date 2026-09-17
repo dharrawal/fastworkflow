@@ -38,6 +38,7 @@ from fastworkflow.answer_coverage import (
     request_text,
     retrieved_corpus,
     split_by_presence,
+    strip_query_echoes,
     subject_corpus,
 )
 from fastworkflow.observation_offloading.archive import (
@@ -323,6 +324,72 @@ class Presence(unittest.TestCase):
             # Anna Garcia is on page 1 of the store but not in the bounded text.
             self.assertNotIn("Anna Garcia", shown)
             self.assertIn(normalise("Anna Garcia"), haystack)
+
+
+class QueryEchoes(unittest.TestCase):
+    """ido-mng: a miss that quotes the query back is not a retrieval.
+
+    The contract is "a name the agent merely typed into a query can never make
+    that name look retrieved". A filtered listing that matched nothing still
+    prints its filter in the header, and a backend may word its miss with the
+    literal in it, so the echo has to go before presence is decided.
+    """
+
+    ZERO_PAGE = (
+        'result_handle=O2 filter="Christopher Hubbard" '
+        "filter_columns=name page 1 rows 0 of 12 matched=0 materialized=12 "
+        "total=12 source_complete=true matched_complete=true "
+        "continuation=none outcome=complete has_more=false\n"
+        'No rows matched the literal "Christopher Hubbard" in these fields: '
+        "name. That is a complete zero for this literal in this listing; it is "
+        "not evidence that the person or object does not exist."
+    )
+
+    def test_a_filtered_miss_does_not_retrieve_its_own_literal(self) -> None:
+        entities = named_entities("Find Christopher Hubbard and list his rights.")
+        observed, unobserved = split_by_presence(entities, normalise(self.ZERO_PAGE))
+        self.assertEqual([e.text for e in observed], [])
+        self.assertEqual([e.text for e in unobserved], ["Christopher Hubbard"])
+
+    def test_a_backend_wording_of_the_miss_is_no_different(self) -> None:
+        echo = ("Observation O4 (execute_workflow_query, in DirectoryExplorer)\n"
+                "No identity matching 'Christopher Hubbard' was found.")
+        entities = named_entities("Find Christopher Hubbard and list his rights.")
+        observed, unobserved = split_by_presence(entities, normalise(echo))
+        self.assertEqual([e.text for e in observed], [])
+        self.assertEqual([e.text for e in unobserved], ["Christopher Hubbard"])
+
+    def test_a_name_in_a_retrieved_row_stays_observed(self) -> None:
+        page = (
+            'result_handle=O2 filter="Alan Cooper" page 1 rows 1-1 of 1 '
+            "matched=1\nuid-1  Alan Cooper  active"
+        )
+        entities = named_entities("Find Alan Cooper and list his rights.")
+        observed, unobserved = split_by_presence(entities, normalise(page))
+        self.assertEqual([e.text for e in observed], ["Alan Cooper"])
+        self.assertEqual(unobserved, [])
+
+    def test_only_the_echo_is_removed_never_the_line_around_it(self) -> None:
+        """A row that merely contains a miss keeps every name it retrieved."""
+        row = "uid-1  Alan Cooper  no manager found  active"
+        entities = named_entities("Find Alan Cooper and list his rights.")
+        observed, _ = split_by_presence(entities, normalise(row))
+        self.assertEqual([e.text for e in observed], ["Alan Cooper"])
+        self.assertEqual(strip_query_echoes(row), row)
+
+    def test_the_block_then_allows_the_only_true_statement(self) -> None:
+        query = "Find Christopher Hubbard and list his rights."
+        copy, report = build_statement(
+            {}, user_query=query, exhausted=False,
+            haystack=normalise(self.ZERO_PAGE),
+        )
+        self.assertEqual(report.unobserved, ["Christopher Hubbard"])
+        self.assertEqual(report.observed_named, [])
+        block = copy[COVERAGE_KEY]
+        self.assertIn(
+            "appear in no retrieved observation: Christopher Hubbard.", block)
+        self.assertNotIn(
+            "DO appear in this run's observations: Christopher Hubbard", block)
 
 
 class Block(unittest.TestCase):

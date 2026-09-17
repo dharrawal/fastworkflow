@@ -31,8 +31,11 @@ from fastworkflow.answer_attribution import (
     attribution_report,
     check_attribution,
     match_forms,
+    match_forms_index,
     observations,
+    subject_evidence,
     units,
+    writes,
 )
 from fastworkflow.answer_coverage import named_entities
 from fastworkflow.observation_offloading.archive import (
@@ -300,6 +303,124 @@ class Segments(unittest.TestCase):
                          [("Ada Lovelace", "Analytical Engine_Drive Wheel")])
         self.assertEqual(strict.flags, [])
         self.assertFalse(strict.segments)
+
+
+SIBLING_REQUEST = (
+    "Audit Analytical Engine_Drive Wheel and Difference Engine_Drive Wheel "
+    "for Ada Lovelace and Charles Babbage."
+)
+
+#: Ada's OWN rows carry the Difference Engine part and nothing else.
+ADA_ONE_PART = Observation(
+    alias="O7",
+    clause="Person 1815 Ada Lovelace",
+    text="1 part.\n1815 [parts]  Difference Engine_Drive Wheel via device 7",
+)
+
+
+class SiblingSegments(unittest.TestCase):
+    """ido-rf3: a tail two request items share names neither of them."""
+
+    def test_a_shared_tail_is_not_a_form_of_either_item(self) -> None:
+        items = named_entities(SIBLING_REQUEST)
+        forms = match_forms_index(items)
+        self.assertEqual(forms["analytical engine_drive wheel"],
+                         ["analytical engine_drive wheel"])
+        self.assertEqual(forms["difference engine_drive wheel"],
+                         ["difference engine_drive wheel"])
+
+    def test_an_unshared_tail_still_stands_for_its_item(self) -> None:
+        items = named_entities(REQUEST)
+        forms = match_forms_index(items)
+        self.assertEqual(forms["analytical engine_drive wheel"],
+                         ["analytical engine_drive wheel", "drive wheel"])
+        self.assertEqual(forms["analytical engine_mill gear"],
+                         ["analytical engine_mill gear", "mill gear"])
+
+    def test_a_shared_tail_does_not_make_the_sibling_supported(self) -> None:
+        answer = ("| Person | Part |\n"
+                  "| Ada Lovelace | Analytical Engine_Drive Wheel |\n")
+        report = check_attribution(request=SIBLING_REQUEST, answer=answer,
+                                   observations=[ADA_ONE_PART])
+        self.assertEqual(report.pairs_supported, 0)
+        self.assertEqual(report.pairs_unsupported, 1)
+        self.assertEqual(
+            flags_of(report),
+            [("Ada Lovelace", "Analytical Engine_Drive Wheel")],
+        )
+
+    def test_the_part_the_rows_do_carry_is_still_supported(self) -> None:
+        answer = ("| Person | Part |\n"
+                  "| Ada Lovelace | Difference Engine_Drive Wheel |\n")
+        report = check_attribution(request=SIBLING_REQUEST, answer=answer,
+                                   observations=[ADA_ONE_PART])
+        self.assertEqual(report.pairs_supported, 1)
+        self.assertEqual(report.pairs_unsupported, 0)
+        self.assertEqual(report.flags, [])
+
+    def test_an_unshared_tail_still_supports_an_abbreviated_row(self) -> None:
+        """The convenience survives where the tail is unambiguous."""
+        abbreviated = Observation(
+            alias="O8",
+            clause="Person 1815 Ada Lovelace",
+            text="1 part.\n1815 [parts]  Drive Wheel via device 7",
+        )
+        report = check_attribution(
+            request=REQUEST,
+            answer="| Ada Lovelace | Analytical Engine_Drive Wheel |",
+            observations=[abbreviated],
+        )
+        self.assertEqual(report.pairs_supported, 1)
+        self.assertEqual(report.flags, [])
+
+    def test_a_tail_inside_another_qualified_name_is_that_other_name(self) -> None:
+        """The request names ONE such item and the rows carry a different one."""
+        request = "Audit Analytical Engine_Drive Wheel for Ada Lovelace."
+        other_part = Observation(
+            alias="O9",
+            clause="Person 1815 Ada Lovelace",
+            text="1 part.\n1815 [parts]  Difference Engine_Drive Wheel via 7",
+        )
+        report = check_attribution(
+            request=request,
+            answer="| Ada Lovelace | Analytical Engine_Drive Wheel |",
+            observations=[other_part],
+        )
+        self.assertEqual(report.pairs_supported, 0)
+        self.assertEqual(report.pairs_unsupported, 1)
+
+    def test_the_containment_test_reads_a_prefix_as_a_different_thing(self) -> None:
+        forms = ["analytical engine_drive wheel", "drive wheel"]
+        self.assertTrue(writes("1815 [parts]  drive wheel via 7", forms))
+        self.assertTrue(writes("1815  analytical engine_drive wheel", forms))
+        self.assertFalse(writes("1815  difference engine_drive wheel", forms))
+        self.assertTrue(
+            writes("difference engine_drive wheel and drive wheel", forms))
+
+    def test_a_clause_stamped_on_another_qualified_name_is_not_this_subject(
+        self,
+    ) -> None:
+        request = "Audit Analytical Engine_Drive Wheel for Ada Lovelace."
+        item = [e for e in named_entities(request)
+                if e.text == "Analytical Engine_Drive Wheel"]
+        elsewhere = Observation(
+            alias="O10",
+            clause="Part 77aa Difference Engine_Drive Wheel",
+            text="3 holders.\np1  Ada Lovelace",
+        )
+        self.assertEqual(
+            answer_attribution.subject_index(item, [elsewhere]),
+            {"analytical engine_drive wheel": []},
+        )
+
+    def test_the_evidence_sentence_does_not_lend_one_item_the_others_rows(self) -> None:
+        items = named_entities(SIBLING_REQUEST)
+        evidence = subject_evidence(items, [ADA_ONE_PART])
+        self.assertEqual(
+            [(subject.text, [other.text for other in others])
+             for subject, others in evidence],
+            [("Ada Lovelace", ["Difference Engine_Drive Wheel"])],
+        )
 
 
 class Caps(unittest.TestCase):

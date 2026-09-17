@@ -435,7 +435,12 @@ def retrieved_corpus(
     (a) the archived text of every execute observation of the turn, with the
         context clause recorded for its alias (``ido-8ps.13``) -- the archive
         keeps the command *response*, never the command, so a name the agent
-        merely typed into a query can never make that name look retrieved;
+        merely typed into a query can never make that name look retrieved. A
+        response may QUOTE the command, though: a filtered listing prints its
+        own filter literal in its header and a backend may quote the literal it
+        did not match, so the contract is finished by
+        :func:`strip_query_echoes`, which ``split_by_presence`` applies before
+        it decides presence (``ido-mng``);
     (b) every stored row behind every result handle the turn declared -- the
         rows ``answer_rehydration`` puts in front of the extractor, whole.
 
@@ -593,14 +598,72 @@ def evidence_by_subject(
     return answer_attribution.subject_evidence(entities, found)
 
 
+#: ``ido-mng``. A rendered result page states the query in its own header --
+#: ``result_handle=O2 filter="Christopher Hubbard" page 1 rows 0 of 12 ...`` --
+#: and a backend that finds nothing may say so in the same words the agent typed
+#: ("No identity matching 'Christopher Hubbard' was found."). Both are the
+#: agent's OWN text quoted back, never a retrieved row, and both are in the
+#: archived response, which is why ``retrieved_corpus``'s "the archive keeps the
+#: command response, never the command" was not by itself enough to keep the
+#: contract. A filtered miss that echoes its literal would otherwise make the
+#: typed name look retrieved and leave the writer instructed AGAINST the one
+#: true statement -- that the filtered listing returned nothing.
+_FILTER_ECHO_RE = re.compile(r"""filter=(?:"[^"\n]*"|'[^'\n]*')""", re.IGNORECASE)
+
+#: A miss, however the backend words it: "no rows matched", "no identity
+#: matching", "no accounts were found", "0 results returned".
+_MISS_CUE = (
+    r"no(?:t)?\s+(?:[\w'\u2019\-]+\s+){0,4}?"
+    r"(?:match(?:ed|es|ing)?|found|returned|exist(?:s|ed)?)"
+)
+
+#: The literal a miss quotes back, and ONLY that literal: the cue, a short gap
+#: that crosses no sentence boundary, then one quoted span. Nothing else on the
+#: line is touched, because removing more than the echo is how a haystack starts
+#: reporting that something retrieved was never retrieved, which is the error
+#: this module exists to prevent.
+#: The quote pairs a backend may use. Typographic quotes survive NFKC, so a
+#: miss written with them echoes just as loudly as one written with ASCII.
+_QUOTED_SPAN = (
+    r"\"[^\"\n]*\"|'[^'\n]*'|\u201c[^\u201d\n]*\u201d|\u2018[^\u2019\n]*\u2019"
+)
+
+_MISS_ECHO_RE = re.compile(
+    _MISS_CUE + r"(?:[^\"'\u201c\u2018\n.;]{0,24}?)(" + _QUOTED_SPAN + r")",
+    re.IGNORECASE,
+)
+
+
+def strip_query_echoes(text: str) -> str:
+    """*text* without the run's own query quoted back at it (``ido-mng``).
+
+    Two spans go, both of them the agent's typed literal and neither of them a
+    retrieved value: the ``filter="..."`` echo a result page prints in its
+    header, and the quoted literal a "nothing matched" sentence repeats. What is
+    removed is the echo itself, never the line around it: a page that DID match
+    rows still carries the name in its rows, so this cannot turn a retrieved
+    name into an absent one. Idempotent, and safe on text whose line structure
+    normalisation has already collapsed, because neither pattern spans a line.
+    """
+    out = _FILTER_ECHO_RE.sub(" ", str(text or ""))
+    return _MISS_ECHO_RE.sub(lambda match: match.group(0)[:match.start(1) - match.start(0)], out)
+
+
 def split_by_presence(
     entities: Iterable[Entity], haystack: str
 ) -> tuple[list[Entity], list[Entity]]:
-    """``(observed, unobserved)``: a normalised substring test, nothing more."""
+    """``(observed, unobserved)``: a normalised substring test, nothing more.
+
+    Nothing more, on a haystack of what the run RETRIEVED: the run's own query
+    echoes are stripped first (:func:`strip_query_echoes`), so a name the agent
+    merely typed into a filter can never come back as observed even when the
+    backend quotes it in a header or a "nothing matched" sentence (``ido-mng``).
+    """
+    hunted = strip_query_echoes(haystack)
     observed: list[Entity] = []
     unobserved: list[Entity] = []
     for entity in entities:
-        (observed if entity.key and entity.key in haystack else unobserved).append(entity)
+        (observed if entity.key and entity.key in hunted else unobserved).append(entity)
     return observed, unobserved
 
 
@@ -1451,5 +1514,6 @@ __all__ = [
     "retrieved_corpus",
     "retrieved_text",
     "split_by_presence",
+    "strip_query_echoes",
     "subject_corpus",
 ]
