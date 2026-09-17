@@ -1667,7 +1667,12 @@ class WalkTerminalStateTests(unittest.TestCase):
         # O1 is the walk the agent is working through; O2 and O3 are older.
         fetch_page("O1", scope=scope(), selected_store=self.store,
                    budget_bytes=600)
-        os.environ["FW_RESULT_HANDLE_HOT_MAX_BYTES"] = "2500"
+        # Room for two walks and no more, in the units the bound now counts.
+        # (ido-5b5) A walk of 40 rendered rows is a few hundred bytes of text
+        # and some 14 KB of retained objects, so the threshold that puts the
+        # cache under pressure has to be read off the accounting, not guessed.
+        one_walk = max(int(entry["bytes"]) for entry in result_handles._hot.values())
+        os.environ["FW_RESULT_HANDLE_HOT_MAX_BYTES"] = str(one_walk * 5 // 2)
         try:
             declare(
                 ResultHandleSpec(kind="holder", items=holders(40, prefix="O4"),
@@ -2116,3 +2121,223 @@ class OversizedCursorOrdinalTests(unittest.TestCase):
         second = self.fetch(first.next_cursor)
         self.assertEqual(second.position, len(first.rows))
         self.assertTrue(second.rows)
+
+
+# ---------------------------------------------------------------------------
+# ido-5b5 (F23) and ido-7ce (F8): the bound measures what is retained, and
+# there is no walk it does not apply to
+# ---------------------------------------------------------------------------
+
+
+def wide_rows(count: int, *, columns: int = 30) -> list[dict[str, str]]:
+    """Rows as wide as the ones the review measured: two useful fields and 30
+    columns of payload the rendering never looks at."""
+    return [
+        {
+            "uid": "u%05d" % index,
+            "name": "Name %d" % index,
+            **{"col%02d" % column: "v" * 40 for column in range(columns)},
+        }
+        for index in range(count)
+    ]
+
+
+def deep_bytes(obj, seen=None) -> int:
+    """``sys.getsizeof`` over a container and everything it reaches, once each.
+
+    Not a precise heap measurement - it misses interpreter-side overhead and
+    counts a shared object for whoever reaches it first - but it is the same
+    measure for both sides of the comparison, and a 229x undercount does not
+    hide inside its error bars.
+    """
+    import sys
+
+    seen = set() if seen is None else seen
+    if id(obj) in seen:
+        return 0
+    seen.add(id(obj))
+    total = sys.getsizeof(obj)
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            total += deep_bytes(key, seen) + deep_bytes(value, seen)
+    elif isinstance(obj, (list, tuple, set, frozenset)):
+        for item in obj:
+            total += deep_bytes(item, seen)
+    return total
+
+
+class HotCacheBoundTests(unittest.TestCase):
+    """What the hot bound counts, and that nothing is exempt from it.
+
+    Two measured defects, one cap. F23 (ido-5b5): the accounting summed rendered
+    line bytes while every cached record also held the full backend row dict, so
+    a 2,000-row walk of 30-column rows accounted 32,890 bytes against a 262,144
+    byte cap while retaining 7.5 MB - a 229x undercount, and about eight such
+    walks under one cap. F8 (ido-7ce): the eviction loop stopped with one walk
+    left and skipped the walk being built, so a single enumerated relation
+    exceeded the cap by any amount and stayed cached after the fetch returned;
+    a cap of zero retained it too.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.rows = wide_rows(600)
+        self.portal = FakePortal(self.rows)
+        result_handles.register_resolver("fake-portal", self.portal)
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("fake-portal")
+        os.environ.pop("FW_RESULT_HANDLE_HOT_MAX_BYTES", None)
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def declare_wide(self, *, alias="O7", page_size=100):
+        return declare(
+            ResultHandleSpec(kind="holder", summary="%d holder(s)." % len(self.rows),
+                             items=[], total=len(self.rows),
+                             source_complete=False, page_size=page_size),
+            source=SourceDescriptor(
+                resolver="fake-portal", view="wide_view", params={"scope": "s"},
+                filter_columns=("name",), uid_field="uid",
+                label_fields=("name",), page_size=page_size,
+            ),
+            scope=scope(), selected_store=self.store, alias=alias,
+        )
+
+    def cap(self, value: int) -> None:
+        os.environ["FW_RESULT_HANDLE_HOT_MAX_BYTES"] = str(value)
+
+    def walk_key(self, alias="O7", query_scope=""):
+        return result_handles._hot_key(self.store, scope(), alias, query_scope)
+
+    def page_to_the_end(self, alias="O7", *, budget=100_000):
+        """Page the way an agent does, and return every row it was shown."""
+        cursor, seen, guard = None, [], 0
+        while guard < 60:
+            guard += 1
+            page = fetch_page(alias, cursor, scope=scope(),
+                              selected_store=self.store, budget_bytes=budget)
+            seen.extend(page.rows)
+            cursor = page.next_cursor
+            if cursor is None:
+                return page, seen
+        self.fail("paging did not terminate")
+
+    # -- F23: the cap measures what the cache holds ------------------------
+
+    def test_a_cached_record_does_not_keep_the_backend_row(self):
+        """The walk keeps the identity and the rendered line. Nothing else."""
+        self.cap(100_000_000)
+        self.declare_wide()
+        fetch_page("O7", scope=scope(), selected_store=self.store,
+                   budget_bytes=100_000)
+        walk = result_handles._hot[self.walk_key()]
+        self.assertTrue(walk["records"])
+        for record in walk["records"][:5]:
+            self.assertEqual(set(record), {"uid", "line"})
+
+    def test_the_stored_page_still_carries_the_row_it_always_did(self):
+        """On-disk shape is untouched: this fix is in memory and nowhere else.
+
+        A store written before it, and one written after it, are the same bytes,
+        so nothing has to read two shapes.
+        """
+        self.cap(100_000_000)
+        self.declare_wide()
+        fetch_page("O7", scope=scope(), selected_store=self.store,
+                   budget_bytes=100_000)
+        page = self.store.list_pages(scope(), alias="O7", query_scope="")[0]
+        record = page["record"]
+        self.assertTrue(record["rows"])
+        self.assertEqual(record["rows"][0]["col00"], "v" * 40)
+        self.assertEqual(set(record["records"][0]), {"uid", "line", "row"})
+        self.assertEqual(record["records"][0]["row"], record["rows"][0])
+
+    def test_the_accounted_bytes_are_within_a_factor_of_two_of_the_truth(self):
+        """The accounting is the retained payload, not the rendered text.
+
+        The factor is two in both directions and the real figure comes out
+        within about 15%; the defect this replaces was out by 229x, one way.
+        """
+        self.cap(100_000_000)
+        self.declare_wide()
+        fetch_page("O7", scope=scope(), selected_store=self.store,
+                   budget_bytes=100_000)
+        walk = result_handles._hot[self.walk_key()]
+        accounted = int(walk["bytes"])
+        real = deep_bytes(walk["records"]) + deep_bytes(walk["seen"])
+        self.assertGreater(accounted, real / 2, "the cap still undercounts")
+        self.assertLess(accounted, real * 2, "the cap now overcounts")
+        # And it is emphatically not the old figure, which was the text alone.
+        line_bytes = sum(len(record["line"].encode("utf-8"))
+                         for record in walk["records"])
+        self.assertGreater(accounted, line_bytes * 8)
+
+    # -- F8: no walk is exempt from the bound ------------------------------
+
+    def test_a_walk_larger_than_the_cap_is_not_retained_after_the_fetch(self):
+        """One enumerated relation, one cap, and the cap wins."""
+        self.declare_wide()
+        first = fetch_page("O7", scope=scope(), selected_store=self.store,
+                           budget_bytes=100_000)
+        whole = result_handles._hot[self.walk_key()]["bytes"]
+        self.assertGreater(whole, 60_000)
+        reset_result_handle_state()
+        self.cap(60_000)
+        page = fetch_page("O7", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        # The page is unchanged: eviction costs rows nothing.
+        self.assertEqual(page.rows, first.rows)
+        self.assertLessEqual(result_handles._hot_bytes(), 60_000)
+        self.assertNotIn(self.walk_key(), result_handles._hot)
+        oversized = [event for event in snapshot_events()
+                     if event["kind"] == "result_handle_hot_oversized"]
+        self.assertTrue(oversized)
+        self.assertEqual(oversized[-1]["limit"], 60_000)
+
+    def test_a_zero_cap_retains_nothing_and_the_cursor_still_recovers(self):
+        """The acceptance check: cap zero, and the enumeration still completes."""
+        self.cap(0)
+        self.declare_wide()
+        page, seen = self.page_to_the_end()
+        self.assertEqual(page.continuation, "complete")
+        self.assertEqual(len(seen), len(self.rows))
+        self.assertEqual(seen[0].split("  ")[0], "u00000")
+        self.assertEqual(seen[-1].split("  ")[0], "u00599")
+        self.assertEqual(len(set(seen)), len(self.rows))
+        self.assertEqual(result_handles._hot, {})
+        self.assertEqual(result_handles._hot_bytes(), 0)
+
+    def test_an_evicted_completed_walk_costs_the_source_nothing_to_rebuild(self):
+        """Eviction must not undo ido-1r0: the verdict is on disk, so a rebuild
+        under a cap that keeps nothing asks the source for nothing."""
+        self.cap(0)
+        self.declare_wide()
+        self.page_to_the_end()
+        calls = len(self.portal.calls)
+        self.assertEqual(result_handles._hot, {})
+        for _ in range(3):
+            page = fetch_page("O7", scope=scope(), selected_store=self.store,
+                              budget_bytes=100_000)
+            self.assertEqual(page.continuation, "complete")
+            self.assertEqual(page.outcome, "rows")
+            self.assertTrue(page.matched_complete)
+        self.assertEqual(len(self.portal.calls), calls)
+
+    def test_eight_wide_walks_together_stay_under_the_configured_cap(self):
+        """The review's arithmetic, asserted: eight of these used to pass the
+        cap while holding some 60 MB between them."""
+        self.cap(262_144)
+        for index in range(8):
+            alias = "O%d" % (index + 1)
+            self.declare_wide(alias=alias)
+            fetch_page(alias, scope=scope(), selected_store=self.store,
+                       budget_bytes=100_000)
+            self.assertLessEqual(result_handles._hot_bytes(), 262_144)
+        real = sum(deep_bytes(walk["records"]) + deep_bytes(walk["seen"])
+                   for walk in result_handles._hot.values())
+        self.assertLess(real, 2 * 262_144)

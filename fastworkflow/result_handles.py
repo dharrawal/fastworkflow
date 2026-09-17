@@ -37,7 +37,7 @@ import unicodedata
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
 from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope
@@ -716,19 +716,46 @@ class ResultHandleStore:
             ).fetchone()
         return None if row is None else self._decode_page(row)
 
-    def list_pages(
+    def iter_pages(
         self, scope: RuntimeHandleScope, *, alias: str, query_scope: str
-    ) -> list[dict[str, Any]]:
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
+    ) -> "Iterator[dict[str, Any]]":
+        """The stored pages of one traversal, in offset order, ONE AT A TIME.
+
+        (ido-7ce, F8) ``list_pages`` decodes every page of a walk before the
+        caller sees the first one, so rebuilding a large traversal held every
+        page's rows - which the stored payload carries twice, once in ``rows``
+        and once inside each record - in memory at the same moment. A rebuild
+        reads each page, takes the uid and the line out of it and has no further
+        use for it, so this yields them and lets each one go. What a rebuild
+        holds is then the walk it is building, which the hot bound measures,
+        plus one page.
+
+        The caller may stop early - a rebuild stops at the stored end of the
+        walk - so close the generator (``contextlib.closing``) to put the
+        connection back rather than leaving it to the collector.
+        """
+        conn = self._connect()
+        try:
+            for row in conn.execute(
                 """
                 SELECT * FROM result_handle_pages
                 WHERE scope_id = ? AND alias = ? AND query_scope = ?
                 ORDER BY start_offset
                 """,
                 (scope.scope_id, alias, query_scope),
-            ).fetchall()
-        return [self._decode_page(row) for row in rows]
+            ):
+                yield self._decode_page(row)
+        finally:
+            conn.close()
+
+    def list_pages(
+        self, scope: RuntimeHandleScope, *, alias: str, query_scope: str
+    ) -> list[dict[str, Any]]:
+        """Every stored page of one traversal at once. See ``iter_pages``."""
+        with closing(
+            self.iter_pages(scope, alias=alias, query_scope=query_scope)
+        ) as pages:
+            return list(pages)
 
     def list_page_query_scopes(
         self, scope: RuntimeHandleScope, *, alias: str
@@ -1165,16 +1192,56 @@ def _cache_namespace(scope: RuntimeHandleScope, store_: "ResultHandleStore") -> 
     return "%s@%s" % (scope.scope_id, store_.db_path)
 
 
+#: What one cached walk record costs beyond the text it carries. (ido-5b5, F23)
+#: Measured on CPython 3.13: the two-key record dict (184), the list slot that
+#: holds it (8), its entry in the walk's ``seen`` set (66 at a 2,000-uid load
+#: factor) and the object header of each of the two strings (41 apiece) come to
+#: 340 bytes; the strings' own bytes are added on top of it. It is an accounting
+#: figure, not an allocation, and it exists so the bound measures what the cache
+#: RETAINS. Counting rendered line bytes alone undercounted a 30-column
+#: relation by 229x, which is how 32,890 accounted bytes passed a 262,144 byte
+#: cap while the walk held 7.5 MB.
+_HOT_RECORD_OVERHEAD_BYTES = 340
+
+
+def _walk_retained_bytes(walk: Mapping[str, Any]) -> int:
+    """What one cached walk holds, counted to the nearest object header.
+
+    Every field a walk keeps per row is counted: the record dict, its slot in
+    the records list, its uid in the ``seen`` set, and the two strings. The rest
+    of a walk - offsets, flags, the stop reason - is a fixed handful of bytes
+    per walk and the eviction loop is not sensitive to it.
+    """
+    total = 0
+    for record in walk["records"]:
+        total += (
+            _HOT_RECORD_OVERHEAD_BYTES
+            + len(str(record["uid"]).encode("utf-8"))
+            + len(str(record["line"]).encode("utf-8"))
+        )
+    return total
+
+
 def _hot_bytes() -> int:
     return sum(int(entry.get("bytes") or 0) for entry in _hot.values())
 
 
 def _remember_walk(key: str, walk: dict[str, Any]) -> list[str]:
-    """Cache a walk and evict least-recently-used first when over the bound.
+    """Cache a walk and evict least-recently-used first until under the bound.
 
-    Eviction is free of consequence: every row in a walk came from a stored page
-    and is rebuilt from SQLite on the next read, so the bound controls memory
-    and never reachability.
+    **On return ``_hot_bytes() <= hot_rows_max_bytes_from_env()``, always.** The
+    bound has no exemption, not for a big walk and not for the walk this call is
+    building. Eviction is free of consequence: every row in a walk came from a
+    stored page and is rebuilt from SQLite on the next read, so the bound
+    controls memory and never reachability, and the caller that just handed its
+    walk over still holds it for the rest of the call.
+
+    (ido-7ce, F8) The loop used to stop while one walk was left and skip the
+    walk being built, so a single enumerated relation could exceed the cap by
+    any amount and stay cached after the fetch returned - a zero cap still
+    retained it. The walk being built is now the LAST one evicted rather than
+    the one never evicted, which keeps it out of the way of walks the turn has
+    finished with while still making it answer to the bound.
 
     (ido-1r0) Re-assigning an existing key leaves its position in the dict where
     first use put it, which made insertion order first-use order and evicted the
@@ -1183,23 +1250,34 @@ def _remember_walk(key: str, walk: dict[str, Any]) -> list[str]:
     the end, and ``next(iter(_hot))`` is genuinely the coldest one.
     """
     evicted: list[str] = []
+    oversized = False
     with _lock:
-        walk["bytes"] = sum(len(record["line"].encode("utf-8")) for record in walk["records"])
+        walk["bytes"] = _walk_retained_bytes(walk)
         _hot.pop(key, None)
         _hot[key] = walk
         limit = hot_rows_max_bytes_from_env()
-        while _hot_bytes() > limit and len(_hot) > 1:
+        while _hot_bytes() > limit and _hot:
             oldest = next(iter(_hot))
-            if oldest == key:
-                # Never evict the walk being built: the rest of this call still
-                # needs it, and it will be rebuilt from SQLite next time anyway.
-                oldest = next((candidate for candidate in _hot if candidate != key), None)
-                if oldest is None:
-                    break
+            if oldest == key and len(_hot) > 1:
+                # Coldest first, but the walk being built goes last: the rest of
+                # this call still reads it out of the local it was handed from.
+                oldest = next(candidate for candidate in _hot if candidate != key)
             _hot.pop(oldest, None)
             evicted.append(oldest)
+            oversized = oversized or oldest == key
     if evicted:
         record_event({"kind": "result_handle_hot_evict", "walks": evicted})
+    if oversized:
+        # A walk that does not fit the cache on its own. Worth saying out loud:
+        # it is rebuilt from stored pages on every fetch from here on, which
+        # costs SQLite reads and no resolver call, and the cap is the reason.
+        record_event({
+            "kind": "result_handle_hot_oversized",
+            "walk": key,
+            "bytes": int(walk["bytes"]),
+            "limit": int(hot_rows_max_bytes_from_env()),
+            "records": len(walk["records"]),
+        })
     return evicted
 
 
@@ -1685,8 +1763,21 @@ def _records_from_items(items: Iterable[str]) -> list[dict[str, Any]]:
 
 
 def _record_of(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {"uid": str(record["uid"]), "line": str(record["line"]),
-            "row": record.get("row")}
+    """One stored record as the WALK keeps it: the identity and the text.
+
+    (ido-5b5, F23) The backend row this line was rendered from is deliberately
+    not carried here. Nothing reads it back: rendering happened when the page
+    was stored, a local filter matches the rendered line, the uid is the
+    identity, and every caller of a walk reads ``uid`` or ``line`` and nothing
+    else. Keeping it made a walk hold every column of every row it had ever
+    paged for the length of a turn - 7.5 MB for a 2,000-row walk of 30-column
+    rows - while the hot bound counted only the rendered text.
+
+    The stored page is untouched: ``record_json`` still carries the row, byte
+    for byte, in the shape it has always had, so this changes what the process
+    holds and never what a later process reads.
+    """
+    return {"uid": str(record["uid"]), "line": str(record["line"])}
 
 
 # ---------------------------------------------------------------------------
@@ -2169,26 +2260,34 @@ def _walk_records(
     next_offset = int((declaration["descriptor"] or {}).get("start_offset") or 0)
     backend_total: Optional[int] = None
     terminal_offset: Optional[int] = None
-    for page in store_.list_pages(scope, alias=alias, query_scope=query_scope):
-        record = page["record"]
-        entries = record.get("records") or []
-        if (not entries and not (record.get("rows") or [])
-                and page["source"] != "producer"):
-            # (ido-1r0) The stored end of the walk, recognised here exactly as
-            # ``_extend_walk`` recognises it live. Seeding the rebuilt walk PAST
-            # it is what made every rebuild ask the source to find the end
-            # again, one page further out, and store another empty page.
-            terminal_offset = page["start_offset"]
-            break
-        for entry in entries:
-            item = _record_of(entry)
-            if item["uid"] and item["uid"] in seen:
-                continue
-            seen.add(item["uid"])
-            records.append(item)
-        next_offset = max(next_offset, page["start_offset"] + page["limit_requested"])
-        if page["backend_total"] is not None:
-            backend_total = page["backend_total"]
+    # (ido-7ce, F8) Page at a time, not the whole traversal at once: see
+    # ``iter_pages``. Only the uid and the line of each row outlive the page.
+    with closing(
+        store_.iter_pages(scope, alias=alias, query_scope=query_scope)
+    ) as pages:
+        for page in pages:
+            record = page["record"]
+            entries = record.get("records") or []
+            if (not entries and not (record.get("rows") or [])
+                    and page["source"] != "producer"):
+                # (ido-1r0) The stored end of the walk, recognised here exactly
+                # as ``_extend_walk`` recognises it live. Seeding the rebuilt
+                # walk PAST it is what made every rebuild ask the source to find
+                # the end again, one page further out, and store another empty
+                # page.
+                terminal_offset = page["start_offset"]
+                break
+            for entry in entries:
+                item = _record_of(entry)
+                if item["uid"] and item["uid"] in seen:
+                    continue
+                seen.add(item["uid"])
+                records.append(item)
+            next_offset = max(
+                next_offset, page["start_offset"] + page["limit_requested"]
+            )
+            if page["backend_total"] is not None:
+                backend_total = page["backend_total"]
     # Without a descriptor the producer's own rows are all there will ever be,
     # so the producer's own claim about coverage is the walk's.
     complete = bool(declaration["source_complete"]) and not query_scope
