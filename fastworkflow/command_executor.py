@@ -424,10 +424,15 @@ class CommandExecutor(CommandExecutorInterface):
                 parameters = parameters.model_dump()
             if not isinstance(parameters, dict):
                 parameters = {}
-            from fastworkflow.result_handles import current_execute_alias
+            from fastworkflow.result_handles import current_execute_alias, current_scope
 
+            # The scope OBJECT, not only its id (ido-dhw): the durable copy of
+            # this entry has to carry the channel and experiment it belongs to,
+            # which is what the sidecar's erasure and retention read.
+            scope = current_scope()
             auto_navigation.record_context_entry(
-                auto_navigation.current_scope_id(),
+                scope.scope_id,
+                scope=scope,
                 context=context_name_after,
                 command_name=command_name,
                 parameters=parameters,

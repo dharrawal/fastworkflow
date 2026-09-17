@@ -475,7 +475,8 @@ def retrieved_corpus(
             return
         aliases.append(alias)
         parts.append(strip_alias_line(str(handle.get("text") or "")))
-        parts.append(context_clause_of(selected, alias) or "")
+        parts.append(
+            context_clause_of(selected, alias, selected_archive=archive) or "")
 
     for handle in rows:
         take(str(handle.get("alias") or ""), handle)
@@ -563,7 +564,10 @@ def subject_corpus(
     for alias in stored_handles(selected):
         if alias and alias not in aliases and not is_search_answer_key(alias):
             aliases.append(alias)
-    parts = [context_clause_of(selected, alias) or "" for alias in aliases]
+    parts = [
+        context_clause_of(selected, alias, selected_archive=archive) or ""
+        for alias in aliases
+    ]
     return normalise("\n".join(parts))
 
 

@@ -464,16 +464,27 @@ class ReclaimScopeIsNotAGlobalResetTests(unittest.TestCase):
                 scope, {"alias": "O1", "text": "payload", "text_sha256": "d" * 64})
             offload_state.next_search_answer_sequence(scope)
             auto_navigation.record_context_entry(
-                scope.scope_id, context="Fixture", command_name="c", alias="O1")
+                scope.scope_id, scope=scope, context="Fixture",
+                command_name="c", alias="O1")
             record_event({"kind": "fixture", "scope_id": scope.scope_id})
 
         reclaim_scope(gone)
 
-        self.assertIsNone(context_clause_of(gone, "O1"))
+        # RESIDENCY, never evidence. Since ido-dhw the clause and the entry
+        # registry have a durable tier, so what reclamation releases is the
+        # process-local copy -- read through the private maps, because the
+        # public readers deliberately rebuild from the sidecar and would answer
+        # from disk, which is the cold-resume path working as designed. The
+        # survival of those rows is asserted straight after.
+        self.assertNotIn(
+            offload_state.handle_key(gone, "O1"), offload_state._context_clauses)
+        self.assertEqual(auto_navigation._entries.get(gone.scope_id), None)
         self.assertIsNone(offload_state.archived_digest(gone, "O1"))
         self.assertEqual(offload_state.stored_handles(gone), {})
-        self.assertEqual(auto_navigation.context_entries(gone.scope_id), ())
         self.assertEqual(offload_state.next_search_answer_sequence(gone), 1)
+
+        self.assertEqual(context_clause_of(gone, "O1"), "Fixture gone")
+        self.assertEqual(len(auto_navigation.context_entries(gone.scope_id)), 1)
 
         self.assertEqual(context_clause_of(kept, "O1"), "Fixture kept")
         self.assertEqual(offload_state.archived_digest(kept, "O1"), "d" * 64)

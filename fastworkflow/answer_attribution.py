@@ -243,7 +243,8 @@ def observations(
     return [
         Observation(
             alias=alias,
-            clause=normalise(context_clause_of(selected, alias) or ""),
+            clause=normalise(
+                context_clause_of(selected, alias, selected_archive=archive) or ""),
             text=normalise("\n".join(texts[alias])),
         )
         for alias in order

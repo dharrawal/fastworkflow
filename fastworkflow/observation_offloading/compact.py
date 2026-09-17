@@ -128,6 +128,7 @@ def annotate_execute_observations(
     ordinal_offset: int = 0,
     executes: Optional[list[tuple[int, int]]] = None,
     scope: Optional[RuntimeHandleScope] = None,
+    selected_archive: Optional[RuntimeHandleArchive] = None,
 ) -> list[dict[str, Any]]:
     """Print the canonical ``O{n}`` handle on every execute observation, in place.
 
@@ -192,7 +193,8 @@ def annotate_execute_observations(
                     "action": "escaped_under_computed_alias",
                 }
             )
-        clause = context_clause_of(selected_scope, alias) or ""
+        clause = context_clause_of(
+            selected_scope, alias, selected_archive=selected_archive) or ""
         line = alias_line(alias, clause)
         trajectory[key] = annotated_observation(alias, clause, text)
         record_event(
@@ -202,7 +204,9 @@ def annotate_execute_observations(
                 "alias": alias,
                 "step_index": step_index,
                 "context": printed_context(line) or "",
-                "context_recorded": context_clause_of(selected_scope, alias) is not None,
+                "context_recorded": context_clause_of(
+                    selected_scope, alias,
+                    selected_archive=selected_archive) is not None,
                 "has_instance": bool(clause and " " in clause),
                 "line_utf8_bytes": len(line.encode("utf-8")),
                 "clause_utf8_bytes": (
@@ -396,7 +400,8 @@ def compact_trajectory(
     # Print the handle before measuring: the packed target must be checked
     # against the trajectory the agent actually receives.
     annotate_execute_observations(
-        trajectory, executes=executes, scope=selected_scope)
+        trajectory, executes=executes, scope=selected_scope,
+        selected_archive=store)
     # Then make every execute observation durable, whatever the offload
     # decision below turns out to be. Residency and availability are separate:
     # a handle the agent can read inline must resolve too.

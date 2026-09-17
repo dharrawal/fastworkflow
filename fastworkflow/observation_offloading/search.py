@@ -17,6 +17,7 @@ from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, Ru
 from fastworkflow.observation_offloading.labels import is_search_answer_key, search_answer_key
 from fastworkflow.observation_offloading.state import (
     archive,
+    context_clause_of,
     default_scope,
     next_search_answer_sequence,
     observation_inline,
@@ -201,6 +202,70 @@ def text_page(text: str, start_byte: int, max_bytes: int) -> dict[str, Any]:
         "has_more": end_byte < len(payload),
         "total_bytes": len(payload),
     }
+
+
+#: What the subject field says when the framework recorded no subject for the
+#: observation. Checked by ``subject_is_unknown`` rather than re-spelled.
+UNKNOWN_SUBJECT_MARK = "NOT RECORDED"
+
+
+def declaring_subject(alias: str, clause: Optional[str], command: str = "") -> str:
+    """The subject metadata handed to the search model beside the observation.
+
+    ``ido-kmm`` (F4). The archived text is the raw command response: the handle
+    line naming the alias and the context it ran in is presentation, stripped
+    before the bytes are stored and hashed. So a stored ``list_permissions``
+    response is a table of permission rows with nothing in it saying WHOSE
+    permissions they are, and a search model told to use only its observation
+    could answer a subject-specific question only by adopting the requesting
+    agent's premise or by refusing. This is the missing fact, supplied
+    separately from the evidence so the evidence's digest still covers exactly
+    the bytes the command returned.
+
+    Three states, and they stay three. A recorded clause is the subject. The
+    EMPTY clause is also recorded -- it means the command ran at the workflow
+    root, which declares no subject -- and says so. ``None`` is UNRECORDED, and
+    it is what an observation archived before the subject was persisted reads
+    as; it is reported as unknown and never filled in from the question, from
+    the current context, or from the alias.
+    """
+    ran = f" by {command}" if command else ""
+    if clause is None:
+        return (
+            f"{alias}: {UNKNOWN_SUBJECT_MARK}. The framework has no record of the "
+            f"context this observation was produced in, so its subject is unknown. "
+            f"Do not infer one from the question."
+        )
+    if not clause.strip():
+        return (
+            f"{alias}: produced{ran} at the workflow root, which declares no "
+            f"subject. The observation is not about any one named entity unless "
+            f"its own rows say so."
+        )
+    return (
+        f"{alias}: produced{ran} while the workflow's current context was "
+        f"{clause}. That is the subject this observation is evidence about, "
+        f"recorded by the framework when the command was dispatched."
+    )
+
+
+def subject_is_unknown(subject: str) -> bool:
+    """True when the subject field says no subject was recorded."""
+    return UNKNOWN_SUBJECT_MARK in subject
+
+
+def evidence_max_bytes(subject: str, max_bytes: Optional[int] = None) -> int:
+    """How much OBSERVATION fits once the subject metadata is paid for.
+
+    The subject travels beside the evidence but inside the SAME budget
+    (``ido-3vp``): the bound exists because the search model's window is
+    finite, and the whole input is what the provider measures. The metadata is
+    a couple of hundred bytes against a budget whose floor is a 4 KB page, so
+    what this really does is shorten the last line of the read by a row.
+    """
+    if max_bytes is None:
+        max_bytes = search_observation_max_bytes()
+    return max(1, max_bytes - len(subject.encode("utf-8")))
 
 
 def answer_header(alias: str, tier: str, *, bounded: bool = False) -> str:
@@ -466,9 +531,21 @@ class ObservationSearchSignature(dspy.Signature):
     recorded count and a concise description of the contents, explicitly say
     the full list is not reproduced, and ask for a focused entity or predicate.
     Never present a subset as an exhaustive list.
+
+    The subject field is the framework's own record of the context this
+    observation was produced in, taken when the command was dispatched. It is
+    evidence, on the same footing as the observation: the observation text is
+    the raw command response and often names no subject at all, so a table of
+    permission rows is the permissions OF the subject named there. Use it to
+    answer whose rows these are and to correct a question that names a
+    different subject. When it says the subject was NOT RECORDED, the subject
+    is unknown: say so, answer only what the rows themselves establish, and do
+    not adopt the subject the question assumes.
     """
 
     question: str = dspy.InputField(desc="Current agent reasoning followed by its question")
+    subject: str = dspy.InputField(
+        desc="Framework-recorded context the observation was produced in, or NOT RECORDED")
     observation: str = dspy.InputField(desc="Complete text of the single selected observation")
     answer: str = dspy.OutputField(desc="Evidence-grounded answer, or an explicit evidence gap")
 
@@ -565,8 +642,29 @@ def search_memory(
     # whole on every search of it -- paid for again on every repeat, and past
     # some size refused outright by the provider.
     max_observation_bytes = search_observation_max_bytes()
-    evidence = bounded_evidence(handle["text"], max_observation_bytes)
     command = str(handle.get("command") or "")
+    # ido-kmm (F4). The subject travels BESIDE the evidence, never inside it:
+    # ``handle["text_sha256"]`` still covers exactly the bytes the command
+    # returned, so an observation and its digest stay comparable with every
+    # other recording of them. It is read from the archive that holds the
+    # observation, so it answers in a process that only resumed the turn and
+    # answers about the context THIS observation was produced in, whatever the
+    # workflow's current context has since become.
+    #
+    # And it is paid for out of the one budget the call has (ido-3vp): the
+    # bound exists because the search model's window is finite, and metadata
+    # that escaped it would be metadata the provider refuses the prompt over.
+    # The subject is at most a couple of hundred bytes, so the evidence floor
+    # below can never be reached in practice -- it is there so that a
+    # pathological budget cuts the evidence rather than the metadata's meaning.
+    subject = declaring_subject(
+        wanted,
+        context_clause_of(selected_scope, wanted, selected_archive=store),
+        command,
+    )
+    subject_bytes = len(subject.encode("utf-8"))
+    evidence_budget = evidence_max_bytes(subject, max_observation_bytes)
+    evidence = bounded_evidence(handle["text"], evidence_budget)
     evidence_marking = bounded_evidence_marking(
         alias=wanted, command=command,
         shown_bytes=evidence["shown_bytes"], total_bytes=evidence["total_bytes"],
@@ -577,6 +675,10 @@ def search_memory(
              "observation_sent_bytes": evidence["shown_bytes"],
              "observation_bounded": evidence["bounded"],
              "observation_max_bytes": max_observation_bytes,
+             "evidence_max_bytes": evidence_budget,
+             "subject": subject,
+             "subject_recorded": not subject_is_unknown(subject),
+             "subject_utf8_bytes": subject_bytes,
              "text_sha256": handle["text_sha256"]}
     started = time.monotonic()
     try:
@@ -586,7 +688,7 @@ def search_memory(
         # the surrounding server disables DSPy history.
         with dspy.context(lm=lm, disable_history=False, max_history_size=1):
             prediction = dspy.Predict(ObservationSearchSignature)(
-                question=query, observation=evidence["text"])
+                question=query, subject=subject, observation=evidence["text"])
         history = lm.history[-1] if lm.history else {}
         if completion_was_truncated(history):
             record_event({**event, "status": "incomplete", "reason": "completion_limit"})

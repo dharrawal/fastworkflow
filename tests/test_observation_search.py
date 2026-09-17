@@ -185,8 +185,10 @@ class SearchInputBound(unittest.TestCase):
                              model='fixture-lm')
 
         def predict(_signature):
-            def call(question, observation):
+            def call(question, subject, observation):
                 seen['observation'] = observation
+                seen['subject'] = subject
+                seen['subject_bytes'] = len(subject.encode('utf-8'))
                 seen['observation_bytes'] = len(observation.encode('utf-8'))
                 if error is not None:
                     raise error

@@ -3285,15 +3285,27 @@ def _stamp_page_clause(
             record_context_clause,
         )
 
+        from fastworkflow.observation_offloading.state import durable_archive
+
+        # The same archive ``record_context_clause`` writes a dispatch-time
+        # stamp to, resolved the same way, because a subject read out of one
+        # file and corrected in another is two subjects. In a running workflow
+        # that file is the store's own -- ``store()`` is keyed by the agent's
+        # archive path -- so the declaring handle's recorded subject is read
+        # back even in a process that only RESUMED the turn, where the clause
+        # map starts empty and this page's subject would otherwise be dropped
+        # (ido-dhw, F3).
+        subjects = durable_archive()
         root = declaring_alias(parent_alias, scope=scope, selected_store=store_)
-        declaring = context_clause_of(scope, root)
-        stamped = context_clause_of(scope, page_alias)
+        declaring = context_clause_of(scope, root, selected_archive=subjects)
+        stamped = context_clause_of(scope, page_alias, selected_archive=subjects)
         if declaring == stamped:
             return
         if declaring is None:
-            forget_context_clause(scope, page_alias)
+            forget_context_clause(scope, page_alias, selected_archive=subjects)
         else:
-            record_context_clause(scope, page_alias, declaring)
+            record_context_clause(
+                scope, page_alias, declaring, selected_archive=subjects)
         record_event(
             {
                 "kind": "result_handle_page_clause",

@@ -275,7 +275,14 @@ def rehydrated_label(
     text = archived_observation(alias, scope=scope, archive=archive)
     if text is None:
         return None
-    return annotated_observation(alias, context_clause_of(scope, alias) or "", text)
+    return annotated_observation(
+        alias,
+        # The archive that holds the text also holds the subject recorded
+        # for it (ido-dhw), so a label rehydrated in a process that never
+        # ran the turn prints the same clause the agent first saw.
+        context_clause_of(scope, alias, selected_archive=archive) or "",
+        text,
+    )
 
 
 # ---------------------------------------------------------------------------

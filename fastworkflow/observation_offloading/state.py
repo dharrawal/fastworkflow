@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import threading
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -50,6 +52,12 @@ _events: list[dict[str, Any]] = []
 _event_log_failures: set[str] = set()
 _event_cap_warnings: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
+#: One archive object per sidecar FILE, on ``result_handles.store``'s pattern
+#: and for the same reason (ido-pg2): two spellings of one path must be one
+#: object, and a caller that holds only a store path must be able to reach the
+#: durable subject rows in the same file without re-creating the schema on
+#: every call.
+_archives_by_path: dict[str, RuntimeHandleArchive] = {}
 _default_scope = RuntimeHandleScope(
     store_identity=f"process-{os.getpid()}",
     channel_id=f"process-{os.getpid()}",
@@ -84,6 +92,52 @@ def hot_handle_max_bytes_from_env() -> int:
     return context_budget.offload_hot_max_bytes()
 
 
+def archive_for_path(db_path: str) -> RuntimeHandleArchive:
+    """The archive object for one sidecar file, created once per path.
+
+    ``ResultHandleStore`` and ``RuntimeHandleArchive`` are two views of the same
+    file by construction, so a caller holding one can reach the other's tables
+    here instead of opening a second connection per call.
+    """
+    key = os.path.abspath(os.path.expanduser(str(db_path)))
+    with _lock:
+        existing = _archives_by_path.get(key)
+    if existing is not None:
+        return existing
+    created = RuntimeHandleArchive(key)
+    with _lock:
+        return _archives_by_path.setdefault(key, created)
+
+
+def durable_archive(selected_archive: Any = None) -> Any:
+    """Where this call's DURABLE subject and navigation records belong.
+
+    The caller's archive when it named one; otherwise the archive the running
+    agent writes its observations to, so a turn's subject metadata lands in the
+    same sidecar as the observations it describes; otherwise the process
+    default, which is what every other write in this module falls back to.
+
+    Never raises: durability of presentation metadata must not be able to fail a
+    command, so an unresolvable archive is reported as ``None`` and the caller
+    keeps working out of its process-local cache alone.
+    """
+    if selected_archive is not None:
+        return selected_archive
+    try:
+        from fastworkflow.result_handles import _current_agent
+
+        found = getattr(_current_agent(), "observation_archive", None)
+        if found is not None:
+            return found
+    except Exception:  # noqa: BLE001 - no agent, no tracing host, no archive
+        logger.debug("no agent archive for durable subject metadata", exc_info=True)
+    try:
+        return archive()
+    except Exception:  # noqa: BLE001
+        logger.debug("no default archive for durable subject metadata", exc_info=True)
+        return None
+
+
 def archive() -> RuntimeHandleArchive:
     """The process-default archive, for a caller with no archive of its own.
 
@@ -93,10 +147,61 @@ def archive() -> RuntimeHandleArchive:
     """
     global _default_archive
     if _default_archive is None:
-        _default_archive = RuntimeHandleArchive(os.path.join(
-            tempfile.gettempdir(), f"fw-offload-handles-{os.getpid()}.sqlite3"
-        ))
+        _default_archive = RuntimeHandleArchive(default_archive_path())
     return _default_archive
+
+
+def default_archive_path() -> str:
+    """Where the per-process fallback sidecar lives.
+
+    Named after the pid and in the temp directory, so it is process-local by
+    construction. Spelled once, because ``clear_default_cold_records`` has to
+    be able to reach the file whether or not this process has instantiated the
+    archive object for it.
+    """
+    return os.path.join(
+        tempfile.gettempdir(), f"fw-offload-handles-{os.getpid()}.sqlite3"
+    )
+
+
+#: The tables that exist so a turn can be read back after a restart
+#: (``ido-dhw``). They are the only two whose rows a process-local reset has to
+#: reach: everything else in the sidecar is evidence a reset never owned.
+COLD_RESTART_TABLES = ("observation_subjects", "observation_context_entries")
+
+
+def clear_default_cold_records(*tables: str) -> None:
+    """Empty the PROCESS-DEFAULT sidecar's cold-restart tables.
+
+    The durable half of a process-local reset (``ido-dhw``). Subject clauses and
+    navigation entries are now read THROUGH to the sidecar when the in-memory
+    registry misses, so a reset that cleared only memory would be answered from
+    disk by the very rows it meant to drop. Every caller that never named an
+    archive of its own shares this one file AND one ``default_scope``, so those
+    rows are exactly the state the reset owns.
+
+    No archive a CALLER named is touched, and nothing but these tables is:
+    a real sidecar holds real turns, and this is not an erasure path.
+    """
+    wanted = tables or COLD_RESTART_TABLES
+    path = default_archive_path()
+    if not os.path.exists(path):
+        return
+    try:
+        with closing(sqlite3.connect(path, timeout=30.0)) as conn:
+            present = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            for table in wanted:
+                if table in present:
+                    conn.execute(f'DELETE FROM "{table}"')
+            conn.commit()
+    except Exception:  # noqa: BLE001 - a reset must not fail on a temp file
+        logger.debug("could not clear the default sidecar's cold-restart records",
+                     exc_info=True)
 
 
 def scope_for_host(host: Any) -> RuntimeHandleScope:
@@ -240,7 +345,13 @@ def next_search_answer_sequence(scope: RuntimeHandleScope) -> int:
         return _search_answers[scope.scope_id]
 
 
-def record_context_clause(scope: RuntimeHandleScope, alias: str, clause: str) -> None:
+def record_context_clause(
+    scope: RuntimeHandleScope,
+    alias: str,
+    clause: str,
+    *,
+    selected_archive: Any = None,
+) -> None:
     """Remember the context an execute step's command RAN IN (``ido-8ps.13``).
 
     Written at dispatch, from the context handle taken BEFORE the command
@@ -252,18 +363,77 @@ def record_context_clause(scope: RuntimeHandleScope, alias: str, clause: str) ->
 
     An empty clause is stored as an empty clause: "this ran at the root" is a
     fact, and it must not read as "nothing was captured".
+
+    ``ido-dhw`` (F3): it is also written THROUGH to the sidecar, because this
+    map is turn-scoped process memory and the subject of an observation has to
+    outlive the process that saw it. The durable write is best effort on the
+    same terms as everything else on this path -- a sidecar that cannot be
+    written keeps the observation and loses only its cold-restart subject, and
+    says so in the event log rather than failing the command.
     """
+    text = str(clause or "")
     with _lock:
-        _context_clauses[handle_key(scope, alias)] = str(clause or "")
+        _context_clauses[handle_key(scope, alias)] = text
+    _write_subject(scope, alias, text, selected_archive)
 
 
-def context_clause_of(scope: RuntimeHandleScope, alias: str) -> Optional[str]:
-    """The recorded clause for *alias*, ``""`` at the root, None if unrecorded."""
+def _write_subject(
+    scope: RuntimeHandleScope, alias: str, clause: str, selected_archive: Any
+) -> None:
+    store = durable_archive(selected_archive)
+    if store is None:
+        return
+    try:
+        store.put_subject(scope, alias, clause)
+    except Exception as error:  # noqa: BLE001 - metadata must never fail a turn
+        record_event(
+            {
+                "kind": "subject_persist_refused",
+                "scope_id": scope.scope_id,
+                "alias": alias,
+                "error": type(error).__name__,
+            }
+        )
+
+
+def context_clause_of(
+    scope: RuntimeHandleScope, alias: str, *, selected_archive: Any = None
+) -> Optional[str]:
+    """The recorded clause for *alias*, ``""`` at the root, None if unrecorded.
+
+    Process memory first, then the sidecar (``ido-dhw``, F3). The second tier is
+    what makes a subject survive a restart: a rehydrated label, a cross-context
+    page stamp, the attribution check and observation search all read the
+    subject through here, and in a process that only imported a suspension the
+    map is empty while the rows are still on disk. A durable hit refills the map
+    -- the bounded runtime cache is REBUILT from the durable record rather than
+    kept a second way -- so the read is paid for once per alias per process.
+
+    ``None`` still means UNRECORDED, and it is what an alias stamped before this
+    table existed reads as. Nothing here ever invents a subject.
+    """
+    key = handle_key(scope, alias)
     with _lock:
-        return _context_clauses.get(handle_key(scope, alias))
+        if key in _context_clauses:
+            return _context_clauses[key]
+    store = durable_archive(selected_archive)
+    if store is None:
+        return None
+    try:
+        clause = store.get_subject(scope, alias)
+    except Exception:  # noqa: BLE001 - an unreadable sidecar is an unrecorded one
+        logger.debug("could not read the stored subject of %s", alias, exc_info=True)
+        return None
+    if clause is None:
+        return None
+    with _lock:
+        _context_clauses.setdefault(key, clause)
+    return clause
 
 
-def forget_context_clause(scope: RuntimeHandleScope, alias: str) -> None:
+def forget_context_clause(
+    scope: RuntimeHandleScope, alias: str, *, selected_archive: Any = None
+) -> None:
     """Drop the clause recorded for *alias*, so it reads as UNRECORDED again.
 
     ``ido-8ps.29``. The dispatch-time stamp is a good default and a bad answer
@@ -272,9 +442,20 @@ def forget_context_clause(scope: RuntimeHandleScope, alias: str) -> None:
     truth and the context the agent happened to be standing in is not -- and
     "unrecorded" is a state every reader already handles, where a wrong clause
     is one every reader believes.
+
+    The durable row goes with it (``ido-dhw``): a correction that only reached
+    process memory would be undone by the next restart, which is the failure
+    mode this whole pair exists to prevent.
     """
     with _lock:
         _context_clauses.pop(handle_key(scope, alias), None)
+    store = durable_archive(selected_archive)
+    if store is None:
+        return
+    try:
+        store.forget_subject(scope, alias)
+    except Exception:  # noqa: BLE001 - metadata must never fail a turn
+        logger.debug("could not drop the stored subject of %s", alias, exc_info=True)
 
 
 def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
@@ -283,7 +464,10 @@ def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
     Residency, never evidence: the archive and the result-handle tables keep
     every row, so a scope reclaimed here is still fully readable from disk --
     which is exactly what the cold-resume path already does in a process that
-    never saw the turn at all.
+    never saw the turn at all. That now includes the subject clauses and the
+    navigation entries dropped below (``ido-dhw``): both tiers are dropped from
+    memory and neither row is deleted, so a later read of a reclaimed scope
+    rebuilds from the sidecar rather than answering "unrecorded".
 
     This is deliberately NOT a global reset. Everything the offloading runtime
     remembers is keyed by ``scope_id``, so one turn's state can be released
@@ -328,6 +512,15 @@ def reset_runtime_state() -> None:
     The auto-navigation registry goes with them for the same reason: it is
     turn-scoped by contract (ido-8ps.9), so a handle written in one turn must
     never resolve to a context instance another turn entered.
+
+    The PROCESS-DEFAULT sidecar's durable subject and navigation rows go too
+    (ido-dhw). That file is ``fw-offload-handles-<pid>.sqlite3`` in the temp
+    directory -- process-local by construction, named after this process, and
+    shared by every caller that never passed an archive of its own, all of whom
+    also share one ``default_scope``. Leaving those two tables behind would let
+    a reset process read back the subject and the navigation entries of the
+    state it just dropped. Nothing else in the file is touched, and no archive a
+    CALLER named is touched at all: those are real sidecars holding real turns.
     """
     global _default_archive
     with _lock:
@@ -338,6 +531,8 @@ def reset_runtime_state() -> None:
         _events.clear()
         _event_log_failures.clear()
         _default_archive = None
+        _archives_by_path.clear()
+    clear_default_cold_records()
     from fastworkflow import auto_navigation, result_handles
 
     result_handles.reset_result_handle_state()

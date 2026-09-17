@@ -400,6 +400,8 @@ def record_context_entry(
     parameters: Optional[Mapping[str, Any]] = None,
     alias: Optional[str] = None,
     required_parameters: Optional[Sequence[str]] = None,
+    scope: Any = None,
+    selected_archive: Any = None,
 ) -> ContextEntry:
     """Remember that *command_name* entered *context* in this turn.
 
@@ -407,6 +409,12 @@ def record_context_entry(
     separates the values that IDENTIFY the instance from the rest of the
     parameter dump (F31/ido-nx6). Absent, the entry publishes its alias alone
     as a handle rather than every value it was given.
+
+    ``ido-dhw`` (F3): the entry is also written to the sidecar when the caller
+    can say which turn scope it belongs to (*scope*), because rule 3 has to be
+    able to resolve a handle the agent printed in a turn that a later process
+    only resumes. The durable write is best effort -- the registry is the thing
+    rule 3 reads, and a sidecar that refuses the row costs only the cold case.
     """
     values = {
         str(name): str(value)
@@ -424,12 +432,104 @@ def record_context_entry(
             required_parameters=tuple(str(n) for n in (required_parameters or ())),
         )
         _entries.setdefault(scope_id, []).append(entry)
+    _persist_entry(scope_id, entry, scope, selected_archive)
     return entry
 
 
-def context_entries(scope_id: str) -> tuple[ContextEntry, ...]:
+def _persist_entry(
+    scope_id: str, entry: ContextEntry, scope: Any, selected_archive: Any
+) -> None:
+    """Write one entry to the sidecar, if this call knows which scope it is in.
+
+    The scope OBJECT is needed and not just its id: the sidecar's erasure and
+    retention read ``scope_json`` off every evidence row to decide whether a row
+    belongs to a chatbot channel or to a preserved experiment run, and a row
+    that could not say would be preserved forever.
+    """
+    try:
+        from fastworkflow.observation_offloading.archive import RuntimeHandleScope
+        from fastworkflow.observation_offloading.state import durable_archive
+
+        resolved = scope if isinstance(scope, RuntimeHandleScope) else None
+        if resolved is None:
+            from fastworkflow.result_handles import current_scope
+
+            resolved = current_scope()
+        if str(resolved.scope_id) != str(scope_id):
+            # The registry keyed this entry by one scope and the durable row
+            # would be keyed by another. A row filed under a turn that did not
+            # record it is worse than no row, so nothing is written.
+            return
+        store = durable_archive(selected_archive)
+        if store is None:
+            return
+        store.put_context_entry(
+            resolved,
+            sequence=entry.sequence,
+            context=entry.context,
+            command_name=entry.command_name,
+            parameters=dict(entry.parameters),
+            alias=entry.alias or "",
+            required_parameters=entry.required_parameters,
+        )
+    except Exception:  # noqa: BLE001 - never fail a command over the registry
+        logger.debug("could not persist a context entry", exc_info=True)
+
+
+def _restore_entries(scope_id: str, selected_archive: Any = None) -> tuple[ContextEntry, ...]:
+    """Rebuild one turn's registry from the sidecar (``ido-dhw``, F3).
+
+    Called only when this process holds no entries for the scope, which is the
+    cold case by definition: a resumed turn in a new process, or a scope whose
+    residency was reclaimed. The rebuilt list is put back in the registry with
+    the sequence counter set past it, so an entry recorded after the restore
+    extends the turn's numbering instead of colliding with it.
+
+    This does not widen rule 3. The registry stays turn-scoped: rows are keyed
+    by ``scope_id``, so what comes back is what THIS turn recorded and nothing
+    another turn did.
+    """
+    try:
+        from fastworkflow.observation_offloading.state import durable_archive
+
+        store = durable_archive(selected_archive)
+        if store is None:
+            return ()
+        rows = store.list_context_entries(scope_id)
+    except Exception:  # noqa: BLE001 - an unreadable sidecar is an empty registry
+        logger.debug("could not restore the context entries of %s", scope_id,
+                     exc_info=True)
+        return ()
+    if not rows:
+        return ()
+    restored = [
+        ContextEntry(
+            sequence=int(row["sequence"]),
+            context=str(row["context"]),
+            command_name=str(row["command_name"]),
+            parameters={str(k): str(v) for k, v in (row["parameters"] or {}).items()},
+            alias=str(row["alias"]) if row["alias"] else None,
+            required_parameters=tuple(str(n) for n in row["required_parameters"]),
+        )
+        for row in rows
+    ]
     with _lock:
-        return tuple(_entries.get(scope_id, ()))
+        if _entries.get(scope_id):
+            return tuple(_entries[scope_id])
+        _entries[scope_id] = restored
+        _sequence[scope_id] = max(
+            _sequence.get(scope_id, 0), max(item.sequence for item in restored)
+        )
+        return tuple(restored)
+
+
+def context_entries(
+    scope_id: str, *, selected_archive: Any = None
+) -> tuple[ContextEntry, ...]:
+    """This turn's recorded entries, restored from the sidecar if need be."""
+    with _lock:
+        found = tuple(_entries.get(scope_id, ()))
+    return found or _restore_entries(scope_id, selected_archive)
 
 
 def forget_scope(scope_id: str) -> None:
@@ -446,10 +546,26 @@ def forget_scope(scope_id: str) -> None:
 
 
 def reset_auto_navigation_state() -> None:
-    """Drop every turn-scoped entry. Nothing here outlives the turn."""
+    """Drop every turn-scoped entry. Nothing here outlives the turn.
+
+    Since ``ido-dhw`` an entry has a durable copy, read back when this registry
+    misses, so a reset of the process-local half alone would be answered from
+    disk by the rows it just dropped. The copies in the PROCESS-DEFAULT sidecar
+    -- the pid-named temp file every caller that named no archive shares, along
+    with one ``default_scope`` -- go with them. A real workflow's sidecar is
+    untouched: those rows belong to real turns and only erasure may remove them.
+    """
     with _lock:
         _entries.clear()
         _sequence.clear()
+    try:
+        from fastworkflow.observation_offloading.state import (
+            clear_default_cold_records,
+        )
+
+        clear_default_cold_records("observation_context_entries")
+    except Exception:  # noqa: BLE001 - a reset must not fail on a temp file
+        logger.debug("could not clear the default sidecar's entries", exc_info=True)
 
 
 def current_scope_id() -> str:

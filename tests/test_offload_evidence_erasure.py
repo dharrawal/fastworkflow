@@ -61,6 +61,11 @@ KNOWN_EVIDENCE_TABLES = {
     "result_handle_walks": "recorded_at",
     "result_handle_cursor_tags": "created_at",
     "result_handle_cursors": "issued_at",
+    # ido-dhw (F3). Both carry scope_id and scope_json, so both are discovered
+    # structurally and erased with their channel without erasure.py knowing
+    # their names -- which is exactly the property this constant checks.
+    "observation_subjects": "recorded_at",
+    "observation_context_entries": "recorded_at",
 }
 
 needs_erasure_module = unittest.skipIf(
@@ -106,8 +111,7 @@ def counts(db_path: str, scope_id: str | None = None) -> dict[str, int]:
             for (name,) in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
-            if name == "observation_offload_handles"
-            or name.startswith("result_handle_")
+            if name in KNOWN_EVIDENCE_TABLES
         )
         clause = " WHERE scope_id=?" if scope_id else ""
         args = (scope_id,) if scope_id else ()
@@ -150,16 +154,28 @@ class EvidenceFixture(unittest.TestCase):
     ) -> str:
         """One turn's worth of evidence, written by the production writers.
 
-        An archived observation, a declaration, a fetched raw page, a cursor,
-        a filtered cursor tag and a walk verdict -- one row in each of the six
-        tables a turn can reach. Returns the cursor the page printed.
+        An archived observation, its recorded subject, a navigation entry, a
+        declaration, a fetched raw page, a cursor, a filtered cursor tag and a
+        walk verdict -- one row in each of the tables a turn can reach.
+        Returns the cursor the page printed.
         """
         path = sidecar or self.sidecar
         text = (
             "Observation O1 (execute_workflow_query)\n"
             + "\n".join(rows(marker))
         )
-        RuntimeHandleArchive(path).persist(
+        archive = RuntimeHandleArchive(path)
+        # ido-dhw (F3): the cold-restart records are evidence too. The clause
+        # names the subject of a listing and the entry names an instance the
+        # turn opened, so both carry exactly the kind of text a deletion
+        # request is about and both must go with the channel.
+        archive.put_subject(scope, "O1", "Fixture " + marker)
+        archive.put_context_entry(
+            scope, sequence=1, context="Fixture", command_name="open_fixture",
+            parameters={"uid": marker}, alias="O1",
+            required_parameters=("uid",),
+        )
+        archive.persist(
             scope,
             alias="O1",
             offload_order=1,
@@ -221,9 +237,15 @@ class EvidenceFixture(unittest.TestCase):
     def assert_readable(self, scope: RuntimeHandleScope, marker: str, cursor: str):
         """This scope's evidence is still there and still usable."""
         reset_result_handle_state()
-        recovered = RuntimeHandleArchive(self.sidecar).get(scope, "O1")
+        archive = RuntimeHandleArchive(self.sidecar)
+        recovered = archive.get(scope, "O1")
         self.assertIsNotNone(recovered)
         self.assertIn(marker, recovered["text"])
+        # ido-dhw: the cold-restart records survive with everything else, so a
+        # preserved turn can still say whose listing O1 was and still resolve
+        # the handle of the instance it opened.
+        self.assertEqual(archive.get_subject(scope, "O1"), "Fixture " + marker)
+        self.assertEqual(len(archive.list_context_entries(scope)), 1)
         reopened = ResultHandleStore(self.sidecar)
         self.assertIsNotNone(reopened.get_declaration(scope, "O1"))
         page = fetch_page(

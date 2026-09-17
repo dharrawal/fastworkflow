@@ -153,6 +153,47 @@ printing a handle can never be what makes an offload look profitable — a
 response that saves 1,023 B stays inline even though the printed text is ~34 B
 longer.
 
+**The clause is persisted, so the subject survives the process** (`ido-dhw`).
+The clause was captured at dispatch into a turn-scoped process map and nothing
+else, so a turn resumed in another process had no subject for any of its
+observations: the rehydrated handle line lost its clause, a page of an old
+listing lost the clause of the handle that declared it, the attribution check
+could not say whose evidence a listing was, and the auto-navigation registry
+could not resolve an `O` handle the same turn had printed. `record_context_clause`
+now writes through to an `observation_subjects` row in the sidecar, keyed by
+`(scope_id, alias)`, and `context_clause_of` reads through to it when the map
+misses and refills the map from what it finds — the bounded runtime cache is
+REBUILT from the durable record rather than kept a second way. The navigation
+registry gets the same treatment in `observation_context_entries`, which stores
+the contract rule 3 rebuilds an entry from: the context, the entering command,
+its parameter values, the alias and the contract's REQUIRED parameter names.
+
+Both tables are created on open with `CREATE TABLE IF NOT EXISTS`, so an
+existing sidecar gains them the first time new code opens it and no migration
+runs. Both carry `scope_id` and `scope_json`, so
+[evidence erasure](../fastworkflow/observation_offloading/erasure.py) discovers
+them structurally and erases them with their channel, and preserves them for an
+experiment run, without being told they exist. A row written before the tables
+existed simply has no entry, which reads back as UNRECORDED — the state every
+reader already handles — and never as a guessed subject. `reclaim_scope` drops
+both process-local halves and neither row: residency, never evidence.
+
+**The subject is handed to `search_memory` beside the evidence** (`ido-kmm`).
+Because the archived text is the raw response, a stored `list_permissions` page
+is a table of permission rows with nothing in it saying whose permissions they
+are, and the search model is instructed to use only the observation it is given
+— so a subject-specific question could only be refused or answered from the
+requesting agent's unsupported premise. `ObservationSearchSignature` therefore
+takes a third input, `subject`, built by `declaring_subject` from the clause
+recorded for that alias. It keeps three states apart: the recorded clause, the
+recorded EMPTY clause (the command ran at the workflow root, which declares no
+subject), and UNRECORDED, which says so and tells the model not to infer one.
+The metadata travels beside the evidence and never inside it, so
+`text_sha256` still covers exactly the bytes the command returned; and it is
+paid for out of the same `search_observation_max_bytes` budget the evidence is
+cut to (`evidence_max_bytes`), because the bound exists to fit the search
+model's window and the whole input is what the provider measures.
+
 **Handles a command can page.** The same `O` alias identifies a stored, pageable
 copy of a listing when the producing command declares one: see
 [Result handles](result_handles.md). Search answers questions inside one

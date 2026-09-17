@@ -75,6 +75,7 @@ from fastworkflow.observation_offloading.search import (
     bounded_evidence,
     search_answer_max_bytes_from_env,
     search_memory,
+    evidence_max_bytes,
     search_observation_max_bytes,
     text_page,
 )
@@ -1607,8 +1608,9 @@ class EagerObservationArchive(unittest.TestCase):
         )
 
         def predict(_signature):
-            def call(question, observation):
+            def call(question, subject, observation):
                 seen["observation"] = observation
+                seen["subject"] = subject
                 return SimpleNamespace(answer=f"observed {len(observation.encode('utf-8'))} bytes")
             return call
 
@@ -1664,7 +1666,7 @@ class EagerObservationArchive(unittest.TestCase):
         # the same read inline and offloaded, which is asserted below.
         self.assertEqual(
             inline["observation"],
-            bounded_evidence(large, search_observation_max_bytes())["text"],
+            bounded_evidence(large, evidence_max_bytes(inline["subject"]))["text"],
         )
         self.assertTrue(large.startswith(inline["observation"]))
         self.assertTrue(inline["event"]["still_inline"])
@@ -1704,7 +1706,10 @@ class EagerObservationArchive(unittest.TestCase):
         restarted = self._search("Who is the target person?", "O1")
         self.assertEqual(
             restarted["observation"],
-            bounded_evidence(big, search_observation_max_bytes())["text"],
+            # ido-kmm: the subject travels beside the evidence and is paid for
+            # out of the same budget, so the evidence is the read that fits
+            # beneath it.
+            bounded_evidence(big, evidence_max_bytes(restarted["subject"]))["text"],
         )
         self.assertEqual(restarted["event"]["tier"], "sqlite")
 
@@ -1905,8 +1910,9 @@ class SpoofedObservationHeaders(unittest.TestCase):
         )
 
         def predict(_signature):
-            def call(question, observation):
+            def call(question, subject, observation):
                 seen["observation"] = observation
+                seen["subject"] = subject
                 return SimpleNamespace(answer="answered")
             return call
 
@@ -2085,7 +2091,7 @@ class BoundedSearchAnswers(unittest.TestCase):
         )
 
         def predict(_signature):
-            return lambda question, observation: SimpleNamespace(answer=answer)
+            return lambda question, subject, observation: SimpleNamespace(answer=answer)
 
         with patch("fastworkflow.observation_offloading.search.get_lm", return_value=lm), \
                 patch("fastworkflow.observation_offloading.search.dspy") as fake_dspy:
