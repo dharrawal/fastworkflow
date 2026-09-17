@@ -18,9 +18,11 @@ import os
 import pytest
 
 from fastworkflow.model_pipeline_training import (
+    MAX_AMBIGUITY_THRESHOLD,
     SINGLE_LABEL_RESOLUTION_FLOOR,
     TIER_AMBIGUITY_MIN_SEPARATION,
     floored_large_ambiguous_threshold,
+    resolvable_ambiguity_ceiling,
     separated_tiny_ambiguous_threshold,
     write_ambiguity_thresholds,
 )
@@ -164,3 +166,80 @@ def test_the_writer_refuses_to_publish_a_collapsed_pair(tmp_path, monkeypatch):
             str(tmp_path / "Broken"), 0.6, _stats(0.6, 0.9), _stats(0.7, 0.95)
         )
     assert not os.path.exists(tmp_path / "Broken" / "tiny_ambiguous_threshold.json")
+
+
+# ---------------------------------------------------------------------------
+# ido-ik6 (F13): a tier threshold at or above the flat cap must still publish.
+#
+# `find_optimal_threshold` sweeps `linspace(failed_mean, successful_mean, 20)` and
+# picks the best point, so a context whose tiny tier is confidently separated
+# legitimately selects a tier threshold at or above `MAX_AMBIGUITY_THRESHOLD`. The
+# statistics below are of that shape: a failed mean of 0.6 and a successful mean of
+# 0.997 put the top of the sweep at 0.997, so 0.99 and 0.995 are points the sweep
+# can actually return. Clamping the ambiguity threshold to a flat 0.99 there made
+# the writer raise inside `train()`'s per-context loop and abort training for the
+# whole workflow.
+# ---------------------------------------------------------------------------
+CONFIDENT_TINY = _stats(0.6, 0.997)
+CONFIDENT_LARGE = _stats(0.7, 0.99)
+
+
+@pytest.mark.parametrize("tier", [0.99, 0.995, 0.997, 0.9999])
+def test_a_tier_at_or_above_the_flat_cap_publishes_a_separated_pair(tmp_path, tier):
+    """The headline regression: no ValueError for a tier the sweep can pick."""
+    ctx_dir = tmp_path / f"Confident{tier}"
+    tiny_amb, large_amb = write_ambiguity_thresholds(
+        str(ctx_dir), tier, CONFIDENT_TINY, CONFIDENT_LARGE
+    )
+
+    on_disk = json.load(open(ctx_dir / "tiny_ambiguous_threshold.json"))
+    assert on_disk['confidence_threshold'] == tiny_amb
+    assert json.load(open(ctx_dir / "large_ambiguous_threshold.json"))[
+        'confidence_threshold'
+    ] == large_amb
+
+    # Usable, not merely written: strictly above the tier so an ambiguity is
+    # reachable, and strictly below certainty so a resolution is reachable too.
+    assert tiny_amb > tier
+    assert tiny_amb < 1.0
+    assert tiny_amb >= SINGLE_LABEL_RESOLUTION_FLOOR
+    assert tiny_amb == pytest.approx((tier + 1.0) / 2.0)
+
+
+def test_the_band_above_the_flat_cap_is_the_remaining_headroom_halved():
+    """The ceiling above the cap is the midpoint between the tier and certainty."""
+    assert resolvable_ambiguity_ceiling(0.99) == pytest.approx(0.995)
+    assert resolvable_ambiguity_ceiling(0.995) == pytest.approx(0.9975)
+    assert separated_tiny_ambiguous_threshold(0.99, CONFIDENT_TINY) == pytest.approx(0.995)
+    assert separated_tiny_ambiguous_threshold(0.995, CONFIDENT_TINY) == pytest.approx(0.9975)
+
+
+@pytest.mark.parametrize(
+    "tier, expected",
+    [
+        (0.90, 0.95),                      # tier + minimum separation, cap not binding
+        (0.94, MAX_AMBIGUITY_THRESHOLD),   # cap binds, exactly as before
+        (0.985, MAX_AMBIGUITY_THRESHOLD),  # cap binds with only 0.005 of separation
+        (0.9899, MAX_AMBIGUITY_THRESHOLD),  # the last tier below the boundary
+        (-1, 0.7985),  # find_optimal_threshold's sentinel: the sweep midpoint binds
+    ],
+)
+def test_a_tier_below_the_flat_cap_is_unchanged(tmp_path, tier, expected):
+    """Every tier under `MAX_AMBIGUITY_THRESHOLD` keeps the value it had before
+    ido-ik6, so the fix is confined to the range that used to abort training."""
+    assert resolvable_ambiguity_ceiling(tier) == MAX_AMBIGUITY_THRESHOLD
+    tiny_amb, _large = write_ambiguity_thresholds(
+        str(tmp_path / f"Tier{tier}"), tier, CONFIDENT_TINY, CONFIDENT_LARGE
+    )
+    assert tiny_amb == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("tier", [1.0, 1.5])
+def test_a_genuinely_collapsed_pair_still_refuses_to_publish(tmp_path, tier):
+    """A tier threshold at or above certainty is not something a sweep over softmax
+    probabilities can return: nothing can sit above it and still be reachable, so the
+    writer must keep refusing rather than publish an unsatisfiable pair."""
+    ctx_dir = tmp_path / f"Collapsed{tier}"
+    with pytest.raises(ValueError, match="never report an ambiguity"):
+        write_ambiguity_thresholds(str(ctx_dir), tier, CONFIDENT_TINY, CONFIDENT_LARGE)
+    assert not os.path.exists(ctx_dir / "tiny_ambiguous_threshold.json")

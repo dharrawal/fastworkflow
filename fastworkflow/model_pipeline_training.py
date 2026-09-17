@@ -394,6 +394,25 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
 # 0.05 is far above float noise and narrow enough not to undo a deliberately high
 # tier threshold.
 #
+# CEILING (ido-ik6) — `MAX_AMBIGUITY_THRESHOLD` exists so a context can still resolve
+# a single label: an ambiguity threshold at 1.0 would make `confidence >
+# ambiguous_threshold` unsatisfiable. It is a *resolvability* cap, not a second
+# invariant, so it must never be allowed to pull the ambiguity threshold down to or
+# below the tier threshold. `find_optimal_threshold` sweeps up to the tiny tier's
+# measured successful mean, so a confidently separated context legitimately picks a
+# tier threshold at or above 0.99; clamping to a flat 0.99 there collapsed the pair
+# and aborted the whole workflow's training from inside `train()`'s per-context loop.
+# Above that point the cap becomes the midpoint of the headroom that is actually
+# left, `(tier + 1) / 2`: still strictly above the tier threshold, still strictly
+# below certainty, and it halves the resolvable band rather than deleting it. The
+# tier threshold itself is never rewritten to fit the cap, because that number is
+# consumed as the escalation point (`ModelPipeline.predict_batch`: `need_distil =
+# tiny_confidence < self.confidence_threshold`) and was chosen by the sweep to
+# balance F1, NDCG and DistilBERT usage; the ambiguity threshold is consumed only by
+# `CommandRouter.predict_with_details` to choose one label over a candidate list.
+# Moving the cap changes how loudly a very confident tier reports ambiguity; moving
+# the tier would silently re-route traffic between the two models.
+#
 # FLOOR — `SINGLE_LABEL_RESOLUTION_FLOOR = 0.5` is the point at which the model
 # stops putting more posterior mass on the winning label than on everything else
 # combined. Below it a "confident" single label is not supported by the model's own
@@ -407,15 +426,40 @@ SINGLE_LABEL_RESOLUTION_FLOOR = 0.5
 MAX_AMBIGUITY_THRESHOLD = 0.99
 
 
+def resolvable_ambiguity_ceiling(tier_threshold) -> float:
+    """The highest ambiguity threshold that still leaves a context able to resolve.
+
+    `MAX_AMBIGUITY_THRESHOLD` normally, which is what every tier threshold below it
+    has always been clamped to. For a tier threshold at or above that constant — which
+    the sweep can legitimately pick for a well separated context — the flat cap would
+    sit at or under the tier and collapse the pair, so the ceiling becomes the midpoint
+    of the remaining headroom, `(tier + 1) / 2`. That is strictly above any tier below
+    1.0 and strictly below 1.0, so both the separation invariant and resolvability
+    survive. A tier at or above 1.0 is not something any sweep over softmax
+    probabilities can produce; the ceiling then falls at or below it and
+    `write_ambiguity_thresholds` raises, which is the intended treatment of a
+    genuinely collapsed pair.
+    """
+    if tier_threshold is None:
+        return MAX_AMBIGUITY_THRESHOLD
+    tier = float(tier_threshold)
+    # `tier != tier` is the NaN test: a NaN tier keeps the flat cap it has always had
+    # rather than propagating into the written threshold.
+    if tier != tier or tier < 0 or tier < MAX_AMBIGUITY_THRESHOLD:
+        return MAX_AMBIGUITY_THRESHOLD
+    return (tier + 1.0) / 2.0
+
+
 def separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats) -> float:
     """The tiny tier's ambiguity threshold, guaranteed strictly above *tier_threshold*.
 
     Returns the largest of the sweep-interval midpoint, `tier_threshold +
     TIER_AMBIGUITY_MIN_SEPARATION` and `SINGLE_LABEL_RESOLUTION_FLOOR`, clamped below
-    `MAX_AMBIGUITY_THRESHOLD` so a context can still resolve something. A missing
-    statistic (no failures, or no successes, in the held-out split) drops that term
-    rather than the whole computation; the floor is always present, so the result is
-    a usable threshold even when `find_optimal_threshold` returned its -1 sentinel.
+    `resolvable_ambiguity_ceiling(tier_threshold)` so a context can still resolve
+    something. A missing statistic (no failures, or no successes, in the held-out
+    split) drops that term rather than the whole computation; the floor is always
+    present, so the result is a usable threshold even when `find_optimal_threshold`
+    returned its -1 sentinel.
     """
     failed_mean = tiny_stats['failed']['mean']
     successful_mean = tiny_stats['successful']['mean']
@@ -426,7 +470,7 @@ def separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats) -> float:
     if failed_mean is not None and successful_mean is not None:
         candidates.append((float(failed_mean) + float(successful_mean)) / 2.0)
 
-    return min(max(candidates), MAX_AMBIGUITY_THRESHOLD)
+    return min(max(candidates), resolvable_ambiguity_ceiling(tier_threshold))
 
 
 def floored_large_ambiguous_threshold(large_stats) -> float:
@@ -447,7 +491,12 @@ def write_ambiguity_thresholds(
     real files for every context without loading a model or a routing definition.
     Raises `ValueError` rather than publishing a collapsed pair, because a silently
     collapsed threshold is the exact defect R3 exists to prevent and it survived
-    unnoticed in a published artifact set for a fortnight.
+    unnoticed in a published artifact set for a fortnight. The guard is reserved for a
+    pair no legitimate sweep could produce — a tier threshold at or above certainty, or
+    a margin computation that stopped separating (ido-ik6). A tier threshold the sweep
+    can actually pick, including one at or above `MAX_AMBIGUITY_THRESHOLD`, is always
+    published, because aborting `train()` for the whole workflow is a far worse answer
+    to a well separated context than a narrow ambiguity band is.
     """
     tiny_ambiguous_threshold = separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats)
     large_ambiguous_threshold = floored_large_ambiguous_threshold(large_stats)
