@@ -1,8 +1,10 @@
 """Answer evidence questions using exactly one complete archived observation."""
 from __future__ import annotations
 
+from fractions import Fraction
 from typing import Any, Optional
 import hashlib
+import logging
 import re
 import time
 
@@ -22,6 +24,13 @@ from fastworkflow.observation_offloading.state import (
     stored_handles,
 )
 
+logger = logging.getLogger(__name__)
+
+#: The reference page geometry of an observation read: one 4 KB page, at most
+#: three of them in a single search. Their product is no longer an independent
+#: contract -- it is the REFERENCE VALUE of ``SEARCH_OBSERVATION`` below, which
+#: reproduces it exactly at the reference window and scales it with the search
+#: model everywhere else.
 DEFAULT_PAGE_BYTES = 4096
 SEARCH_MEMORY_MAX_PAGES = 3
 # A search answer is model output capped only by the 2,048-token completion
@@ -36,6 +45,96 @@ SEARCH_ANSWER_MAX_BYTES = context_budget.REFERENCE_SEARCH_ANSWER_MAX_BYTES
 SEARCH_ANSWER_MAX_BYTES_ENV = context_budget.SEARCH_ANSWER.override_env
 # Below this the marking would not fit inside the budget it is describing.
 SEARCH_ANSWER_MIN_BYTES = context_budget.SEARCH_ANSWER.floor
+
+#: The model that actually reads the observation. The evidence is cut to fit
+#: ITS window, not the agent's: ``context_budget`` resolves ``LLM_AGENT``, which
+#: is routinely a different model with a different window, and sizing one
+#: model's prompt from another model's window is the failure this bound exists
+#: to prevent.
+SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
+
+#: How much archived observation ONE ``search_memory`` call may hand the search
+#: model. A fixed fraction of that model's context window, on the
+#: ``fastworkflow.context_budget`` pattern, so moving the search model moves the
+#: bound and no deployment has to set a byte count. The fraction is pinned to
+#: reproduce the declared page geometry EXACTLY at the reference window:
+#: 131,072 tokens x 4 bytes/token x 3/128 = 12,288 = ``DEFAULT_PAGE_BYTES`` x
+#: ``SEARCH_MEMORY_MAX_PAGES``. Its floor is one page: below that a search could
+#: not read a single page of evidence, which is not a search.
+SEARCH_OBSERVATION = context_budget.BudgetSpec(
+    name="search_observation_max_bytes",
+    fraction=Fraction(3, 128),
+    override_env="FW_SEARCH_OBSERVATION_MAX_BYTES",
+    floor=DEFAULT_PAGE_BYTES,
+    what="one archived observation handed to the observation-search model",
+)
+SEARCH_OBSERVATION_MAX_BYTES_ENV = SEARCH_OBSERVATION.override_env
+REFERENCE_SEARCH_OBSERVATION_MAX_BYTES = SEARCH_OBSERVATION.reference_bytes  # 12,288
+
+#: The marker that types a search observation whose EVIDENCE was cut, and the
+#: marker that types the over-window outcome. Both are checked by
+#: ``is_bounded_evidence_observation`` / ``is_over_window_observation`` rather
+#: than by callers re-spelling the wording.
+BOUNDED_EVIDENCE_MARK = "[search_memory BOUNDED EVIDENCE:"
+OVER_WINDOW_MARK = "[search_memory INPUT OVER WINDOW:"
+
+#: Names the providers give the prompt-too-long condition, and the words they
+#: use when they do not map it to a class.
+CONTEXT_WINDOW_ERROR_NAMES = frozenset({"ContextWindowExceededError"})
+CONTEXT_WINDOW_ERROR_PHRASES = (
+    "context window",
+    "context_length_exceeded",
+    "maximum context length",
+    "prompt is too long",
+    "reduce the length",
+    "too many tokens",
+)
+
+
+def search_window_tokens() -> tuple[int, str]:
+    """``(tokens, source)`` for the OBSERVATION-SEARCH model's own window.
+
+    The resolution order ``context_budget`` documents, asked about
+    ``LLM_OBSERVATION_SEARCH`` instead of ``LLM_AGENT``: the explicit
+    ``FW_MODEL_CONTEXT_TOKENS`` setting still wins because it is the
+    deployment's statement about the whole stack, then the search model's own
+    litellm metadata, then whatever ``context_budget`` resolves. The metadata
+    lookup is ``context_budget``'s cached one on purpose -- a second
+    tokens-from-a-model path is precisely what that module exists to prevent.
+    """
+    if context_budget.env_value(context_budget.MODEL_CONTEXT_TOKENS_ENV):
+        return context_budget.context_window_tokens()
+    model = context_budget.env_value(SEARCH_MODEL_ENV)
+    if model:
+        tokens = context_budget._model_window_tokens(model)
+        if tokens is not None:
+            return tokens, f"{context_budget.SOURCE_MODEL_METADATA}:{model}"
+    return context_budget.context_window_tokens()
+
+
+def search_observation_max_bytes() -> int:
+    """UTF-8 bytes of one archived observation a single search call may read.
+
+    ``FW_SEARCH_OBSERVATION_MAX_BYTES`` is a tuning override on the same terms
+    as every other budget: an override below the floor is refused with a
+    warning and the derived value stands.
+    """
+    derived = SEARCH_OBSERVATION.bytes_for(search_window_tokens()[0])
+    raw = context_budget.env_value(SEARCH_OBSERVATION.override_env)
+    if not raw:
+        return derived
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an integer; using the derived budget %d",
+                       SEARCH_OBSERVATION.override_env, raw, derived)
+        return derived
+    if value < SEARCH_OBSERVATION.floor:
+        logger.warning("%s=%d is below the minimum %d; using the derived budget %d",
+                       SEARCH_OBSERVATION.override_env, value,
+                       SEARCH_OBSERVATION.floor, derived)
+        return derived
+    return value
 
 
 def search_answer_max_bytes_from_env() -> int:
@@ -132,6 +231,142 @@ def bounded_answer_marking(
     )
 
 
+def bounded_evidence(text: str, max_bytes: int) -> dict[str, Any]:
+    """The leading ``max_bytes`` UTF-8 bytes of *text*, as a HARD byte bound.
+
+    Built out of ``text_page`` so the cuts are the audited ones -- on a UTF-8
+    character boundary, preferring the end of a line -- but built out of
+    SUCCESSIVE pages rather than one, because one page does not spend the
+    budget. ``text_page`` ends just after the LAST newline inside its window, so
+    a single call on ``"holder uid label\n" + 30 KB of one unbroken line``
+    returns 17 bytes and leaves the other 12 KB of budget unused: the search
+    would then be answered from a heading. Paging on from where the previous
+    page stopped fills the budget in that case and is a no-op in the ordinary
+    row-per-line case.
+
+    The last page can end mid-line. That tail is dropped when it is shorter
+    than one page, so a row is not handed to the model as a plausible-looking
+    shorter row; it is KEPT when it is longer, because on a text with no line
+    structure dropping it would throw the whole read away.
+
+    ``bounded`` is False exactly when the whole text is returned, and the
+    returned ``text`` is then the original string, byte-identical: an
+    observation under the bound is passed through, not reconstructed.
+    """
+    total_bytes = len(text.encode("utf-8"))
+    if total_bytes <= max_bytes:
+        return {"text": text, "shown_bytes": total_bytes,
+                "total_bytes": total_bytes, "bounded": False}
+    pages: list[str] = []
+    start = 0
+    while start < max_bytes:
+        remaining = max_bytes - start
+        page = text_page(text, start, remaining)
+        if page["end_byte"] - start > remaining and remaining > 1:
+            # The newline this window ends on is the byte AT the budget, which
+            # is one past it. Ask for one byte less rather than overrun.
+            page = text_page(text, start, remaining - 1)
+        if page["end_byte"] <= start or page["end_byte"] - start > remaining:
+            break
+        pages.append(page["text"])
+        start = page["end_byte"]
+        if not page["has_more"]:
+            break
+    shown = "".join(pages)
+    if not shown.endswith("\n"):
+        newline = shown.rfind("\n")
+        tail_bytes = len(shown[newline + 1:].encode("utf-8"))
+        if newline >= 0 and tail_bytes < DEFAULT_PAGE_BYTES:
+            shown = shown[: newline + 1]
+    shown_bytes = len(shown.encode("utf-8"))
+    return {
+        "text": shown,
+        "shown_bytes": shown_bytes,
+        "total_bytes": total_bytes,
+        "bounded": shown_bytes < total_bytes,
+    }
+
+
+def bounded_evidence_marking(
+    *, alias: str, command: str, shown_bytes: int, total_bytes: int
+) -> str:
+    """Say that the EVIDENCE was cut, by how much, and what actually reaches it.
+
+    The counterpart of ``bounded_answer_marking`` for the other end of the
+    call: there the model's answer did not fit the trajectory, here the
+    archived observation did not fit the search model's window. It states the
+    omission in bytes, denies the absence inference a partial read would
+    otherwise invite, and gives an action that can actually work. That action is
+    NOT "ask a narrower question": every search of an observation reads it from
+    byte 0, so the same observation answers from the same bytes however the
+    question is phrased. The bytes change only when the observation does, which
+    means re-running the command that produced it.
+    """
+    action = (f"re-run {command} with a narrower filter or a smaller page"
+              if command else
+              "re-run the command that produced it with a narrower filter")
+    return (
+        f"{BOUNDED_EVIDENCE_MARK} answered from the first {shown_bytes:,} of "
+        f"{total_bytes:,} UTF-8 bytes of {alias}; {total_bytes - shown_bytes:,} bytes "
+        f"were NOT read. This is not a search of the whole observation, and nothing "
+        f"missing from the answer is thereby absent from {alias}. Re-asking {alias} "
+        f"reads the same first bytes however the question is worded; to reach the "
+        f"rest, {action} and search the new observation.]"
+    )
+
+
+def is_bounded_evidence_observation(text: str) -> bool:
+    """True when this search observation was answered from a partial read."""
+    return BOUNDED_EVIDENCE_MARK in text
+
+
+def is_context_window_error(error: BaseException) -> bool:
+    """True when the provider refused the prompt for being too long.
+
+    Matched on the exception's own class chain first -- litellm raises
+    ``ContextWindowExceededError`` -- and on the message only as a fallback,
+    because a provider that does not map to that class still says so in words.
+    The message is INSPECTED here, never printed: it can carry payload or
+    credentials.
+    """
+    if any(cls.__name__ in CONTEXT_WINDOW_ERROR_NAMES for cls in type(error).__mro__):
+        return True
+    message = str(error).lower()
+    return any(phrase in message for phrase in CONTEXT_WINDOW_ERROR_PHRASES)
+
+
+def over_window_observation(
+    *, alias: str, command: str, shown_bytes: int, total_bytes: int, max_bytes: int
+) -> str:
+    """A context-window refusal, stated as something the agent can act on.
+
+    Not ``failed (ContextWindowExceededError)``: that names a condition the
+    agent cannot do anything with, and the only move it suggests is the retry
+    that will fail identically. This is a typed outcome -- ``OVER_WINDOW_MARK``
+    -- which says what was sent, that the same call cannot succeed, and the
+    moves that can: a different observation for the agent, a bigger search model
+    or a lower bound for the operator.
+    """
+    scale = (f"the first {shown_bytes:,} of {total_bytes:,} UTF-8 bytes"
+             if shown_bytes < total_bytes else f"all {total_bytes:,} UTF-8 bytes")
+    narrower = (f" Re-run {command} with a narrower filter or a smaller page and "
+                f"search the new observation." if command else "")
+    return (
+        f"{OVER_WINDOW_MARK} {alias} was sent to the observation-search model as "
+        f"{scale}, the {max_bytes:,}-byte bound derived from that model's own context "
+        f"window, and the model still refused the prompt as too long. No evidence "
+        f"answer was produced. Repeating this call sends the same bytes and fails the "
+        f"same way, so do not retry it unchanged.{narrower} Operator: lower "
+        f"{SEARCH_OBSERVATION.override_env} or point {SEARCH_MODEL_ENV} at a model "
+        f"with a larger context window.]"
+    )
+
+
+def is_over_window_observation(text: str) -> bool:
+    """True when a search ended in the typed context-window outcome."""
+    return text.startswith(OVER_WINDOW_MARK)
+
+
 def present_answer(
     answer: str,
     *,
@@ -140,6 +375,7 @@ def present_answer(
     archive_key: str,
     digest: str,
     max_bytes: int,
+    evidence_marking: str = "",
 ) -> tuple[str, Optional[dict[str, Any]]]:
     """The observation text for one answer, bounded to ``max_bytes`` if needed.
 
@@ -147,22 +383,30 @@ def present_answer(
     whole answer fits, and in that case the text is exactly what an unbounded
     ``search_memory`` returned before this bound existed.
 
+    ``evidence_marking``, when the observation could not be read whole, is
+    appended as the last line and is PAID FOR out of ``max_bytes``: the whole
+    search observation stays inside the one budget it has, whichever of the two
+    ends had to be cut. It also marks the header, so a reader learns from the
+    first line that this observation is not a complete rendering.
+
     The cut is taken by ``text_page``, so it lands just after the last newline
     inside the window and otherwise on a UTF-8 character boundary: an
     identifier the answer offers as evidence is never split mid-token, and a
     row is never halved into a plausible-looking shorter one.
     """
-    header = answer_header(alias, tier)
+    suffix = f"\n{evidence_marking}" if evidence_marking else ""
+    suffix_bytes = len(suffix.encode("utf-8"))
+    header = answer_header(alias, tier, bounded=bool(evidence_marking))
     total_bytes = len(answer.encode("utf-8"))
-    if len(header.encode("utf-8")) + total_bytes <= max_bytes:
-        return header + answer, None
+    if len(header.encode("utf-8")) + total_bytes + suffix_bytes <= max_bytes:
+        return header + answer + suffix, None
     header = answer_header(alias, tier, bounded=True)
     # Reserve the marking at its widest. It prints three numbers -- shown,
     # total and omitted -- and each of the three is at most as wide as the
     # total, so rendering it with shown = total (omitted collapses to "0") and
     # paying for omitted at the total's width bounds every real rendering.
     widest = len(f"{total_bytes:,}") - len("0")
-    reserve = len(header.encode("utf-8")) + 1 + widest + len(
+    reserve = suffix_bytes + len(header.encode("utf-8")) + 1 + widest + len(
         bounded_answer_marking(alias=alias, archive_key=archive_key, digest=digest,
                                shown_bytes=total_bytes, total_bytes=total_bytes
                                ).encode("utf-8")
@@ -173,7 +417,7 @@ def present_answer(
         alias=alias, archive_key=archive_key, digest=digest,
         shown_bytes=shown_bytes, total_bytes=total_bytes,
     )
-    text = f"{header}{page['text'].rstrip(chr(10))}\n{marking}"
+    text = f"{header}{page['text'].rstrip(chr(10))}\n{marking}{suffix}"
     return text, {
         "answer_bounded": True,
         "answer_utf8_bytes": total_bytes,
@@ -246,6 +490,7 @@ def bound_answer_for_trajectory(
     scope: RuntimeHandleScope,
     store: RuntimeHandleArchive,
     max_bytes: Optional[int] = None,
+    evidence_marking: str = "",
 ) -> tuple[str, Optional[dict[str, Any]]]:
     """Archive the complete answer, then present at most ``max_bytes`` of it.
 
@@ -258,9 +503,11 @@ def bound_answer_for_trajectory(
     """
     if max_bytes is None:
         max_bytes = search_answer_max_bytes_from_env()
-    header_bytes = len(answer_header(alias, tier).encode("utf-8"))
-    if header_bytes + len(answer.encode("utf-8")) <= max_bytes:
-        return answer_header(alias, tier) + answer, None
+    suffix = f"\n{evidence_marking}" if evidence_marking else ""
+    header = answer_header(alias, tier, bounded=bool(evidence_marking))
+    if (len(header.encode("utf-8")) + len(answer.encode("utf-8"))
+            + len(suffix.encode("utf-8"))) <= max_bytes:
+        return header + answer + suffix, None
     digest = hashlib.sha256(answer.encode("utf-8")).hexdigest()
     key = search_answer_key(alias, next_search_answer_sequence(scope))
     try:
@@ -272,9 +519,10 @@ def bound_answer_for_trajectory(
                       "reason": "persistence_failed_complete_answer_retained",
                       "error": type(error).__name__,
                       "answer_utf8_bytes": len(answer.encode("utf-8"))})
-        return answer_header(alias, tier) + answer, None
+        return header + answer + suffix, None
     return present_answer(answer, alias=alias, tier=tier, archive_key=key,
-                          digest=digest, max_bytes=max_bytes)
+                          digest=digest, max_bytes=max_bytes,
+                          evidence_marking=evidence_marking)
 
 
 def search_memory(
@@ -311,9 +559,24 @@ def search_memory(
                       "alias": wanted, "status": "missing", "still_inline": still_inline})
         return f"search_memory: no matching offloaded handle {wanted} in this turn."
     query = f"{reasoning.strip().rstrip('.')}. {question.strip()}" if reasoning.strip() else question.strip()
+    # The evidence is cut to the search model's own budget BEFORE the call, not
+    # hoped to fit it. An execute observation that used no result handles is
+    # archived at full size, so without this an arbitrarily large text is sent
+    # whole on every search of it -- paid for again on every repeat, and past
+    # some size refused outright by the provider.
+    max_observation_bytes = search_observation_max_bytes()
+    evidence = bounded_evidence(handle["text"], max_observation_bytes)
+    command = str(handle.get("command") or "")
+    evidence_marking = bounded_evidence_marking(
+        alias=wanted, command=command,
+        shown_bytes=evidence["shown_bytes"], total_bytes=evidence["total_bytes"],
+    ) if evidence["bounded"] else ""
     event = {"kind": "search_memory", "scope_id": selected_scope.scope_id,
              "alias": wanted, "tier": tier, "still_inline": still_inline, "question": question,
-             "reasoning": reasoning, "observation_bytes": len(handle["text"].encode("utf-8")),
+             "reasoning": reasoning, "observation_bytes": evidence["total_bytes"],
+             "observation_sent_bytes": evidence["shown_bytes"],
+             "observation_bounded": evidence["bounded"],
+             "observation_max_bytes": max_observation_bytes,
              "text_sha256": handle["text_sha256"]}
     started = time.monotonic()
     try:
@@ -323,7 +586,7 @@ def search_memory(
         # the surrounding server disables DSPy history.
         with dspy.context(lm=lm, disable_history=False, max_history_size=1):
             prediction = dspy.Predict(ObservationSearchSignature)(
-                question=query, observation=handle["text"])
+                question=query, observation=evidence["text"])
         history = lm.history[-1] if lm.history else {}
         if completion_was_truncated(history):
             record_event({**event, "status": "incomplete", "reason": "completion_limit"})
@@ -334,6 +597,19 @@ def search_memory(
         if not answer:
             raise ValueError("observation search returned an empty answer")
     except Exception as error:
+        if is_context_window_error(error):
+            # A typed outcome, not a generic failure: the agent is told the
+            # retry cannot work and what does, instead of being handed a
+            # provider class name it can only repeat the call against.
+            record_event({**event, "status": "over_window",
+                          "reason": "context_window_exceeded",
+                          "error": type(error).__name__})
+            return over_window_observation(
+                alias=wanted, command=command,
+                shown_bytes=evidence["shown_bytes"],
+                total_bytes=evidence["total_bytes"],
+                max_bytes=max_observation_bytes,
+            )
         record_event({**event, "status": "error", "error": type(error).__name__})
         # Do not print provider exceptions: they may include credentials or payloads.
         return (f"search_memory: search of {wanted} failed ({type(error).__name__}); "
@@ -341,7 +617,8 @@ def search_memory(
                 "LITELLM_API_KEY_OBSERVATION_SEARCH configuration or retry.")
     history = lm.history[-1] if lm.history else {}
     text, bound = bound_answer_for_trajectory(
-        answer, alias=wanted, tier=tier, scope=selected_scope, store=store)
+        answer, alias=wanted, tier=tier, scope=selected_scope, store=store,
+        evidence_marking=evidence_marking)
     record_event({**event, "status": "answered", "model": lm.model,
                   "latency_ms": round((time.monotonic() - started) * 1000),
                   "usage": {key: (history.get("usage") or {}).get(key) for key in

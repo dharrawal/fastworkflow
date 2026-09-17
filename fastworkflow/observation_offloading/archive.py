@@ -46,6 +46,10 @@ class RuntimeHandleScope:
 
 
 class RuntimeHandleArchive:
+    #: This one holds a file it can read and write. See
+    #: ``UnavailableHandleArchive`` for the one that does not.
+    available = True
+
     def __init__(self, db_path: str) -> None:
         self.db_path = os.path.abspath(os.path.expanduser(db_path))
         parent = os.path.dirname(self.db_path)
@@ -169,3 +173,49 @@ class RuntimeHandleArchive:
             "text": payload.decode("utf-8"),
             "text_sha256": digest,
         }
+
+
+class UnavailableHandleArchive:
+    """The archive this process could not open, inert and honest about it.
+
+    Opening or creating the sidecar can fail for reasons that have nothing to do
+    with the turn about to run: a read-only state root, a permission bit, a path
+    that holds something which is not a database. Evidence storage is an
+    availability optimisation, and the surrounding design already says what a
+    storage failure costs -- ``archive_execute_observations`` and
+    ``compact_trajectory`` record the refusal and leave the observation inline.
+    Before ``ido-t5x`` an INITIALISATION failure cost the whole turn instead,
+    because it raised out of the agent's constructor and the persist-before-label
+    recovery never got to run.
+
+    So the failure is degraded to the policy the writes already have, rather
+    than to a second one. Every write refuses with the ``PersistenceError`` the
+    write path expects, so the caller records ``archive_refused`` /
+    ``offload_refused`` per alias and keeps the original text; every read answers
+    "nothing stored here", which is the same answer as an alias that was never
+    archived, so ``search_memory`` reports a miss instead of raising. Nothing is
+    ever marked archived, so no part of the runtime claims durability this
+    object cannot provide.
+
+    ``db_path`` is the path that was WANTED, not a substitute: no evidence is
+    silently redirected to another file, and the sidecar stays absent, which is
+    exactly what ``observation_offloading.erasure`` reports empty for.
+    """
+
+    available = False
+
+    def __init__(self, db_path: str, error: BaseException) -> None:
+        self.db_path = os.path.abspath(os.path.expanduser(db_path))
+        self.error = error
+        self.reason = f"{type(error).__name__}: {error}"
+
+    def persist(self, scope: RuntimeHandleScope, **_: Any) -> None:
+        raise PersistenceError(
+            f"runtime handle archive unavailable at {self.db_path}: {self.reason}"
+        )
+
+    def get(self, scope: RuntimeHandleScope, alias: str) -> Optional[dict[str, Any]]:
+        return None
+
+    def list(self, scope: RuntimeHandleScope, alias: str = "") -> list[dict[str, Any]]:
+        return []

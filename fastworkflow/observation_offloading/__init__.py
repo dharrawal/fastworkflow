@@ -9,11 +9,15 @@ answer-time rehydration. See ``docs/observation_search.md``.
 """
 from __future__ import annotations
 
-from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.observation_offloading.agent import (
+    build_tool_agent,
+    open_handle_archive,
+)
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
     RuntimeHandleArchive,
     RuntimeHandleScope,
+    UnavailableHandleArchive,
 )
 from fastworkflow.observation_offloading.compact import (
     MIN_OFFLOAD_SAVING_BYTES,
@@ -33,7 +37,9 @@ from fastworkflow.observation_offloading.continuation import (
 )
 from fastworkflow.observation_offloading.labels import (
     alias_line,
+    annotated_observation,
     context_clause,
+    escape_response,
     is_search_answer_key,
     offload_label,
     offload_saving_bytes,
@@ -76,9 +82,11 @@ __all__ = [
     "RuntimeHandleScope",
     "SEARCH_ANSWER_MAX_BYTES",
     "StructuredContinuationReAct",
+    "UnavailableHandleArchive",
     "alias_line",
-    "context_clause",
     "annotate_execute_observations",
+    "annotated_observation",
+    "context_clause",
     "archive_execute_observations",
     "archived_search_answer",
     "bounded_answer_marking",
@@ -86,6 +94,7 @@ __all__ = [
     "classify_against_steps",
     "clear_hot_handles",
     "compact_trajectory",
+    "escape_response",
     "event_buffer_max_from_env",
     "execute_ordinals",
     "hot_payload_bytes",
@@ -95,6 +104,7 @@ __all__ = [
     "observation_inline",
     "offload_label",
     "offload_saving_bytes",
+    "open_handle_archive",
     "present_answer",
     "printed_alias",
     "printed_context",

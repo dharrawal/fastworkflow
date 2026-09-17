@@ -52,7 +52,7 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleScope,
 )
 from fastworkflow.observation_offloading.labels import (
-    alias_line,
+    annotated_observation,
     is_offload_label,
     label_alias,
     printed_alias,
@@ -248,11 +248,16 @@ def rehydrated_label(
     context clause recorded for it at dispatch (``ido-8ps.13``). An alias with no
     recorded clause prints the plain A1 line: the clause is presentation and its
     absence is never guessed at.
+
+    ``annotated_observation`` joins the two, exactly as the compaction hook did
+    when the step completed, so a response whose own first line is shaped like
+    a handle line is quoted here too and reads back as the same response
+    (``ido-cku``).
     """
     text = archived_observation(alias, scope=scope, archive=archive)
     if text is None:
         return None
-    return alias_line(alias, context_clause_of(scope, alias) or "") + text
+    return annotated_observation(alias, context_clause_of(scope, alias) or "", text)
 
 
 # ---------------------------------------------------------------------------

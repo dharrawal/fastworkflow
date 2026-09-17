@@ -7,7 +7,11 @@ from typing import Any, Callable, Optional
 import fastworkflow
 from fastworkflow import state_paths
 from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
+from fastworkflow.observation_offloading.archive import (
+    RuntimeHandleArchive,
+    RuntimeHandleScope,
+    UnavailableHandleArchive,
+)
 from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.continuation import (
     DEFAULT_MAX_ITERS,
@@ -85,6 +89,47 @@ def build_compacting_step(
     return compacting_step
 
 
+def open_handle_archive(
+    archive_path: str, *, scope: Optional[RuntimeHandleScope] = None
+) -> Any:
+    """The turn archive, or an inert stand-in and one event saying why (ido-t5x).
+
+    Opening or creating the sidecar is the FIRST thing agent construction does
+    that touches the disk, and it used to be the only one allowed to fail the
+    turn: a read-only state root, a permission bit or a file that is not a
+    database raised out of ``RuntimeHandleArchive`` and no agent was built at
+    all, so the persist-before-label recovery -- the design's answer to exactly
+    this class of failure -- never ran.
+
+    Evidence storage is an optimisation, so an initialisation failure is
+    degraded through the policy the WRITES already have rather than a second one
+    invented here: the observation stays inline, the refusal is recorded, and
+    the turn proceeds. Reported once, at the seam that failed; the per-alias
+    ``archive_refused`` / ``offload_refused`` events that follow are the
+    ordinary write-degradation record and say the same thing per observation.
+    """
+    try:
+        return RuntimeHandleArchive(archive_path)
+    except Exception as error:  # noqa: BLE001
+        unavailable = UnavailableHandleArchive(archive_path, error)
+        logger.warning(
+            "observation offloading has no archive at %s: %s: %s; "
+            "observations stay inline for this agent",
+            unavailable.db_path, type(error).__name__, error,
+        )
+        record_event(
+            {
+                "kind": "archive_unavailable",
+                "scope_id": getattr(scope, "scope_id", None),
+                "db_path": unavailable.db_path,
+                "reason": "initialization_failed_observations_inline",
+                "error": type(error).__name__,
+                "detail": str(error)[:300],
+            }
+        )
+        return unavailable
+
+
 def current_search_reasoning(agent: Any) -> str:
     """Read the current search step, not an earlier completed tool's thought."""
     trajectory = agent.current_trajectory
@@ -145,7 +190,11 @@ def build_tool_agent(
     active_workflow = getter() if callable(getter) else None
     workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
     archive_path = state_paths.observability_db(workflow_path) + ".offload-handles.sqlite3"
-    selected_archive = RuntimeHandleArchive(archive_path)
+    # An archive that cannot be opened degrades; it does not stop the agent
+    # being built (ido-t5x). ``build_compacting_step`` catches compaction
+    # failures, and this is the one storage failure that used to happen too
+    # early for it to catch.
+    selected_archive = open_handle_archive(archive_path, scope=scope)
     agent: Any = None
 
     compacting_step = build_compacting_step(

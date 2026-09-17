@@ -10,6 +10,7 @@ from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import (
     alias_line,
+    annotated_observation,
     estimated_tokens,
     is_offload_label,
     label_alias,
@@ -110,6 +111,17 @@ def execute_ordinals(
     return found
 
 
+def _command_response(text: str, alias: str) -> str:
+    """The exact command response inside an observation slot.
+
+    Only the handle line this module printed for *alias* is presentation, so
+    only that line is removed. A first line naming a different alias is the
+    backend's own text (``ido-cku``): stripping it would drop a line of the
+    response from the archive, its digest and every search of it.
+    """
+    return strip_alias_line(text) if printed_alias(text) == alias else text
+
+
 def annotate_execute_observations(
     trajectory: dict[str, Any],
     *,
@@ -130,9 +142,17 @@ def annotate_execute_observations(
     so stored text and its digest stay comparable with observations recorded
     before this existed.
 
-    An alias, once printed, is never rewritten: a surviving step's ordinal
-    cannot change, so a disagreement is a bug, not a renumbering. It is
-    recorded as ``alias_conflict`` and the text is left exactly as it stands.
+    The ordinal decides the alias, and nothing read out of the response ever
+    does (``ido-cku``). A command response is backend text: one whose own first
+    line is shaped like this line, or like an offload label, is quoted by
+    ``escape_response`` and printed UNDER the handle line this step is really
+    called by, so no backend can name a handle. The quote is undone by
+    ``strip_alias_line``, so the archived response is still the exact bytes the
+    command returned. The alias itself is never rewritten -- a line already
+    naming this step's own ordinal is left exactly as it stands -- and a line
+    naming any other ordinal is still recorded as ``alias_conflict``, because
+    after ido-7qd the ledger cannot disagree with itself and such a line is
+    either the backend's or a bug.
 
     ``ido-8ps.13``: the line also names the context the command RAN IN and, where
     the workflow declares one, that context's instance identity. The clause was
@@ -151,25 +171,30 @@ def annotate_execute_observations(
     for step_index, ordinal in executes:
         key = f"observation_{step_index}"
         text = trajectory.get(key)
-        if not isinstance(text, str) or is_offload_label(text):
+        if not isinstance(text, str):
             continue
         alias = f"O{ordinal}"
         shown = printed_alias(text)
         if shown == alias:
             continue
-        if shown is not None:
+        if is_offload_label(text):
+            # This step's own offload label, written by the offload pass below.
+            # It already names the alias and holds no response to annotate.
+            if label_alias(text) == alias:
+                continue
+        if shown is not None or is_offload_label(text):
             record_event(
                 {
                     "kind": "alias_conflict",
                     "step_index": step_index,
-                    "printed_alias": shown,
+                    "printed_alias": shown or label_alias(text),
                     "expected_alias": alias,
+                    "action": "escaped_under_computed_alias",
                 }
             )
-            continue
         clause = context_clause_of(selected_scope, alias) or ""
         line = alias_line(alias, clause)
-        trajectory[key] = line + text
+        trajectory[key] = annotated_observation(alias, clause, text)
         record_event(
             {
                 "kind": "context_line",
@@ -205,12 +230,16 @@ def archive_execute_observations(
     the observation becomes durable as soon as the step completes, and the
     offload decision is purely a residency decision.
 
-    The alias is the one actually printed on the observation when there is one
-    (``annotate_execute_observations`` runs first), so a handle the agent can
-    see is always the key it is stored under -- including the ``alias_conflict``
-    case, where the printed alias stands and the recomputed one is not used.
+    The alias is this step's ordinal, from the agent's ledger (``executes``),
+    and never a name read off the observation. Taking the printed one let a
+    command response whose first line was shaped like a handle line file itself
+    under any alias it liked: the genuine step of that ordinal was then refused
+    its archive and a search of the alias answered with the backend's text
+    (``ido-cku``). ``annotate_execute_observations`` runs first and prints that
+    same ordinal, so the handle the agent can see is still the key it is stored
+    under.
 
-    Stored text is the raw command response: ``strip_alias_line`` removes the
+    Stored text is the raw command response: ``_command_response`` removes the
     presentation line, exactly as the offload path does, so the same alias
     written twice is the same bytes and the same digest. Writes are
     insert-or-nothing and skipped entirely once this process has written that
@@ -231,12 +260,11 @@ def archive_execute_observations(
         shown = trajectory.get(f"observation_{step_index}")
         if not isinstance(shown, str):
             continue
+        alias = f"O{ordinal}"
         if is_offload_label(shown):
-            alias = label_alias(shown) or f"O{ordinal}"
             mark_offloaded(selected_scope, alias)
             continue
-        alias = printed_alias(shown) or f"O{ordinal}"
-        original = strip_alias_line(shown)
+        original = _command_response(shown, alias)
         digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
         if archived_digest(selected_scope, alias) == digest:
             continue
@@ -394,7 +422,7 @@ def compact_trajectory(
         alias = f"O{ordinal}"
         # Every offload decision is taken on the exact command response, so the
         # printed handle cannot shift eligibility, savings or the stored digest.
-        original = strip_alias_line(response)
+        original = _command_response(response, alias)
         size = {
             "characters": len(original),
             "utf8_bytes": len(original.encode("utf-8")),

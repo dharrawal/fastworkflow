@@ -18,6 +18,10 @@ MAX_INSTANCE_LABEL_CHARS = 80
 #: Longest context name printed, for the same reason.
 MAX_CONTEXT_NAME_CHARS = 60
 SEARCH_ANSWER_KEY_RE = re.compile(r"^(O[1-9]\d*)#a([1-9]\d*)$")
+#: What a command response is quoted with when its own first line is shaped
+#: like a line this module prints (``ido-cku``). Two characters, visible, and
+#: self-escaping: see ``escape_response``.
+RESPONSE_ESCAPE = "> "
 
 
 def search_answer_key(alias: str, sequence: int) -> str:
@@ -81,6 +85,57 @@ def alias_line(alias: str, context: str = "") -> str:
     return f"Observation {alias} (execute_workflow_query{suffix})\n"
 
 
+def _escape_depth(text: str) -> int | None:
+    """Escape markers standing between the start of *text* and a line of ours.
+
+    ``0`` for a text that already opens with a handle line or an offload label,
+    ``n`` for one behind ``n`` markers, ``None`` for anything else -- which is
+    the overwhelmingly common case and the one that is never escaped at all.
+    Counting the markers is what makes the escape reversible: a response that
+    genuinely begins with the marker is escaped once more, so removing exactly
+    one marker always lands back on the response that was given.
+    """
+    depth = 0
+    rest = text
+    while rest.startswith(RESPONSE_ESCAPE):
+        rest = rest[len(RESPONSE_ESCAPE):]
+        depth += 1
+    if ALIAS_LINE_RE.match(rest) or LABEL_RE.match(rest):
+        return depth
+    return None
+
+
+def escape_response(text: str) -> str:
+    """*text* made safe to print underneath a handle line (``ido-cku``).
+
+    A command response whose own first line is shaped like a handle line or an
+    offload label would otherwise be read back as one: the framework would
+    trust a name the backend printed, and a response opening "Observation O7
+    (execute_workflow_query)" would be taken for observation seven. Only this
+    module may name an alias, so such a response is quoted with a marker. The
+    marker is visible on purpose -- the agent should see that the line below
+    the handle line is part of the output, not a second header -- and the quote
+    is undone by ``strip_alias_line`` before anything is stored or hashed.
+    """
+    return RESPONSE_ESCAPE + text if _escape_depth(text) is not None else text
+
+
+def unescape_response(text: str) -> str:
+    """The response ``escape_response`` was given back, exactly."""
+    depth = _escape_depth(text)
+    return text[len(RESPONSE_ESCAPE):] if depth else text
+
+
+def annotated_observation(alias: str, context: str = "", text: str = "") -> str:
+    """The observation as the agent sees it: our handle line, then the response.
+
+    The one place the two are joined, so the compaction hook that prints the
+    line on a completed step and the rehydration that re-prints it over an
+    archived response escape a shape-colliding response identically.
+    """
+    return alias_line(alias, context) + escape_response(text)
+
+
 def printed_alias(text: str) -> str | None:
     """The alias already printed on this observation, or None."""
     match = ALIAS_LINE_RE.match(text)
@@ -101,9 +156,17 @@ def printed_context(text: str) -> str | None:
 
 
 def strip_alias_line(text: str) -> str:
-    """The original command response, without a printed alias line."""
+    """The original command response, without OUR printed alias line.
+
+    The inverse of ``annotated_observation``: the presentation line goes, and
+    the escape that protected a response of the same shape is undone, so what
+    comes back is the command response byte for byte (``ido-cku``). A response
+    that was never annotated, or one carrying a line somebody else printed, is
+    returned untouched -- ``unescape_response`` only ever runs on the text that
+    stood under a line this module wrote.
+    """
     match = ALIAS_LINE_RE.match(text)
-    return text[match.end():] if match else text
+    return unescape_response(text[match.end():]) if match else text
 
 
 def estimated_tokens(text: str) -> int:
