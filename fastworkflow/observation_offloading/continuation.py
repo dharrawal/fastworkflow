@@ -26,9 +26,9 @@ from fastworkflow.observation_offloading.labels import (
     strip_alias_line,
 )
 from fastworkflow.observation_offloading.state import (
-    clear_hot_handles,
     archive,
     default_scope,
+    reclaim_scope,
     record_event,
 )
 from fastworkflow.utils.dspy_logger import DSPyForward
@@ -229,14 +229,30 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         return getattr(self, "max_forced_replans", MAX_FORCED_REPLANS) + 1
 
     def bind_scope(self) -> RuntimeHandleScope | None:
-        """Resolve the scope for the turn that is starting; drop the previous turn's hot cache."""
+        """Resolve the scope for the turn that is starting; reclaim the one it replaces.
+
+        ido-1ew. Binding a different scope is this agent saying the previous
+        turn is over, which makes it the earliest honest moment to release that
+        turn's process-local state -- not just its hot payloads, which is all
+        this used to drop, but its archive registry, context clauses, handle
+        rows, cursor tokens and navigation entries too. Everything released is
+        still on disk; only residency goes.
+
+        A suspension is the one thing that is not over, so a still-suspended
+        agent reclaims nothing. ``forward`` clears the suspension before it gets
+        here, so the guard is for a caller that binds a scope by hand.
+        """
         factory = getattr(self, "_scope_factory", None)
         if factory is None:
             return getattr(self, "continuation_scope", None)
         previous = getattr(self, "continuation_scope", None)
         scope = factory()
-        if previous is not None and previous != scope:
-            clear_hot_handles(previous)
+        if (
+            previous is not None
+            and previous != scope
+            and getattr(self, "_suspended", None) is None
+        ):
+            reclaim_scope(previous)
         self.continuation_scope = scope
         self.continuation_scope_id = scope.scope_id
         return scope

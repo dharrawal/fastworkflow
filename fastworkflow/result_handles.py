@@ -995,6 +995,17 @@ _local_sequence: "dict[str, int]" = {}
 #: write failed. It is never the only copy that matters - the SQLite row is what
 #: survives a restart, and the tests read tokens back through a fresh store.
 _cursor_tokens: "dict[str, dict[str, Any]]" = {}
+#: Which turn scopes a cached store is serving, ``db_path -> {scope_id}``.
+#: (ido-1ew) ``_stores`` grows by one entry per archive file the process ever
+#: touches, so something has to say when an entry may go. The rule is
+#: OWNERSHIP BY USE: a scope owns the store whose file its cached rows name,
+#: recorded where a scope and a store meet to form a cache key, and the LAST
+#: owner released drops the store. A file no scope ever claimed -- the
+#: per-process fallback a command frame uses before any agent exists -- has no
+#: owner to release it and is kept. Dropping an entry closes nothing: a store
+#: is a path, and ``_connect`` opens and closes a connection per statement, so
+#: a reopened store is the same store.
+_store_scopes: "dict[str, set[str]]" = {}
 
 
 def hot_rows_max_bytes_from_env() -> int:
@@ -1049,10 +1060,47 @@ def reset_result_handle_state() -> None:
     """Drop the process-local caches. Stored rows are untouched by design."""
     with _lock:
         _stores.clear()
+        _store_scopes.clear()
         _hot.clear()
         _pages_served.clear()
         _local_sequence.clear()
         _cursor_tokens.clear()
+
+
+def release_scope(scope_id: str) -> None:
+    """Drop one finished turn scope's process-local rows, counters and tokens.
+
+    ``ido-1ew``. Stored rows are untouched, by the same design that makes hot
+    eviction free of consequence: everything dropped here is rebuildable from
+    the store file, which is what a resume in another process already does.
+
+    Only ``observation_offloading.state.reclaim_scope`` calls this, so the
+    decision about which turns are finished is made in one place.
+    """
+    hot_prefix = "%s:" % scope_id
+    namespace_prefix = "%s@" % scope_id
+    with _lock:
+        for key in [key for key in _hot if key.startswith(hot_prefix)]:
+            _hot.pop(key, None)
+        for registry in (_pages_served, _cursor_tokens):
+            for key in [
+                key for key in registry if key.startswith(namespace_prefix)
+            ]:
+                registry.pop(key, None)
+        _local_sequence.pop(scope_id, None)
+        for path in list(_store_scopes):
+            owners = _store_scopes[path]
+            owners.discard(scope_id)
+            if owners:
+                continue
+            del _store_scopes[path]
+            _stores.pop(path, None)
+
+
+def _note_store_owner(store_: "ResultHandleStore", scope: RuntimeHandleScope) -> None:
+    """Record that *scope* is using *store_*, so its release can free the store."""
+    with _lock:
+        _store_scopes.setdefault(store_.db_path, set()).add(scope.scope_id)
 
 
 def _hot_key(
@@ -1067,11 +1115,13 @@ def _hot_key(
     workflows whose turn scopes agree, and a walk rebuilt from one file must
     never be served for the other.
     """
+    _note_store_owner(store_, scope)
     return "%s:%s:%s@%s" % (scope.scope_id, alias, query_scope, store_.db_path)
 
 
 def _cache_namespace(scope: RuntimeHandleScope, store_: "ResultHandleStore") -> str:
     """The process-local cache namespace of one turn scope in one store file."""
+    _note_store_owner(store_, scope)
     return "%s@%s" % (scope.scope_id, store_.db_path)
 
 
@@ -2905,6 +2955,7 @@ __all__ = [
     "register_resolver",
     "registered_resolvers",
     "result_pages_reference",
+    "release_scope",
     "reset_result_handle_state",
     "resolver_for",
     "store",

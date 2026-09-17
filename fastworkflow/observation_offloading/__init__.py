@@ -57,8 +57,10 @@ from fastworkflow.observation_offloading.search import (
 )
 from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
+    event_buffer_max_from_env,
     hot_payload_bytes,
     observation_inline,
+    reclaim_scope,
     reset_runtime_state,
     stored_handles,
 )
@@ -84,6 +86,7 @@ __all__ = [
     "classify_against_steps",
     "clear_hot_handles",
     "compact_trajectory",
+    "event_buffer_max_from_env",
     "execute_ordinals",
     "hot_payload_bytes",
     "install_span_policy",
@@ -95,6 +98,7 @@ __all__ = [
     "present_answer",
     "printed_alias",
     "printed_context",
+    "reclaim_scope",
     "replan_trajectory_skeleton",
     "reset_runtime_state",
     "search_answer_key",

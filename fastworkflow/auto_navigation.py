@@ -362,6 +362,19 @@ def context_entries(scope_id: str) -> tuple[ContextEntry, ...]:
         return tuple(_entries.get(scope_id, ()))
 
 
+def forget_scope(scope_id: str) -> None:
+    """Drop one finished turn's entries, leaving every other turn's alone.
+
+    ``ido-1ew``. The registry is turn-scoped by contract (``ido-8ps.9``) but was
+    only ever emptied wholesale, by a test helper; a long-lived process
+    therefore kept one list per turn it had ever run. Called from
+    ``observation_offloading.state.reclaim_scope``, never on its own.
+    """
+    with _lock:
+        _entries.pop(scope_id, None)
+        _sequence.pop(scope_id, None)
+
+
 def reset_auto_navigation_state() -> None:
     """Drop every turn-scoped entry. Nothing here outlives the turn."""
     with _lock:

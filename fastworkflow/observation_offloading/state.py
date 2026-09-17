@@ -25,6 +25,16 @@ HOT_HANDLE_MAX_BYTES_ENV = context_budget.OFFLOAD_HOT.override_env
 #: is appended for a run that wants one on disk. It is what the evaluation
 #: harness reads every offloading, coverage and search measure out of.
 EVENTS_ENV = "FW_OFFLOAD_EVENTS"
+#: How many diagnostic events the process keeps in memory. The in-process log is
+#: a RING, not a ledger: the durable copy is the ``FW_OFFLOAD_EVENTS`` file, and
+#: what stays in memory is only what a live turn (or a test) reads back through
+#: ``snapshot_events``. Unbounded it grew with lifetime traffic and held search
+#: questions, reasoning and full answers long after the turns that produced them
+#: had ended (ido-1ew). A scope's own events go the moment the scope is
+#: reclaimed; this cap is the backstop for the events no scope owns and for a
+#: single turn that talks more than the whole process should remember.
+EVENT_BUFFER_MAX_ENV = "FW_OFFLOAD_EVENT_BUFFER_MAX"
+DEFAULT_EVENT_BUFFER_MAX = 2000
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +48,7 @@ _search_answers: dict[str, int] = {}
 _context_clauses: dict[str, str] = {}
 _events: list[dict[str, Any]] = []
 _event_log_failures: set[str] = set()
+_event_cap_warnings: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
 _default_scope = RuntimeHandleScope(
     store_identity=f"process-{os.getpid()}",
@@ -47,6 +58,25 @@ _default_scope = RuntimeHandleScope(
     attempt=0,
     turn_key=f"process-{os.getpid()}",
 )
+
+
+def event_buffer_max_from_env() -> int:
+    """How many events this process keeps in memory. ``0`` is not allowed."""
+    raw = os.environ.get(EVENT_BUFFER_MAX_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+        if raw not in _event_cap_warnings:
+            _event_cap_warnings.add(raw)
+            logger.warning(
+                "ignoring %s=%s: expected a positive integer",
+                EVENT_BUFFER_MAX_ENV, raw,
+            )
+    return DEFAULT_EVENT_BUFFER_MAX
 
 
 def hot_handle_max_bytes_from_env() -> int:
@@ -125,6 +155,12 @@ def record_event(event: Mapping[str, Any]) -> None:
     item = dict(event)
     with _lock:
         _events.append(item)
+        # The ring closes here, inside the same lock that appended, so two
+        # threads recording at once cannot both skip the trim. A list is kept
+        # rather than a deque because callers read this buffer as a list.
+        overflow = len(_events) - event_buffer_max_from_env()
+        if overflow > 0:
+            del _events[:overflow]
         path = os.environ.get(EVENTS_ENV, "").strip()
         if not path:
             return
@@ -239,6 +275,46 @@ def forget_context_clause(scope: RuntimeHandleScope, alias: str) -> None:
     """
     with _lock:
         _context_clauses.pop(handle_key(scope, alias), None)
+
+
+def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
+    """Drop every process-local cache one FINISHED turn scope holds (``ido-1ew``).
+
+    Residency, never evidence: the archive and the result-handle tables keep
+    every row, so a scope reclaimed here is still fully readable from disk --
+    which is exactly what the cold-resume path already does in a process that
+    never saw the turn at all.
+
+    This is deliberately NOT a global reset. Everything the offloading runtime
+    remembers is keyed by ``scope_id``, so one turn's state can be released
+    while every other live turn in the process keeps its own. A reset that took
+    the lot would invalidate the turns running beside this one.
+
+    The caller decides what "finished" means, and only two places may: a turn
+    that is over because the agent has bound the NEXT one
+    (``StructuredContinuationReAct.bind_scope``), and a session that is over
+    because its execution context was closed or evicted
+    (``WorkflowExecutionContext.close``). Neither fires for a SUSPENDED turn,
+    because a suspension is state that must outlive the process, not state to
+    reclaim.
+    """
+    scope_id = scope if isinstance(scope, str) else scope.scope_id
+    prefix = f"{scope_id}:"
+    with _lock:
+        for registry in (_handles, _archived, _context_clauses):
+            for key in [key for key in registry if key.startswith(prefix)]:
+                del registry[key]
+        _search_answers.pop(scope_id, None)
+        kept = [
+            item for item in _events
+            if str(item.get("scope_id") or "") != scope_id
+        ]
+        if len(kept) != len(_events):
+            _events[:] = kept
+    from fastworkflow import auto_navigation, result_handles
+
+    result_handles.release_scope(scope_id)
+    auto_navigation.forget_scope(scope_id)
 
 
 def reset_runtime_state() -> None:

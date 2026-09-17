@@ -1212,6 +1212,8 @@ class WorkflowExecutionContext:
             self._app_workflow.remove_context_change_listener(listener)
             self._context_change_listener = None
 
+        self._reclaim_offloading_scope()
+
         if self._cme_workflow is None:
             return True
         try:
@@ -1220,6 +1222,44 @@ class WorkflowExecutionContext:
             # Child cme workflows should not occur; ignore if mis-invoked.
             logger.debug("WorkflowExecutionContext.close: cme_workflow is not a root session")
             return False
+
+    def _reclaim_offloading_scope(self) -> None:
+        """Release this session's process-local offloading state (``ido-1ew``).
+
+        ``close`` is the one production signal that a session is over in this
+        process: the fleet's session cache calls it when it retires or removes a
+        channel, and an embedder calls it when its session ends. Until this, the
+        offloading runtime's per-scope registries -- the archive memo, the
+        context clauses, the hot observations, the result-handle rows, the
+        cursor tokens, the navigation entries and the turn's diagnostic events
+        -- only ever grew, for the lifetime of the process.
+
+        Two turns are NOT reclaimed. A turn suspended on ask_user is still
+        resumable: its scope is the one the resume writes and reads handles
+        under, and an eviction is precisely the case where it is expected to
+        come back. And nothing per-agent is touched at all -- the execute
+        numbering ledger, the suspended trajectory and the truncated-execute
+        count are the agent's own memory, they die with it, and a resume
+        rebuilds them from the suspension payload.
+
+        Best effort by construction: failing to reclaim memory must never turn a
+        session close into an error the caller has to handle.
+        """
+        agent = self._workflow_tool_agent
+        scope = getattr(agent, "continuation_scope", None)
+        if scope is None:
+            return
+        try:
+            if self._awaiting_user or agent.export_suspended() is not None:
+                return
+            from fastworkflow.observation_offloading import state as offload_state
+
+            offload_state.reclaim_scope(scope)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "WorkflowExecutionContext.close: could not reclaim offloading "
+                f"state ({type(exc).__name__}: {exc})"
+            )
 
     # ------------------------------------------------------------------
     # Active workflow stack (contextvar)
