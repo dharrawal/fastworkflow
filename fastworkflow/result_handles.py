@@ -506,20 +506,39 @@ class ResultHandleStore:
     # -- declarations ------------------------------------------------------
 
     def put_declaration(
-        self, scope: RuntimeHandleScope, alias: str, payload: Mapping[str, Any]
+        self,
+        scope: RuntimeHandleScope,
+        alias: str,
+        payload: Mapping[str, Any],
+        *,
+        first_page_offset: Optional[int] = None,
+        first_page_sha256: Optional[str] = None,
     ) -> dict[str, Any]:
         """Write a declaration once. A redeclaration of the same query is a no-op.
 
         Two different queries under one alias would make the alias ambiguous —
         the agent would ask for O42 and get whichever was written last — so the
         second one is refused by name instead.
+
+        (ido-ecd, F19) The descriptor digest alone is not that identity. Every
+        descriptor-less handle shares one digest, and re-running the same query
+        against a changed backend shares it too, so a second, different listing
+        declared under an alias a restarted sequence handed out again reported
+        itself declared with its own total while the alias went on serving the
+        first listing's rows. What a listing actually IS, for this purpose, is
+        its first page of rows: pass ``first_page_offset`` with the digest of
+        the producer page this declaration is about to write (``None`` for a
+        listing that materialised nothing), and a redeclaration whose first page
+        is not the stored first page is refused by name like any other different
+        query. Callers that file something other than a producer listing -- a
+        page observation's own alias -- pass neither and are unaffected.
         """
         scope_json = json.dumps(
             asdict(scope), ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO result_handle_declarations (
                     scope_id, scope_json, alias, kind, summary, ordering, total,
@@ -554,6 +573,9 @@ class ResultHandleStore:
                     _now(),
                 ),
             )
+            # Nothing inserted means the alias was already taken by an earlier
+            # declaration, which is the only case the identity below judges.
+            redeclaration = not cursor.rowcount
             conn.commit()
         stored = self.get_declaration(scope, alias)
         if stored is None:
@@ -563,7 +585,33 @@ class ResultHandleStore:
                 "result handle %s already describes a different query in this "
                 "scope; an alias identifies one observation" % alias
             )
+        if redeclaration and first_page_offset is not None:
+            kept = self._producer_page_digest(
+                scope, alias=alias, start_offset=int(first_page_offset)
+            )
+            if kept != first_page_sha256:
+                raise ResultHandleError(
+                    "result handle %s already holds a different listing in this "
+                    "scope: its first page is not the one being declared. An "
+                    "alias identifies one observation" % alias
+                )
         return stored
+
+    def _producer_page_digest(
+        self, scope: RuntimeHandleScope, *, alias: str, start_offset: int
+    ) -> Optional[str]:
+        """The digest of the rows the PRODUCER filed at this alias, if any.
+
+        Only a producer page answers: a page the walk stored at the same offset
+        is the backend's account of the same query, not the listing's own first
+        page, and a handle that materialised nothing has no first page at all.
+        """
+        page = self.get_page(
+            scope, alias=alias, query_scope="", start_offset=int(start_offset)
+        )
+        if page is None or page["source"] != "producer":
+            return None
+        return str(page["record_sha256"])
 
     def get_declaration(
         self, scope: RuntimeHandleScope, alias: str
@@ -1969,13 +2017,31 @@ def declare(
     }
     stored_pages: list[dict[str, Any]] = []
     try:
+        # Only when there are rows. A zero-row producer page stored at the
+        # walk's first offset would be read back as the empty page that ends a
+        # walk, and the walk would stop before it started.
+        start_offset = int(descriptor.start_offset) if descriptor else 0
+        producer_record = (
+            {"rows": [], "records": _records_from_items(items)} if items else None
+        )
+        # (ido-ecd, F19) Digested here, before anything is written, because it
+        # is half of the identity `put_declaration` refuses a redeclaration on.
+        # It is the digest of the bytes `put_page` would store, so it compares
+        # directly against `record_sha256` of the page a first declaration left
+        # behind.
+        producer_sha256 = (
+            None if producer_record is None
+            else _digest(_canonical_json(dict(producer_record)))
+        )
         store_ = selected_store or store()
-        store_.put_declaration(selected_scope, handle, payload)
-        if items:
-            # Only when there are rows. A zero-row producer page stored at the
-            # walk's first offset would be read back as the empty page that ends
-            # a walk, and the walk would stop before it started.
-            start_offset = int(descriptor.start_offset) if descriptor else 0
+        store_.put_declaration(
+            selected_scope,
+            handle,
+            payload,
+            first_page_offset=start_offset,
+            first_page_sha256=producer_sha256,
+        )
+        if producer_record is not None:
             stored = store_.put_page(
                 selected_scope,
                 alias=handle,
@@ -1983,7 +2049,7 @@ def declare(
                 start_offset=start_offset,
                 limit_requested=len(items),
                 source="producer",
-                record={"rows": [], "records": _records_from_items(items)},
+                record=producer_record,
                 backend_total=int(spec.total or len(items)),
             )
             # `put_page` reads the row back and re-digests it, so this sha256 is
@@ -2257,7 +2323,19 @@ def _walk_records(
         return cached
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    next_offset = int((declaration["descriptor"] or {}).get("start_offset") or 0)
+    # (ido-oon, F24) Where this traversal begins. The descriptor's start_offset
+    # is an offset into the RELATION, and it is the right origin for the
+    # unfiltered walk, which re-walks the relation the producer paged. It is the
+    # wrong origin for a filtered one: the backend applies `contains` first, so
+    # `start` there counts MATCHES. Seeding a filtered walk at 100 asked for the
+    # matches after the hundredth one, a relation with 68 of them answered
+    # nothing at all, and the walk called itself finished with zero. A filter
+    # begins at the first match, whatever part of the relation the handle was
+    # declared over.
+    next_offset = (
+        0 if query_scope
+        else int((declaration["descriptor"] or {}).get("start_offset") or 0)
+    )
     backend_total: Optional[int] = None
     terminal_offset: Optional[int] = None
     # (ido-7ce, F8) Page at a time, not the whole traversal at once: see
@@ -2411,9 +2489,13 @@ def _extend_walk(
     columns_for = tuple(descriptor.get("filter_columns") or ()) if query_scope else ()
     while len(walk["records"]) < needed:
         start = int(walk["next_offset"])
-        stored = store_.get_page(
-            scope, alias=alias, query_scope=query_scope, start_offset=start
-        )
+        try:
+            stored = store_.get_page(
+                scope, alias=alias, query_scope=query_scope, start_offset=start
+            )
+        except (sqlite3.Error, OSError) as error:
+            _refuse_for_store(scope, walk, alias, query_scope, start, error)
+            break
         if stored is None:
             if budget.exhausted:
                 # Over-limit warns and continues: the cursor still advances, so
@@ -2457,23 +2539,37 @@ def _extend_walk(
                 )
                 break
             records = [_render_row(row, descriptor) for row in rows]
-            stored = store_.put_page(
-                scope,
-                alias=alias,
-                query_scope=query_scope,
-                start_offset=start,
-                limit_requested=limit,
-                source="resolver",
-                record={"rows": rows, "records": records,
-                        "columns": _columns_of(response, rows)},
-                backend_total=backend_total,
-            )
-            if rows:
-                store_.set_verified_columns(
-                    scope, alias,
-                    columns=_columns_of(response, rows),
-                    sample_row=rows[0],
+            # (ido-2mk, F21) A page is served from what was STORED, so a store
+            # that cannot be written ends this walk here rather than out of the
+            # process. A read-only file, a full disk and a writer holding the
+            # file past the busy timeout all arrive as the same sqlite3 error,
+            # and all three mean the same thing to the agent: the rows already
+            # walked are still served, this call stopped, and the reason says
+            # the store and not the source. The offset is NOT advanced, so the
+            # same page is asked for again when the store comes back, and no
+            # cursor is offered for a walk whose continuation could not be
+            # recorded either.
+            try:
+                stored = store_.put_page(
+                    scope,
+                    alias=alias,
+                    query_scope=query_scope,
+                    start_offset=start,
+                    limit_requested=limit,
+                    source="resolver",
+                    record={"rows": rows, "records": records,
+                            "columns": _columns_of(response, rows)},
+                    backend_total=backend_total,
                 )
+                if rows:
+                    store_.set_verified_columns(
+                        scope, alias,
+                        columns=_columns_of(response, rows),
+                        sample_row=rows[0],
+                    )
+            except (sqlite3.Error, OSError) as error:
+                _refuse_for_store(scope, walk, alias, query_scope, start, error)
+                break
         record = stored["record"]
         page_records = record.get("records") or []
         if not page_records and not (record.get("rows") or []):
@@ -2503,6 +2599,38 @@ def _extend_walk(
     return walk
 
 
+def _refuse_for_store(
+    scope: RuntimeHandleScope,
+    walk: dict[str, Any],
+    alias: str,
+    query_scope: str,
+    start: int,
+    error: BaseException,
+) -> None:
+    """Stop a walk on a store failure the way it stops on a source failure. (ido-2mk, F21)
+
+    Typed, not raised: the caller has rows in hand that cost the source real
+    calls, and losing them to a traceback no command catches is the worst of the
+    available outcomes.
+    """
+    walk["stop_reason"] = "store_unavailable"
+    walk["error"] = "%s: %s" % (type(error).__name__, error)
+    record_event(
+        {
+            "kind": "result_handle_store_unavailable",
+            "scope_id": scope.scope_id,
+            "alias": alias,
+            "query_scope": query_scope,
+            "start": start,
+            "error": type(error).__name__,
+            "detail": str(error)[:300],
+        }
+    )
+    logger.warning(
+        "result handle page store unavailable at %s@%d: %s", alias, start, error
+    )
+
+
 def _reconcile(
     scope: RuntimeHandleScope,
     store_: ResultHandleStore,
@@ -2523,7 +2651,13 @@ def _reconcile(
     exactly the case a ``rows == total`` pager reports as finished.
     """
     walk["count_only"] = None
-    if int(descriptor.get("start_offset") or 0) != 0:
+    if not query_scope and int(descriptor.get("start_offset") or 0) != 0:
+        # (ido-oon, F24) The unfiltered proof only. A walk that starts partway
+        # into the relation can never account for the rows before it, so it is
+        # never complete. A FILTERED walk now starts at the first match
+        # regardless (see `_walk_records`), so the same origin says nothing
+        # about it, and reporting it here said the query was unprovable when it
+        # had in fact just been asked wrongly.
         walk["complete"] = False
         # Read off the descriptor, so it is free to decide again and needs no
         # stored verdict; marking it settled keeps the walk from re-walking.
@@ -2645,6 +2779,7 @@ _STOP_REASON_NOTES = {
     "countonly_unavailable": "the source offers no independent count to prove coverage",
     "countonly_error": "the source refused the count that would prove coverage",
     "offset_origin_not_zero": "this handle starts partway into the relation",
+    "store_unavailable": "the page store could not be written, so this walk stopped where it was",
     "producer_materialized_subset": "the producing command did not materialise every row",
 }
 
@@ -2804,14 +2939,23 @@ def fetch_page(
     # and each is decided on rows that EXIST for this query, not on rows that
     # happened to fit in this observation.
     error_reason = page.incomplete_reason in (
-        "resolver_error", "resolver_unavailable", "countonly_error"
+        "resolver_error", "resolver_unavailable", "countonly_error",
+        # (ido-2mk, F21) A page that could not be stored is a failure of this
+        # call, not a property of the query, so an empty one must not read as a
+        # zero.
+        "store_unavailable",
     )
     if error_reason and not available:
         page.outcome = "error"
         notes.append(
-            "The source refused this query (%s). Rows already stored are still "
-            "readable; nothing here shows what the unread rows contain."
-            % (walk.get("error") or page.incomplete_reason)
+            "%s (%s). Rows already stored are still readable; nothing here "
+            "shows what the unread rows contain."
+            % (
+                "This query's pages could not be stored, so it did not run"
+                if page.incomplete_reason == "store_unavailable"
+                else "The source refused this query",
+                walk.get("error") or page.incomplete_reason,
+            )
         )
     elif matched == 0 and page.matched_complete:
         page.outcome = "complete-zero"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -2341,3 +2342,326 @@ class HotCacheBoundTests(unittest.TestCase):
         real = sum(deep_bytes(walk["records"]) + deep_bytes(walk["seen"])
                    for walk in result_handles._hot.values())
         self.assertLess(real, 2 * 262_144)
+
+
+# ---------------------------------------------------------------------------
+# ido-ecd (F19): what makes two declarations the same declaration
+# ---------------------------------------------------------------------------
+
+
+class RedeclarationIdentityTests(unittest.TestCase):
+    """An alias names one listing, and the listing's own rows say which.
+
+    The descriptor digest cannot carry this on its own: every descriptor-less
+    handle has the same digest, and a handle re-declared from the same query
+    against a changed backend has the same digest too. The alias then served the
+    first listing's rows under the second listing's header.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def declare_rows(self, alias, items, *, total=None, source=None,
+                     complete=True):
+        return declare(
+            ResultHandleSpec(
+                kind="holder",
+                summary="%d holder(s)." % (total or len(items)),
+                items=items,
+                total=total or len(items),
+                source_complete=complete,
+                page_size=25,
+            ),
+            source=source,
+            scope=scope(),
+            selected_store=self.store,
+            alias=alias,
+        )
+
+    def test_a_second_different_listing_under_one_alias_is_refused(self):
+        """The alias a restarted local sequence hands out again is not free."""
+        first = self.declare_rows("O1", holders(5, prefix="A"))
+        self.assertTrue(first["declared"])
+        with self.assertRaises(ResultHandleError) as refusal:
+            self.declare_rows("O1", holders(3, prefix="B"))
+        self.assertIn("O1", str(refusal.exception))
+        self.assertIn("different listing", str(refusal.exception))
+        # Refused, not merged: the alias still holds exactly the first listing,
+        # and the second listing left no page of its own behind.
+        stored = self.store.get_declaration(scope(), "O1")
+        self.assertEqual(stored["total"], 5)
+        self.assertEqual(
+            len(self.store.list_pages(scope(), alias="O1", query_scope="")), 1
+        )
+        page = fetch_page("O1", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        self.assertEqual(page.matched, 5)
+        self.assertTrue(all(row.startswith("A") for row in page.rows))
+
+    def test_the_same_descriptor_over_changed_rows_is_refused_too(self):
+        """A re-run of one query is a different listing when the rows differ."""
+        descriptor = SourceDescriptor(
+            resolver="fake-portal", view="v", uid_field="uid",
+            label_fields=("name",), page_size=25, materialized=5,
+        )
+        self.declare_rows("O2", holders(5, prefix="A"), total=5,
+                          source=descriptor, complete=False)
+        with self.assertRaises(ResultHandleError):
+            self.declare_rows("O2", holders(3, prefix="B"), total=3,
+                              source=descriptor, complete=False)
+
+    def test_an_emptied_listing_does_not_pass_as_the_stored_one(self):
+        """Nothing is not a match for something: no producer page is a state."""
+        self.declare_rows("O3", holders(4))
+        with self.assertRaises(ResultHandleError):
+            self.declare_rows("O3", [], total=0)
+
+    def test_redeclaring_the_same_rows_is_still_a_no_op(self):
+        """The idempotence the whole store is built on survives the check."""
+        first = self.declare_rows("O4", holders(5))
+        again = self.declare_rows("O4", holders(5))
+        self.assertTrue(again["declared"])
+        self.assertEqual(
+            again["raw_pages"]["pages"][0]["sha256"],
+            first["raw_pages"]["pages"][0]["sha256"],
+        )
+        self.assertEqual(
+            len(self.store.list_pages(scope(), alias="O4", query_scope="")), 1
+        )
+
+    def test_a_page_alias_is_filed_without_a_listing_identity(self):
+        """`_link_page` declares a page observation, which has no producer page.
+
+        It passes no first page and must go on being a plain upsert-once, or
+        every second fetch of the same position would raise.
+        """
+        self.declare_rows("O5", holders(6))
+        for _ in range(3):
+            self.store.put_declaration(
+                scope(), "O6",
+                {
+                    "kind": "holder-page", "summary": "s", "ordering": "",
+                    "total": 6, "materialized": 2, "source_complete": True,
+                    "page_size": 25, "classification": "user-text",
+                    "presentation": True, "filters": {}, "descriptor": {},
+                    "descriptor_sha256": result_handles._digest(
+                        result_handles._canonical_json({})),
+                    "parent_alias": "O5", "query_scope": "", "cursor_position": 0,
+                },
+            )
+        self.assertEqual(
+            self.store.get_declaration(scope(), "O6")["parent_alias"], "O5"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ido-oon (F24): where a filtered walk begins
+# ---------------------------------------------------------------------------
+
+
+class FilteredWalkOriginTests(unittest.TestCase):
+    """A filter starts at the first match, not at the handle's row in the relation.
+
+    The descriptor's ``start_offset`` is an offset into the relation. The
+    backend applies ``contains`` first, so the same number sent with a filter
+    counts matches: a handle declared over rows 100-124 asked for the matches
+    after the hundredth one, got none, and called the search finished.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.rows = portal_rows(200)
+        self.portal = FakePortal(self.rows)
+        result_handles.register_resolver("fake-portal", self.portal)
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("fake-portal")
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def declare_window(self, *, start=100, span=25, alias="O1"):
+        rendered = ["%s  %s" % (row["identity__id"], row["identity_displayname"])
+                    for row in self.rows[start:start + span]]
+        return declare(
+            ResultHandleSpec(kind="holder", summary="200 holder(s).",
+                             items=rendered, total=200, source_complete=False,
+                             page_size=25),
+            source=SourceDescriptor(
+                resolver="fake-portal", view="v",
+                uid_field="identity__id",
+                label_fields=("identity_displayname",),
+                filter_columns=("identity_displayname",),
+                page_size=25, start_offset=start, materialized=span),
+            scope=scope(), selected_store=self.store, alias=alias,
+        )
+
+    def test_a_filter_on_a_handle_declared_past_zero_finds_its_matches(self):
+        self.declare_window()
+        page = fetch_page("O1", None, "Christopher", scope=scope(),
+                          selected_store=self.store, budget_bytes=100_000)
+        expected = [row["identity__id"] for row in self.rows
+                    if "christopher" in row["identity_displayname"].lower()]
+        self.assertEqual(len(expected), 33)
+        self.assertEqual(page.matched, len(expected))
+        self.assertEqual([row.split("  ")[0] for row in page.rows], expected)
+        self.assertIsNone(page.incomplete_reason)
+        self.assertTrue(page.matched_complete)
+        self.assertEqual(page.outcome, "rows")
+
+    def test_the_first_filtered_call_asks_the_backend_from_zero(self):
+        self.declare_window()
+        fetch_page("O1", None, "Christopher", scope=scope(),
+                   selected_store=self.store, budget_bytes=100_000)
+        filtered = [call for call in self.portal.calls
+                    if call.contains and not call.count_only]
+        self.assertTrue(filtered)
+        self.assertEqual(filtered[0].start, 0)
+
+    def test_the_offset_origin_reason_still_guards_the_unfiltered_proof(self):
+        """The reason it was borrowed from keeps its own case."""
+        self.declare_window()
+        page = fetch_page("O1", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        self.assertEqual(page.incomplete_reason, "offset_origin_not_zero")
+        self.assertFalse(page.matched_complete)
+
+    def test_a_filtered_walk_is_not_re_walked_on_every_fetch(self):
+        """ido-1r0's fix holds: the second fetch of a proven filter is free."""
+        self.declare_window()
+        fetch_page("O1", None, "Christopher", scope=scope(),
+                   selected_store=self.store, budget_bytes=100_000)
+        calls = len(self.portal.calls)
+        result_handles.reset_result_handle_state()
+        for _ in range(3):
+            page = fetch_page("O1", None, "Christopher", scope=scope(),
+                              selected_store=self.store, budget_bytes=100_000)
+            self.assertEqual(page.matched, 33)
+            self.assertTrue(page.matched_complete)
+        self.assertEqual(len(self.portal.calls), calls)
+
+
+# ---------------------------------------------------------------------------
+# ido-2mk (F21): a store that cannot be written
+# ---------------------------------------------------------------------------
+
+
+class StoreUnavailableDuringWalkTests(unittest.TestCase):
+    """A page store that refuses a write ends the walk; it does not end the turn.
+
+    A read-only file, a full disk and a writer holding the file past the busy
+    timeout all reach the walk as one sqlite3 error, and the rows it already
+    holds cost the source real calls.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.temp.name, "h.sqlite3")
+        self.store = ResultHandleStore(self.path)
+        self.rows = portal_rows(120)
+        self.portal = FakePortal(self.rows)
+        result_handles.register_resolver("fake-portal", self.portal)
+        rendered = ["%s  %s" % (row["identity__id"], row["identity_displayname"])
+                    for row in self.rows[:25]]
+        declare(
+            ResultHandleSpec(kind="holder", summary="120 holder(s).",
+                             items=rendered, total=120, source_complete=False,
+                             page_size=25),
+            source=SourceDescriptor(
+                resolver="fake-portal", view="v", uid_field="identity__id",
+                label_fields=("identity_displayname",),
+                filter_columns=("identity_displayname",),
+                page_size=25, materialized=25),
+            scope=scope(), selected_store=self.store, alias="O3",
+        )
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("fake-portal")
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def refuse_writes(self, error=None):
+        """Page writes on this store raise what a locked or full file raises.
+
+        Returns the callable that puts the store back, so a test can watch the
+        walk recover.
+        """
+        failure = error or sqlite3.OperationalError("database is locked")
+        original = ResultHandleStore.put_page
+
+        def refusing(*args, **kwargs):
+            raise failure
+
+        def restore():
+            ResultHandleStore.put_page = original
+
+        ResultHandleStore.put_page = refusing
+        self.addCleanup(restore)
+        return restore
+
+    def test_a_write_failure_serves_the_rows_already_fetched(self):
+        self.refuse_writes()
+        page = fetch_page("O3", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        self.assertEqual(page.incomplete_reason, "store_unavailable")
+        # The producer's 25 rows are still served, and the page says plainly
+        # that this is not all of them.
+        self.assertEqual(page.matched, 25)
+        self.assertEqual(len(page.rows), 25)
+        self.assertEqual(page.outcome, "partial")
+        self.assertFalse(page.matched_complete)
+        self.assertEqual(page.continuation, "source-incomplete")
+        self.assertIsNone(page.next_cursor)
+
+    def test_a_readonly_store_refuses_rather_than_raising(self):
+        self.refuse_writes(
+            sqlite3.OperationalError("attempt to write a readonly database")
+        )
+        page = fetch_page("O3", None, "Christopher", scope=scope(),
+                          selected_store=self.store, budget_bytes=100_000)
+        # Nothing could be walked for this filter at all, so it is an error and
+        # emphatically not a zero.
+        self.assertEqual(page.incomplete_reason, "store_unavailable")
+        self.assertEqual(page.matched, 0)
+        self.assertEqual(page.outcome, "error")
+        self.assertNotEqual(page.outcome, "complete-zero")
+
+    def test_the_refusal_is_recorded_as_an_event(self):
+        self.refuse_writes()
+        fetch_page("O3", scope=scope(), selected_store=self.store,
+                   budget_bytes=100_000)
+        kinds = [event["kind"] for event in snapshot_events()]
+        self.assertIn("result_handle_store_unavailable", kinds)
+
+    def test_the_walk_resumes_at_the_page_it_could_not_store(self):
+        """Nothing is skipped: the offset never advanced past the lost page."""
+        restore = self.refuse_writes()
+        fetch_page("O3", scope=scope(), selected_store=self.store,
+                   budget_bytes=100_000)
+        asked = [call.start for call in self.portal.calls if not call.count_only]
+        self.assertEqual(asked, [25])
+        restore()
+        reset_result_handle_state()
+        page = fetch_page("O3", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        self.assertEqual(page.matched, 120)
+        self.assertTrue(page.matched_complete)
+        self.assertEqual(
+            sorted({call.start for call in self.portal.calls
+                    if not call.count_only}),
+            [25, 50, 75, 100, 125],
+        )
