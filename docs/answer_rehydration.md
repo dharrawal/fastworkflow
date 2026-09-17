@@ -54,9 +54,13 @@ disagree with the copy the pager showed.
 
 ## The budget
 
-`FW_ANSWER_REHYDRATION_MAX_BYTES` (default **250,000** UTF-8 bytes, sized from the
-control's ~80k-token answer-time prompt) bounds the UTF-8 bytes of the whole
-extractor trajectory. The walk goes **most recent first** and **stops at the first
+The extraction budget bounds the UTF-8 bytes of the whole extractor
+trajectory. It is a fraction of the model's context window — 15625/32768 of it,
+which is **250,000 bytes** at the 131,072-token window every accepted run used,
+the size of the control's ~80k-token answer-time prompt. See
+[`docs/context_budget.md`](context_budget.md) for the one input and the whole
+table; `FW_ANSWER_REHYDRATION_MAX_BYTES` remains as a tuning override. The walk
+goes **most recent first** and **stops at the first
 replacement that would not fit**; everything older stays as it is.
 
 Every alias left that way is named in one deterministic line appended to the copy
@@ -79,17 +83,24 @@ If the extract call still overflows the model's context window, the existing
 truncation fallback runs unchanged — on the copy, never on the loop's trajectory —
 and the run records `rehydration_overflow`.
 
-## The flag
+## There is no flag
+
+`ido-pyw.1` removed `FW_ANSWER_REHYDRATION`. Rehydration is what the extract
+step does, for every workflow: the loop keeps its compacted trajectory and the
+writer gets the evidence behind it. A run with nothing offloaded and nothing
+paged rehydrates nothing and its extract call is the call it always was — the
+rule is the trajectory's content, not a setting.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FW_ANSWER_REHYDRATION` | `0` | `1`/`true`/`yes`/`on` turns rehydration on. Off, the extract call receives byte-for-byte what it received at `e16b6c5` (the `ido-8ps.17` accepted stack) — the same module, the same trajectory *object*, the same truncation fallback. |
-| `FW_ANSWER_REHYDRATION_MAX_BYTES` | `250000` | The extraction byte budget. Below 4,096 or unparseable, the default stands and a warning is logged. |
+| `FW_ANSWER_REHYDRATION_MAX_BYTES` | derived (**250,000** at a 131,072-token window) | Tuning override on the extraction byte budget. Below 4,096 or unparseable, the derived budget stands and a warning is logged. |
 
-Both are read **env file first, then the process environment**, the rule
-`auto_navigation` uses: `fastworkflow.get_env_var` short-circuits on its default
-before consulting `os.environ`, so a variable exported into the process but absent
-from the workflow env file would otherwise read as the default.
+It is read **env file first, then the process environment**:
+`fastworkflow.get_env_var` short-circuits on its default before consulting
+`os.environ`, so a variable exported into the process but absent from the
+workflow env file would otherwise read as the default — and, unlike the
+pre-`ido-pyw.1` readers, one written into the workflow's own `fastworkflow.env`
+now takes effect.
 
 ## Events
 
@@ -98,7 +109,7 @@ same `FW_OFFLOAD_EVENTS` file every other measure does.
 
 | Event | Carries |
 |---|---|
-| `rehydration_started` | `budget_bytes`, `bytes_before`, the effective flag, `scope_id` |
+| `rehydration_started` | `budget_bytes`, `bytes_before`, `scope_id` |
 | `rehydration_finished` | `bytes_before`, `bytes_after`, `bytes_added`, `rehydrated_labels` / `rehydrated_listings` / `rehydrated_pages`, per-alias `{alias, kind, added_bytes}`, `dropped_aliases`, `unresolved_aliases`, `stopped_on`, `extract_prompt_tokens`, `extract_duration_ms`, `rehydration_overflow` |
 | `rehydration_overflow` | how many times the fallback truncated, the budget, `bytes_after` |
 | `rehydration_failed` | the exception type and detail; the extract call then runs on the plain trajectory |
@@ -110,8 +121,7 @@ estimated.
 ## Where it is wired
 
 `fastWorkflowReAct._extract_prediction` (and `_async_extract_prediction`) is the
-single place the flag is read and the copy is built. Every extract call site goes
-through it:
+single place the copy is built. Every extract call site goes through it:
 
 * `fastworkflow/utils/react.py` — `forward` (agent-selected finish and the
   iteration ceiling), `resume` (an `ask_user` continuation), `aforward`;
@@ -119,9 +129,11 @@ through it:
   `StructuredContinuationReAct._finish_prediction`, which is the one extract call
   of a segmented turn and therefore the site the measured configuration uses.
 
-With the flag off, `_extract_prediction` returns the plain call on the trajectory
-object it was handed, so every one of those sites is byte-identical to what it was
-before this existed. `tests/test_answer_rehydration.py::ExtractHook::test_flag_off_is_byte_identical`
+A failure anywhere in the copy — an unreadable archive, a broken handle store —
+falls back to the plain call on the trajectory object it was handed, and records
+`rehydration_failed`. An answer over pointers is worse than one over evidence
+and far better than no answer.
+`tests/test_answer_rehydration.py::ExtractHook::test_a_broken_store_costs_the_evidence_and_not_the_answer`
 asserts exactly that.
 
 ## Related

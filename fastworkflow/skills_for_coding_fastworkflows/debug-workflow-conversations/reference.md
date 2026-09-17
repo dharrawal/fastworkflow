@@ -48,7 +48,7 @@ labels; the catalog corpus itself lives under the workflow's `benchmarks/` direc
 ## Span catalog
 
 `trace_id = turn_key` links every span to its turn; `parent_span_id` builds the
-tree. Attribute values over the cap (`FW_OBS_MAX_ATTR_BYTES`, default 16 KiB)
+tree. Attribute values over the cap (`tracing.MAX_ATTR_BYTES`, 16 KiB)
 are replaced by `{"truncated": true, "original_length", "sha256", "value"}`.
 
 ### `fw.turn` (root; kind `internal`)

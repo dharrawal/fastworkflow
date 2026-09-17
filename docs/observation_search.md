@@ -332,15 +332,31 @@ The search uses temperature 0, a 2,048-token completion limit, a 120-second
 request timeout and one provider retry. `FW_LM_CACHE=0` disables response caching
 for independent benchmark calls.
 
-Compaction knobs, all optional and all falling back to their default on a value
-that is not a non-negative integer:
+Compaction budgets are derived from ONE input — the model's context window —
+in `fastworkflow/context_budget.py`; see
+[`docs/context_budget.md`](context_budget.md) for the input, its resolution
+order and the whole table. The values below are what a 131,072-token window
+(`cerebras/gpt-oss-120b`, the accepted stack's main agent model) produces. Each
+name remains as a **tuning override**, optional, and falls back to the derived
+budget on a value that is not a valid integer or is below its minimum:
 
-| variable | default | meaning |
+| override | derived at a 131,072-token window | meaning |
 |---|---|---|
 | `FW_OFFLOAD_MIN_SAVING_BYTES` | 1024 | minimum UTF-8 bytes an offload must free |
 | `FW_TRAJECTORY_MAX_BYTES` | 28000 | packed-trajectory target and replan bound |
 | `FW_OFFLOAD_HOT_MAX_BYTES` | 262144 | hot handle cache cap |
 | `FW_SEARCH_ANSWER_MAX_BYTES` | 3072 | presentation bound on a search answer |
+
+Observation offloading itself has no switch: `build_tool_agent` always returns a
+`StructuredContinuationReAct` with `search_memory` in its tools, and the forced
+replan bound is the module constant
+`observation_offloading.continuation.MAX_FORCED_REPLANS` (2, therefore 3
+segments). `FW_OBSERVATION_OFFLOADING`, `FW_MAX_FORCED_REPLANS` and
+`FW_OFFLOAD_HANDLE_ARCHIVE` were removed in `ido-pyw.1`; the handle archive now
+always lives beside the workflow's own observability database.
+`FW_OFFLOAD_EVENTS` remains, and is a destination rather than a switch: the
+events are always recorded in process, and it says where a copy is appended on
+disk.
 
 ## Tool behavior
 

@@ -188,7 +188,8 @@ longer matches its digest is refused rather than served.
 **Retention.** This module deletes nothing. Declarations and pages live exactly
 as long as the archive file that holds the turn's observations — that is what
 makes a page reconstructable for evaluation after the live turn ended. The hot
-cache (`FW_RESULT_HANDLE_HOT_MAX_BYTES`, default 256 KB, oldest walk first) is a
+cache (`FW_RESULT_HANDLE_HOT_MAX_BYTES`, 256 KB at a 131,072-token window,
+oldest walk first) is a
 *residency* bound and not a retention bound: every evicted row came from a
 stored page and is rebuilt from SQLite on the next read.
 
@@ -409,12 +410,17 @@ presented as a whole-relation answer.
 
 ## Configuration
 
+Both budgets are derived from the model's context window
+(see [`docs/context_budget.md`](context_budget.md)); the names below are
+**tuning overrides**, not the interface.
+
 ```
 # fastworkflow.env
 FW_RESULT_PAGE_MAX_BYTES=3072            # page observation budget (min 512)
 FW_RESULT_HANDLE_HOT_MAX_BYTES=262144    # hot rows per process
 ```
 
-Both follow the `env_int` pattern: a value that is not a valid integer (or is
-below the minimum) logs a warning and falls back to the default rather than
-aborting a turn.
+Those are the values a 131,072-token window produces — `cerebras/gpt-oss-120b`,
+the accepted stack's main agent model. A value that is not a valid integer, or
+is below the minimum, logs a warning and falls back to the derived budget rather
+than aborting a turn.

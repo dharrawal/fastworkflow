@@ -1,4 +1,4 @@
-# Answer coverage statement (`ido-8ps.22`, `ido-8ps.23`)
+# Answer coverage statement, roster nudge and evidence sentence (`ido-8ps.22`, `ido-8ps.23`, `ido-8ps.27`, `ido-8ps.28`)
 
 Two measured failures share one shape: the writer says more about the world than
 the run earned.
@@ -46,9 +46,8 @@ forbids the phrasing explicitly. Only kinds that are ever INSTRUCTED as "not
 retrieved" are listed back, so the two lists partition one set — a quoted
 request phrase is measured and never instructed, in either direction.
 
-**The last sentence before the closer is `ido-8ps.28`, and it is off by
-default** (`FW_ANSWER_EVIDENCE`). With it on the block gains one further
-sentence, after the observed-items rule:
+**The last sentence before the closer is `ido-8ps.28`.** After the
+observed-items rule the block carries one further sentence:
 
 ```
 … not named in the unobserved list above. Evidence by subject - for each named
@@ -188,25 +187,82 @@ observation, every one of the 45 named items was mentioned somewhere in its
 answer, and only 3 were already marked "not retrieved". That is the number to
 move.
 
-## The flag
+## The roster nudge (`ido-8ps.27` (a))
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `FW_ANSWER_COVERAGE` | `0` | `1`/`true`/`yes`/`on` turns the statement on. Off, the extract call receives byte-for-byte what it received at `4832b3c` (the `ido-8ps.18` stack) — the same module, the same trajectory *object*, the same truncation fallback. |
-| `FW_ANSWER_EVIDENCE` | `0` | `ido-8ps.28`. `1`/`true`/`yes`/`on` adds the evidence sentence after the observed-items rule. Off, nothing is computed and the block is byte-for-byte what it was at `90a1565` (the `ido-8ps.27` stack). |
+The statement tells the *writer* what the run never retrieved. The nudge tells
+the *loop*, once, while it can still do something about it.
 
-Read **env file first, then the process environment**, the rule
-`auto_navigation` and `answer_rehydration` use
-(`answer_rehydration.env_value`): `fastworkflow.get_env_var` short-circuits on
-its default before consulting `os.environ`, so a variable exported into the
-process but absent from the workflow env file would otherwise read as the
-default.
+`ido-8ps.27` measured runs that called `finish` with named people of the request
+they had never made the subject of any command — not retrieved and not refused,
+simply not reached — and then wrote a table about them. So at the one place a
+`finish` action is recognised, before the answer is extracted,
+`fastWorkflowReAct._roster_nudge` replaces that step's `"Completed."`
+observation with a bounded note and lets the loop continue:
 
-`tests/test_answer_coverage.py::ExtractHook::test_flag_off_is_byte_identical`
-asserts the coverage default;
-`EvidenceInTheBlock::test_flag_off_is_byte_identical_to_90a1565` pins the
-statement the `ido-8ps.27` stack produced, and
-`test_flag_off_never_reads_the_evidence` asserts the reader is not even called.
+```
+Harness check before this turn ends: these named items of the request were never
+the subject of a command in this run: Brandon Miller; Barbara Sanchez. Open each
+one and report what its own data shows, then finish.
+```
+
+The rules, all deterministic, all in `answer_coverage.build_nudge`:
+
+* **At most one per turn.** `_roster_nudges_fired` is checked before anything is
+  read, so a second `finish` ends the turn as it always did.
+* **Never on exhaustion.** The note refuses below `NUDGE_MIN_ITERS_LEFT`
+  iterations left, counted as what the agent would still have *after* spending
+  this step on the note. A turn with no room is a turn the note cannot help.
+* **Never an `ask_user` round.** It is an observation on the agent's own step;
+  nothing reaches the user, and the turn is not suspended.
+* **Bounded** at `NUDGE_MAX_BYTES`, with what it cut counted in the event.
+* **Subjects, not mentions.** "Made the subject of a command" is the recorded
+  context clause (`ido-8ps.13`), not a substring of a listing row: appearing in
+  someone else's holder page is not being opened.
+* **A failure leaves the loop alone.** The exception is recorded as
+  `roster_nudge_failed` and the `finish` ends the turn.
+
+It fires whether or not the note is produced, so `roster_nudge` is on the event
+log either way, with `fired`, the `reason` when it did not, `subjects_total`,
+`subjects_missing`, `subjects_named`, `iterations_left` and the byte counts.
+
+## The evidence sentence (`ido-8ps.28`)
+
+The sentence shown in **The block** above, stated per subject, answers a failure
+that is neither retrieval nor coverage: the run retrieves the right rows for a
+person and the answer credits that person with a property their own rows do not
+carry, copied off the request's premise.
+
+* **Positive half only.** What a subject's evidence *lacks* is never stated. A
+  bounded portrait is not a complete one, so "X's observations do not contain Y"
+  would be exactly the false absence `ido-8ps.22` exists to prevent. A subject
+  with nothing to state is not printed at all — which is why a run whose only
+  subject has nothing to state renders the block byte for byte as the
+  `ido-8ps.27` stack did.
+* **No conclusion is instructed.** The sentence says what the evidence contains
+  and stops; it never tells the writer what to do with it.
+* **Subjects come from the recorded context clause**, through
+  `answer_attribution.observations`, so `ido-8ps.29`'s repair to the clause on a
+  re-paged result handle reaches this sentence with no change of its own.
+* **Bounded** at `EVIDENCE_LIST_MAX_BYTES`: whole subjects only, and the rest are
+  counted rather than half-printed.
+* **Not gated on `complete`.** The completeness refusal exists because "appears
+  in no retrieved observation" would otherwise be a claim about the archive; a
+  sentence that only ever says what IS in an observation cannot make that
+  mistake, and on a partial archive it simply says less.
+
+## There are no flags
+
+`ido-pyw.1` removed `FW_ANSWER_COVERAGE`, `FW_ROSTER_NUDGE` and
+`FW_ANSWER_EVIDENCE`. The coverage statement, the roster nudge and the evidence
+sentence are what an answer-time extract call and a `finish` action get, for
+every workflow. Each one is silent when it has nothing to say — a request with
+no named items produces no unobserved list and no nudge, and a subject with no
+other named item in its own observations is never printed — so what used to be
+"the flag is off" is now the ordinary behaviour of a run with nothing to report.
+
+`tests/test_answer_coverage.py::EvidenceInTheBlock::test_a_lone_subject_with_nothing_to_state_is_90a1565`
+pins that statement, byte for byte, against the one the `ido-8ps.27` stack
+produced.
 
 ## Events
 
@@ -215,23 +271,28 @@ same `FW_OFFLOAD_EVENTS` file every other measure does.
 
 | Event | Carries |
 |---|---|
-| `coverage_statement` | `exhausted`, `steps`, `entities_total` / `entities_observed` / `entities_unobserved`, `observed`, `unobserved`, `entity_kinds`, `phrases_total`, `phrases_unmatched`, `complete`, `incomplete_reason`, `archived_observations`, `aliased_executes`, `statement_bytes`, `haystack_bytes`, `request_bytes`, and the `ido-8ps.28` sentence: `evidence_flag`, `evidence` (every stamped subject with the items its own observations contain, including the empty ones the sentence may not print), `evidence_named`, `evidence_subjects`, `evidence_items`, `evidence_bytes` |
-| `coverage_post_check` | `answer_bytes`, `unobserved_total`, `unobserved_mentioned`, **`unavailability_claim_on_unobserved`**, `not_retrieved_on_unobserved`, `silent_on_unobserved`, `per_item`, and the `ido-8ps.24` direction: `observed_total`, `observed_mentioned`, `unavailability_claim_on_observed`, `not_retrieved_on_observed`, **`misuse_on_observed`**, `per_observed_item`, and the `ido-8ps.28` measure: `evidence_subjects_total`, `evidence_subjects_mentioned`, **`evidence_claims_listed`** / **`evidence_claims_unlisted`** (per subject, the request's named items written within `CLAIM_WINDOW_CHARS` of it, split by whether the sentence listed them for that subject), `per_evidence_subject` |
+| `coverage_statement` | `exhausted`, `steps`, `entities_total` / `entities_observed` / `entities_unobserved`, `observed`, `unobserved`, the `ido-8ps.27` (b) split `unavailable` / `never_attempted`, `entity_kinds`, `phrases_total`, `phrases_unmatched`, `complete`, `incomplete_reason`, `archived_observations`, `aliased_executes`, `statement_bytes`, `haystack_bytes`, `request_bytes`, and the `ido-8ps.28` sentence: `evidence` (every stamped subject with the items its own observations contain, including the empty ones the sentence may not print), `evidence_named`, `evidence_subjects`, `evidence_items`, `evidence_bytes` |
+| `coverage_post_check` | `answer_bytes`, `unobserved_total`, `unobserved_mentioned`, **`unavailability_claim_on_unobserved`**, `not_retrieved_on_unobserved`, `silent_on_unobserved`, `per_item`, the `ido-8ps.27` (b) half `unavailable_total`, `unavailable_mentioned`, `unavailability_claim_on_unavailable`, `not_retrieved_on_unavailable` (wired in `ido-8ps.30`; they read 0 in every run recorded before it), and the `ido-8ps.24` direction: `observed_total`, `observed_mentioned`, `unavailability_claim_on_observed`, `not_retrieved_on_observed`, **`misuse_on_observed`**, `per_observed_item`, and the `ido-8ps.28` measure: `evidence_subjects_total`, `evidence_subjects_mentioned`, **`evidence_claims_listed`** / **`evidence_claims_unlisted`** (per subject, the request's named items written within `CLAIM_WINDOW_CHARS` of it, split by whether the sentence listed them for that subject), `per_evidence_subject` |
 | `coverage_failed` | the exception type and detail; the extract call then runs on the trajectory it was handed |
+| `roster_nudge` | `fired`, `reason`, `entities_total`, `subjects_total`, `subjects_missing`, `subjects_named`, `iterations_left`, `text_bytes`, `clause_bytes` |
+| `roster_nudge_failed` | the exception type and detail; the `finish` action ends the turn |
 
 ## Where it is wired
 
-`fastWorkflowReAct._cover_for_extract` is the single place the flag is read and
-the copy is built, called from `_extract_prediction` /
+`fastWorkflowReAct._cover_for_extract` is the single place the copy is built,
+called from `_extract_prediction` /
 `_async_extract_prediction` immediately after `_rehydrate_for_extract`. Every
 extract call site therefore goes through it, including
 `StructuredContinuationReAct._finish_prediction` — the one extract call of a
 segmented turn, and the site the measured configuration uses.
 
+The roster nudge is wired at the one place a `finish` action is recognised in
+`fastWorkflowReAct._run_loop`, after the `"Completed."` observation is written
+and before the answer is extracted.
+
 `truncate_trajectory` skips `coverage_statement` when it drops "the oldest tool
 call information": the coverage block is the one key whose whole job is to be
-read. With the flag off the key never exists, so that line selects exactly the
-keys it always did.
+read.
 
 ## Related
 

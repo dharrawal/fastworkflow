@@ -236,7 +236,7 @@ identical-content retry verifies and claims idempotent success.
 value over `FW_OBS_INLINE_ARTIFACT_BYTES` is replaced **inside `record_json`**
 by a placeholder/ref envelope (per final spec `[A10]`); the `artifacts` table
 is the only value holder. Individual span attributes are capped at
-`FW_OBS_MAX_ATTR_BYTES` (truncation is lossy-and-counted: truncated attrs
+`tracing.MAX_ATTR_BYTES` (truncation is lossy-and-counted: truncated attrs
 carry `truncated: true` + original length + sha256 — no silent truncation).
 `record_json` stores the internal `TurnResult` (full capture is the
 observability value), post-envelope and post-redaction.
@@ -436,7 +436,7 @@ Not absorbed: fix-85g.11 (backpressure/TTL), fix-85g.13 (distributed store).
 | `FW_OBS_DB_MAX_BYTES` | `1073741824` | soft cap incl. `-wal` `[R12]` |
 | `FW_OBS_RETENTION_DAYS` | `30` | prune horizon — spans/artifacts; conversations exempt post-Phase B `[R16]` |
 | `FW_OBS_INLINE_ARTIFACT_BYTES` | `262144` | inline vs envelope-in-artifacts-table `[R10]` |
-| `FW_OBS_MAX_ATTR_BYTES` | `16384` | per-attribute cap, lossy-and-counted `[R10]` |
+| `tracing.MAX_ATTR_BYTES` (constant since `ido-pyw.1`; was `FW_OBS_MAX_ATTR_BYTES`) | `16384` | per-attribute cap, lossy-and-counted `[R10]`. Still reported in `observability_config()`, because provenance records the value in effect. |
 | `FW_OBS_QUEUE_MAX` | `10000` | span/artifact queue bound (turn-record queue is separate and small) `[R13]` |
 | `FW_OBS_SYNC_WRITE_TIMEOUT_S` | `5` | busy timeout for in-request synchronous store writes (conversation-id minting; Phase-7 ruling C9's fail-fast principle) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | `0` | persist traceback artifacts `[R20]` |
@@ -498,7 +498,7 @@ spawned server always passes it.
 | R7 | Daemon writer + explicit close() on CLI exit/atexit |
 | R8 | timeout=30, BEGIN IMMEDIATE, bounded turn-record retries; local-fs only |
 | R9 | Registry-first GET /turns; 202 returns logical key; mapping recorded |
-| R10 | Single envelope mechanism inside record_json; FW_OBS_MAX_ATTR_BYTES; lossy-and-counted |
+| R10 | Single envelope mechanism inside record_json; tracing.MAX_ATTR_BYTES; lossy-and-counted |
 | R11 | PRAGMA user_version + refuse-newer/migrate-forward; spec conversation columns added |
 | R12 | auto_vacuum INCREMENTAL at creation; startup prune + studio --prune; count -wal |
 | R13 | Two queues; bounded-timeout turn-record put; writer health visible in DB/Studio |

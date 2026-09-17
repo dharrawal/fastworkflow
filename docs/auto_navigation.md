@@ -145,28 +145,27 @@ four stateless (`ControlsMonitor`, `DirectoryExplorer`, `ReconciliationWorkspace
 and `ControlFinding` — see the caveat below) and seven parameterised on a
 `*_uid`.
 
-## The feature flag
+## There is no feature flag: the declaration is the switch
 
-```
-FW_AUTO_NAVIGATION=0   # default: declaration and hint only (the 74c348a behaviour)
-FW_AUTO_NAVIGATION=1   # dispatch and the blocking clarification
-```
+`ido-pyw.1` removed `FW_AUTO_NAVIGATION`, `FW_AUTO_NAVIGATION_CANDIDATE_STEPS`
+and `FW_AUTO_NAVIGATION_CANDIDATE_MAX`. Dispatch is unconditional, and it is
+still opt-in per workflow, because the thing it acts on is a declaration:
 
-Read from the fastworkflow env file first, then the process environment. With
-the flag off nothing in this document happens: the decision short-circuits to
-`reason="flag_off"` and the R1 hint is byte-identical to the predecessor's. That
-is what makes a declaration-only predecessor run reproducible against a
-dispatch-enabled one on the same code.
+* a workflow whose context callback classes declare `enter_command` /
+  `enter_commands` gets two-step dispatch and the blocking clarification;
+* a workflow that declares nothing gets exactly the declaration-and-hint
+  behaviour the flag used to pin — `decide` finds no `EntryContract` for the
+  owning context and returns `reason="no_entry_declaration"`, so the R1 hint is
+  what the agent is told, byte for byte.
 
-Two more knobs, both about the clarification's convenience list only:
+Nothing here is ever inferred from a command's name, and nothing is read from
+history, so "no declaration" is a complete answer rather than a degraded one.
 
-```
-FW_AUTO_NAVIGATION_CANDIDATE_STEPS=3    # execute observations scanned for candidates
-FW_AUTO_NAVIGATION_CANDIDATE_MAX=10     # candidate values listed
-```
-
-Setting either to `0` turns candidates off; the clarification is otherwise
-unchanged, because candidates are never part of the decision.
+The clarification's convenience list is bounded by two module constants,
+`auto_navigation.CANDIDATE_STEPS` (3 execute observations scanned) and
+`auto_navigation.CANDIDATE_MAX` (10 values listed). They are presentation
+bounds, not policy: candidates are listed and never chosen, so they are never
+part of the decision.
 
 ## What a dispatch looks like
 
@@ -217,17 +216,17 @@ the presence of the key rather than by a value):
 | `entered_context` | the owning context's name |
 | `auto_navigation_step` | `entry` \| `original` |
 
-On the `fw.nlu.intent` span of the declining prediction (contract v2):
+On the `fw.nlu.intent` span of the declining prediction (contract v3 —
+`auto_navigation_enabled` left it in `ido-pyw.1` with the flag it recorded):
 
 | attribute | value |
 |---|---|
 | `matcher_layer` | `known_name_foreign_context` (R1, unchanged) |
 | `known_name_owner_contexts` | contexts owning the name (R1, unchanged) |
 | `known_name_foreign_context_hint` | the hint text (R1, unchanged) |
-| `auto_navigation_enabled` | the flag, **whether or not anything was dispatched** |
 
 And one `auto_navigation` event per declined name, through the offloading event
-log (`FW_OFFLOAD_EVENTS`), carrying the flag, the decision kind
+log (`FW_OFFLOAD_EVENTS`), carrying the decision kind
 (`dispatch`/`clarify`/`none`), the reason, the rule, the entered context, the
 entry command, the missing parameters and the resolved handle. The reasons are a
 closed vocabulary (`auto_navigation.REASON_*`) so a summary counts them without
@@ -251,7 +250,7 @@ parsing prose.
 | file | what |
 |---|---|
 | `fastworkflow/auto_navigation.py` | the rule: declaration, contracts, registry, `decide`, candidates, clarification text, validator |
-| `fastworkflow/_workflows/command_metadata_extraction/intent_detection.py` | R1's guard; records the flag on the routing event |
+| `fastworkflow/_workflows/command_metadata_extraction/intent_detection.py` | R1's guard: the declined known name and the hint |
 | `fastworkflow/_workflows/command_metadata_extraction/_commands/wildcard.py` | decides after the walk fails; leaves a plan or a clarification |
 | `fastworkflow/command_executor.py` | runs the plan's two steps; records context entries for rule 3 |
 | `fastworkflow/tracing.py` | the two span contracts |

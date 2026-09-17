@@ -181,7 +181,10 @@ proxy routing. Full recipe: [references/litellm-proxy-and-local-dev.md](referenc
 | `INVALID` | none | `"INVALID"` | `parameter_extraction.py:23` (import-time) | prod | Sentinel |
 | `PARAMETER_EXTRACTION_ERROR_MSG` | none | `"Error in parameter extraction: {error}"` | `parameter_extraction.py:263`; `signatures.py:249` (lazy, cached) | prod | Must keep the `{error}` placeholder |
 | `LOG_LEVEL` | `INFO` | not templated | THREE paths: `utils/logging.py:53` (OS env at import, invalid value raises `ValueError`); `__init__.py:180-182` (dotenv, via `reconfigure_log_level`); `run_fastapi_mcp/__main__.py:1612-1617` (dotenv pre-read for uvicorn) | prod | Put it in `fastworkflow.env`; that covers paths 2 and 3. Shell export covers path 1 only |
-| `FW_EAGER_ARTIFACT_VALIDATION` | `"1"` (on) | not templated | `turn.py:155` (direct `os.environ.get` — shell export works) | prod, transitional | Set `0` to silence unserializable-artifact warnings; becomes a hard rejection in v3.0 per the docstring (`turn.py:147-154`) |
+| ~~`FW_EAGER_ARTIFACT_VALIDATION`~~ | — | — | **removed in `ido-pyw.1` (3.4.0)** | **gone** | The unserializable-artifact validator is unconditional; it still only warns, and becomes a hard rejection in v3.0 per the `warn_on_unserializable_artifacts` docstring |
+| `FW_MODEL_CONTEXT_TOKENS` | model metadata, else 131072 | not templated | `context_budget.py` (env file first, then `os.environ`) | prod | **The one byte-budget input**: the model's context window in tokens. Every `FW_*_MAX_BYTES` budget is a fraction of it — see `docs/context_budget.md`. Unset, it is read from the `LLM_AGENT` model via `litellm.get_model_info`. |
+| `FW_TRAJECTORY_MAX_BYTES`, `FW_ANSWER_REHYDRATION_MAX_BYTES`, `FW_RESULT_PAGE_MAX_BYTES`, `FW_SEARCH_ANSWER_MAX_BYTES`, `FW_OFFLOAD_HOT_MAX_BYTES`, `FW_RESULT_HANDLE_HOT_MAX_BYTES`, `FW_OFFLOAD_MIN_SAVING_BYTES` | derived from the window | not templated | `context_budget.py` | prod | **Tuning overrides, not the interface.** Below their floor or unparseable, the derived budget stands with a warning. |
+| `FW_OFFLOAD_EVENTS` | unset | not templated | `observation_offloading/state.py` (`os.environ`) | diagnostics | A destination, not a switch: offloading/search/answer-time events are always recorded in process, and this appends a JSONL copy on disk. |
 | `PYTEST_RUNNING` | — | — | set by `tests/conftest.py:16`; **zero readers** in `fastworkflow/` | **dead** | Safe to ignore; do not build logic on it |
 
 Not fastWorkflow config, despite appearances: repo-root `config.yaml` is a Dolt SQL server
@@ -271,7 +274,8 @@ the next `LLM_RESPONSE_GEN` / `LLM_COMMAND_METADATA_GEN` drift entry.
 
 1. [ ] **Consumer**: read via `fastworkflow.get_env_var("MY_VAR", ...)` — never a scattered
    `os.environ` read (sanctioned exceptions: `LOG_LEVEL` at logger import, and
-   `FW_EAGER_ARTIFACT_VALIDATION`). Never call it at module import time — read lazily inside
+   `context_budget.env_value`, which checks the env file first and then `os.environ`
+   precisely because `get_env_var` short-circuits on its default). Never call it at module import time — read lazily inside
    functions/properties (the 79e6986 lesson; litellm's cwd-`.env` load will hide the bug in-repo).
 2. [ ] **Decide the precedence tier consciously**: passing `default=` to `get_env_var` makes
    the var shell-unoverridable (Section 2). If ops must be able to override via shell, pass no
