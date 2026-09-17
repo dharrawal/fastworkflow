@@ -27,8 +27,11 @@ from fastworkflow.answer_rehydration import (
     MIN_MAX_BYTES,
     NOT_REHYDRATED_KEY,
     NOT_REHYDRATED_PREFIX,
+    ROWS_OMITTED_PREFIX,
     max_bytes_from_env,
     rehydrate,
+    rehydrated_label,
+    stored_rows_block,
     trajectory_bytes,
 )
 from fastworkflow.observation_offloading.archive import (
@@ -523,6 +526,221 @@ class ContinuationSite(unittest.TestCase):
         ) as hook:
             agent._finish_prediction({"thought_0": "t"}, {"user_query": "q"})
         hook.assert_called_once()
+
+
+class OffloadedListing(unittest.TestCase):
+    """ido-pex: a listing can be bounded AND offloaded, and gets both.
+
+    The compaction hook swaps the bounded page-1 observation for a 250 B label
+    while the rows behind its handle stay in the store. Restoring the label puts
+    page 1 back; it does not put pages 2..n back. ``answer_coverage``'s
+    retrieved corpus reads those stored rows either way, so before this fix the
+    block told the writer a row had been observed that the writer could not see.
+    """
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.addCleanup(reset_runtime_state)
+        self.fixture = Fixture(self.directory.name)
+        # The bounded page-1 text O2 showed before compaction archived it.
+        self.page_one = (
+            "result_handle=O2 page 1 rows 1-25 of 60\n"
+            + "\n".join(self.fixture.listing_rows[:25])
+        )
+        self.fixture.archive.persist(
+            self.fixture.scope, alias="O2", offload_order=2,
+            command_name="show_holders", step_index=1, text=self.page_one,
+            text_sha256=hashlib.sha256(self.page_one.encode("utf-8")).hexdigest(),
+        )
+        record_context_clause(
+            self.fixture.scope, "O2", "Permission 6fadcafc Cloud Administrator")
+        self.label = offload_label(
+            alias="O2", command_name="show_holders", response=self.page_one,
+            description="the holder rows",
+        )
+        self.last_row = self.fixture.listing_rows[-1]
+
+    def trajectory(self, *, with_page_step: bool = False) -> dict:
+        trajectory = self.fixture.trajectory()
+        trajectory["observation_1"] = self.label
+        if not with_page_step:
+            for key in ("thought_2", "tool_name_2", "tool_args_2", "observation_2"):
+                trajectory.pop(key)
+        return trajectory
+
+    def rehydrate(self, trajectory=None, budget=DEFAULT_MAX_BYTES):
+        return rehydrate(
+            trajectory if trajectory is not None else self.trajectory(),
+            scope=self.fixture.scope, archive=self.fixture.archive,
+            handle_store=self.fixture.store, budget=budget,
+        )
+
+    # -- the defect -------------------------------------------------------
+
+    def test_the_archived_page_and_the_stored_rows_both_reach_the_extractor(self):
+        copy, report = self.rehydrate()
+        text = copy["observation_1"]
+        self.assertTrue(text.startswith(
+            "Observation O2 (execute_workflow_query, "
+            "in Permission 6fadcafc Cloud Administrator)\n"))
+        self.assertIn(self.page_one, text)               # (a) the label
+        self.assertIn("stored rows behind result_handle=O2", text)
+        for line in self.fixture.listing_rows:           # (b) every stored row
+            self.assertIn(line, text)
+        self.assertNotIn(self.last_row, self.page_one)   # page 3, unseen before
+        entry = [item for item in report.rehydrated if item["alias"] == "O2"][0]
+        self.assertEqual(entry["kind"], KIND_LABEL)
+        self.assertEqual(entry["listing_alias"], "O2")
+
+    def test_the_coverage_corpus_and_the_extractor_copy_now_agree(self) -> None:
+        """The harm, stated as the two readers of the same stored rows."""
+        from fastworkflow import answer_coverage
+
+        corpus, _ = answer_coverage.retrieved_corpus(
+            scope=self.fixture.scope, archive=self.fixture.archive,
+            handle_store=self.fixture.store,
+        )
+        copy, _ = self.rehydrate()
+        self.assertIn(answer_coverage.normalise(self.last_row), corpus)
+        self.assertIn(self.last_row, copy["observation_1"])
+
+    # -- the budget -------------------------------------------------------
+
+    def _added(self) -> tuple[int, int]:
+        """``(bytes for the label alone, bytes for the label and the rows)``."""
+        restored = rehydrated_label(
+            "O2", scope=self.fixture.scope, archive=self.fixture.archive)
+        block = stored_rows_block(
+            "O2", scope=self.fixture.scope, store=self.fixture.store,
+            shown_for="O2")
+        label_only = len(restored.encode("utf-8")) - len(self.label.encode("utf-8"))
+        return label_only, label_only + len("\n".encode("utf-8")) + len(
+            block.encode("utf-8"))
+
+    def test_the_pair_is_charged_to_the_budget_as_one_replacement(self) -> None:
+        trajectory = self.trajectory()
+        _, full = self._added()
+        budget = trajectory_bytes(trajectory) + full
+        copy, report = self.rehydrate(trajectory, budget=budget)
+        entry = [item for item in report.rehydrated if item["alias"] == "O2"][0]
+        self.assertEqual(entry["added_bytes"], full)
+        # The pair fits to the byte, and the note (a statement about the
+        # trajectory, not evidence) is the only thing outside the bound.
+        note_bytes = len(copy.get(NOT_REHYDRATED_KEY, "").encode("utf-8"))
+        self.assertEqual(trajectory_bytes(copy) - note_bytes, budget)
+        self.assertEqual(
+            report.bytes_after - report.bytes_before,
+            sum(item["added_bytes"] for item in report.rehydrated) + note_bytes,
+        )
+        self.assertEqual(report.rows_omitted_aliases, [])
+        self.assertIn("O2", [item["alias"] for item in report.rehydrated])
+
+    def test_one_byte_short_keeps_the_label_and_says_the_rows_are_missing(self):
+        trajectory = self.trajectory()
+        label_only, full = self._added()
+        budget = trajectory_bytes(trajectory) + full - 1
+        self.assertGreater(budget, trajectory_bytes(trajectory) + label_only)
+        copy, report = self.rehydrate(trajectory, budget=budget)
+        text = copy["observation_1"]
+        # The label is still what it was before ido-pex: better than a pointer.
+        self.assertIn(self.page_one, text)
+        self.assertNotIn("stored rows behind result_handle=O2", text)
+        self.assertEqual(report.rows_omitted_aliases, ["O2"])
+        self.assertNotIn("O2", report.dropped_aliases)
+        self.assertEqual(report.stopped_on, "O2")
+        # The budget still bounds the copy, the note excluded (it is not evidence).
+        self.assertLessEqual(
+            trajectory_bytes(copy)
+            - len(copy.get(NOT_REHYDRATED_KEY, "").encode("utf-8")),
+            budget,
+        )
+
+    def test_the_note_says_what_happened_to_each_alias(self) -> None:
+        trajectory = self.trajectory()
+        _, full = self._added()
+        copy, report = self.rehydrate(
+            trajectory, budget=trajectory_bytes(trajectory) + full - 1)
+        note = copy[NOT_REHYDRATED_KEY]
+        self.assertEqual(note, report.note_line)
+        # O1, older than the stop, got nothing at all; O2 got all but its rows.
+        self.assertIn(NOT_REHYDRATED_PREFIX + "O1", note)
+        self.assertIn(ROWS_OMITTED_PREFIX + "O2", note)
+        self.assertEqual(report.as_event()["rows_omitted_aliases"], ["O2"])
+
+    def test_a_budget_that_holds_nothing_drops_the_alias_outright(self) -> None:
+        trajectory = self.trajectory()
+        copy, report = self.rehydrate(
+            trajectory, budget=trajectory_bytes(trajectory))
+        self.assertEqual(copy["observation_1"], self.label)
+        self.assertIn("O2", report.dropped_aliases)
+        self.assertEqual(report.rows_omitted_aliases, [])
+        self.assertTrue(report.note_line.startswith(NOT_REHYDRATED_PREFIX))
+        self.assertNotIn(ROWS_OMITTED_PREFIX, report.note_line)
+
+    # -- what must not change --------------------------------------------
+
+    def test_an_inline_bounded_listing_is_unchanged(self) -> None:
+        """The control: not offloaded, so exactly the (b) treatment as before."""
+        trajectory = self.fixture.trajectory()
+        for key in ("thought_2", "tool_name_2", "tool_args_2", "observation_2"):
+            trajectory.pop(key)
+        before = trajectory["observation_1"]
+        copy, report = self.rehydrate(trajectory)
+        entry = [item for item in report.rehydrated if item["alias"] == "O2"][0]
+        self.assertEqual(entry["kind"], KIND_LISTING)
+        self.assertEqual(report.counts[KIND_LISTING], 1)
+        self.assertEqual(report.counts[KIND_LABEL], 1)      # O1, the plain label
+        self.assertTrue(copy["observation_1"].startswith(before))
+        for line in self.fixture.listing_rows:
+            self.assertIn(line, copy["observation_1"])
+
+    def test_a_label_over_an_observation_with_no_handle_is_unchanged(self) -> None:
+        """O1 was offloaded and never declared a handle: (a) only, as before."""
+        copy, report = self.rehydrate()
+        self.assertEqual(
+            copy["observation_0"],
+            rehydrated_label("O1", scope=self.fixture.scope,
+                             archive=self.fixture.archive),
+        )
+        self.assertNotIn("stored rows behind", copy["observation_0"])
+        entry = [item for item in report.rehydrated if item["alias"] == "O1"][0]
+        self.assertEqual(entry["kind"], KIND_LABEL)
+        self.assertEqual(entry["listing_alias"], "")
+
+    def test_an_unarchived_label_over_a_handle_invents_nothing(self) -> None:
+        """No archived text means no observation: the rows have no page to join."""
+        trajectory = self.trajectory()
+        trajectory["observation_1"] = offload_label(
+            alias="O9", command_name="show_holders", response=self.page_one)
+        copy, report = self.rehydrate(trajectory)
+        self.assertEqual(copy["observation_1"], trajectory["observation_1"])
+        self.assertIn("O9", report.unresolved_aliases)
+
+    def test_the_rows_are_not_repeated_under_a_newer_page_observation(self) -> None:
+        """Dedup still wins: the newest carrier holds the rows, once."""
+        copy, report = self.rehydrate(self.trajectory(with_page_step=True))
+        self.assertEqual(report.counts[KIND_PAGE], 1)
+        self.assertIn("stored rows behind result_handle=O2", copy["observation_2"])
+        # The older offloaded listing still gets its archived page back...
+        self.assertIn(self.page_one, copy["observation_1"])
+        # ...and does not pay for a second copy of the same rows.
+        self.assertNotIn("stored rows behind result_handle=O2",
+                         copy["observation_1"])
+        self.assertEqual(report.counts[KIND_LABEL], 2)      # O1 and O2
+
+    def test_the_stores_are_still_only_read(self) -> None:
+        before_archive = self.fixture.archive.list(self.fixture.scope)
+        before_pages = self.fixture.store.list_pages(
+            self.fixture.scope, alias="O2", query_scope="")
+        self.rehydrate()
+        self.assertEqual(self.fixture.archive.list(self.fixture.scope),
+                         before_archive)
+        self.assertEqual(
+            self.fixture.store.list_pages(self.fixture.scope, alias="O2",
+                                          query_scope=""),
+            before_pages)
 
 
 if __name__ == "__main__":

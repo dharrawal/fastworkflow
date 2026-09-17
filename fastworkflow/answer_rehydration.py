@@ -25,6 +25,12 @@ extractor's OWN copy of the trajectory with the evidence put back:
 (c) a **fetch_result_page observation** is treated the same way through the
     listing it paged: the rows behind the page it served are appended to it.
 
+(a) and (b) are not alternatives. A listing can be bounded AND later offloaded,
+and such an observation gets both: its archived page comes back under its alias
+line and the stored rows are appended to that (``ido-pex``). Before that fix the
+label step ended the walk for that observation, so pages 2..n reached the
+coverage corpus -- which reads the same stored rows -- but never the writer.
+
 Rules this module does not bend:
 
 * **Nothing is chosen by a model and nothing is invented.** Every byte added here
@@ -84,6 +90,14 @@ NOT_REHYDRATED_KEY = "answer_rehydration_note"
 NOT_REHYDRATED_PREFIX = (
     "Not rehydrated for the answer (evidence exists under these observations): "
 )
+#: The second clause of the same note. An offloaded listing that got its
+#: archived text back but not the rows behind its handle is not "not
+#: rehydrated" -- its own page is there -- so it is named separately, and the
+#: extractor can say which listings it holds only in part (``ido-pex``).
+ROWS_OMITTED_PREFIX = (
+    "Rehydrated without the stored rows behind their result handles (the "
+    "observation's own text is present, the remaining pages are not): "
+)
 
 KIND_LABEL = "label"        # (a)
 KIND_LISTING = "listing"    # (b)
@@ -120,6 +134,9 @@ class RehydrationReport:
     )
     rehydrated: list[dict[str, Any]] = field(default_factory=list)
     dropped_aliases: list[str] = field(default_factory=list)
+    #: Aliases whose observation WAS rehydrated but whose stored rows did not
+    #: fit beside it. Disjoint from ``dropped_aliases``: those got nothing.
+    rows_omitted_aliases: list[str] = field(default_factory=list)
     unresolved_aliases: list[str] = field(default_factory=list)
     note_line: str = ""
     stopped_on: str = ""
@@ -139,6 +156,7 @@ class RehydrationReport:
             "rehydrated_listings": self.counts[KIND_LISTING],
             "rehydrated_pages": self.counts[KIND_PAGE],
             "dropped_aliases": list(self.dropped_aliases),
+            "rows_omitted_aliases": list(self.rows_omitted_aliases),
             "unresolved_aliases": list(self.unresolved_aliases),
             "stopped_on": self.stopped_on,
             "aliases": [
@@ -357,6 +375,14 @@ def rehydrate(
     it was -- a label or a bounded page -- and every alias left that way is named
     in one deterministic line appended to the copy, so the extractor can report
     those slots as unresolved instead of inventing them.
+
+    One replacement can carry two treatments, for an observation that was both a
+    bounded listing and an offload label, and the budget sees them as the single
+    replacement they are. If the pair overruns, the archived text alone is kept
+    when it fits -- that is what the extractor held before ``ido-pex`` and it
+    beats a pointer -- the alias goes into ``rows_omitted_aliases``, the note
+    says the rest of that listing is absent, and the walk stops as it would for
+    any other overrun.
     """
     from fastworkflow import result_handles
 
@@ -383,41 +409,70 @@ def rehydrate(
             continue
         kind = ""
         listing_alias = ""
-        replacement: Optional[str] = None
+        # (a) The label, if this observation is one. ``base`` is the text the
+        # rows are appended to below: the archived observation for a label, the
+        # observation's own text otherwise.
+        base = text
         if is_offload_label(text):
-            kind = KIND_LABEL
-            replacement = rehydrated_label(
+            restored = rehydrated_label(
                 alias, scope=selected_scope, archive=archive
             )
-            if replacement is None:
+            if restored is None:
                 report.unresolved_aliases.append(alias)
                 continue
-        else:
-            declaration = _declaration(handle_store, selected_scope, alias)
-            if declaration is None:
-                continue
+            kind = KIND_LABEL
+            base = restored
+
+        # (b)/(c) The stored rows, if this observation declared a handle. A
+        # listing that was BOTH bounded and offloaded gets both treatments:
+        # until ``ido-pex`` the label branch ended the step here, so the
+        # archived FIRST page came back and pages 2..n never reached the
+        # extractor -- while the coverage corpus, which reads the same stored
+        # rows, told the writer the item had been retrieved.
+        block = ""
+        declaration = _declaration(handle_store, selected_scope, alias)
+        if declaration is not None:
             parent = str(declaration.get("parent_alias") or "")
-            kind = KIND_PAGE if parent else KIND_LISTING
-            listing_alias = parent or alias
-            if listing_alias in seen_blocks:
+            of_handle = parent or alias
+            if of_handle not in seen_blocks:
                 # A later (more recent) observation already carries this
                 # handle's rows in full. Repeating them would spend the budget
                 # on bytes the extractor is already holding.
-                continue
-            block = stored_rows_block(
-                listing_alias, scope=selected_scope, store=handle_store,
-                shown_for=alias,
-            )
-            if not block:
-                continue
-            replacement = text + "\n" + block
-
-        added = (len(replacement.encode("utf-8")) - len(text.encode("utf-8")))
-        if used + added > budget_bytes:
-            stopped = True
-            report.stopped_on = alias
-            report.dropped_aliases.append(alias)
+                block = stored_rows_block(
+                    of_handle, scope=selected_scope, store=handle_store,
+                    shown_for=alias,
+                )
+                if block:
+                    listing_alias = of_handle
+                    kind = kind or (KIND_PAGE if parent else KIND_LISTING)
+        if not kind:
+            # Neither a label nor a handle with stored rows: nothing to put back.
             continue
+        replacement: str = (base + "\n" + block) if block else base
+
+        text_bytes = len(text.encode("utf-8"))
+        added = len(replacement.encode("utf-8")) - text_bytes
+        if used + added > budget_bytes:
+            # An offloaded listing asks the budget for two things at once: the
+            # archived text behind its label and the stored rows behind its
+            # handle. When both will not fit, the label alone is still what the
+            # extractor had before ``ido-pex``, and strictly better than a
+            # pointer -- so it is kept if IT fits, the rows are declared
+            # omitted in the note, and the walk stops here as it would for any
+            # other replacement that overran.
+            label_only = len(base.encode("utf-8")) - text_bytes
+            if not (block and kind == KIND_LABEL
+                    and used + label_only <= budget_bytes):
+                stopped = True
+                report.stopped_on = alias
+                report.dropped_aliases.append(alias)
+                continue
+            replacement = base
+            added = label_only
+            listing_alias = ""
+            report.rows_omitted_aliases.append(alias)
+            report.stopped_on = alias
+            stopped = True
         copy[f"observation_{index}"] = replacement
         used += added
         report.counts[kind] += 1
@@ -433,9 +488,15 @@ def rehydrate(
             "utf8_bytes": len(replacement.encode("utf-8")),
         })
 
+    clauses: list[str] = []
     if report.dropped_aliases:
         report.dropped_aliases.sort(key=_alias_ordinal)
-        report.note_line = NOT_REHYDRATED_PREFIX + ", ".join(report.dropped_aliases)
+        clauses.append(NOT_REHYDRATED_PREFIX + ", ".join(report.dropped_aliases))
+    if report.rows_omitted_aliases:
+        report.rows_omitted_aliases.sort(key=_alias_ordinal)
+        clauses.append(ROWS_OMITTED_PREFIX + ", ".join(report.rows_omitted_aliases))
+    if clauses:
+        report.note_line = " ".join(clauses)
         copy[NOT_REHYDRATED_KEY] = report.note_line
     report.bytes_after = trajectory_bytes(copy)
     return copy, report
@@ -467,6 +528,7 @@ __all__ = [
     "MIN_MAX_BYTES",
     "NOT_REHYDRATED_KEY",
     "NOT_REHYDRATED_PREFIX",
+    "ROWS_OMITTED_PREFIX",
     "RehydrationReport",
     "archived_observation",
     "max_bytes_from_env",
