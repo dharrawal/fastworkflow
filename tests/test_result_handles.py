@@ -12,7 +12,12 @@ from fastworkflow.observation_offloading.archive import RuntimeHandleScope
 from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive
 from fastworkflow.observation_offloading.labels import printed_alias, strip_alias_line
-from fastworkflow.observation_offloading.state import reset_runtime_state
+from fastworkflow.observation_offloading.state import (
+    context_clause_of,
+    record_context_clause,
+    reset_runtime_state,
+    snapshot_events,
+)
 from fastworkflow.result_handles import (
     ResultHandleError,
     ResultHandleSpec,
@@ -20,6 +25,7 @@ from fastworkflow.result_handles import (
     SourceDescriptor,
     current_execute_alias,
     declare,
+    declaring_alias,
     fetch_page,
     normalize_literal,
     parent_handle,
@@ -753,6 +759,150 @@ class AliasTests(unittest.TestCase):
             self.assertEqual(follow.handle, "O1")
             self.assertEqual(follow.rows, holders(8)[len(page.rows):])
             self.assertIsNone(parent_handle("O1", selected_store=self.store))
+
+
+class PageSubjectTests(unittest.TestCase):
+    """ido-8ps.29: a page carries the subject its HANDLE was declared for.
+
+    The measured defect: evidence-pinned attempt 1 opened Christopher Hubbard's
+    identity and then re-paged O11, Alan Cooper's entitlement listing. The page
+    observations O48 and O49 were stamped "Identity ... Christopher Hubbard"
+    over rows that every one read "via account <Cooper's account>", and both the
+    answer-time evidence sentence and the attribution check read them as
+    Hubbard's evidence. A $0 replay over the ten stored evidence-pinned and
+    roster-pinned attempts found 90 of 106 page observations stamped with a
+    subject their handle was not declared for.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.scope = scope()
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    @staticmethod
+    def host(trajectory, selected_scope=None):
+        agent = SimpleNamespace(current_trajectory=trajectory,
+                                continuation_scope=selected_scope or scope())
+        return SimpleNamespace(workflow_tool_agent=agent)
+
+    def _declare_under(self, trajectory, clause):
+        """Declare a listing at the in-flight execute step, stamped with *clause*."""
+        with tracing.host_scope(self.host(trajectory, self.scope)):
+            payload = declare(
+                ResultHandleSpec(kind="entitlement", items=holders(8), total=8,
+                                 page_size=4),
+                scope=self.scope, selected_store=self.store,
+            )
+        record_context_clause(self.scope, payload["result_handle"], clause)
+        return payload["result_handle"]
+
+    def _page_under(self, trajectory, handle, clause, cursor=""):
+        """Fetch a page at the next execute step, with *clause* stamped at dispatch
+        the way CommandExecutor._remember_execute_context does."""
+        index = max(int(key.removeprefix("tool_name_")) for key in trajectory
+                    if key.startswith("tool_name_")) + 1
+        trajectory[f"observation_{index - 1}"] = "rows"
+        trajectory[f"tool_name_{index}"] = "execute_workflow_query"
+        with tracing.host_scope(self.host(trajectory, self.scope)):
+            alias = current_execute_alias()
+            record_context_clause(self.scope, alias, clause)
+            page = fetch_page(handle, cursor, scope=self.scope,
+                              selected_store=self.store, budget_bytes=300)
+        return page
+
+    COOPER = "Identity 28c5aeb5b64e4ac6c40c57b0235980e2 Alan Cooper"
+    HUBBARD = "Identity 81b86cf622ed7f1f3be7b964852e0f42 Christopher Hubbard"
+
+    def test_a_page_fetched_in_another_context_keeps_the_handles_subject(self):
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        handle = self._declare_under(trajectory, self.COOPER)
+        page = self._page_under(trajectory, handle, self.HUBBARD)
+        self.assertEqual(context_clause_of(self.scope, page.page_alias),
+                         self.COOPER)
+
+    def test_a_page_fetched_in_its_own_context_is_unchanged(self):
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        handle = self._declare_under(trajectory, self.COOPER)
+        page = self._page_under(trajectory, handle, self.COOPER)
+        self.assertEqual(context_clause_of(self.scope, page.page_alias),
+                         self.COOPER)
+        self.assertEqual(
+            [e for e in snapshot_events()
+             if e["kind"] == "result_handle_page_clause"], [])
+
+    def test_an_unrecorded_declaring_subject_drops_the_dispatch_stamp(self):
+        """"No subject recorded" is a state every reader handles; the context
+        the agent happened to be standing in is one they all believe."""
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        with tracing.host_scope(self.host(trajectory, self.scope)):
+            payload = declare(
+                ResultHandleSpec(kind="entitlement", items=holders(8), total=8,
+                                 page_size=4),
+                scope=self.scope, selected_store=self.store,
+            )
+        page = self._page_under(trajectory, payload["result_handle"], self.HUBBARD)
+        self.assertIsNone(context_clause_of(self.scope, page.page_alias))
+
+    def test_a_page_of_a_page_follows_the_root_handle(self):
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        handle = self._declare_under(trajectory, self.COOPER)
+        first = self._page_under(trajectory, handle, self.HUBBARD)
+        second = self._page_under(trajectory, first.page_alias, self.HUBBARD,
+                                  cursor=first.next_cursor)
+        self.assertEqual(
+            declaring_alias(second.page_alias, scope=self.scope,
+                            selected_store=self.store),
+            handle)
+        self.assertEqual(context_clause_of(self.scope, second.page_alias),
+                         self.COOPER)
+
+    def test_the_correction_is_recorded_as_an_event(self):
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        handle = self._declare_under(trajectory, self.COOPER)
+        page = self._page_under(trajectory, handle, self.HUBBARD)
+        event = [e for e in snapshot_events()
+                 if e["kind"] == "result_handle_page_clause"][0]
+        self.assertEqual(event["page_alias"], page.page_alias)
+        self.assertEqual(event["declaring_alias"], handle)
+        self.assertEqual(event["clause_at_dispatch"], self.HUBBARD)
+        self.assertEqual(event["clause_recorded"], self.COOPER)
+
+    def test_both_answer_time_consumers_read_the_corrected_subject(self):
+        """The evidence sentence (ido-8ps.28) and the attribution check both
+        group a turn's observations by the clause stamped on them, through the
+        one reader `answer_attribution.observations`. Neither needs a change of
+        its own: the page carries Cooper, so no reader can see Cooper's rows
+        under Hubbard's name."""
+        from fastworkflow import answer_attribution
+
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        handle = self._declare_under(trajectory, self.COOPER)
+        page = self._page_under(trajectory, handle, self.HUBBARD)
+        archive = RuntimeHandleArchive(
+            os.path.join(self.temp.name, "obs.sqlite3"))
+        import hashlib
+        for alias, text in ((handle, "\n".join(holders(8))),
+                            (page.page_alias, page.observation)):
+            archive.persist(
+                self.scope, alias=alias, offload_order=int(alias[1:]),
+                command_name="list_entitlements", step_index=int(alias[1:]),
+                text=text,
+                text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
+        seen = answer_attribution.observations(
+            scope=self.scope, archive=archive, handle_store=self.store)
+        by_alias = {item.alias: item.clause for item in seen}
+        self.assertEqual(by_alias[page.page_alias],
+                         answer_attribution.normalise(self.COOPER))
+        self.assertNotIn("christopher hubbard",
+                         " ".join(by_alias.values()))
 
 
 class OffloadingInterplayTests(unittest.TestCase):

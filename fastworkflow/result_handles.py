@@ -1704,6 +1704,34 @@ def handle_declaration(
     return declaration
 
 
+def declaring_alias(
+    handle: str,
+    *,
+    scope: Optional[RuntimeHandleScope] = None,
+    selected_store: Optional[ResultHandleStore] = None,
+) -> str:
+    """The handle a page ULTIMATELY pages: ``parent_alias`` followed to the root.
+
+    ``ido-8ps.29``. A page of a page of a listing is still evidence about the
+    listing, so the walk goes all the way up rather than one step. A handle with
+    no parent is its own declaring alias, and an alias with no stored
+    declaration at all is returned unchanged -- this is a lookup, not a
+    validator, and it is read on the paging path of every fetch.
+    """
+    selected_scope = scope or current_scope()
+    store_ = selected_store or store()
+    current = str(handle or "").strip()
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        declaration = store_.get_declaration(selected_scope, current)
+        parent = str((declaration or {}).get("parent_alias") or "")
+        if not parent:
+            return current
+        current = parent
+    return current
+
+
 def parent_handle(
     handle: str,
     *,
@@ -2506,6 +2534,73 @@ def _link_page(
                 "error": type(error).__name__,
             }
         )
+        return
+    _stamp_page_clause(scope, store_, page.page_alias, declaration["alias"])
+
+
+def _stamp_page_clause(
+    scope: RuntimeHandleScope,
+    store_: ResultHandleStore,
+    page_alias: str,
+    parent_alias: str,
+) -> None:
+    """Give a page observation the subject its HANDLE was declared for (ido-8ps.29).
+
+    ``CommandExecutor._remember_execute_context`` stamps every execute step with
+    the context the command RAN IN, taken before dispatch. That is the right
+    fact for a command that produces new output and the wrong one for a command
+    that re-serves output produced elsewhere: an agent that opens Christopher
+    Hubbard's identity and then pages Alan Cooper's entitlement listing gets
+    Cooper's rows stamped "Identity ... Christopher Hubbard", and every reader
+    of the clause -- the alias line, the answer-time evidence sentence
+    (``answer_coverage``), the attribution check (``answer_attribution``) --
+    then reads another subject's rows as this subject's evidence.
+
+    A page is evidence about the handle it pages, wherever it is fetched from,
+    so the clause follows the declaring handle. If the declaring handle carries
+    no recorded clause the dispatch-time stamp is DROPPED rather than kept:
+    unrecorded is a state every reader handles, and a wrong subject is one they
+    all believe.
+
+    Best effort from end to end: a presentation fact must never fail a fetch.
+    """
+    try:
+        from fastworkflow.observation_offloading.state import (
+            context_clause_of,
+            forget_context_clause,
+            record_context_clause,
+        )
+
+        root = declaring_alias(parent_alias, scope=scope, selected_store=store_)
+        declaring = context_clause_of(scope, root)
+        stamped = context_clause_of(scope, page_alias)
+        if declaring == stamped:
+            return
+        if declaring is None:
+            forget_context_clause(scope, page_alias)
+        else:
+            record_context_clause(scope, page_alias, declaring)
+        record_event(
+            {
+                "kind": "result_handle_page_clause",
+                "scope_id": scope.scope_id,
+                "page_alias": page_alias,
+                "parent_alias": parent_alias,
+                "declaring_alias": root,
+                "clause_at_dispatch": stamped,
+                "clause_recorded": declaring,
+            }
+        )
+    except Exception as error:  # noqa: BLE001 - presentation must never fail a fetch
+        record_event(
+            {
+                "kind": "result_handle_page_clause_refused",
+                "scope_id": scope.scope_id,
+                "page_alias": page_alias,
+                "parent_alias": parent_alias,
+                "error": type(error).__name__,
+            }
+        )
 
 
 __all__ = [
@@ -2536,6 +2631,7 @@ __all__ = [
     "fetch_page",
     "handle_declaration",
     "normalize_literal",
+    "declaring_alias",
     "page_max_bytes_from_env",
     "parent_handle",
     "MAX_RESOLVER_CALLS_PER_FETCH",

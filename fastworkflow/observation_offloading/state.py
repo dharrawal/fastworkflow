@@ -253,6 +253,20 @@ def context_clause_of(scope: RuntimeHandleScope, alias: str) -> Optional[str]:
         return _context_clauses.get(handle_key(scope, alias))
 
 
+def forget_context_clause(scope: RuntimeHandleScope, alias: str) -> None:
+    """Drop the clause recorded for *alias*, so it reads as UNRECORDED again.
+
+    ``ido-8ps.29``. The dispatch-time stamp is a good default and a bad answer
+    for one kind of step: a page of a result handle declared somewhere else. If
+    the declaring subject turns out to be unknown, "no subject recorded" is the
+    truth and the context the agent happened to be standing in is not -- and
+    "unrecorded" is a state every reader already handles, where a wrong clause
+    is one every reader believes.
+    """
+    with _lock:
+        _context_clauses.pop(handle_key(scope, alias), None)
+
+
 def reset_runtime_state() -> None:
     """Drop every process-local cache the offloading runtime holds.
 
