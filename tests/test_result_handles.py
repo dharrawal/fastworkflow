@@ -1391,3 +1391,290 @@ class CompactionPolicyTests(unittest.TestCase):
         # The five most recent execute observations are protected exactly as
         # before; nothing here asked compaction to treat a page differently.
         self.assertEqual(decisions[0]["reason"], "recent_observation_protected")
+
+
+# ---------------------------------------------------------------------------
+# ido-pg2: the store is the ACTIVE agent's archive file, not the first one used
+# ---------------------------------------------------------------------------
+
+
+class StoreSelectionTests(unittest.TestCase):
+    """Two workflows in one process each write into their own archive file.
+
+    The measured defect: ``store()`` returned one process-global handle, so
+    whichever workflow ran first owned the file. The second workflow's
+    declarations, pages and cursors were written into the first workflow's
+    database while its observations were archived in its own, and a later
+    process that opened the second file could not read them back.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def path(self, name: str) -> str:
+        return os.path.join(self.temp.name, name + ".offload-handles.sqlite3")
+
+    def host(self, name: str, selected_scope=None):
+        """A trace host whose agent archives into ``name``'s workflow file."""
+        agent = SimpleNamespace(
+            current_trajectory={"tool_name_0": "execute_workflow_query"},
+            continuation_scope=selected_scope or scope(turn=name),
+            observation_archive=RuntimeHandleArchive(self.path(name)),
+        )
+        return SimpleNamespace(workflow_tool_agent=agent)
+
+    def declare_in(self, name: str):
+        with tracing.host_scope(self.host(name)):
+            payload = declare(
+                ResultHandleSpec(kind="holder",
+                                 summary="30 holder(s).",
+                                 items=holders(30, prefix=name),
+                                 total=30, page_size=10),
+            )
+            page = fetch_page(payload["result_handle"], budget_bytes=400)
+            selected = result_handles.store().db_path
+        return payload, page, selected
+
+    def test_each_workflow_writes_into_its_own_archive_file(self):
+        first = self.declare_in("wa")
+        second = self.declare_in("wb")
+        self.assertEqual(first[2], self.path("wa"))
+        self.assertEqual(second[2], self.path("wb"))
+        self.assertNotEqual(first[2], second[2])
+
+    def test_each_file_reopened_alone_holds_its_own_handles(self):
+        _, first_page, _ = self.declare_in("wa")
+        _, second_page, _ = self.declare_in("wb")
+        self.assertIsNotNone(first_page.next_cursor)
+        self.assertIsNotNone(second_page.next_cursor)
+        # A fresh process: no hot rows, no token cache, one file at a time.
+        reset_result_handle_state()
+        for name, cursor in (("wa", first_page.next_cursor),
+                             ("wb", second_page.next_cursor)):
+            reopened = ResultHandleStore(self.path(name))
+            turn = scope(turn=name)
+            self.assertIsNotNone(reopened.get_declaration(turn, "O1"))
+            self.assertTrue(reopened.list_pages(turn, alias="O1", query_scope=""))
+            self.assertTrue(reopened.list_cursors(turn, alias="O1"))
+            # The rows the cursor resumes are this workflow's rows, read out of
+            # this workflow's file, with nothing of the other workflow in it.
+            page = fetch_page("O1", cursor, scope=turn, selected_store=reopened,
+                              budget_bytes=400)
+            self.assertTrue(page.rows)
+            self.assertTrue(all(row.startswith(name) for row in page.rows))
+            other = "wb" if name == "wa" else "wa"
+            self.assertIsNone(
+                ResultHandleStore(self.path(name)).get_declaration(
+                    scope(turn=other), "O1"
+                )
+            )
+
+    def test_a_call_before_any_agent_does_not_pin_the_process(self):
+        from fastworkflow.observation_offloading import state as offload_state
+
+        # A command frame with no agent: the per-process fallback archive.
+        fallback = result_handles.store()
+        self.assertEqual(fallback.db_path,
+                         os.path.abspath(offload_state.archive().db_path))
+        declare(
+            ResultHandleSpec(kind="holder", items=holders(3), total=3),
+            scope=scope(turn="pre-agent"), selected_store=fallback, alias="O1",
+        )
+        # The agent arrives; the process follows it to its own file.
+        with tracing.host_scope(self.host("wa")):
+            selected = result_handles.store()
+        self.assertEqual(selected.db_path, self.path("wa"))
+        self.assertIsNone(selected.get_declaration(scope(turn="pre-agent"), "O1"))
+        # ... and the fallback file is still its own store, not a discarded one.
+        self.assertIs(result_handles.store(), fallback)
+
+    def test_one_turn_scope_in_two_files_is_two_traversals(self):
+        """The hot caches are keyed by the store file as well as the scope."""
+        shared = scope(turn="shared")
+        for name in ("wa", "wb"):
+            with tracing.host_scope(self.host(name, selected_scope=shared)):
+                declare(
+                    ResultHandleSpec(kind="holder", summary="30 holder(s).",
+                                     items=holders(30, prefix=name), total=30,
+                                     page_size=10),
+                    alias="O1",
+                )
+        pages = {}
+        for name in ("wa", "wb"):
+            with tracing.host_scope(self.host(name, selected_scope=shared)):
+                pages[name] = fetch_page("O1", budget_bytes=400)
+        for name, page in pages.items():
+            self.assertTrue(all(row.startswith(name) for row in page.rows))
+        self.assertNotEqual(pages["wa"].next_cursor and pages["wa"].rows,
+                            pages["wb"].rows)
+
+
+# ---------------------------------------------------------------------------
+# ido-1r0: a walk's end is stored, and the hot bound evicts the coldest walk
+# ---------------------------------------------------------------------------
+
+
+class WalkTerminalStateTests(unittest.TestCase):
+    """Where a walk ended, and the count that judged it, outlive the process.
+
+    The measured defect: the empty page that ends a walk was stored, but the
+    rebuilt walk was seeded PAST it and its completeness was taken from the
+    producer's flag alone. Every eviction and every restart therefore asked the
+    source to find the end again, stored another empty page one page further
+    out, and reconciled again - two calls and one new row per fetch, forever -
+    while a walk whose count disagreed re-walked on every single fetch.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.rows = portal_rows(120)
+        self.portal = FakePortal(self.rows)
+        result_handles.register_resolver("fake-portal", self.portal)
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("fake-portal")
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def declare_handle(self, *, materialized=40, total=120, **kwargs):
+        rendered = [
+            "%s  %s" % (row["identity__id"], row["identity_displayname"])
+            for row in self.rows[:materialized]
+        ]
+        return declare(
+            ResultHandleSpec(kind="member", summary="%d member(s)." % total,
+                             items=rendered, total=total, source_complete=False,
+                             page_size=40),
+            source=SourceDescriptor(
+                resolver="fake-portal", view="ido_groupDetail_identity",
+                params={"scope": "f737"},
+                filter_columns=("identity_displayname",),
+                uid_field="identity__id", label_fields=("identity_displayname",),
+                page_size=40, materialized=materialized, **kwargs,
+            ),
+            scope=scope(), selected_store=self.store, alias="O7",
+        )
+
+    def whole_walk(self):
+        """Page to the end, the way an agent would."""
+        cursor, page = None, None
+        for _ in range(20):
+            page = fetch_page("O7", cursor, scope=scope(),
+                              selected_store=self.store, budget_bytes=100_000)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        return page
+
+    def stored_pages(self):
+        return [(row["start_offset"], row["row_count"])
+                for row in self.store.list_pages(scope(), alias="O7",
+                                                 query_scope="")]
+
+    def test_the_end_of_a_walk_and_the_count_that_proved_it_are_stored(self):
+        self.declare_handle()
+        page = self.whole_walk()
+        self.assertEqual(page.continuation, "complete")
+        verdict = self.store.get_walk_terminal(scope(), alias="O7", query_scope="")
+        self.assertIsNotNone(verdict)
+        self.assertTrue(verdict["complete"])
+        self.assertEqual(verdict["count_only"], 120)
+        self.assertEqual(verdict["distinct_uids"], 120)
+        # The offset of the empty page that ended it, not one page past it.
+        self.assertEqual(verdict["terminal_offset"], 120)
+        self.assertEqual(verdict["stop_reason"], "")
+
+    def test_a_completed_walk_costs_the_source_nothing_after_a_restart(self):
+        self.declare_handle()
+        self.whole_walk()
+        calls, pages = len(self.portal.calls), self.stored_pages()
+        for _ in range(3):
+            # Hot eviction and a restart are the same thing to this module.
+            reset_result_handle_state()
+            page = self.whole_walk()
+            self.assertEqual(page.continuation, "complete")
+            self.assertEqual(page.outcome, "rows")
+            self.assertTrue(page.matched_complete)
+        self.assertEqual(len(self.portal.calls), calls)
+        self.assertEqual(self.stored_pages(), pages)
+
+    def test_a_walk_proven_complete_is_not_partial_without_a_resolver(self):
+        self.declare_handle()
+        self.whole_walk()
+        reset_result_handle_state()
+        result_handles.unregister_resolver("fake-portal")
+        page = fetch_page("O7", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        self.assertEqual(page.outcome, "rows")
+        self.assertEqual(page.continuation, "complete")
+        self.assertIsNone(page.incomplete_reason)
+        self.assertEqual(len(page.rows), 120)
+        result_handles.register_resolver("fake-portal", self.portal)
+
+    def test_a_count_mismatch_is_judged_once_and_not_on_every_fetch(self):
+        self.portal.lossy = True
+        self.declare_handle(materialized=0)
+        page = self.whole_walk()
+        self.assertEqual(page.incomplete_reason, "countonly_mismatch")
+        calls, pages = len(self.portal.calls), self.stored_pages()
+        for _ in range(3):
+            again = fetch_page("O7", scope=scope(), selected_store=self.store,
+                               budget_bytes=100_000)
+            self.assertEqual(again.incomplete_reason, "countonly_mismatch")
+            self.assertEqual(again.outcome, "partial")
+        self.assertEqual(len(self.portal.calls), calls)
+        self.assertEqual(self.stored_pages(), pages)
+        verdict = self.store.get_walk_terminal(scope(), alias="O7", query_scope="")
+        self.assertFalse(verdict["complete"])
+        self.assertEqual(verdict["stop_reason"], "countonly_mismatch")
+        # And after a restart the mismatch is still known, still without a call.
+        reset_result_handle_state()
+        restarted = fetch_page("O7", scope=scope(), selected_store=self.store,
+                               budget_bytes=100_000)
+        self.assertEqual(restarted.incomplete_reason, "countonly_mismatch")
+        self.assertEqual(len(self.portal.calls), calls)
+        self.assertEqual(self.stored_pages(), pages)
+
+    def test_the_walk_being_paged_is_the_last_one_evicted(self):
+        for alias in ("O1", "O2", "O3"):
+            declare(
+                ResultHandleSpec(kind="holder", items=holders(40, prefix=alias),
+                                 total=40),
+                scope=scope(), selected_store=self.store, alias=alias,
+            )
+        for alias in ("O1", "O2", "O3"):
+            fetch_page(alias, scope=scope(), selected_store=self.store,
+                       budget_bytes=600)
+        # O1 is the walk the agent is working through; O2 and O3 are older.
+        fetch_page("O1", scope=scope(), selected_store=self.store,
+                   budget_bytes=600)
+        os.environ["FW_RESULT_HANDLE_HOT_MAX_BYTES"] = "2500"
+        try:
+            declare(
+                ResultHandleSpec(kind="holder", items=holders(40, prefix="O4"),
+                                 total=40),
+                scope=scope(), selected_store=self.store, alias="O4",
+            )
+            fetch_page("O4", scope=scope(), selected_store=self.store,
+                       budget_bytes=600)
+        finally:
+            os.environ.pop("FW_RESULT_HANDLE_HOT_MAX_BYTES", None)
+        live = [key.split(":")[1] for key in result_handles._hot]
+        self.assertIn("O1", live)
+        self.assertNotIn("O2", live)
+        evictions = [event for event in snapshot_events()
+                     if event["kind"] == "result_handle_hot_evict"]
+        self.assertTrue(evictions)
+        self.assertTrue(all("O1" not in walk.split(":")[1]
+                            for event in evictions for walk in event["walks"]))

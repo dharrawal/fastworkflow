@@ -391,6 +391,30 @@ class ResultHandleStore:
                 ON result_handle_pages(scope_id, alias, query_scope, start_offset)
                 """
             )
+            # (ido-1r0) Where a traversal ended and what proved it. The empty
+            # page that ends a walk is stored like any other page, but the
+            # countOnly reconciliation that turns "the pages ran out" into
+            # "every row was seen" was memory only: after an eviction or a
+            # restart the walk asked the backend to prove its end again, stored
+            # another empty page one offset further on, and did it again on the
+            # next fetch. This row is that proof, written once the two numbers
+            # are known, so the end of a walk costs the source nothing twice.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS result_handle_walks (
+                    scope_id TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    query_scope TEXT NOT NULL,
+                    terminal_offset INTEGER NOT NULL,
+                    complete INTEGER NOT NULL,
+                    count_only INTEGER,
+                    distinct_uids INTEGER NOT NULL,
+                    stop_reason TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY (scope_id, alias, query_scope)
+                )
+                """
+            )
             # (ido-986.14.11) The tokens themselves. A token carries no payload:
             # everything the old base64 cursor spelled out - query scope, offset,
             # descriptor digest - lives in these rows, so the agent-visible
@@ -691,6 +715,84 @@ class ResultHandleStore:
             value for value in scopes if value
         ]
 
+    # -- where a walk ended, and what proved it ---------------------------
+
+    def put_walk_terminal(
+        self,
+        scope: RuntimeHandleScope,
+        *,
+        alias: str,
+        query_scope: str,
+        terminal_offset: int,
+        complete: bool,
+        count_only: Optional[int],
+        distinct_uids: int,
+        stop_reason: str,
+    ) -> None:
+        """Record the offset a walk ended at and the count that judged it.
+
+        Written only when the source returned a real count, because that is the
+        only verdict a later process can trust without asking again: the empty
+        page proves the pages ran out, and the count proves nothing was missed.
+        A verdict is replaceable — rows the walk did not have when it was
+        written would make a new one — so this is an upsert, unlike a page.
+        """
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO result_handle_walks (
+                    scope_id, alias, query_scope, terminal_offset, complete,
+                    count_only, distinct_uids, stop_reason, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_id, alias, query_scope) DO UPDATE SET
+                    terminal_offset = excluded.terminal_offset,
+                    complete = excluded.complete,
+                    count_only = excluded.count_only,
+                    distinct_uids = excluded.distinct_uids,
+                    stop_reason = excluded.stop_reason,
+                    recorded_at = excluded.recorded_at
+                """,
+                (
+                    scope.scope_id,
+                    alias,
+                    query_scope,
+                    int(terminal_offset),
+                    1 if complete else 0,
+                    None if count_only is None else int(count_only),
+                    int(distinct_uids),
+                    str(stop_reason or ""),
+                    _now(),
+                ),
+            )
+            conn.commit()
+
+    def get_walk_terminal(
+        self, scope: RuntimeHandleScope, *, alias: str, query_scope: str
+    ) -> Optional[dict[str, Any]]:
+        """The stored verdict for one traversal, or ``None`` if it has none."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM result_handle_walks
+                WHERE scope_id = ? AND alias = ? AND query_scope = ?
+                """,
+                (scope.scope_id, alias, query_scope),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "alias": str(row["alias"]),
+            "query_scope": str(row["query_scope"]),
+            "terminal_offset": int(row["terminal_offset"]),
+            "complete": bool(row["complete"]),
+            "count_only": (None if row["count_only"] is None
+                           else int(row["count_only"])),
+            "distinct_uids": int(row["distinct_uids"]),
+            "stop_reason": str(row["stop_reason"] or ""),
+            "recorded_at": str(row["recorded_at"]),
+        }
+
     @staticmethod
     def _decode_page(row: sqlite3.Row) -> dict[str, Any]:
         payload = bytes(row["record_json"])
@@ -876,7 +978,14 @@ class ResultHandleStore:
 # ---------------------------------------------------------------------------
 
 _lock = threading.Lock()
-_default_store: Optional[ResultHandleStore] = None
+#: One store per archive file, keyed by the normalised path. (ido-pg2) Keying
+#: this by first use instead made the whole process write into whichever
+#: workflow happened to run first: a second workflow's declarations, pages and
+#: cursors landed in the first workflow's file while its observations were
+#: archived in its own, and a later process that opened the second file could
+#: not find them. The path is resolved on every call, so the file a handle is
+#: written to is always the file the current agent archives its observations in.
+_stores: "dict[str, ResultHandleStore]" = {}
 _hot: "dict[str, dict[str, Any]]" = {}
 _pages_served: "dict[str, set[int]]" = {}
 _local_sequence: "dict[str, int]" = {}
@@ -904,17 +1013,25 @@ def store() -> ResultHandleStore:
     The same file the observation archive uses, so a page and the observation
     that showed it survive together: one file to keep, one file to read back
     when an experiment is scored.
+
+    The active archive path is resolved first and the cache is keyed by it, so
+    two agents alive in one process each write into their own workflow's file,
+    and a call made before any agent exists is pinned to the per-process
+    fallback file only for as long as that is the file it names.
     """
-    global _default_store
+    key = _store_key(_default_store_path())
     with _lock:
-        if _default_store is not None:
-            return _default_store
-    path = _default_store_path()
-    created = ResultHandleStore(path)
+        existing = _stores.get(key)
+    if existing is not None:
+        return existing
+    created = ResultHandleStore(key)
     with _lock:
-        if _default_store is None:
-            _default_store = created
-        return _default_store
+        return _stores.setdefault(key, created)
+
+
+def _store_key(path: str) -> str:
+    """The normalised path two spellings of one archive file agree on."""
+    return os.path.abspath(os.path.expanduser(str(path)))
 
 
 def _default_store_path() -> str:
@@ -930,17 +1047,32 @@ def _default_store_path() -> str:
 
 def reset_result_handle_state() -> None:
     """Drop the process-local caches. Stored rows are untouched by design."""
-    global _default_store
     with _lock:
-        _default_store = None
+        _stores.clear()
         _hot.clear()
         _pages_served.clear()
         _local_sequence.clear()
         _cursor_tokens.clear()
 
 
-def _hot_key(scope: RuntimeHandleScope, alias: str, query_scope: str) -> str:
-    return "%s:%s:%s" % (scope.scope_id, alias, query_scope)
+def _hot_key(
+    store_: "ResultHandleStore",
+    scope: RuntimeHandleScope,
+    alias: str,
+    query_scope: str,
+) -> str:
+    """One walk per traversal per store file.
+
+    (ido-pg2) The store file is part of the key because one process can hold two
+    workflows whose turn scopes agree, and a walk rebuilt from one file must
+    never be served for the other.
+    """
+    return "%s:%s:%s@%s" % (scope.scope_id, alias, query_scope, store_.db_path)
+
+
+def _cache_namespace(scope: RuntimeHandleScope, store_: "ResultHandleStore") -> str:
+    """The process-local cache namespace of one turn scope in one store file."""
+    return "%s@%s" % (scope.scope_id, store_.db_path)
 
 
 def _hot_bytes() -> int:
@@ -948,15 +1080,22 @@ def _hot_bytes() -> int:
 
 
 def _remember_walk(key: str, walk: dict[str, Any]) -> list[str]:
-    """Cache a walk and evict oldest-first when over the hot bound.
+    """Cache a walk and evict least-recently-used first when over the bound.
 
     Eviction is free of consequence: every row in a walk came from a stored page
     and is rebuilt from SQLite on the next read, so the bound controls memory
     and never reachability.
+
+    (ido-1r0) Re-assigning an existing key leaves its position in the dict where
+    first use put it, which made insertion order first-use order and evicted the
+    walk being paged right now before walks nothing had touched in a while. The
+    key is dropped before it is written so that every remembered walk moves to
+    the end, and ``next(iter(_hot))`` is genuinely the coldest one.
     """
     evicted: list[str] = []
     with _lock:
         walk["bytes"] = sum(len(record["line"].encode("utf-8")) for record in walk["records"])
+        _hot.pop(key, None)
         _hot[key] = walk
         limit = hot_rows_max_bytes_from_env()
         while _hot_bytes() > limit and len(_hot) > 1:
@@ -975,8 +1114,18 @@ def _remember_walk(key: str, walk: dict[str, Any]) -> list[str]:
 
 
 def _cached_walk(key: str) -> Optional[dict[str, Any]]:
+    """The cached walk, moved to the end of the eviction order by the read.
+
+    (ido-1r0) Reading a walk is using it: without this a walk that is paged on
+    every call but never rebuilt keeps the position its first use gave it and is
+    evicted ahead of walks nothing has touched since.
+    """
     with _lock:
-        return _hot.get(key)
+        walk = _hot.get(key)
+        if walk is not None:
+            _hot.pop(key, None)
+            _hot[key] = walk
+        return walk
 
 
 # ---------------------------------------------------------------------------
@@ -1166,14 +1315,14 @@ def _cursor_tag(
         return "f1"
 
 
-def _remember_token(scope_id: str, token: str, payload: Mapping[str, Any]) -> None:
+def _remember_token(namespace: str, token: str, payload: Mapping[str, Any]) -> None:
     with _lock:
-        _cursor_tokens["%s|%s" % (scope_id, token)] = dict(payload)
+        _cursor_tokens["%s|%s" % (namespace, token)] = dict(payload)
 
 
-def _recall_token(scope_id: str, token: str) -> Optional[dict[str, Any]]:
+def _recall_token(namespace: str, token: str) -> Optional[dict[str, Any]]:
     with _lock:
-        payload = _cursor_tokens.get("%s|%s" % (scope_id, token))
+        payload = _cursor_tokens.get("%s|%s" % (namespace, token))
     return None if payload is None else dict(payload)
 
 
@@ -1215,10 +1364,12 @@ def encode_cursor(
                       "scope_id": selected_scope.scope_id, "alias": alias,
                       "error": type(error).__name__})
         logger.warning("result handle cursor could not be stored: %s", error)
-        page = _fallback_page(selected_scope.scope_id, alias, tag, int(position))
+        page = _fallback_page(
+            _cache_namespace(selected_scope, store_), alias, tag, int(position)
+        )
     token = cursor_token(alias, tag, page)
     _remember_token(
-        selected_scope.scope_id,
+        _cache_namespace(selected_scope, store_),
         token,
         {"v": CURSOR_VERSION, "h": alias, "q": query_scope, "p": int(position),
          "d": digest},
@@ -1226,9 +1377,9 @@ def encode_cursor(
     return token
 
 
-def _fallback_page(scope_id: str, alias: str, tag: str, position: int) -> int:
+def _fallback_page(namespace: str, alias: str, tag: str, position: int) -> int:
     """An ordinal for a token the store refused to write. Process-local only."""
-    prefix = "%s|%s/%sp" % (scope_id, alias, tag)
+    prefix = "%s|%s/%sp" % (namespace, alias, tag)
     with _lock:
         for key, payload in _cursor_tokens.items():
             if key.startswith(prefix) and int(payload.get("p") or 0) == position:
@@ -1277,7 +1428,7 @@ def _issued_tokens(
     except Exception:  # noqa: BLE001
         rows = []
     tokens = [cursor_token(alias, str(row["tag"]), int(row["page"])) for row in rows]
-    prefix = "%s|%s/" % (scope.scope_id, alias)
+    prefix = "%s|%s/" % (_cache_namespace(scope, store_), alias)
     with _lock:
         tokens.extend(key[len(prefix) - len(alias) - 1:]
                       for key in _cursor_tokens if key.startswith(prefix))
@@ -1317,16 +1468,18 @@ def decode_cursor(
             % (token_alias, alias, alias, token_alias, alias)
         )
     selected_scope = scope or current_scope()
+    store_ = selected_store or store()
     token = cursor_token(token_alias, tag, page)
-    payload = _recall_token(selected_scope.scope_id, token)
+    payload = _recall_token(_cache_namespace(selected_scope, store_), token)
     if payload is None:
-        store_ = selected_store or store()
         row = store_.get_cursor(selected_scope, alias=token_alias, tag=tag, page=page)
         if row is not None:
             payload = {"v": CURSOR_VERSION, "h": token_alias,
                        "q": str(row["query_scope"]), "p": int(row["position"]),
                        "d": str(row["descriptor_sha256"])[:16]}
-            _remember_token(selected_scope.scope_id, token, payload)
+            _remember_token(
+                _cache_namespace(selected_scope, store_), token, payload
+            )
         else:
             issued = _issued_tokens(selected_scope, store_, token_alias)
             raise ResultHandleError(
@@ -1825,7 +1978,7 @@ def _walk_records(
     what makes hot eviction free of consequence.
     """
     alias = declaration["alias"]
-    key = _hot_key(scope, alias, query_scope)
+    key = _hot_key(store_, scope, alias, query_scope)
     cached = _cached_walk(key)
     if cached is not None:
         return cached
@@ -1833,9 +1986,19 @@ def _walk_records(
     seen: set[str] = set()
     next_offset = int((declaration["descriptor"] or {}).get("start_offset") or 0)
     backend_total: Optional[int] = None
+    terminal_offset: Optional[int] = None
     for page in store_.list_pages(scope, alias=alias, query_scope=query_scope):
         record = page["record"]
-        for entry in record.get("records") or []:
+        entries = record.get("records") or []
+        if (not entries and not (record.get("rows") or [])
+                and page["source"] != "producer"):
+            # (ido-1r0) The stored end of the walk, recognised here exactly as
+            # ``_extend_walk`` recognises it live. Seeding the rebuilt walk PAST
+            # it is what made every rebuild ask the source to find the end
+            # again, one page further out, and store another empty page.
+            terminal_offset = page["start_offset"]
+            break
+        for entry in entries:
             item = _record_of(entry)
             if item["uid"] and item["uid"] in seen:
                 continue
@@ -1844,18 +2007,45 @@ def _walk_records(
         next_offset = max(next_offset, page["start_offset"] + page["limit_requested"])
         if page["backend_total"] is not None:
             backend_total = page["backend_total"]
+    # Without a descriptor the producer's own rows are all there will ever be,
+    # so the producer's own claim about coverage is the walk's.
+    complete = bool(declaration["source_complete"]) and not query_scope
+    count_only: Optional[int] = None
+    stop_reason: Optional[str] = None
+    reconciled = False
+    verdict = store_.get_walk_terminal(scope, alias=alias, query_scope=query_scope)
+    if verdict is not None and verdict["count_only"] is None:
+        # A row without a count is not a verdict: the end was recorded but
+        # nothing proved what it covered, so the reconciliation still owes a
+        # call. Nothing this module writes looks like that; a hand-written or
+        # migrated row might.
+        verdict = None
+    if verdict is not None:
+        # The end was reached and judged against the source's own count in some
+        # earlier call or process. Nothing about that is worth asking twice.
+        terminal_offset = verdict["terminal_offset"]
+        next_offset = verdict["terminal_offset"]
+        complete = verdict["complete"]
+        count_only = verdict["count_only"]
+        stop_reason = verdict["stop_reason"] or None
+        reconciled = True
+    elif terminal_offset is not None:
+        # The end is stored but was never judged: resume AT the empty page, so
+        # the reconciliation runs once off a stored page and costs no fetch.
+        next_offset = terminal_offset
     walk = {
         "alias": alias,
         "query_scope": query_scope,
         "records": records,
         "seen": seen,
         "next_offset": next_offset,
-        # Without a descriptor the producer's own rows are all there will ever
-        # be, so the producer's own claim about coverage is the walk's.
-        "complete": bool(declaration["source_complete"]) and not query_scope,
+        "complete": complete,
         "backend_total": backend_total,
-        "count_only": None,
-        "stop_reason": None,
+        "count_only": count_only,
+        "stop_reason": stop_reason,
+        "terminal_offset": terminal_offset,
+        "terminal_stop_reason": stop_reason,
+        "reconciled": reconciled,
         "error": None,
         "bytes": 0,
     }
@@ -1893,10 +2083,16 @@ def _extend_walk(
     """
     walk["stop_reason"] = None
     walk["error"] = None
+    if walk.get("reconciled"):
+        # (ido-1r0) The walk reached its end and the source's own count has
+        # already judged it. Re-walking would re-prove a stored fact, and on a
+        # mismatch it would do so on every fetch for the life of the handle.
+        walk["stop_reason"] = walk.get("terminal_stop_reason")
+        return walk
     if walk["complete"]:
         return walk
     alias = declaration["alias"]
-    key = _hot_key(scope, alias, query_scope)
+    key = _hot_key(store_, scope, alias, query_scope)
     try:
         resolver = resolver_for(str(descriptor.get("resolver") or ""))
     except ResultHandleError as error:
@@ -1973,6 +2169,7 @@ def _extend_walk(
                 continue
             # THE stop condition, and the only one.
             walk["complete"] = True
+            walk["terminal_offset"] = start
             break
         for entry in page_records:
             item = _record_of(entry)
@@ -1985,7 +2182,7 @@ def _extend_walk(
             walk["backend_total"] = stored["backend_total"]
     if walk["complete"]:
         _reconcile(
-            scope, declaration, walk, descriptor=descriptor,
+            scope, store_, declaration, walk, descriptor=descriptor,
             query_scope=query_scope, literal=literal, resolver=resolver,
         )
     _remember_walk(key, walk)
@@ -1994,6 +2191,7 @@ def _extend_walk(
 
 def _reconcile(
     scope: RuntimeHandleScope,
+    store_: ResultHandleStore,
     declaration: Mapping[str, Any],
     walk: dict[str, Any],
     *,
@@ -2013,11 +2211,13 @@ def _reconcile(
     walk["count_only"] = None
     if int(descriptor.get("start_offset") or 0) != 0:
         walk["complete"] = False
-        walk["stop_reason"] = "offset_origin_not_zero"
+        # Read off the descriptor, so it is free to decide again and needs no
+        # stored verdict; marking it settled keeps the walk from re-walking.
+        _settle_walk(walk, "offset_origin_not_zero")
         return
     if not descriptor.get("count_only", True):
         walk["complete"] = False
-        walk["stop_reason"] = "countonly_unavailable"
+        _settle_walk(walk, "countonly_unavailable")
         return
     try:
         response = _call_resolver(
@@ -2048,7 +2248,10 @@ def _reconcile(
     walk["count_only"] = int(count)
     if int(count) != distinct:
         walk["complete"] = False
-        walk["stop_reason"] = "countonly_mismatch"
+        _settle_walk(walk, "countonly_mismatch")
+    else:
+        _settle_walk(walk, None)
+    _record_walk_terminal(scope, store_, declaration, walk, query_scope=query_scope)
     record_event(
         {
             "kind": "result_handle_reconciled",
@@ -2060,6 +2263,49 @@ def _reconcile(
             "complete": bool(walk["complete"]),
         }
     )
+
+
+def _settle_walk(walk: dict[str, Any], stop_reason: Optional[str]) -> None:
+    """Mark a walk judged: this is its end and this is why, until it changes."""
+    walk["stop_reason"] = stop_reason
+    walk["terminal_stop_reason"] = stop_reason
+    walk["reconciled"] = True
+
+
+def _record_walk_terminal(
+    scope: RuntimeHandleScope,
+    store_: ResultHandleStore,
+    declaration: Mapping[str, Any],
+    walk: dict[str, Any],
+    *,
+    query_scope: str,
+) -> None:
+    """Persist the verdict so the next process inherits it instead of re-proving it.
+
+    Best effort, like every other write on a page's path: a walk whose verdict
+    could not be written still serves its rows and is still right for this
+    process; it only pays for the proof again next time.
+    """
+    if walk.get("terminal_offset") is None or walk.get("count_only") is None:
+        return
+    try:
+        store_.put_walk_terminal(
+            scope,
+            alias=declaration["alias"],
+            query_scope=query_scope,
+            terminal_offset=int(walk["terminal_offset"]),
+            complete=bool(walk["complete"]),
+            count_only=int(walk["count_only"]),
+            distinct_uids=len(walk["records"]),
+            stop_reason=str(walk.get("terminal_stop_reason") or ""),
+        )
+    except Exception as error:  # noqa: BLE001
+        record_event({"kind": "result_handle_walk_terminal_failed",
+                      "scope_id": scope.scope_id,
+                      "alias": declaration["alias"],
+                      "query_scope": query_scope,
+                      "error": type(error).__name__})
+        logger.warning("result handle walk terminal could not be stored: %s", error)
 
 
 def _filter_records(
@@ -2214,7 +2460,7 @@ def fetch_page(
             declaration=declaration, alias=alias, rows=available, records=records,
             base=base, walk=walk, plan=plan, literal=literal,
             filter_columns=filter_columns, descriptor=descriptor,
-            position=position, scope=selected_scope, notes=notes,
+            position=position, scope=selected_scope, store_=store_, notes=notes,
             warnings=warnings,
             placeholder_cursor=cursor_placeholder(
                 alias, tag, pages_at_most=len(records) + 2
@@ -2344,6 +2590,7 @@ def _provisional_page(
     descriptor: Mapping[str, Any],
     position: int,
     scope: RuntimeHandleScope,
+    store_: "ResultHandleStore",
     notes: Sequence[str],
     warnings: Sequence[str],
     placeholder_cursor: str,
@@ -2379,7 +2626,7 @@ def _provisional_page(
         incomplete_reason=stop_reason,
         next_cursor=placeholder_cursor,
         position=position,
-        page_index=_page_index(scope, alias, position),
+        page_index=_page_index(scope, store_, alias, position),
         parent_alias=alias,
         page_alias=current_execute_alias(),
         literal=literal.text or None,
@@ -2433,7 +2680,7 @@ def _unsupported_page(
         next_cursor=None,
         outcome="unsupported",
         position=0,
-        page_index=_page_index(scope, declaration["alias"], 0),
+        page_index=_page_index(scope, store_, declaration["alias"], 0),
         parent_alias=declaration["alias"],
         page_alias=current_execute_alias(),
         literal=literal.text or None,
@@ -2449,13 +2696,15 @@ def _unsupported_page(
     return page
 
 
-def _page_index(scope: RuntimeHandleScope, alias: str, position: int) -> int:
+def _page_index(
+    scope: RuntimeHandleScope, store_: "ResultHandleStore", alias: str, position: int
+) -> int:
     """How many distinct pages of this handle have been served in this turn.
 
     Counted by start position rather than by call, so a retried cursor is the
     same page it was the first time and cannot inflate the count.
     """
-    key = "%s:%s" % (scope.scope_id, alias)
+    key = "%s:%s" % (_cache_namespace(scope, store_), alias)
     with _lock:
         served = _pages_served.setdefault(key, set())
         served.add(int(position))
