@@ -1858,3 +1858,261 @@ class ColdResumeAliasTests(unittest.TestCase):
             resumed.forward(user_query="a new turn")
         self.assertEqual(resumed.execute_ordinal_by_step, {})
         self.assertEqual(resumed.next_execute_ordinal(), 1)
+
+
+class ShortRowResolver:
+    """Six short rows a page, deterministically, and an honest countOnly.
+
+    (ido-2y3, F6) Short rows are the point: they make the packer's first
+    estimate of "rows enough to fill the observation" too small, so the fetch
+    asks for a second fill round. That is the shape in which a per-call resolver
+    budget that restarted each round spent many times its advertised number of
+    backend pages.
+    """
+
+    PAGE_ROWS = 6
+
+    def __init__(self, count: int = 600) -> None:
+        self.rows = [{"uid": "u%03d" % index, "name": "n%d" % index}
+                     for index in range(count)]
+        self.calls: list[object] = []
+
+    def __call__(self, request):
+        self.calls.append(request)
+        if request.count_only:
+            return {"count": len(self.rows)}
+        return {"rows": self.rows[request.start:request.start + request.limit],
+                "total": len(self.rows)}
+
+    @property
+    def page_calls(self) -> int:
+        return len([call for call in self.calls if not call.count_only])
+
+    @property
+    def count_calls(self) -> int:
+        return len([call for call in self.calls if call.count_only])
+
+
+class SharedResolverBudgetTests(unittest.TestCase):
+    """ido-2y3 (F6): the resolver-call budget bounds the fetch, not the round."""
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.resolver = ShortRowResolver()
+        result_handles.register_resolver("short-rows", self.resolver)
+        declare(
+            ResultHandleSpec(kind="member", summary="600 member(s).", items=[],
+                             total=600, source_complete=False, page_size=6),
+            source=SourceDescriptor(
+                resolver="short-rows",
+                view="short_rows",
+                params={},
+                filter_columns=("name",),
+                uid_field="uid",
+                label_fields=("name",),
+                page_size=ShortRowResolver.PAGE_ROWS,
+                materialized=0,
+            ),
+            scope=scope(), selected_store=self.store, alias="O7",
+        )
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("short-rows")
+        reset_result_handle_state()
+        self.temp.cleanup()
+
+    def fetch(self, cursor=None):
+        return fetch_page("O7", cursor, scope=scope(), selected_store=self.store,
+                          budget_bytes=3_072)
+
+    def test_one_fetch_never_reads_more_source_pages_than_the_budget(self):
+        page = self.fetch()
+        # The fill rounds of ONE fetch share one purse. Before, each round
+        # opened a fresh one and this fetch read sixteen source pages.
+        self.assertLessEqual(self.resolver.page_calls,
+                             result_handles.MAX_RESOLVER_CALLS_PER_FETCH)
+        self.assertEqual(self.resolver.page_calls, 8)
+        self.assertEqual(page.incomplete_reason, "resolver_call_limit")
+        self.assertEqual(page.continuation, "cursor")
+        self.assertIsNotNone(page.next_cursor)
+        self.assertTrue(page.rows)
+
+    def test_every_later_fetch_gets_its_own_whole_budget_and_no_more(self):
+        seen, cursor, spent = [], None, []
+        for _ in range(4):
+            before = self.resolver.page_calls
+            page = self.fetch(cursor)
+            spent.append(self.resolver.page_calls - before)
+            seen.extend(page.rows)
+            cursor = page.next_cursor
+            self.assertIsNotNone(cursor)
+        for calls in spent:
+            self.assertLessEqual(calls,
+                                 result_handles.MAX_RESOLVER_CALLS_PER_FETCH)
+        # The cursor resumes exactly where the budget stopped: no row is served
+        # twice and none is skipped over.
+        self.assertEqual(seen, ["u%03d  n%d" % (index, index)
+                                for index in range(len(seen))])
+        self.assertEqual(len(seen), len(set(seen)))
+
+    def test_the_cursor_walks_the_whole_relation_without_losing_rows(self):
+        seen, cursor = [], None
+        for _ in range(200):
+            page = self.fetch(cursor)
+            seen.extend(page.rows)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        self.assertEqual(seen, ["u%03d  n%d" % (index, index)
+                                for index in range(600)])
+        self.assertTrue(page.source_complete)
+        self.assertEqual(page.continuation, "complete")
+
+    def test_the_independent_count_is_bounded_on_its_own_not_by_the_page_purse(self):
+        """Stated explicitly: countOnly is NOT charged to the page budget."""
+        cursor = None
+        for _ in range(200):
+            page = self.fetch(cursor)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        # One coverage proof for the whole enumeration, however many pages it
+        # took, and it is never spent out of a fetch's eight source pages.
+        self.assertEqual(self.resolver.count_calls, 1)
+        self.assertTrue(page.source_complete)
+
+
+class MalformedResolverOutputTests(unittest.TestCase):
+    """ido-94h (F20): a malformed reply is resolver_error, not a raw exception."""
+
+    SHAPES = {
+        "rows is a string": {"rows": "abc"},
+        "rows holds non-mappings": {"rows": [1, 2]},
+        "rows holds lists": {"rows": [["uid", "x"]]},
+        "rows is a single mapping": {"rows": {"uid": "u1"}},
+        "total non-numeric": {"rows": [{"uid": "u1", "name": "n"}],
+                              "total": "many"},
+    }
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.reply = {"rows": []}
+        result_handles.register_resolver("malformed", self.resolve)
+        declare(
+            ResultHandleSpec(kind="member", summary="10 member(s).",
+                             items=["u000  n0", "u001  n1"], total=10,
+                             source_complete=False, page_size=4),
+            source=SourceDescriptor(
+                resolver="malformed", view="v", params={},
+                filter_columns=("name",), uid_field="uid",
+                label_fields=("name",), page_size=4, materialized=2,
+            ),
+            scope=scope(), selected_store=self.store, alias="O1",
+        )
+
+    def tearDown(self) -> None:
+        result_handles.unregister_resolver("malformed")
+        reset_result_handle_state()
+        self.temp.cleanup()
+
+    def resolve(self, request):
+        if request.count_only:
+            return self.count_reply
+        return self.reply
+
+    count_reply: object = {"count": 10}
+
+    def fetch(self):
+        return fetch_page("O1", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+
+    def test_every_malformed_row_shape_is_a_typed_outcome_with_stored_rows(self):
+        for name, reply in self.SHAPES.items():
+            with self.subTest(shape=name):
+                reset_result_handle_state()
+                self.reply = reply
+                page = self.fetch()
+                self.assertEqual(page.incomplete_reason, "resolver_error")
+                self.assertEqual(page.outcome, "partial")
+                # The rows already stored are still served; the refusal is
+                # reported beside them rather than replacing them.
+                self.assertEqual(page.rows, ["u000  n0", "u001  n1"])
+                self.assertFalse(page.source_complete)
+
+    def test_a_non_numeric_count_is_a_countonly_error_not_a_ValueError(self):
+        self.reply = {"rows": []}
+        self.count_reply = {"count": "n/a"}
+        page = self.fetch()
+        self.assertEqual(page.incomplete_reason, "countonly_error")
+        self.assertEqual(page.outcome, "partial")
+        self.assertEqual(page.rows, ["u000  n0", "u001  n1"])
+
+    def test_a_malformed_reply_is_never_raised_at_the_caller(self):
+        for name, reply in self.SHAPES.items():
+            with self.subTest(shape=name):
+                reset_result_handle_state()
+                self.reply = reply
+                try:
+                    self.fetch()
+                except ResultHandleError:
+                    pass  # this module's own error is an answer, not a crash
+                except Exception as error:  # noqa: BLE001
+                    self.fail("%s escaped as %s: %s"
+                              % (name, type(error).__name__, error))
+
+
+class OversizedCursorOrdinalTests(unittest.TestCase):
+    """ido-1de (F22): an absurd page ordinal is refused, not a crash."""
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        declare(
+            ResultHandleSpec(kind="holder", items=holders(30), total=30,
+                             source_complete=True, page_size=4),
+            scope=scope(), selected_store=self.store, alias="O7",
+        )
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        self.temp.cleanup()
+
+    def fetch(self, cursor):
+        return fetch_page("O7", cursor, scope=scope(), selected_store=self.store,
+                          budget_bytes=800)
+
+    def test_an_ordinal_too_large_for_sqlite_is_refused_by_name(self):
+        # 20 digits reached SQLite as an out-of-range INTEGER (OverflowError).
+        with self.assertRaises(ResultHandleError) as caught:
+            self.fetch("O7/p" + "9" * 20)
+        self.assertIn("largest page", str(caught.exception))
+
+    def test_an_absurd_ordinal_is_refused_before_int_sees_it(self):
+        # 5000 digits hit CPython's int() digit limit (ValueError).
+        with self.assertRaises(ResultHandleError) as caught:
+            self.fetch("O7/p" + "9" * 5_000)
+        self.assertIn("largest page", str(caught.exception))
+        # And the refusal does not echo five thousand characters back.
+        self.assertLess(len(str(caught.exception)), 400)
+
+    def test_an_ordinal_just_past_the_bound_is_refused_and_one_inside_is_not(self):
+        with self.assertRaises(ResultHandleError) as caught:
+            self.fetch("O7/p%d" % (result_handles.MAX_CURSOR_PAGE + 1))
+        self.assertIn("largest page", str(caught.exception))
+        # Inside the bound it is an ordinary "never issued" refusal, which is
+        # the check that was there all along.
+        with self.assertRaises(ResultHandleError) as issued:
+            self.fetch("O7/p%d" % result_handles.MAX_CURSOR_PAGE)
+        self.assertIn("no page token", str(issued.exception))
+
+    def test_the_tokens_the_pages_really_issue_still_work(self):
+        first = self.fetch(None)
+        self.assertEqual(first.next_cursor, "O7/p2")
+        second = self.fetch(first.next_cursor)
+        self.assertEqual(second.position, len(first.rows))
+        self.assertTrue(second.rows)

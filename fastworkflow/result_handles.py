@@ -118,8 +118,29 @@ CURSOR_TOKEN_EXAMPLE = "O7/p2"
 #: Page 1 is the call that passes no cursor, so the first token a traversal
 #: issues is page 2.
 FIRST_CURSOR_PAGE = 2
+#: (ido-1de, F22) The largest page ordinal a token may name. An unbounded
+#: ordinal was not merely useless, it was a crash a model could type: 20 digits
+#: reached SQLite as an out-of-range INTEGER (OverflowError) and 4300 digits hit
+#: CPython's int() digit limit (ValueError), and neither is a ResultHandleError
+#: the command can turn into a refusal. No traversal reaches a millionth page,
+#: so anything past this is garbage and is named as such.
+MAX_CURSOR_PAGE = 999_999
+#: Digits the token pattern itself accepts. Comfortably wider than the bound
+#: above - the bound is what refuses a large ordinal, with a message about
+#: pages - but narrow enough that int() on the match is always cheap and always
+#: fits a SQLite INTEGER.
+MAX_CURSOR_PAGE_DIGITS = 12
 _CURSOR_TOKEN_RE = re.compile(
-    r"^(?P<alias>[OD][1-9]\d*)/(?P<tag>[a-z]\d{1,3})?p(?P<page>[1-9]\d*)$",
+    r"^(?P<alias>[OD][1-9]\d*)/(?P<tag>[a-z]\d{1,3})?p(?P<page>[1-9]\d{0,%d})$"
+    % (MAX_CURSOR_PAGE_DIGITS - 1),
+    re.IGNORECASE,
+)
+#: The same shape with an ordinal too long for the pattern above, so a token
+#: whose only fault is an absurd page number is refused for THAT, rather than
+#: falling through to "this is not a page token".
+_CURSOR_TOKEN_OVERLONG_RE = re.compile(
+    r"^[OD][1-9]\d*/(?:[a-z]\d{1,3})?p(?P<page>[1-9]\d{%d,})$"
+    % MAX_CURSOR_PAGE_DIGITS,
     re.IGNORECASE,
 )
 #: Quoting and punctuation a model wraps a copied value in.
@@ -127,6 +148,20 @@ _CURSOR_TOKEN_TRIM = "`'\"<>[](){} \t\r\n,.;:"
 
 #: Backend pages one fetch call may read before it warns and hands the rest to
 #: the next cursor. A bound on one call, never a cap on enumeration.
+#:
+#: (ido-2y3, F6) It bounds the whole of ONE ``fetch_page``, across every fill
+#: round that call makes, because the budget used to restart at zero on each
+#: round: a round that spent all eight calls and still had not filled the
+#: observation simply got eight more, so a fetch could read many times the
+#: advertised number of backend pages. ``_PageCallBudget`` is what makes the
+#: number mean one fetch.
+#:
+#: What it counts is SOURCE PAGES. The independent ``countOnly`` of
+#: ``_reconcile`` is deliberately outside it: it is at most one call per fetch
+#: (the walk is marked reconciled and never re-proves itself), it does not grow
+#: with the number of pages read, and it is the coverage proof itself - charging
+#: it against the page budget would let a fetch that read exactly eight pages
+#: silently lose the one call that decides whether the enumeration was complete.
 MAX_RESOLVER_CALLS_PER_FETCH = 8
 #: How many times one call may widen its read to fill the byte budget.
 MAX_FILL_ROUNDS = 4
@@ -1474,6 +1509,18 @@ def _parse_cursor_token(cursor: str) -> tuple[str, str, int]:
     text = str(cursor or "").strip().strip(_CURSOR_TOKEN_TRIM).replace(" ", "")
     match = _CURSOR_TOKEN_RE.match(text)
     if match is None:
+        overlong = _CURSOR_TOKEN_OVERLONG_RE.match(text)
+        if overlong is not None:
+            # (ido-1de, F22) Refused here, as this module's own error, before
+            # int() or SQLite ever sees the digits.
+            raise ResultHandleError(
+                "that page token names a page %d digits long; the largest page a "
+                "traversal can name is %d. A page token is printed on the page it "
+                "continues as next_cursor=%s - copy it from that page, or omit "
+                "cursor to start this query at its first page."
+                % (len(overlong.group("page")), MAX_CURSOR_PAGE,
+                   CURSOR_TOKEN_EXAMPLE)
+            )
         raise ResultHandleError(
             "%r is not a page token. A page token is short and is printed on the "
             "page it continues as next_cursor=%s - the result handle, then the "
@@ -1483,6 +1530,15 @@ def _parse_cursor_token(cursor: str) -> tuple[str, str, int]:
     alias = match.group("alias").upper()
     tag = (match.group("tag") or "").lower()
     page = int(match.group("page"))
+    if page > MAX_CURSOR_PAGE:
+        # (ido-1de, F22) Same refusal, for an ordinal short enough to parse and
+        # still far past any page this traversal could have issued.
+        raise ResultHandleError(
+            "page token %s names page %d; the largest page a traversal can name "
+            "is %d. Copy the token from the page it continues, or omit cursor to "
+            "start this query at its first page."
+            % (cursor_token(alias, tag, page), page, MAX_CURSOR_PAGE)
+        )
     if page < FIRST_CURSOR_PAGE:
         raise ResultHandleError(
             "page token %s names page %d; page 1 is the call that passes no "
@@ -2005,6 +2061,60 @@ def _call_resolver(resolver: Callable[..., Any], request: SourceRequest) -> dict
     }
 
 
+class MalformedResolverResponse(ValueError):
+    """A resolver answered, but not with a shape a page can be built from.
+
+    (ido-94h, F20) A malformed reply is the SOURCE failing, exactly like a
+    resolver that raised, so it is raised where the resolver call is already
+    guarded and becomes the same typed ``resolver_error`` outcome. It used to
+    escape ``fetch_page`` as a bare ValueError/TypeError from ``dict(row)`` or
+    ``int(total)``; callers catch ResultHandleError, so the command errored
+    instead of serving the rows it already had.
+    """
+
+
+def _coerce_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """``response["rows"]`` as a list of row dicts, or a typed refusal.
+
+    Raised, not repaired: a resolver that answers with a string, or with rows
+    that are not mappings, has not returned rows, and guessing at what it meant
+    would put invented rows in front of the agent.
+    """
+    raw = response.get("rows")
+    if raw is None:
+        return []
+    if isinstance(raw, (str, bytes, bytearray)) or isinstance(raw, Mapping):
+        raise MalformedResolverResponse(
+            "rows is %s, not a sequence of row mappings" % type(raw).__name__
+        )
+    try:
+        items = list(raw)
+    except TypeError as error:
+        raise MalformedResolverResponse(
+            "rows is not a sequence of row mappings (%s)" % error
+        ) from None
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(items):
+        if not isinstance(row, Mapping):
+            raise MalformedResolverResponse(
+                "row %d is %s, not a mapping" % (index, type(row).__name__)
+            )
+        rows.append(dict(row))
+    return rows
+
+
+def _coerce_row_count(value: Any, field: str) -> Optional[int]:
+    """A resolver's ``total``/``count`` as an int, or a typed refusal."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise MalformedResolverResponse(
+            "%s is %r, which is not a number of rows" % (field, value)
+        ) from None
+
+
 def _render_row(row: Mapping[str, Any], descriptor: Mapping[str, Any]) -> dict[str, Any]:
     """A backend row as the producer would have rendered it: ``uid  label``.
 
@@ -2125,6 +2235,28 @@ def _walk_records(
     return walk
 
 
+class _PageCallBudget:
+    """Source-page resolver calls left in ONE ``fetch_page``. (ido-2y3, F6)
+
+    Mutable and shared: ``fetch_page`` makes one and hands the same object to
+    every ``_extend_walk`` of that call, so the fill rounds spend from one purse
+    instead of each opening a fresh one. Count-only reconciliation is not
+    charged here - see ``MAX_RESOLVER_CALLS_PER_FETCH``.
+    """
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, calls: int = MAX_RESOLVER_CALLS_PER_FETCH) -> None:
+        self.remaining = max(0, int(calls))
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0
+
+    def spend(self) -> None:
+        self.remaining -= 1
+
+
 def _extend_walk(
     scope: RuntimeHandleScope,
     store_: ResultHandleStore,
@@ -2135,7 +2267,7 @@ def _extend_walk(
     query_scope: str,
     literal: "Literal",
     needed: int,
-    budget_calls: int = MAX_RESOLVER_CALLS_PER_FETCH,
+    budget: Optional["_PageCallBudget"] = None,
 ) -> dict[str, Any]:
     """Walk offsets until ``needed`` rows are known or the walk ends.
 
@@ -2153,6 +2285,10 @@ def _extend_walk(
     already stored stay served, and the walk carries a typed stop reason the
     page turns into ``incomplete_reason``.
     """
+    # (ido-2y3, F6) No budget passed means this is a walk of its own and gets a
+    # whole fetch's worth; fetch_page passes ITS budget, so its fill rounds
+    # share one.
+    budget = _PageCallBudget() if budget is None else budget
     walk["stop_reason"] = None
     walk["error"] = None
     if walk.get("reconciled"):
@@ -2174,18 +2310,20 @@ def _extend_walk(
         return walk
     limit = max(1, int(descriptor.get("page_size") or DEFAULT_PAGE_SIZE))
     columns_for = tuple(descriptor.get("filter_columns") or ()) if query_scope else ()
-    calls = 0
     while len(walk["records"]) < needed:
         start = int(walk["next_offset"])
         stored = store_.get_page(
             scope, alias=alias, query_scope=query_scope, start_offset=start
         )
         if stored is None:
-            if calls >= budget_calls:
+            if budget.exhausted:
                 # Over-limit warns and continues: the cursor still advances, so
                 # the next call resumes exactly here.
                 walk["stop_reason"] = "resolver_call_limit"
                 break
+            # Charged before the call, so a page the source refused still costs
+            # what it cost the source.
+            budget.spend()
             try:
                 response = _call_resolver(
                     resolver,
@@ -2197,6 +2335,13 @@ def _extend_walk(
                         filter_columns=columns_for,
                     ),
                 )
+                # (ido-94h, F20) Reading the reply is part of the resolver
+                # call, not part of the caller's bookkeeping: a malformed rows
+                # list or a non-numeric total is refused HERE, inside this
+                # guard, so it reaches the agent as resolver_error with the
+                # rows already stored still served.
+                rows = _coerce_rows(response)
+                backend_total = _coerce_row_count(response.get("total"), "total")
             except Exception as error:  # noqa: BLE001
                 walk["stop_reason"] = "resolver_error"
                 walk["error"] = "%s: %s" % (type(error).__name__, error)
@@ -2212,8 +2357,6 @@ def _extend_walk(
                     }
                 )
                 break
-            calls += 1
-            rows = [dict(row) for row in (response.get("rows") or [])]
             records = [_render_row(row, descriptor) for row in rows]
             stored = store_.put_page(
                 scope,
@@ -2224,7 +2367,7 @@ def _extend_walk(
                 source="resolver",
                 record={"rows": rows, "records": records,
                         "columns": _columns_of(response, rows)},
-                backend_total=response.get("total"),
+                backend_total=backend_total,
             )
             if rows:
                 store_.set_verified_columns(
@@ -2304,14 +2447,17 @@ def _reconcile(
                 count_only=True,
             ),
         )
+        # (ido-94h, F20) The count is read inside the guard too: a countOnly
+        # that answers "n/a" is a source failure, reported as countonly_error,
+        # not a ValueError out of the command.
+        count = _coerce_row_count(response.get("count"), "count")
+        if count is None:
+            count = _coerce_row_count(response.get("total"), "total")
     except Exception as error:  # noqa: BLE001
         walk["complete"] = False
         walk["stop_reason"] = "countonly_error"
         walk["error"] = "%s: %s" % (type(error).__name__, error)
         return
-    count = response.get("count")
-    if count is None:
-        count = response.get("total")
     if count is None:
         walk["complete"] = False
         walk["stop_reason"] = "countonly_unavailable"
@@ -2512,6 +2658,9 @@ def fetch_page(
     # a row: a header that grew by a cursor would push out a row the previous
     # cursor had already counted as shown.
     rounds = 0
+    # (ido-2y3, F6) One purse for this fetch. Every fill round below spends from
+    # it, so MAX_RESOLVER_CALLS_PER_FETCH bounds the call, not the round.
+    call_budget = _PageCallBudget()
     while True:
         if plan in ("backend-walk", "backend-filter"):
             # Ask for enough rows to fill the observation, not for one backend
@@ -2521,6 +2670,7 @@ def fetch_page(
                 selected_scope, store_, declaration, walk,
                 descriptor=descriptor, query_scope=query_scope, literal=literal,
                 needed=position + _rows_wanted(walk, budget, page_size) * (rounds + 1),
+                budget=call_budget,
             )
             records: list[dict[str, Any]] = walk["records"]
         elif plan == "local-filter":
@@ -2942,6 +3092,7 @@ __all__ = [
     "WILDCARD_CHARACTERS",
     "CURSOR_TOKEN_EXAMPLE",
     "FIRST_CURSOR_PAGE",
+    "MAX_CURSOR_PAGE",
     "current_execute_alias",
     "current_scope",
     "cursor_placeholder",
