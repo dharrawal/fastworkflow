@@ -572,6 +572,51 @@ class ExtractHook(unittest.TestCase):
         self.assertGreater(statement[0]["statement_bytes"], 0)
         self.assertEqual(check[0]["unavailability_claim_on_unobserved"], 1)
 
+    def test_the_post_check_receives_the_unavailable_split(self) -> None:
+        """ido-8ps.30. `CoverageReport.unavailable` is the subset of the
+        unobserved items the run DID name in a command (ido-8ps.27 (b)). It was
+        computed on the report and never passed to `post_check`, so every
+        recorded `coverage_post_check` event said `unavailable_total: 0` -- and
+        the three measures beside it, which only ever count over that subset,
+        were zero by construction rather than by observation.
+
+        The trajectory here names Christopher Hubbard in a command and retrieves
+        nothing for him, which is exactly the attempted-and-empty case."""
+        trajectory = dict(
+            self.trajectory,
+            tool_args_0={"command": "find_identity <name>Christopher Hubbard</name>"},
+        )
+        self.agent.extract = mock.Mock(
+            return_value=dspy.Prediction(
+                final_answer="Christopher Hubbard: no record is available."))
+        with self._patch_store():
+            self.agent._extract_prediction(trajectory, user_query=CARD)
+        statement = [e for e in snapshot_events()
+                     if e["kind"] == "coverage_statement"][0]
+        check = [e for e in snapshot_events()
+                 if e["kind"] == "coverage_post_check"][0]
+        self.assertIn("Christopher Hubbard", statement["unavailable"])
+        self.assertEqual(check["unavailable_total"], len(statement["unavailable"]))
+        self.assertGreater(check["unavailable_total"], 0)
+        self.assertEqual(check["unavailable_mentioned"], 1)
+        self.assertEqual(check["unavailability_claim_on_unavailable"], 1)
+
+    def test_an_item_the_run_never_asked_for_is_not_in_the_unavailable_count(self) -> None:
+        """The other half of ido-8ps.27 (b): never-attempted items stay out of
+        the unavailable measure, so the split is a split and not a rename."""
+        self.agent.extract = mock.Mock(
+            return_value=dspy.Prediction(
+                final_answer="Christopher Hubbard: no record is available."))
+        with self._patch_store():
+            self.agent._extract_prediction(self.trajectory, user_query=CARD)
+        statement = [e for e in snapshot_events()
+                     if e["kind"] == "coverage_statement"][0]
+        check = [e for e in snapshot_events()
+                 if e["kind"] == "coverage_post_check"][0]
+        self.assertEqual(statement["unavailable"], [])
+        self.assertEqual(check["unavailable_total"], 0)
+        self.assertEqual(check["unavailability_claim_on_unobserved"], 1)
+
     def test_a_subject_with_nothing_to_state_leaves_the_sentence_out(self) -> None:
         """ido-8ps.28 / ido-pyw.1. The sentence is computed unconditionally, and
         a run whose only subject has nothing to state still renders the block

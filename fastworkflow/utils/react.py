@@ -610,6 +610,15 @@ class fastWorkflowReAct(Module):
                 # measured as a defect - absence phrasing about an item the run
                 # DID retrieve. Measured the same way, counted separately.
                 getattr(report, "observed_named", ()) or (),
+                # ido-8ps.30: the attempted-vs-never-attempted split of
+                # `unobserved` (ido-8ps.27 (b)). `post_check`'s third
+                # positional after `observed` is `unavailable`, and it was
+                # never passed, so `unavailable_total` and the three measures
+                # beside it read 0 in every coverage_post_check event ever
+                # recorded -- including the attempts whose statement named an
+                # attempted-and-empty item. The report computes it correctly;
+                # only the measure missed it.
+                getattr(report, "unavailable", ()) or (),
                 # ido-8ps.28: per subject, the items the answer claims of it,
                 # split by whether the evidence sentence listed them.
                 evidence=getattr(report, "evidence", ()) or (),
