@@ -180,10 +180,56 @@ _TRAIL_STRIP = "\"'“”‘’)]}"
 #: separates two names, it does not join them.
 _BREAK_AFTER = ",;:.!?—–"
 _SENTENCE_END = ".!?"
+#: ``ido-jf6``/F29. These separate two named items with no space around them, so
+#: ``Alan Cooper/Brandon Miller`` is two people and ``Anna Garcia—contractor``
+#: is a person and a word. They never belong to a token and always end a run.
+_SEPARATORS = "/—–"
+_TOKEN_RE = re.compile(r"[^\s/—–]+")
+#: Taken off the end of a token BEFORE the possessive test. The apostrophes are
+#: deliberately absent: a trailing apostrophe is stripped as a closing quote,
+#: which would make a plural possessive invisible to that test.
+_TRAIL_BEFORE_POSSESSIVE = "\"“”)]}" + _BREAK_AFTER
+#: ``ido-jf6``/F29. "Cooper's" is a name plus a grammatical marker, not a
+#: two-word name, and the marker ENDS the name: "Alan Cooper's Active Directory
+#: rights" is Alan Cooper AND Active Directory, never one item. Straight and
+#: curly apostrophes, and the upper-case spelling of a shouted request.
+_POSSESSIVE_SUFFIXES = ("'s", "’s", "'S", "’S")
+#: ``ido-jf6``/F29. A sentence that OPENS with one of these opens with a verb,
+#: so the capital is grammar and not a name: "List Identities whose manager
+#: left" and "Compare Alan and Brandon" name nobody. The list is deliberately
+#: small, explicit, and holds only words that are not also ordinary given names
+#: or surnames -- no "Mark", "Bill", "Grant", "Will", "Rose", "May" -- because
+#: dropping a real first name would cost the run a handle, the more expensive
+#: mistake of the two. Only the FIRST token of a sentence is tested against it,
+#: so "Alan Cooper met Barbara List" is untouched.
+_IMPERATIVE_VERBS = frozenset({
+    "audit", "check", "compare", "count", "describe", "display", "explain",
+    "fetch", "find", "get", "identify", "list", "report", "retrieve", "review",
+    "search", "show", "summarise", "summarize", "tell", "verify",
+})
 
 
-def _clean_token(raw: str) -> str:
-    return raw.strip(_LEAD_STRIP).rstrip(_TRAIL_STRIP + _BREAK_AFTER).strip(_LEAD_STRIP)
+def _clean_token(raw: str) -> tuple[str, bool]:
+    """The token itself, and whether it carried a possessive marker.
+
+    The possessive comes off before the capitalisation test, because "Cooper's"
+    ends in a letter and would otherwise read as an ordinary capitalised token
+    and join its run to whatever capitalised word follows it.
+    """
+    trimmed = raw.lstrip(_LEAD_STRIP).rstrip(_TRAIL_BEFORE_POSSESSIVE)
+    possessive = False
+    for suffix in _POSSESSIVE_SUFFIXES:
+        if len(trimmed) > len(suffix) and trimmed.endswith(suffix):
+            trimmed, possessive = trimmed[: -len(suffix)], True
+            break
+    else:
+        # Plural possessive: a bare apostrophe after an s ("the Hendersons'
+        # rights"). Only that shape, so a closing quote on any other word stays
+        # an ordinary closing quote.
+        if len(trimmed) > 2 and trimmed[-1] in "'’" and trimmed[-2] in "sS":
+            trimmed, possessive = trimmed[:-1], True
+    cleaned = trimmed.strip(_LEAD_STRIP).rstrip(_TRAIL_STRIP + _BREAK_AFTER)
+    return cleaned.strip(_LEAD_STRIP), possessive
 
 
 def _is_capitalised(token: str) -> bool:
@@ -217,11 +263,19 @@ def _name_spans(text: str) -> list[Entity]:
     "Two" is grammar, not a name. "Christopher Hubbard is one of the people it
     names" keeps both of its tokens: dropping the sentence capital there would
     leave a bare surname, which is a worse handle than the name itself.
+
+    A run also ends at a possessive marker and at a ``/`` or a dash, and a run
+    that opens a sentence with an imperative verb loses that verb however short
+    the run is -- ``ido-jf6``/F29, where "List Alan Cooper's Active Directory
+    rights" came out as one named item that appears in no observation ever
+    retrieved, and the coverage block then instructed a false absence about the
+    person the run had in fact opened.
     """
     tokens: list[tuple[str, int, bool, bool]] = []  # cleaned, start, sentence_start, breaks
     previous_end = 0
     previous_raw = ""
-    for match in re.finditer(r"\S+", text):
+    matches = list(_TOKEN_RE.finditer(text))
+    for index, match in enumerate(matches):
         raw = match.group(0)
         gap = text[previous_end:match.start()]
         sentence_start = (
@@ -229,8 +283,17 @@ def _name_spans(text: str) -> list[Entity]:
             or "\n" in gap
             or previous_raw.rstrip(_TRAIL_STRIP).endswith(tuple(_SENTENCE_END))
         )
-        cleaned = _clean_token(raw)
-        breaks = raw.rstrip(_TRAIL_STRIP).endswith(tuple(_BREAK_AFTER))
+        cleaned, possessive = _clean_token(raw)
+        following = (
+            text[match.end():matches[index + 1].start()]
+            if index + 1 < len(matches)
+            else text[match.end():]
+        )
+        breaks = (
+            possessive
+            or raw.rstrip(_TRAIL_STRIP).endswith(tuple(_BREAK_AFTER))
+            or any(char in _SEPARATORS for char in following)
+        )
         tokens.append((cleaned, match.start(), sentence_start, breaks))
         previous_end, previous_raw = match.end(), raw
 
@@ -238,10 +301,12 @@ def _name_spans(text: str) -> list[Entity]:
     run: list[tuple[str, int, bool]] = []
 
     def flush() -> None:
-        if len(run) >= 2:
-            body = run
-            if body[0][2] and len(body) >= 3:
-                body = body[1:]
+        body = run
+        if body and body[0][2] and (
+            len(body) >= 3 or body[0][0].casefold() in _IMPERATIVE_VERBS
+        ):
+            body = body[1:]
+        if len(body) >= 2:
             spans.append(
                 Entity(" ".join(part[0] for part in body), "name", body[0][1])
             )

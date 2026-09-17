@@ -140,6 +140,95 @@ class EntityExtraction(unittest.TestCase):
         kinds = {e.kind for e in named_entities("this quarter's list and that one's")}
         self.assertNotIn("quoted", kinds)
 
+    def test_a_possessive_ends_the_name_it_marks(self) -> None:
+        # ido-jf6/F29. "Cooper's" ends in a letter, so the run used to carry on
+        # into the next capital and name a thing no observation can contain.
+        self.assertEqual(
+            [e.text for e in named_entities(
+                "List Alan Cooper's Active Directory rights and "
+                "Brandon Miller's accounts."
+            )],
+            ["Alan Cooper", "Active Directory", "Brandon Miller"],
+        )
+
+    def test_a_curly_possessive_reads_the_same_as_a_straight_one(self) -> None:
+        self.assertEqual(
+            [e.text for e in named_entities("Audit Barbara Sanchez’s permissions.")],
+            ["Barbara Sanchez"],
+        )
+        self.assertEqual(
+            [e.text for e in named_entities("open Alan Cooper’s Active Directory row")],
+            ["Alan Cooper", "Active Directory"],
+        )
+
+    def test_a_plural_possessive_is_a_bare_apostrophe(self) -> None:
+        self.assertEqual(
+            [e.text for e in named_entities(
+                "Audit the Cooper Brothers' Active Directory rights.")],
+            ["Cooper Brothers", "Active Directory"],
+        )
+
+    def test_an_apostrophe_inside_a_name_survives(self) -> None:
+        # Only the possessive marker comes off; O'Brien is the name itself.
+        self.assertEqual(
+            [e.text for e in named_entities("Find Sean O'Brien and Anna Garcia.")],
+            ["Sean O'Brien", "Anna Garcia"],
+        )
+
+    def test_a_sentence_initial_imperative_is_not_part_of_a_name(self) -> None:
+        # ido-jf6/F29. "List Identities", "Show Accounts" and "Compare Alan"
+        # were named items; the capital is grammar, not a handle.
+        self.assertEqual(
+            named_entities("List Identities whose manager left. Show Accounts for each."),
+            [],
+        )
+        self.assertEqual(named_entities("Compare Alan and Brandon."), [])
+        self.assertEqual(
+            [e.text for e in named_entities("Show Alan Cooper's manager.")],
+            ["Alan Cooper"],
+        )
+
+    def test_an_imperative_word_away_from_the_sentence_start_is_kept(self) -> None:
+        # Only the FIRST token of a sentence is tested against the verb list.
+        self.assertEqual(
+            [e.text for e in named_entities("we saw Alan Cooper, Barbara List today")],
+            ["Alan Cooper", "Barbara List"],
+        )
+
+    def test_a_sentence_capital_that_is_not_a_verb_is_still_kept(self) -> None:
+        self.assertEqual(
+            [e.text for e in named_entities("Christopher Hubbard leaves on Friday.")],
+            ["Christopher Hubbard"],
+        )
+
+    def test_a_slash_or_a_dash_separates_two_named_items(self) -> None:
+        self.assertEqual(
+            [e.text for e in named_entities(
+                "Audit Alan Cooper/Brandon Miller and Anna Garcia—contractor.")],
+            ["Alan Cooper", "Brandon Miller", "Anna Garcia"],
+        )
+        self.assertEqual(
+            [e.text for e in named_entities("Anna Garcia – contractor and Alan Cooper.")],
+            ["Anna Garcia", "Alan Cooper"],
+        )
+
+    def test_an_ordinary_multi_word_name_is_unchanged(self) -> None:
+        self.assertEqual(
+            [e.text for e in named_entities(
+                "we saw Alan Cooper and Active Directory_Cloud Administrator today")],
+            ["Alan Cooper", "Active Directory_Cloud Administrator"],
+        )
+
+    def test_a_particle_or_an_initial_is_not_part_of_a_name(self) -> None:
+        # Documented limit, unchanged by ido-jf6: a lowercase particle and the
+        # full stop of an initial both end a run, so these name nobody. The
+        # module never invents a handle it cannot spell from the request.
+        self.assertEqual(
+            named_entities("Check Maria de la Cruz and J. R. Smith and "
+                           "Ludwig van der Berg."),
+            [],
+        )
+
     def test_uids_and_addresses_are_named_items(self) -> None:
         found = {e.kind: e.text for e in named_entities(
             "open 28c5aeb5b64e4ac6c40c57b0235980e2 and mail a.cooper@example.com"
@@ -336,6 +425,19 @@ class Statement(unittest.TestCase):
         self.assertEqual(list(copy)[0], COVERAGE_KEY)
         self.assertEqual(list(copy)[1:], list(self.trajectory()))
         self.assertEqual(report.unobserved, ["Christopher Hubbard"])
+
+    def test_a_possessive_request_instructs_no_false_absence(self) -> None:
+        # ido-jf6/F29. The run opened Alan Cooper; the block used to name
+        # "Alan Cooper's" as an item no observation contains.
+        _, report = build_statement(
+            self.trajectory(),
+            user_query="List Alan Cooper's rights and Brandon Miller's accounts.",
+            exhausted=False,
+            haystack=normalise("identity 28c5 alan cooper 29 permissions "
+                               "identity 9a1 brandon miller 3 accounts"),
+        )
+        self.assertEqual(report.unobserved, [])
+        self.assertEqual(report.observed, ["Alan Cooper", "Brandon Miller"])
 
     def test_the_input_trajectory_is_never_mutated(self) -> None:
         trajectory = self.trajectory()
@@ -856,6 +958,18 @@ class SubjectOfACommand(unittest.TestCase):
         self.assertEqual(text, "")
         self.assertFalse(report.fired)
         self.assertEqual(report.reason, "every named item was already a subject")
+
+    def test_a_possessive_spelling_never_nudges_an_opened_subject(self) -> None:
+        # ido-jf6/F29. Both people were opened; the nudge used to fire on
+        # "Alan Cooper's" and "Brandon Miller's", which no clause can contain.
+        text, report = build_nudge(
+            user_query="List Alan Cooper's rights and Brandon Miller's accounts.",
+            iterations_left=10,
+            clauses=normalise("Identity 28c5  Alan Cooper\nIdentity 9a1  Brandon Miller"),
+        )
+        self.assertEqual(text, "")
+        self.assertFalse(report.fired)
+        self.assertEqual(report.subjects_missing, [])
 
     def test_no_recorded_clause_says_nothing(self) -> None:
         text, report = build_nudge(

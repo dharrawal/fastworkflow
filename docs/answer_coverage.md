@@ -113,7 +113,7 @@ Named items, by regex, in the order they are written:
 
 | kind | rule |
 |---|---|
-| `name` | maximal runs of **two or more** consecutive capitalised tokens. A lowercase token breaks the run; so does the punctuation that ends a token, so `Alan Cooper, Anna Garcia` is two names. A run that starts a sentence loses its first token **when two or more remain** — `Two Active Directory rights` is about *Active Directory*; `Christopher Hubbard is one of…` keeps both, because a bare surname is a worse handle than the name. |
+| `name` | maximal runs of **two or more** consecutive capitalised tokens. A lowercase token breaks the run; so does the punctuation that ends a token, so `Alan Cooper, Anna Garcia` is two names. A run that starts a sentence loses its first token **when two or more remain** — `Two Active Directory rights` is about *Active Directory*; `Christopher Hubbard is one of…` keeps both, because a bare surname is a worse handle than the name. `ido-jf6`: a possessive marker (`'s`, `’s`, or a bare apostrophe after an `s`) is stripped before the capitalisation test and **ends** the run, so `Alan Cooper's Active Directory rights` is *Alan Cooper* and *Active Directory*, not one item; `/`, `—` and `–` separate two items; and a run that starts a sentence with an imperative verb from a small explicit list (`list`, `show`, `compare`, `audit`, …, none of which is also an ordinary given name) loses that verb however short the run is, so `List Identities` and `Compare Alan` name nobody. |
 | `quoted` | `'…'`, `"…"`, `“…”`, `‘…’`. A single quote opens only after whitespace or an opener, so the apostrophe of `this quarter's` never opens a quotation. |
 | `uid` | an unbroken hex run of 16–64. |
 | `email` | an address. |
