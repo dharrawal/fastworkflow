@@ -1,4 +1,14 @@
-"""Turn-scoped SQLite archive for persist-before-label offloads."""
+"""Turn-scoped SQLite archive for persist-before-label offloads.
+
+Deletion lives next door, in ``observation_offloading.erasure``: this
+module writes a turn's raw response bytes and never removes them, and that
+module owns erasure and retention for every scope-keyed table in the file,
+including the result-handle tables written beside this one. The two halves
+meet at ``scope_json``, which is why this module stores the whole scope and
+not only its digest: a row must be able to say which channel it came from,
+and whether it belongs to an experiment run, long after the process that
+wrote it is gone (ido-gls).
+"""
 from __future__ import annotations
 
 import hashlib

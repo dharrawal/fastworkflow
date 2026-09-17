@@ -327,10 +327,15 @@ class ResultHandleStore:
     insert-or-nothing writes — in its own tables. The offload table is not
     touched.
 
-    Retention. Rows are never deleted by this module. They live exactly as long
-    as the archive file that holds the turn's observations, which is what makes
-    a page reconstructable for evaluation after the live turn has ended; the hot
-    cache bound is a residency bound and not a retention bound.
+    Retention. Rows are not deleted by this module, and that is a division of
+    labour, not an exemption (ido-gls). They live exactly as long as the archive
+    file that holds the turn's observations, which is what makes a page
+    reconstructable for evaluation after the live turn has ended; the hot cache
+    bound is a residency bound and not a retention bound. What deletes them is
+    ``fastworkflow.observation_offloading.erasure``, which owns erasure and
+    retention for every scope-keyed table in this file -- including the ones
+    this class adds -- and which discovers those tables structurally, so a table
+    added here is erased with its channel without that module being edited.
     """
 
     def __init__(self, db_path: str) -> None:

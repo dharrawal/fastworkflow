@@ -889,6 +889,19 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _offload_erasure() -> Any:
+    """The offload evidence sidecar's erasure/retention module (``ido-gls``).
+
+    Imported on use, not at module scope: the ``observation_offloading``
+    package pulls in the ReAct agent, which reaches back here, and erasure
+    runs only from ``prune``, ``forget_channel`` and ``clear_conversations``
+    -- never while this module is being imported.
+    """
+    from fastworkflow.observation_offloading import erasure
+
+    return erasure
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -5272,11 +5285,36 @@ class ObservabilityStore:
 
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
+
+        # (ido-gls) The same horizon and the same cap now reach the offload
+        # evidence sidecar beside this file. Retention that stopped at the
+        # main store meant every execute response this workflow ever produced
+        # outlived, for ever, the turn record that named it. Experiment runs
+        # are preserved: see ``observation_offloading.erasure`` for the mode
+        # and the signal it reads.
+        erasure = _offload_erasure()
+        offload = erasure.prune(
+            erasure.sidecar_path(self.db_path),
+            retention_days=retention_days,
+            max_bytes=max_bytes,
+        )
+        for key, value in offload.items():
+            deleted[f"offload_{key}"] = value
         return deleted
 
     def forget_channel(self, channel_id: str) -> dict[str, int]:
         """First-class erasure [R21]: delete a channel across all tables, then
-        checkpoint-truncate the WAL and reclaim pages."""
+        checkpoint-truncate the WAL and reclaim pages.
+
+        (ido-gls) "All tables" includes the offload evidence sidecar beside
+        this database, which holds the channel's raw execute responses, its
+        declared result handles, their source pages, cursor tokens and walk
+        verdicts -- every row carrying a ``scope_json`` that names the channel
+        it came from. Erasing the turn record and leaving that file is not
+        erasure. An experiment run's evidence is preserved and reported rather
+        than deleted; the chatbot channels this method exists for are not
+        experiment runs.
+        """
         deleted: dict[str, int] = {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -5331,6 +5369,13 @@ class ObservabilityStore:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
+
+        erasure = _offload_erasure()
+        offload = erasure.forget_channel(
+            erasure.sidecar_path(self.db_path), channel_id
+        )
+        for key, value in offload.items():
+            deleted[f"offload_{key}"] = value
         return deleted
 
     def clear_conversations(self) -> dict[str, int]:
@@ -5339,6 +5384,11 @@ class ObservabilityStore:
         Training runs, writer diagnostics, and monotonic conversation counters
         survive. Keeping counters prevents a clear operation from reusing a
         conversation identity that may still be referenced outside this DB.
+
+        (ido-gls) This is the action the chatbot UI actually exposes, so it
+        reaches the offload evidence sidecar too, for every channel at once.
+        Preservation still applies per scope: an experiment run's evidence is
+        not a conversation the operator is clearing, and survives.
         """
         deleted: dict[str, int] = {}
         with self._connect() as conn:
@@ -5356,6 +5406,11 @@ class ObservabilityStore:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
+
+        erasure = _offload_erasure()
+        offload = erasure.forget_all_channels(erasure.sidecar_path(self.db_path))
+        for key, value in offload.items():
+            deleted[f"offload_{key}"] = value
         return deleted
 
 
