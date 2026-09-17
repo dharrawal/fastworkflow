@@ -297,6 +297,36 @@ def entry_contracts(workflow_folderpath: str) -> dict[str, EntryContract]:
 # The turn-scoped registry (rule 3)
 # ---------------------------------------------------------------------------
 
+#: F31 (ido-nx6). A recorded value is a handle only when the agent could have
+#: WRITTEN it to denote an instance. A boolean and a two-digit page size are
+#: things the framework filled in, not names of anything: left as handles they
+#: made any later utterance carrying the literal ``25`` -- a limit on an
+#: unrelated command, or the prose "the top 25 rights" -- resolve to whatever
+#: instance happened to have been entered with that default.
+MIN_NUMERIC_HANDLE_LENGTH = 6
+_NON_HANDLE_TOKENS = frozenset(
+    {"true", "false", "yes", "no", "none", "null", "nan"}
+)
+_NUMERIC_RE = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
+
+
+def is_handle_value(value: Any) -> bool:
+    """Could *value* be something the agent wrote down to name an instance?
+
+    Syntactic and deliberately narrow. A blank, a boolean-ish word and a short
+    number are never handles; everything else is left to the registry, which
+    still has to know the value.
+    """
+    token = str(value or "").strip()
+    if not token:
+        return False
+    if token.lower() in _NON_HANDLE_TOKENS:
+        return False
+    return not (
+        _NUMERIC_RE.match(token) and len(token) < MIN_NUMERIC_HANDLE_LENGTH
+    )
+
+
 @dataclass(frozen=True)
 class ContextEntry:
     """One context instance entered in this turn, and what entered it.
@@ -315,13 +345,45 @@ class ContextEntry:
     command_name: str
     parameters: Mapping[str, str]
     alias: Optional[str]
+    #: The entry contract's REQUIRED parameter names, as the recorder read them
+    #: off the context model. Only these name the instance; see `handles`.
+    required_parameters: tuple[str, ...] = ()
 
-    def handles(self) -> tuple[str, ...]:
-        """Every token that denotes this entry: its alias and its values."""
+    def handles(
+        self, required_parameters: Optional[Sequence[str]] = None
+    ) -> tuple[str, ...]:
+        """Every token that denotes this entry: its alias and its IDENTIFIERS.
+
+        F31 (ido-nx6). This used to be the alias plus every value of the
+        recorded parameter dump -- which is `model_dump()`, so it included the
+        optional parameters and their DEFAULTS. An entry recorded from a
+        listing therefore published ``25`` and ``True`` as handles, and rule 3
+        dispatched any later utterance carrying one of those literals to this
+        instance. What the docs say, and what this now does: a handle is the
+        ``O`` alias or a value of the entry contract's REQUIRED parameters --
+        the values that identify the instance and that rule 3 would rebuild the
+        entry from -- and only when the value looks like something written down
+        (`is_handle_value`).
+
+        *required_parameters* lets the caller use the contract it is deciding
+        against rather than the set the recorder happened to capture; with None
+        the entry's own recorded set is used.
+        """
+        names = tuple(
+            self.required_parameters
+            if required_parameters is None
+            else required_parameters
+        )
         found: list[str] = []
         if self.alias:
             found.append(str(self.alias))
-        found.extend(str(v) for v in self.parameters.values() if str(v).strip())
+        for name in names:
+            value = self.parameters.get(name)
+            if value is None:
+                continue
+            value = str(value)
+            if is_handle_value(value) and value not in found:
+                found.append(value)
         return tuple(found)
 
 
@@ -337,8 +399,15 @@ def record_context_entry(
     command_name: str,
     parameters: Optional[Mapping[str, Any]] = None,
     alias: Optional[str] = None,
+    required_parameters: Optional[Sequence[str]] = None,
 ) -> ContextEntry:
-    """Remember that *command_name* entered *context* in this turn."""
+    """Remember that *command_name* entered *context* in this turn.
+
+    *required_parameters* is the entry contract's required set, which is what
+    separates the values that IDENTIFY the instance from the rest of the
+    parameter dump (F31/ido-nx6). Absent, the entry publishes its alias alone
+    as a handle rather than every value it was given.
+    """
     values = {
         str(name): str(value)
         for name, value in (parameters or {}).items()
@@ -352,6 +421,7 @@ def record_context_entry(
             command_name=str(command_name),
             parameters=values,
             alias=str(alias) if alias else None,
+            required_parameters=tuple(str(n) for n in (required_parameters or ())),
         )
         _entries.setdefault(scope_id, []).append(entry)
     return entry
@@ -547,10 +617,13 @@ def decide(
         )
 
     # Rule 2 -- the agent wrote the values in the utterance it just sent.
+    # An EMPTY tag is not a value the agent supplied. `<account_uid></account_uid>`
+    # used to satisfy rule 2 and compose an entry command with an empty tag,
+    # which can only fail at entry (F31/ido-nx6, the smaller half).
     from_utterance = {
         name: value
         for name in contract.required_parameters
-        if (value := xml_parameter(utterance, name)) is not None
+        if (value := xml_parameter(utterance, name))
     }
     if len(from_utterance) == len(contract.required_parameters):
         return AutoNavigationDecision(
@@ -564,7 +637,10 @@ def decide(
     # The leading token is the command name, not a handle: a workflow whose uid
     # happened to spell a command name would otherwise resolve every call of
     # that command to it.
-    tokens = utterance_tokens(utterance.split(" ", 1)[1] if " " in utterance else "")
+    # Split on WHITESPACE, not on a single space: `list_permissions\nO7` is the
+    # same utterance and used to yield no tokens at all (F31/ido-nx6).
+    head_and_tail = (utterance or "").split(None, 1)
+    tokens = utterance_tokens(head_and_tail[1] if len(head_and_tail) > 1 else "")
     matched: list[tuple[str, ContextEntry]] = []
     for token in tokens:
         for entry in entries:
@@ -572,12 +648,21 @@ def decide(
                 continue
             if not all(name in entry.parameters for name in contract.required_parameters):
                 continue
-            aliases = {h.upper() if _is_alias(h) else h for h in entry.handles()}
+            # The contract being decided against says which recorded values name
+            # the instance; an optional parameter's value or a default never
+            # does (F31/ido-nx6).
+            aliases = {
+                h.upper() if _is_alias(h) else h
+                for h in entry.handles(contract.required_parameters)
+            }
             probe = token.upper() if _is_alias(token) else token
             if probe in aliases:
                 matched.append((token, entry))
+    # Two entries denote the same instance when the values that IDENTIFY it
+    # agree; a differing optional parameter is not an ambiguity.
     distinct = {
-        tuple(sorted(entry.parameters.items())) for _, entry in matched
+        tuple((name, entry.parameters[name]) for name in contract.required_parameters)
+        for _, entry in matched
     }
     if len(distinct) == 1:
         token, entry = matched[0]

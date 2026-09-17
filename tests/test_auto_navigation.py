@@ -266,6 +266,128 @@ class TestRuleThreeAnExplicitHandle:
         assert decision.kind == CLARIFY
 
 
+#: The shape the recorder actually captures: `model_dump()` of the entry
+#: command's Input model, so the identifying uid AND every optional parameter
+#: that took its default. Built as the registry holds it, so this reproduction
+#: does not depend on the recorder having been fixed too.
+def recorded_entry(sequence=1, alias="O7", account_uid="3f2a9c1d7b8e4f60",
+                   page_size="25"):
+    return ContextEntry(
+        sequence=sequence, context="Account", command_name="open_account_by_uid",
+        parameters={
+            "account_uid": account_uid,
+            "name_filter": "admin",
+            "page_size": page_size,
+            "include_disabled": "True",
+        },
+        alias=alias,
+    )
+
+
+class TestOnlyIdentifiersAreHandles:
+    """F31 (ido-nx6). Rule 3 resolves an ``O`` alias or a value the agent wrote
+    to DENOTE an instance -- which is what the docs say and what the code did
+    not do. Every recorded parameter value was a handle, defaults included, so a
+    foreign command carrying the literal ``25`` for its own unrelated limit --
+    or prose that merely contained the number -- navigated into an account the
+    agent had never named."""
+
+    def setup_method(self):
+        auto_navigation.reset_auto_navigation_state()
+
+    def teardown_method(self):
+        auto_navigation.reset_auto_navigation_state()
+
+    def _decide(self, utterance):
+        return decide(
+            command_name="list_permissions", utterance=utterance,
+            owner_contexts=["Account"], contracts={"Account": ACCOUNT},
+            entries=(recorded_entry(),),
+        )
+
+    @pytest.mark.parametrize("utterance", [
+        "list_permissions <limit>25</limit>",
+        "list_permissions 25",
+        "list_permissions <include_disabled>True</include_disabled>",
+        "list_permissions <name_filter>admin</name_filter>",
+    ])
+    def test_a_foreign_value_that_is_not_an_identifier_does_not_navigate(
+        self, utterance
+    ):
+        decision = self._decide(utterance)
+        assert decision.kind == CLARIFY
+        assert decision.handle is None
+
+    def test_prose_carrying_a_recorded_number_does_not_navigate(self):
+        """The confirmed report: 'for the top 25 rights' dispatched into an
+        account because 25 was some listing's default page size."""
+        decision = self._decide("list_permissions for the top 25 rights")
+        assert decision.kind == CLARIFY
+        assert decision.entry_utterance is None
+
+    def test_the_observation_alias_still_resolves(self):
+        decision = self._decide("list_permissions O7")
+        assert decision.kind == DISPATCH
+        assert decision.rule == RULE_EXPLICIT_HANDLE
+        assert decision.handle == "O7"
+        assert decision.entry_utterance == (
+            "open_account_by_uid <account_uid>3f2a9c1d7b8e4f60</account_uid>")
+
+    def test_a_required_parameter_value_still_resolves(self):
+        decision = self._decide("list_permissions 3f2a9c1d7b8e4f60")
+        assert decision.kind == DISPATCH
+        assert decision.handle == "3f2a9c1d7b8e4f60"
+
+    def test_an_alias_after_a_newline_is_still_a_handle(self):
+        """Tokenising on a single space made `list_permissions\nO7` yield no
+        tokens at all, so the agent's own alias was invisible."""
+        decision = self._decide("list_permissions\nO7")
+        assert decision.kind == DISPATCH
+        assert decision.handle == "O7"
+
+    @pytest.mark.parametrize("value,is_handle", [
+        ("3f2a9c1d7b8e4f60", True),
+        ("acct-25", True),
+        ("1234567", True),
+        ("25", False),
+        ("0", False),
+        ("-1", False),
+        ("3.5", False),
+        ("True", False),
+        ("false", False),
+        ("none", False),
+        ("   ", False),
+    ])
+    def test_what_a_value_has_to_look_like_to_be_a_handle(self, value, is_handle):
+        assert auto_navigation.is_handle_value(value) is is_handle
+
+    def test_two_entries_differing_only_in_a_default_are_not_ambiguous(self):
+        """Identity is the values that NAME the instance. A second entry into
+        the same account with a different page size denotes the same account."""
+        first = recorded_entry(alias="O7")
+        second = recorded_entry(sequence=2, alias="O9", page_size="50")
+        decision = decide(
+            command_name="list_permissions", utterance="list_permissions O7 O9",
+            owner_contexts=["Account"], contracts={"Account": ACCOUNT},
+            entries=(first, second),
+        )
+        assert decision.kind == DISPATCH
+        assert decision.entry_utterance == (
+            "open_account_by_uid <account_uid>3f2a9c1d7b8e4f60</account_uid>")
+
+    def test_an_empty_tag_is_not_a_value_the_agent_supplied(self):
+        """The smaller half of the same finding: rule 2 accepted an empty tag
+        and composed an entry command with an empty tag, which can only fail."""
+        decision = decide(
+            command_name="list_permissions",
+            utterance="list_permissions <account_uid> </account_uid>",
+            owner_contexts=["Account"], contracts={"Account": ACCOUNT}, entries=(),
+        )
+        assert decision.kind == CLARIFY
+        assert decision.entry_utterance is None
+        assert decision.missing_parameters == ("account_uid",)
+
+
 # ---------------------------------------------------------------------------
 # When the framework declines to act at all
 # ---------------------------------------------------------------------------
@@ -476,9 +598,18 @@ class TestTheRegistry:
         recorded = auto_navigation.record_context_entry(
             "turn-a", context="Account", command_name="open_account_by_uid",
             parameters={"account_uid": "3f2a", "note": "  ", "absent": None},
-            alias="O4")
+            alias="O4", required_parameters=("account_uid",))
         assert dict(recorded.parameters) == {"account_uid": "3f2a"}
         assert set(recorded.handles()) == {"O4", "3f2a"}
+
+    def test_an_entry_recorded_without_a_contract_publishes_its_alias_only(self):
+        """ido-nx6. Which values NAME the instance is the contract's answer. An
+        entry recorded without one may not guess that every value it was handed
+        does, because the dump it is handed includes the defaults."""
+        recorded = auto_navigation.record_context_entry(
+            "turn-a", context="Account", command_name="open_account_by_uid",
+            parameters={"account_uid": "3f2a", "page_size": 25}, alias="O4")
+        assert set(recorded.handles()) == {"O4"}
 
     def test_nothing_survives_the_turn(self):
         auto_navigation.record_context_entry(
