@@ -385,8 +385,13 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    # v2: `roster_nudge` (ido-8ps.27) marks the one step whose observation is
+    # not a tool result at all. A finish action taken while named items of the
+    # request were never the subject of a command has its "Completed."
+    # observation replaced by a bounded harness note and the loop continues, so
+    # a reader counting tool results would otherwise count that note as one.
     SPAN_AGENT_STEP: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "step_index",
@@ -398,6 +403,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "recovered",
                 "tool_error",
                 "error_type",
+                "roster_nudge",
             }
         ),
     ),

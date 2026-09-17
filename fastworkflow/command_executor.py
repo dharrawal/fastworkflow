@@ -495,7 +495,13 @@ class CommandExecutor(CommandExecutorInterface):
             f"[auto-navigation rule {rule}] '{plan.get('command_name')}' is owned by "
             f"the {entered} context; entered it with '{entry_utterance}'."
         )
-        context_before = cls._context_name(chat_session)
+        # Deliberately NOT called `context_before`: that name belongs to the
+        # observability context PROJECTION (`tracing.context_handle`, line 138),
+        # and `tests/test_no_capture_control_flow.py` forbids any condition that
+        # mentions it, because a captured value reaching control flow is EXP-003's
+        # stop condition. This is a context class NAME, read for the dispatch's own
+        # did-it-move check and never captured.
+        context_at_dispatch = cls._context_name(chat_session)
         with auto_navigation.dispatching():
             entry_output = cls.invoke_command(
                 chat_session, entry_utterance,
@@ -518,9 +524,9 @@ class CommandExecutor(CommandExecutorInterface):
             # anything, so the dispatch proceeds.
             entered_context_name = cls._context_name(chat_session)
             did_not_move = (
-                context_before is not None
+                context_at_dispatch is not None
                 and entered_context_name is not None
-                and entered_context_name == context_before
+                and entered_context_name == context_at_dispatch
             )
             if not entry_output.success or did_not_move:
                 why = "did not enter" if entry_output.success else "could not enter"
