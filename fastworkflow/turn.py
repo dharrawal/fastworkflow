@@ -16,7 +16,6 @@ the bottom of ``fastworkflow/__init__.py`` via ``TurnResult.model_rebuild``.
 
 from __future__ import annotations
 
-import os
 import uuid
 import warnings
 from datetime import datetime, timezone
