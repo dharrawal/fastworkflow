@@ -7,7 +7,11 @@ import re
 from typing import Any, Mapping, Optional
 
 from fastworkflow import tracing
-from fastworkflow.observation_offloading.labels import is_offload_label, label_alias
+from fastworkflow.observation_offloading.labels import (
+    canonical_response,
+    is_offload_label,
+    observation_alias,
+)
 
 CONTRACT = "fastworkflow-trajectory-manifest/1"
 DSPY_OBS_RE = re.compile(
@@ -21,15 +25,45 @@ _original_capped = tracing._capped
 
 
 def observation_row(key: str, text: str) -> dict[str, Any]:
-    alias = label_alias(text.lstrip())
+    """One observation slot of the prompt, described without carrying it.
+
+    Two digests, because the slot and the evidence are not the same bytes
+    (``ido-sll``). ``sha256`` is the PROMPT SLOT exactly as the model received
+    it, header and all, and is what a reader has to hash to prove what was
+    sent. ``response_sha256`` is the command response inside that slot --
+    ``canonical_response`` takes our handle line and its escape back off -- and
+    is what ``fw.agent.step`` recorded, because that span closes before the
+    completion hook annotates. Comparing the first with the second is comparing
+    non-equivalent bytes, and it reported unchanged resident evidence as
+    mismatched.
+
+    ``alias`` is read from either line this package prints, not from the
+    offload label alone: since the handle line became unconditional the inline
+    case IS the normal case, and it was the one reporting no alias.
+    ``alias_source`` says which line named it, so a resident observation and a
+    pointer to one are still told apart by the row rather than by inference.
+
+    One normalisation, used by every field that reads the text's shape: the
+    alias, the kind and the response were previously read off differently
+    normalised copies, so a slot with leading whitespace could report an alias
+    and call itself text in the same row.
+    """
+    probe = text.lstrip()
+    alias, source = observation_alias(probe)
+    response = canonical_response(probe)
     encoded = text.encode("utf-8")
     return {
         "key": key,
         "alias": alias,
-        "kind": "label" if is_offload_label(text) else "text",
+        "alias_source": source,
+        "kind": "label" if is_offload_label(probe) else "text",
         "chars": len(text),
         "utf8_bytes": len(encoded),
         "sha256": hashlib.sha256(encoded).hexdigest(),
+        "response_sha256": (
+            None if response is None
+            else hashlib.sha256(response.encode("utf-8")).hexdigest()
+        ),
     }
 
 
@@ -82,10 +116,39 @@ def manifest_from_messages_json(messages_json: str) -> Optional[dict[str, Any]]:
     }
 
 
+def _comparable_digests(row: Mapping[str, Any]) -> set[str]:
+    """Digests of this row that a step's own evidence can honestly be equal to.
+
+    The canonical response first -- that is the raw tool return the step span
+    recorded -- and the prompt-slot digest too, because a slot this package
+    never annotated (an older recording, a non-execute tool) has only that one
+    and the two are then the same bytes anyway.
+    """
+    return {
+        value
+        for value in (row.get("response_sha256"), row.get("sha256"))
+        if isinstance(value, str) and value
+    }
+
+
 def classify_against_steps(
     manifest: Mapping[str, Any],
     step_sha256_by_index: Mapping[int, str],
 ) -> dict[str, list[int]]:
+    """Each step's recorded observation digest against the manifest's rows.
+
+    ``step_sha256_by_index`` is the digest of the RAW tool return from
+    ``fw.agent.step`` -- recorded before the completion hook prints the handle
+    line -- so residency is decided against the response inside the slot, not
+    against the annotated slot (``ido-sll``).
+
+    ``mismatched`` therefore means the evidence genuinely differs, and it still
+    can: a rehydrated listing carries its own response plus the stored rows
+    behind its result handle, which is an intentional transformation of the
+    slot and not the step's bytes. A rehydrated offload label, whose archived
+    response comes back whole, is resident -- the transformation is the header,
+    and the header is no longer counted against it.
+    """
     by_index: dict[int, dict[str, Any]] = {}
     for row in manifest.get("observations") or []:
         key = str(row.get("key") or "")
@@ -106,7 +169,7 @@ def classify_against_steps(
             absent.append(index)
         elif row.get("kind") == "label":
             labelled.append(index)
-        elif row.get("sha256") == digest:
+        elif digest in _comparable_digests(row):
             resident.append(index)
         else:
             mismatched.append(index)

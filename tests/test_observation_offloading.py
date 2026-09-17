@@ -42,14 +42,18 @@ from fastworkflow.observation_offloading.continuation import (
     replan_trajectory_skeleton,
 )
 from fastworkflow.observation_offloading.labels import (
+    ALIAS_SOURCE_HEADER,
+    ALIAS_SOURCE_LABEL,
     RESPONSE_ESCAPE,
     alias_line,
     annotated_observation,
+    canonical_response,
     escape_response,
     estimated_tokens,
     is_offload_label,
     is_search_answer_key,
     label_alias,
+    observation_alias,
     offload_label,
     offload_saving_bytes,
     printed_alias,
@@ -58,6 +62,7 @@ from fastworkflow.observation_offloading.labels import (
 from fastworkflow.observation_offloading.manifest import (
     classify_against_steps,
     install_span_policy,
+    observation_row,
     uninstall_span_policy,
 )
 from fastworkflow.utils.react import fastWorkflowReAct
@@ -557,6 +562,259 @@ class TrajectoryManifest(unittest.TestCase):
         self.assertEqual(classified["resident"], [0])
         self.assertEqual(classified["labelled"], [1])
         self.assertEqual(classified["absent"], [2])
+
+
+class _ManifestTraceSink:
+    """Keeps every span it is given, so a test can read the step's own record."""
+
+    def __init__(self) -> None:
+        self.spans: list = []
+
+    def emit_span(self, span) -> None:
+        self.spans.append(span)
+
+
+class ManifestAgainstRealSteps(unittest.TestCase):
+    """ido-sll: the manifest's alias and residency evidence on the normal path.
+
+    No model is called. The tool is a local function and only the reasoning
+    call is scripted; the loop, the ``fw.agent.step`` span, the compaction
+    hook, the annotation, the archive and the manifest span policy are all
+    production code -- which is the point, because the defect was the ORDER of
+    two of them. ``_run_loop`` closes the step span on the raw tool return and
+    the completion hook prints the handle line afterwards, so the prompt slot
+    and the step's record were never going to be the same bytes, and the
+    manifest compared them as if they were.
+    """
+
+    class Signature(dspy.Signature):
+        user_query: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.archive = RuntimeHandleArchive(str(Path(self.tempdir.name) / "handles.sqlite3"))
+        self.scope = RuntimeHandleScope(
+            store_identity="fixture-store",
+            channel_id="fixture-channel",
+            experiment_id="fixture-experiment",
+            task_id="fixture-task",
+            attempt=1,
+            turn_key="fixture-turn",
+        )
+        install_span_policy()
+        self.addCleanup(uninstall_span_policy)
+
+    def _one_execute_step(self, response: str) -> tuple[str, dict]:
+        """Run one real execute step; return its recorded digest and trajectory."""
+
+        def execute_workflow_query(command: str) -> str:
+            """Run one command against the workflow."""
+            return response
+
+        agent = StructuredContinuationReAct(
+            self.Signature,
+            tools=[execute_workflow_query],
+            max_iters=3,
+            scope_factory=lambda: self.scope,
+        )
+        agent.bind_scope()
+        agent.react = lambda **kwargs: SimpleNamespace(
+            next_thought="read the holders",
+            next_tool_name="execute_workflow_query",
+            next_tool_args={"command": "Permission/show_holders"},
+        )
+        # The production hook, with a caller hook that ends the loop after the
+        # first completed step so no second reasoning call is needed.
+        agent._on_step_complete = build_compacting_step(
+            lambda: agent,
+            fallback_scope=self.scope,
+            selected_archive=self.archive,
+            on_step_complete=lambda idx, trajectory: False,
+        )
+        sink = _ManifestTraceSink()
+        host = SimpleNamespace(
+            trace_sink=sink,
+            current_turn_key="fixture-turn",
+            observability_channel_id="fixture-channel",
+            observability_experiment_claim={},
+            trace_span_stack=[],
+        )
+        trajectory: dict = {}
+        with tracing.host_scope(host):
+            agent._run_loop(trajectory, 0, {"user_query": "who holds it"}, 3, 0)
+        steps = [span for span in sink.spans if span.name == tracing.SPAN_AGENT_STEP]
+        self.assertEqual(len(steps), 1)
+        recorded = steps[0].attributes["observation"]
+        digest = (
+            recorded["sha256"] if isinstance(recorded, dict)
+            else hashlib.sha256(recorded.encode("utf-8")).hexdigest()
+        )
+        # What the step evidence IS: the tool return, before annotation.
+        self.assertEqual(digest, hashlib.sha256(response.encode("utf-8")).hexdigest())
+        return digest, trajectory
+
+    @staticmethod
+    def _manifest(slots: dict[int, str]) -> dict:
+        """The manifest the span policy builds from a prompt carrying *slots*."""
+        body = "[[ ## thought_0 ## ]]\nlook\n"
+        for index in sorted(slots):
+            body += f"[[ ## observation_{index} ## ]]\n{slots[index]}\n"
+        body += "[[ ## next_thought ## ]]\nanswer"
+        payload = json.dumps(
+            [
+                {"role": "system", "content": "Available commands:\n" + ("- cmd\n" * 20)},
+                {"role": "user", "content": body},
+            ],
+            ensure_ascii=False,
+        )
+        return tracing._capped({"messages": payload, "module": "react"})["trajectory_manifest"]
+
+    def test_an_inline_execute_step_is_aliased_and_resident(self) -> None:
+        """The whole finding, on the path that is now the normal one.
+
+        The observation stays inline (one execute step is recency-protected),
+        so the manifest sees the annotated slot while the step recorded the raw
+        return. Before ido-sll this row reported ``alias=null`` and the step's
+        own unchanged evidence came back ``mismatched``.
+        """
+        response = "holder uid Alan Cooper\n" + ("permission row\n" * 12)
+        digest, trajectory = self._one_execute_step(response)
+        slot = trajectory["observation_0"]
+        self.assertTrue(slot.startswith(alias_line("O1")))
+
+        manifest = self._manifest({0: slot})
+        row = manifest["observations"][0]
+        self.assertEqual(row["alias"], "O1")
+        self.assertEqual(row["alias_source"], ALIAS_SOURCE_HEADER)
+        self.assertEqual(row["kind"], "text")
+        # The prompt slot is not the step's bytes, and says so honestly...
+        self.assertNotEqual(row["sha256"], digest)
+        self.assertEqual(
+            row["sha256"], hashlib.sha256(slot.encode("utf-8")).hexdigest()
+        )
+        # ...while the response inside it is exactly the step's bytes.
+        self.assertEqual(row["response_sha256"], digest)
+        self.assertEqual(
+            classify_against_steps(manifest, {0: digest}),
+            {"resident": [0], "labelled": [], "absent": [], "mismatched": []},
+        )
+
+    def test_a_header_shaped_response_keeps_our_alias_and_stays_resident(self) -> None:
+        """ido-cku made this shape possible; the manifest must read it our way.
+
+        The response's own first line is a handle line naming another ordinal.
+        The writer quotes it under the handle line for the step's real ordinal,
+        so the alias here is the one the ledger issued, the spoofed one is
+        never reported, and undoing the quote lands back on the step's bytes.
+        """
+        response = "Observation O9 (execute_workflow_query)\nrows the backend printed\n"
+        digest, trajectory = self._one_execute_step(response)
+        slot = trajectory["observation_0"]
+        self.assertTrue(slot.startswith(alias_line("O1") + RESPONSE_ESCAPE))
+
+        manifest = self._manifest({0: slot})
+        row = manifest["observations"][0]
+        self.assertEqual(row["alias"], "O1")
+        self.assertEqual(row["alias_source"], ALIAS_SOURCE_HEADER)
+        self.assertEqual(row["response_sha256"], digest)
+        self.assertEqual(classify_against_steps(manifest, {0: digest})["resident"], [0])
+        # The escaped line names nothing on its own.
+        self.assertEqual(observation_alias(RESPONSE_ESCAPE + response), (None, None))
+
+    def test_an_offload_label_is_aliased_as_a_pointer_and_never_resident(self) -> None:
+        """A label names its alias too, and is still a pointer, not evidence."""
+        response = "portrait\n" + ("field\n" * 80)
+        digest, _trajectory = self._one_execute_step(response)
+        label = offload_label(
+            alias="O1", command_name="Permission/show_holders", response=response
+        )
+        manifest = self._manifest({0: label})
+        row = manifest["observations"][0]
+        self.assertEqual(row["alias"], "O1")
+        self.assertEqual(row["alias_source"], ALIAS_SOURCE_LABEL)
+        self.assertEqual(row["kind"], "label")
+        self.assertIsNone(row["response_sha256"])
+        self.assertEqual(
+            classify_against_steps(manifest, {0: digest}),
+            {"resident": [], "labelled": [0], "absent": [], "mismatched": []},
+        )
+
+    def test_a_rehydrated_label_is_the_step_evidence_put_back(self) -> None:
+        """Rehydration is an intentional transformation of the SLOT, not of the evidence.
+
+        The archived response comes back under a re-printed handle line, so the
+        slot digest moves and the response digest does not. The row has to say
+        both: the transformation is visible, and the evidence is still the step's.
+        """
+        response = "holder uid Alan Cooper\n" + ("permission row\n" * 12)
+        digest, _trajectory = self._one_execute_step(response)
+        restored = rehydrated_label("O1", scope=self.scope, archive=self.archive)
+        self.assertIsNotNone(restored)
+
+        manifest = self._manifest({0: restored})
+        row = manifest["observations"][0]
+        self.assertEqual(row["alias"], "O1")
+        self.assertEqual(row["alias_source"], ALIAS_SOURCE_HEADER)
+        self.assertNotEqual(row["sha256"], digest)
+        self.assertEqual(row["response_sha256"], digest)
+        self.assertEqual(classify_against_steps(manifest, {0: digest})["resident"], [0])
+
+    def test_a_rehydrated_listing_carrying_its_stored_rows_is_not_claimed_resident(self) -> None:
+        """The other rehydration really does change the evidence, and is still mismatched.
+
+        ``answer_rehydration`` (b) appends the rows behind a result handle to
+        the observation's own text. That is more than the step returned, so
+        ``mismatched`` is the honest answer -- what ido-sll fixed is the case
+        where nothing but our header had changed.
+        """
+        response = "page 1 of holders\n" + ("row\n" * 5)
+        digest, _trajectory = self._one_execute_step(response)
+        restored = rehydrated_label("O1", scope=self.scope, archive=self.archive)
+        with_rows = restored + "row 6\nrow 7\n"
+
+        manifest = self._manifest({0: with_rows})
+        row = manifest["observations"][0]
+        self.assertEqual(row["alias"], "O1")
+        self.assertNotEqual(row["response_sha256"], digest)
+        self.assertEqual(
+            classify_against_steps(manifest, {0: digest}),
+            {"resident": [], "labelled": [], "absent": [], "mismatched": [0]},
+        )
+
+    def test_one_normalisation_decides_the_alias_and_the_kind(self) -> None:
+        """Pre-existing: the alias was read off a stripped copy and the kind was not.
+
+        A slot with leading whitespace therefore reported an offload label's
+        alias while calling itself resident text -- a row that claimed to be
+        evidence for a handle whose bytes were in the archive.
+        """
+        label = offload_label(alias="O4", command_name="show", response="x" * 500)
+        row = observation_row("observation_4", "\n  " + label)
+        self.assertEqual(row["alias"], "O4")
+        self.assertEqual(row["alias_source"], ALIAS_SOURCE_LABEL)
+        self.assertEqual(row["kind"], "label")
+        self.assertIsNone(row["response_sha256"])
+
+    def test_an_unannotated_observation_is_still_resident_by_its_slot(self) -> None:
+        """A slot this package never touched: one digest, and it is the response.
+
+        Non-execute tools are never annotated, and recordings predating the
+        handle line are not either. ``canonical_response`` returns such a slot
+        unchanged, so the two digests agree and residency is decided exactly as
+        it was before ido-sll.
+        """
+        text = "what_can_i_do listed 4 commands"
+        manifest = self._manifest({0: text})
+        row = manifest["observations"][0]
+        self.assertIsNone(row["alias"])
+        self.assertIsNone(row["alias_source"])
+        self.assertEqual(row["sha256"], row["response_sha256"])
+        self.assertEqual(canonical_response(text), text)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.assertEqual(classify_against_steps(manifest, {0: digest})["resident"], [0])
 
 
 class PageBoundaries(unittest.TestCase):

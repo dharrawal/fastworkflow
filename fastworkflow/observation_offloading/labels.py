@@ -155,6 +155,58 @@ def printed_context(text: str) -> str | None:
     return match.group(2) or None
 
 
+#: Which line of ours named an observation's alias. An alias is evidence only
+#: with its provenance: a reader that cannot tell the printed handle line from
+#: an offload label cannot tell a resident observation from a pointer to one.
+ALIAS_SOURCE_HEADER = "header"
+ALIAS_SOURCE_LABEL = "label"
+
+
+def observation_alias(text: str) -> tuple[str | None, str | None]:
+    """The alias an observation carries, and which line of ours named it.
+
+    The two shapes this module prints are the only two an alias can come from:
+    the handle line ``annotated_observation`` puts above a resident response,
+    and the offload label that replaces a response entirely. Readers that knew
+    only the label reported no alias at all for the normal, inline case
+    (``ido-sll``), which is every execute observation since the handle line
+    became unconditional.
+
+    Both reads are anchored at byte zero and agree with the writer: after
+    ``ido-cku`` our line is always the FIRST line of an annotated observation,
+    and a response whose own first line has either shape is printed under it
+    behind ``RESPONSE_ESCAPE`` -- which neither ``ALIAS_LINE_RE`` nor
+    ``LABEL_RE`` matches. So a backend's text can never be read as an alias
+    here, and the header is checked first because an escaped label-shaped
+    response stands UNDER a header naming the step's real ordinal.
+
+    ``(None, None)`` for an observation carrying neither shape.
+    """
+    alias = printed_alias(text)
+    if alias is not None:
+        return alias, ALIAS_SOURCE_HEADER
+    alias = label_alias(text)
+    return (alias, ALIAS_SOURCE_LABEL) if alias is not None else (None, None)
+
+
+def canonical_response(text: str) -> str | None:
+    """The command response an observation slot carries, byte for byte, or None.
+
+    The counterpart of ``observation_alias`` for evidence rather than naming:
+    what a digest of this observation has to be taken over for it to be
+    comparable with the raw tool return recorded on ``fw.agent.step``
+    (``ido-sll``). Our handle line and the escape underneath it are
+    presentation added after that record was closed, so both come off.
+
+    ``None`` for an offload label, which holds no response at all -- its bytes
+    stand for evidence that lives in the archive, and comparing them with a
+    response would be comparing a pointer with the thing pointed at.
+    """
+    if printed_alias(text) is not None:
+        return strip_alias_line(text)
+    return None if is_offload_label(text) else text
+
+
 def strip_alias_line(text: str) -> str:
     """The original command response, without OUR printed alias line.
 
