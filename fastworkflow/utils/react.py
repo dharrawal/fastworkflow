@@ -137,6 +137,14 @@ class fastWorkflowReAct(Module):
         # nothing about what the fallback does.
         self._truncation_count = 0
 
+    def _note_step(self, idx: int, tool_name: str) -> None:
+        """A step has been chosen and mirrored, and has not been dispatched yet.
+
+        A no-op here. ``StructuredContinuationReAct`` overrides it to assign the
+        step's ``O`` ordinal, which has to be decided before the tool runs
+        because the command inside the tool declares a result handle under it.
+        """
+
     def clear_suspension(self) -> None:
         """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
         self._suspended = None
@@ -336,6 +344,10 @@ class fastWorkflowReAct(Module):
             self.current_trajectory[f"action_{idx}"] = (
                 f"{pred.next_tool_name}: {pred.next_tool_args}"
             )
+            # The step exists and its tool is known, and nothing has dispatched
+            # yet: the one moment a subclass can number it before any code the
+            # tool calls asks what its number is (ido-7qd).
+            self._note_step(idx, pred.next_tool_name)
 
             try:
                 observation = self.tools[pred.next_tool_name](**pred.next_tool_args)

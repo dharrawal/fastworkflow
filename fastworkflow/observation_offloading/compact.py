@@ -54,6 +54,10 @@ TRAJECTORY_MAX_BYTES_ENV = context_budget.TRAJECTORY.override_env
 MIN_OFFLOAD_SAVING_BYTES_ENV = context_budget.OFFLOAD_MIN_SAVING.override_env
 
 
+#: The tool whose steps own the agent-visible ``O`` namespace. One name, so
+#: the dispatch-side ledger and the printed alias agree on what counts.
+EXECUTE_TOOL_NAME = "execute_workflow_query"
+
 _STEP_KEY = re.compile(r"^(?:tool_name|observation)_(\d+)$")
 
 
@@ -91,6 +95,11 @@ def execute_ordinals(
     ``ordinal_offset`` is the number of execute steps already truncated out of
     this trajectory, so the ``O{n}`` alias of a surviving step never shifts onto
     an alias an earlier, now-removed step already persisted under.
+
+    This is the numbering RULE, not the authority. A live turn's authority is
+    the agent's ledger (``StructuredContinuationReAct.execute_ordinal_by_step``),
+    which is seeded by this function and then only ever extended; callers that
+    hold an agent pass its pairs in as ``executes`` rather than recounting.
     """
     found: list[tuple[int, int]] = []
     ordinal = ordinal_offset
@@ -313,6 +322,7 @@ def compact_trajectory(
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
     ordinal_offset: int = 0,
+    executes: Optional[list[tuple[int, int]]] = None,
     describe_output: Optional[Callable[[str, str], str]] = None,
 ) -> list[dict[str, Any]]:
     """Mutate trajectory observations in place. Return offload decisions.
@@ -328,6 +338,14 @@ def compact_trajectory(
     ``ordinal_offset`` counts execute steps the agent has truncated out of the
     trajectory (see ``execute_ordinals``); recency protection is measured over
     the steps still present.
+
+    ``executes`` is the agent's own ``(step_index, ordinal)`` ledger when there
+    is an agent (ido-7qd). Passing it, rather than recounting here, is what
+    keeps the alias printed on an observation identical to the alias the
+    command already declared and stamped under -- including after a cold
+    resume, where this trajectory begins mid-turn. ``ordinal_offset`` is then
+    only the seed for the fallback count, and recency protection is measured
+    from the first ordinal actually present either way.
     """
 
     selected_scope = scope or default_scope()
@@ -340,7 +358,11 @@ def compact_trajectory(
         hot_handle_max_bytes = hot_handle_max_bytes_from_env()
     if hot_handle_max_bytes < 0:
         raise ValueError("hot_handle_max_bytes cannot be negative")
-    executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
+    if executes is None:
+        executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
+    else:
+        present = set(step_indexes(trajectory))
+        executes = [pair for pair in executes if pair[0] in present]
     if not executes:
         return []
     # Print the handle before measuring: the packed target must be checked
@@ -357,7 +379,9 @@ def compact_trajectory(
         selected_archive=store,
         hot_handle_max_bytes=hot_handle_max_bytes,
     )
-    protected_from = ordinal_offset + max(
+    # Measured from the oldest ordinal still present, so an explicit ledger and
+    # a recount protect exactly the same steps.
+    protected_from = (executes[0][1] - 1) + max(
         1, len(executes) - recent_observations_protected + 1
     )
     packed_text = json.dumps(trajectory, ensure_ascii=False, default=str)

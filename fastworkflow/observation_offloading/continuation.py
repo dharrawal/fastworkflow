@@ -12,6 +12,7 @@ import dspy
 from fastworkflow import context_budget, tracing
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope, RuntimeHandleArchive
 from fastworkflow.observation_offloading.compact import (
+    EXECUTE_TOOL_NAME,
     execute_ordinals,
     min_offload_saving_bytes_from_env,
     step_indexes,
@@ -71,6 +72,7 @@ def replan_trajectory_skeleton(
     greedy_max_bytes: Optional[int] = None,
     min_offload_saving_bytes: Optional[int] = None,
     ordinal_offset: int = 0,
+    executes: Optional[list[tuple[int, int]]] = None,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
     describe_output: Optional[Callable[[str, str], str]] = None,
@@ -88,11 +90,11 @@ def replan_trajectory_skeleton(
         min_offload_saving_bytes = min_offload_saving_bytes_from_env()
     if greedy_max_bytes is None:
         greedy_max_bytes = context_budget.trajectory_max_bytes()
+    if executes is None:
+        executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
     execute_aliases = {
         f"observation_{step_index}": f"O{ordinal}"
-        for step_index, ordinal in execute_ordinals(
-            trajectory, ordinal_offset=ordinal_offset
-        )
+        for step_index, ordinal in executes
     }
     skeleton: dict[str, Any] = {}
     observation_keys: list[str] = []
@@ -206,6 +208,16 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         super().__init__(*args, **kwargs)
         self.forced_replans = 0
         self.truncated_execute_steps = 0
+        #: ido-7qd. The turn's authoritative execute numbering: step index ->
+        #: ``O`` ordinal. Assigned once, before the tool runs, and never
+        #: reassigned or removed, so the alias a command declares and stamps
+        #: under is the alias printed on its observation and archived with it.
+        #: Counting a trajectory cannot be that authority: the dispatch-side
+        #: mirror starts empty in a process that only imported a suspension,
+        #: while the working trajectory it resumes already holds the earlier
+        #: steps. Entries for truncated steps stay, because the next ordinal is
+        #: one past the highest ever issued.
+        self.execute_ordinal_by_step: dict[int, int] = {}
         self.continuation_scope: RuntimeHandleScope | None = None
         self.continuation_scope_id: str | None = None
         self._scope_factory = scope_factory
@@ -248,6 +260,62 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             scope = RuntimeHandleScope(**raw_scope)
             self.continuation_scope = scope
             self.continuation_scope_id = scope.scope_id
+        # ido-7qd. The turn continues here, so its numbering must too. Nothing
+        # new is persisted for this: the suspended trajectory carries every
+        # execute step that survives, and ``truncated_execute_steps`` carries
+        # the ones that do not, which together are exactly what issued the
+        # aliases already printed on those observations. A fresh agent that
+        # skipped this restarted at O1 and collided with its own O1.
+        self.execute_ordinal_by_step = dict(
+            execute_ordinals(
+                self._suspended["trajectory"],
+                ordinal_offset=self.truncated_execute_steps,
+            )
+        )
+
+    def _note_step(self, idx: int, tool_name: str) -> None:
+        """Number an execute step before it is dispatched, once and for good."""
+        if str(tool_name or "") != EXECUTE_TOOL_NAME:
+            return
+        # getattr: a loop can be driven on an instance built via __new__ (test
+        # helpers), the same reason _on_step_complete is read that way.
+        ledger = getattr(self, "execute_ordinal_by_step", None)
+        if ledger is None:
+            ledger = self.execute_ordinal_by_step = {}
+        if idx not in ledger:
+            ledger[idx] = self.next_execute_ordinal()
+
+    def next_execute_ordinal(self) -> int:
+        """One past the highest ordinal this turn has ever issued."""
+        ledger = getattr(self, "execute_ordinal_by_step", None) or {}
+        return max(ledger.values(), default=0) + 1
+
+    def execute_ordinal_pairs(
+        self, trajectory: Mapping[str, Any]
+    ) -> list[tuple[int, int]]:
+        """The ledger's ``(step_index, ordinal)`` pairs for the steps *trajectory* still has.
+
+        Every consumer of execute numbering -- the printed alias line, the
+        archive key, the offload label, the replan skeleton -- reads the turn's
+        numbering from here, so none of them can disagree with the alias a
+        command already declared under.
+        """
+        ledger = getattr(self, "execute_ordinal_by_step", None) or {}
+        present = [
+            index
+            for index in step_indexes(trajectory)
+            if str(trajectory.get(f"tool_name_{index}") or "") == EXECUTE_TOOL_NAME
+        ]
+        if any(index not in ledger for index in present):
+            # This agent never numbered these steps -- a trajectory handed in
+            # from outside the loop, a rehydrated skeleton. It has no authority
+            # over them, so the rule stands in for the whole trajectory rather
+            # than half of it.
+            return execute_ordinals(
+                trajectory,
+                ordinal_offset=int(getattr(self, "truncated_execute_steps", 0) or 0),
+            )
+        return [(index, ledger[index]) for index in present]
 
     def truncate_trajectory(self, trajectory: dict[str, Any]) -> dict[str, Any]:
         """Drop the oldest surviving step, remembering how many executes are gone.
@@ -292,6 +360,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         next_segment = completed_segment + 1
         skeleton, observation_metadata = replan_trajectory_skeleton(
             trajectory,
+            executes=self.execute_ordinal_pairs(trajectory),
             ordinal_offset=getattr(self, "truncated_execute_steps", 0),
             scope=getattr(self, "continuation_scope", None),
             selected_archive=getattr(self, "observation_archive", None),
@@ -409,6 +478,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.iteration_counter = 0
         self.forced_replans = 0
         self.truncated_execute_steps = 0
+        self.execute_ordinal_by_step = {}
         # ido-8ps.27: one roster nudge per TURN, and a turn here is a forward()
         # across all of its segments, not a segment.
         self._roster_nudges_fired = 0

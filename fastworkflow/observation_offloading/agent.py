@@ -50,12 +50,18 @@ def build_compacting_step(
     def compacting_step(idx: int, trajectory: dict[str, Any]) -> bool:
         agent = agent_ref()
         scope = getattr(agent, "continuation_scope", None) or fallback_scope
+        # ido-7qd: the agent's ledger, not a recount of this trajectory. The
+        # alias printed and archived here is then the same one the command
+        # inside the step already declared and stamped under, in a process that
+        # resumed the turn as much as in the one that started it.
+        pairs = getattr(agent, "execute_ordinal_pairs", None)
         try:
             compact_trajectory(
                 trajectory,
                 scope=scope,
                 selected_archive=selected_archive,
                 ordinal_offset=int(getattr(agent, "truncated_execute_steps", 0) or 0),
+                executes=pairs(trajectory) if callable(pairs) else None,
                 describe_output=describe_output,
             )
         except Exception as error:  # noqa: BLE001

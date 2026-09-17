@@ -1,15 +1,22 @@
 """C1 result handles: the store, its cursors, and bounded page observations."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from types import SimpleNamespace
 
+import dspy
+
 from fastworkflow import result_handles
 from fastworkflow import tracing
+from fastworkflow.observation_offloading.agent import build_compacting_step
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope
 from fastworkflow.observation_offloading.compact import compact_trajectory
+from fastworkflow.observation_offloading.continuation import (
+    StructuredContinuationReAct,
+)
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive
 from fastworkflow.observation_offloading.labels import printed_alias, strip_alias_line
 from fastworkflow.observation_offloading.state import (
@@ -18,6 +25,7 @@ from fastworkflow.observation_offloading.state import (
     reset_runtime_state,
     snapshot_events,
 )
+from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.result_handles import (
     ResultHandleError,
     ResultHandleSpec,
@@ -1678,3 +1686,175 @@ class WalkTerminalStateTests(unittest.TestCase):
         self.assertTrue(evictions)
         self.assertTrue(all("O1" not in walk.split(":")[1]
                             for event in evictions for walk in event["walks"]))
+
+
+class ColdResumeAliasTests(unittest.TestCase):
+    """ido-7qd: a turn that resumes in another process keeps on counting.
+
+    ``current_execute_alias`` used to count the execute steps in
+    ``current_trajectory``. That mirror is rebuilt empty by a process that only
+    imported a suspension, so the first command after an ``ask_user`` resume
+    declared and stamped ``O1`` while compaction, reading the restored working
+    trajectory, printed the very same step ``O3``: the declaration collided with
+    the real ``O1`` and the subject stamp landed on it.
+
+    Everything here is local -- scripted ReAct decisions, a fixture tool, a temp
+    store and a temp archive. No model, no backend.
+    """
+
+    class Signature(dspy.Signature):
+        user_query: str = dspy.InputField()
+        final_answer: str = dspy.OutputField()
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.archive = RuntimeHandleArchive(
+            os.path.join(self.temp.name, "archive.sqlite3"))
+        self.scope = scope()
+        self.dispatches: list[dict] = []
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    def _tools(self):
+        def execute_workflow_query(command: str) -> str:
+            """Declare a locally generated listing under the step's own alias."""
+            alias = current_execute_alias()
+            record_context_clause(self.scope, alias, "Fixture " + command)
+            entry = {"command": command, "dispatch_alias": alias}
+            self.dispatches.append(entry)
+            rows = holders(30, prefix=command)
+            entry["declared_alias"] = declare(
+                ResultHandleSpec(kind="fixture", summary=command, items=rows,
+                                 total=len(rows), source_complete=True),
+                scope=self.scope, selected_store=self.store,
+            )["result_handle"]
+            return "\n".join(rows)
+
+        def ask_user(question: str) -> str:
+            """Suspend the turn on a local fixture question."""
+            raise AskUserSuspend(question)
+
+        return [execute_workflow_query, ask_user]
+
+    def _agent(self) -> StructuredContinuationReAct:
+        holder: dict = {}
+        agent = StructuredContinuationReAct(
+            self.Signature,
+            tools=self._tools(),
+            max_iters=8,
+            on_step_complete=build_compacting_step(
+                lambda: holder.get("agent"),
+                fallback_scope=self.scope,
+                selected_archive=self.archive,
+            ),
+            scope_factory=lambda: self.scope,
+        )
+        holder["agent"] = agent
+        agent.observation_archive = self.archive
+        agent.extract = lambda **kwargs: dspy.Prediction(final_answer="done")
+        return agent
+
+    @staticmethod
+    def _script(agent, steps) -> None:
+        queue = iter(steps)
+
+        def decide(**kwargs):
+            name, arguments = next(queue)
+            return dspy.Prediction(next_thought="scripted",
+                                   next_tool_name=name, next_tool_args=arguments)
+
+        agent.react = decide
+
+    def _host(self, agent):
+        return SimpleNamespace(workflow_tool_agent=agent)
+
+    def _suspend_after_two_executes(self) -> dict:
+        agent = self._agent()
+        self._script(agent, [
+            ("execute_workflow_query", {"command": "first"}),
+            ("execute_workflow_query", {"command": "second"}),
+            ("ask_user", {"question": "continue?"}),
+        ])
+        with tracing.host_scope(self._host(agent)):
+            prediction = agent.forward(user_query="fixture")
+        self.assertTrue(prediction.suspended)
+        self.assertEqual([entry["dispatch_alias"] for entry in self.dispatches],
+                         ["O1", "O2"])
+        self.assertEqual([entry["declared_alias"] for entry in self.dispatches],
+                         ["O1", "O2"])
+        # Exactly what the session state file carries: JSON, nothing else.
+        return json.loads(json.dumps(agent.export_suspended()))
+
+    def test_a_resumed_execute_declares_stamps_and_prints_the_same_O3(self) -> None:
+        blob = self._suspend_after_two_executes()
+        first_clause = context_clause_of(self.scope, "O1")
+        second_clause = context_clause_of(self.scope, "O2")
+
+        resumed = self._agent()
+        resumed.import_suspended(blob)
+        # The mirror really is empty here; the numbering does not come from it.
+        self.assertEqual(resumed.current_trajectory, {})
+        self._script(resumed, [
+            ("execute_workflow_query", {"command": "third"}),
+            ("finish", {}),
+        ])
+        with tracing.host_scope(self._host(resumed)):
+            prediction = resumed.resume("continue")
+
+        third = self.dispatches[-1]
+        self.assertEqual(third["command"], "third")
+        self.assertEqual(third["dispatch_alias"], "O3")
+        self.assertEqual(third["declared_alias"], "O3")
+        self.assertEqual(printed_alias(prediction.trajectory["observation_3"]), "O3")
+        self.assertEqual(context_clause_of(self.scope, "O3"), "Fixture third")
+        # O1 and O2 keep the subject and the rows they were declared with.
+        self.assertEqual(context_clause_of(self.scope, "O1"), first_clause)
+        self.assertEqual(context_clause_of(self.scope, "O2"), second_clause)
+        self.assertEqual(context_clause_of(self.scope, "O1"), "Fixture first")
+        declarations = {row["alias"]: row for row
+                        in self.store.list_declarations(self.scope)}
+        self.assertEqual(sorted(declarations), ["O1", "O2", "O3"])
+        self.assertEqual(declarations["O1"]["summary"], "first")
+        self.assertEqual(declarations["O3"]["summary"], "third")
+
+    def test_the_restored_ledger_continues_the_turns_numbering(self) -> None:
+        blob = self._suspend_after_two_executes()
+        resumed = self._agent()
+        resumed.import_suspended(blob)
+        self.assertEqual(resumed.execute_ordinal_by_step, {0: 1, 1: 2})
+        self.assertEqual(resumed.next_execute_ordinal(), 3)
+
+    def test_truncated_executes_are_counted_into_the_restored_ledger(self) -> None:
+        """A step the context-window fallback dropped still owns its ordinal."""
+        agent = self._agent()
+        agent.bind_scope()
+        agent.truncated_execute_steps = 2
+        agent._suspended = {
+            "trajectory": {"tool_name_5": "execute_workflow_query",
+                           "observation_5": "rows",
+                           "tool_name_6": "ask_user"},
+            "idx": 6,
+            "input_args": {"user_query": "q"},
+            "max_iters": 8,
+            "clarification": "Which?",
+        }
+        resumed = self._agent()
+        resumed.import_suspended(json.loads(json.dumps(agent.export_suspended())))
+        self.assertEqual(resumed.execute_ordinal_by_step, {5: 3})
+        self.assertEqual(resumed.next_execute_ordinal(), 4)
+
+    def test_a_fresh_turn_starts_the_numbering_over(self) -> None:
+        blob = self._suspend_after_two_executes()
+        resumed = self._agent()
+        resumed.import_suspended(blob)
+        self._script(resumed, [("finish", {})])
+        with tracing.host_scope(self._host(resumed)):
+            resumed.forward(user_query="a new turn")
+        self.assertEqual(resumed.execute_ordinal_by_step, {})
+        self.assertEqual(resumed.next_execute_ordinal(), 1)
