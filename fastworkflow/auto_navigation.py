@@ -523,10 +523,61 @@ def _restore_entries(scope_id: str, selected_archive: Any = None) -> tuple[Conte
         return tuple(restored)
 
 
+#: The scope id ``current_scope_id`` falls back to when the offloading runtime
+#: cannot be asked at all. Constant for the same reason the process default is,
+#: and refused for the same reason.
+UNBOUND_SCOPE_ID = "unbound"
+
+
+def is_process_default_scope(scope_id: str) -> bool:
+    """Is *scope_id* a scope that cannot tell one turn from the next?
+
+    ``ido-bhf`` (F37). Every other scope is minted per turn: an agent's
+    ``continuation_scope`` carries the turn key its observations are archived
+    under, and a trace host's scope is rebuilt from the claim ``_begin_turn``
+    mints. The PROCESS DEFAULT is neither -- it is one object per process, so
+    it is the same id in turn 1, turn 2 and turn 200, while the ``O`` aliases
+    the agent writes restart at ``O1`` every trajectory.
+    """
+    if str(scope_id) == UNBOUND_SCOPE_ID:
+        return True
+    try:
+        from fastworkflow.observation_offloading.state import default_scope
+
+        return str(scope_id) == str(default_scope().scope_id)
+    except Exception:  # noqa: BLE001 - a scope we cannot classify is not the default
+        logger.debug("could not read the process default scope", exc_info=True)
+        return False
+
+
 def context_entries(
     scope_id: str, *, selected_archive: Any = None
 ) -> tuple[ContextEntry, ...]:
-    """This turn's recorded entries, restored from the sidecar if need be."""
+    """This turn's recorded entries, restored from the sidecar if need be.
+
+    ``ido-bhf`` (F37): EMPTY under the process default scope, which is how rule
+    3 is refused there. The registry is turn-scoped by contract, and that
+    contract is carried entirely by the scope id: a handle resolves only against
+    what THIS turn recorded. Under the default scope there is no such boundary,
+    so ``O3`` written in turn 2 -- where it names some listing -- would resolve
+    to the account turn 1 entered under the same alias and dispatch to the wrong
+    instance. A scope that cannot distinguish turns must not be trusted to, so
+    nothing recorded under it is offered to a handle lookup. Rules 1 and 2 are
+    untouched: they read the utterance, which is the same in any scope, and a
+    turn that would have used rule 3 gets the ordinary blocking clarification
+    naming the entry command and its missing parameter.
+
+    Recording is deliberately NOT refused. The entries still go to the registry
+    and to the sidecar, so a scope that is properly bound later, and the
+    reclamation that counts a scope's residency, both see what happened; what is
+    refused is the one use that needs turn boundaries to be sound.
+    """
+    if is_process_default_scope(scope_id):
+        logger.debug(
+            "rule 3 refused: %s is the process default scope, which cannot "
+            "distinguish one turn from the next", scope_id,
+        )
+        return ()
     with _lock:
         found = tuple(_entries.get(scope_id, ()))
     return found or _restore_entries(scope_id, selected_archive)

@@ -408,10 +408,8 @@ class fastWorkflowReAct(Module):
             # an ask_user round.
             nudge = ""
             if pred.next_tool_name == "finish":
-                nudge = self._roster_nudge(input_args, max_iters)
+                nudge = self._intercept_finish(trajectory, idx, input_args, max_iters)
                 if nudge:
-                    trajectory[f"observation_{idx}"] = nudge
-                    self.current_trajectory[f"observation_{idx}"] = nudge
                     step_attributes["observation"] = nudge
                     step_attributes["roster_nudge"] = True
 
@@ -441,9 +439,35 @@ class fastWorkflowReAct(Module):
 
         return None
 
+    def _intercept_finish(self, trajectory, idx, input_args, max_iters) -> str:
+        """The finish action's one interception point, for BOTH loops.
+
+        ``ido-dpx`` (F15). The nudge and the rule that a fired nudge REPLACES
+        this step's observation and returns control to the loop used to live
+        inline in ``_run_loop``, so ``aforward`` recognised finish and broke
+        with no nudge and no ``_roster_nudges_fired`` bookkeeping: two loops,
+        two different accepted behaviours for the same rule (``ido-8ps.27``).
+        The note and the trajectory writes are here; what stays with each loop
+        is what only that loop has -- the sync loop's step span attributes.
+
+        Returns the note, or ``""`` when there is none, which is what each loop
+        tests to decide whether to break on the finish action.
+        """
+        nudge = self._roster_nudge(input_args, max_iters)
+        if nudge:
+            trajectory[f"observation_{idx}"] = nudge
+            self.current_trajectory[f"observation_{idx}"] = nudge
+        return nudge
+
     async def aforward(self, **input_args):
         trajectory = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
+        # The per-TURN state the nudge's "at most one" is counted in, reset here
+        # for the same reason `forward` resets it (ido-dpx/F15): this call is a
+        # logical turn, and a turn inherits neither the previous turn's mirror
+        # nor its nudge count.
+        self.current_trajectory = {}
+        self._roster_nudges_fired = 0
         for idx in range(max_iters):
             try:
                 pred = await self._async_call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
@@ -461,7 +485,16 @@ class fastWorkflowReAct(Module):
                 trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
 
             if pred.next_tool_name == "finish":
-                break
+                # A fired nudge replaces this step's observation and returns
+                # control to the loop; no nudge ends the turn, as before.
+                if not self._intercept_finish(
+                    trajectory, idx, input_args, max_iters
+                ):
+                    break
+            # What `_roster_nudge` reads to know how much room is left. The sync
+            # loop has always counted its steps here; without the same count the
+            # async loop would offer a note on a turn with nothing left to do.
+            self.iteration_counter += 1
 
         extract = await self._async_extract_prediction(trajectory, **input_args)
         return dspy.Prediction(trajectory=trajectory, **extract)

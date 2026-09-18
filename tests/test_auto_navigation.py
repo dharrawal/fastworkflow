@@ -630,6 +630,89 @@ class TestTheRegistry:
         assert auto_navigation.context_entries("turn-a") == ()
 
 
+class TestTheProcessDefaultScopeResolvesNothing:
+    """ido-bhf (F37): a scope that cannot tell turn 1 from turn 2.
+
+    Every scope a host binds is minted per turn -- the agent's
+    ``continuation_scope`` carries the turn key its observations are archived
+    under, and a trace host's is rebuilt from the claim ``_begin_turn`` mints.
+    The process default is one object per process: the same id for every turn,
+    while the ``O`` aliases the agent writes restart at ``O1`` each trajectory.
+    ``O3`` in turn 2 would therefore resolve to whatever turn 1 entered under
+    ``O3`` and dispatch to the wrong instance.
+    """
+
+    def setup_method(self):
+        auto_navigation.reset_auto_navigation_state()
+
+    def teardown_method(self):
+        auto_navigation.reset_auto_navigation_state()
+
+    @property
+    def _default_scope_id(self):
+        from fastworkflow.observation_offloading.state import default_scope
+
+        return str(default_scope().scope_id)
+
+    def test_the_default_scope_and_the_unbound_fallback_are_recognised(self):
+        assert auto_navigation.is_process_default_scope(self._default_scope_id)
+        assert auto_navigation.is_process_default_scope(
+            auto_navigation.UNBOUND_SCOPE_ID)
+        assert not auto_navigation.is_process_default_scope("turn-a")
+
+    def test_a_handle_recorded_under_the_default_scope_does_not_resolve(self):
+        """The c9 script's shape: turn 1 entered an account under O3, turn 2
+        writes O3 meaning something else entirely."""
+        scope_id = self._default_scope_id
+        auto_navigation.record_context_entry(
+            scope_id, context="Account", command_name="open_account_by_uid",
+            parameters={"account_uid": "AAAA000000000001"}, alias="O3",
+            required_parameters=("account_uid",))
+
+        assert auto_navigation.context_entries(scope_id) == ()
+        decision = decide(
+            command_name="list_permissions", utterance="list_permissions O3",
+            owner_contexts=["Account"], contracts={"Account": ACCOUNT},
+            entries=auto_navigation.context_entries(scope_id))
+        assert decision.kind == CLARIFY
+        assert decision.reason == auto_navigation.REASON_MISSING_ENTRY_PARAMETERS
+
+    def test_the_entry_is_still_recorded_and_still_reclaimed(self):
+        """Resolution is refused, not recording: the residency reclamation and
+        the durable copy both still see what the turn did."""
+        scope_id = self._default_scope_id
+        auto_navigation.record_context_entry(
+            scope_id, context="Account", command_name="open_account_by_uid",
+            parameters={"account_uid": "AAAA000000000001"}, alias="O3")
+        assert len(auto_navigation._entries[scope_id]) == 1
+        auto_navigation.forget_scope(scope_id)
+        assert scope_id not in auto_navigation._entries
+
+    def test_a_turn_scope_still_resolves_its_own_handles(self):
+        """The refusal is the default scope's alone. A real host mints a turn
+        key per turn, and rule 3 is exactly as it was there."""
+        auto_navigation.record_context_entry(
+            "turn-2026-a", context="Account", command_name="open_account_by_uid",
+            parameters={"account_uid": "AAAA000000000001"}, alias="O3",
+            required_parameters=("account_uid",))
+        decision = decide(
+            command_name="list_permissions", utterance="list_permissions O3",
+            owner_contexts=["Account"], contracts={"Account": ACCOUNT},
+            entries=auto_navigation.context_entries("turn-2026-a"))
+        assert decision.kind == DISPATCH
+        assert decision.rule == auto_navigation.RULE_EXPLICIT_HANDLE
+
+    def test_rules_1_and_2_are_untouched_under_the_default_scope(self):
+        """They read the utterance, which no scope can distort."""
+        decision = decide(
+            command_name="list_permissions",
+            utterance="list_permissions <account_uid>AAAA000000000002</account_uid>",
+            owner_contexts=["Account"], contracts={"Account": ACCOUNT},
+            entries=auto_navigation.context_entries(self._default_scope_id))
+        assert decision.kind == DISPATCH
+        assert decision.rule == auto_navigation.RULE_UTTERANCE_PARAMETERS
+
+
 # ---------------------------------------------------------------------------
 # The validator (part a), offline
 # ---------------------------------------------------------------------------

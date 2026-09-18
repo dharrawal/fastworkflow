@@ -189,3 +189,136 @@ def test_clear_suspension_drops_stash():
     assert agent._suspended is None
     with pytest.raises(NoSuspendedAgentStateError, match="No suspended"):
         agent.resume("too late")
+
+
+# ---------------------------------------------------------------------------
+# ido-dpx / F15: both loops intercept the finish action the same way
+# ---------------------------------------------------------------------------
+
+class _Tool:
+    """A tool the sync loop calls and the async loop awaits."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def __call__(self, **kwargs):
+        return self.text
+
+    async def acall(self, **kwargs):
+        return self.text
+
+
+class _Report:
+    def as_event(self):
+        return {"fired": True, "subjects_total": 1}
+
+
+NOTE = "Harness check before this turn ends: Brandon Miller."
+
+
+def _looping_agent(predictions, monkeypatch, note=NOTE):
+    """A bare agent whose predictor replays *predictions* and whose coverage
+    check always has the same thing to say. The nudge's CONTENT is
+    answer_coverage's business (tests/test_answer_coverage.py); what is under
+    test here is what each loop does with it."""
+    from fastworkflow import answer_coverage
+
+    monkeypatch.setattr(
+        answer_coverage, "build_nudge", lambda **kwargs: (note, _Report()))
+
+    agent = _bare_react_agent(
+        finish=_Tool("Completed."), a_tool=_Tool("observed more"))
+    agent.max_iters = 12
+    agent._roster_nudges_fired = 0
+    agent._exhausted_last_run = False
+    agent.continuation_scope = None
+    agent.observation_archive = None
+    agent.react = object()
+
+    pending = iter(predictions)
+    agent._call_with_potential_trajectory_truncation = (  # type: ignore[method-assign]
+        lambda module, trajectory, **kwargs: next(pending))
+
+    async def _acall(module, trajectory, **kwargs):
+        return next(pending)
+
+    async def _aextract(trajectory, **kwargs):
+        return {"final_answer": "ok"}
+
+    agent._async_call_with_potential_trajectory_truncation = _acall  # type: ignore[method-assign]
+    agent._async_extract_prediction = _aextract  # type: ignore[method-assign]
+    return agent
+
+
+def _pred(tool_name):
+    return SimpleNamespace(
+        next_thought="t", next_tool_name=tool_name, next_tool_args={})
+
+
+SCRIPT = [_pred("finish"), _pred("a_tool"), _pred("finish")]
+
+
+def test_the_async_loop_fires_the_roster_nudge_and_returns_control(monkeypatch):
+    """ido-dpx. `aforward` recognised finish and broke: no nudge, no
+    `_roster_nudges_fired` bookkeeping, so the two loops implemented different
+    accepted behaviour (ido-8ps.27) for the same rule."""
+    import asyncio
+
+    agent = _looping_agent(list(SCRIPT), monkeypatch)
+    result = asyncio.run(agent.aforward(user_query="who holds it", max_iters=12))
+
+    trajectory = result.trajectory
+    assert trajectory["observation_0"] == NOTE
+    assert trajectory["tool_name_1"] == "a_tool"
+    assert trajectory["tool_name_2"] == "finish"
+    assert trajectory["observation_2"] == "Completed."
+    assert agent._roster_nudges_fired == 1
+
+
+def test_both_loops_agree_on_the_finish_action(monkeypatch):
+    """The point of the shared helper: one rule, two loops, one behaviour."""
+    import asyncio
+
+    sync_agent = _looping_agent(list(SCRIPT), monkeypatch)
+    sync_trajectory: dict = {}
+    sync_agent._run_loop(
+        sync_trajectory, 0, {"user_query": "who holds it"}, 12, 0)
+
+    async_agent = _looping_agent(list(SCRIPT), monkeypatch)
+    async_trajectory = asyncio.run(
+        async_agent.aforward(user_query="who holds it", max_iters=12)).trajectory
+
+    keys = ("observation_0", "tool_name_1", "observation_1", "tool_name_2",
+            "observation_2")
+    assert ({k: sync_trajectory[k] for k in keys}
+            == {k: async_trajectory[k] for k in keys})
+    assert sync_agent._roster_nudges_fired == async_agent._roster_nudges_fired == 1
+
+
+def test_the_async_loop_nudges_at_most_once_a_turn(monkeypatch):
+    """The cap is the nudge's own (`_roster_nudge`); what the loop owes it is
+    the per-turn reset, which `aforward` never did."""
+    import asyncio
+
+    agent = _looping_agent([_pred("finish")] * 4, monkeypatch)
+    agent._roster_nudges_fired = 7  # a previous turn's count, left behind
+    trajectory = asyncio.run(
+        agent.aforward(user_query="who holds it", max_iters=12)).trajectory
+
+    assert trajectory["observation_0"] == NOTE
+    assert trajectory["observation_1"] == "Completed."
+    assert "tool_name_2" not in trajectory
+    assert agent._roster_nudges_fired == 1
+
+
+def test_a_silent_coverage_check_ends_the_async_loop_at_finish(monkeypatch):
+    """No note is the ordinary case, and it must leave the loop as it was."""
+    import asyncio
+
+    agent = _looping_agent(list(SCRIPT), monkeypatch, note="")
+    trajectory = asyncio.run(
+        agent.aforward(user_query="who holds it", max_iters=12)).trajectory
+
+    assert trajectory["observation_0"] == "Completed."
+    assert "tool_name_1" not in trajectory
+    assert agent._roster_nudges_fired == 0

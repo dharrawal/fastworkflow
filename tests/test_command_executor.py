@@ -175,6 +175,22 @@ class _Params:
         return dict(self._values)
 
 
+def _turn_scope():
+    """A scope of the shape a host binds: one per TURN, not one per process.
+
+    ido-bhf (F37). The registry refuses to resolve a handle under the process
+    default scope, because that id is constant across turns while the `O`
+    aliases restart each trajectory. These tests are about the RECORDER, so
+    they run under the scope a real turn would have.
+    """
+    from fastworkflow.observation_offloading.archive import RuntimeHandleScope
+
+    turn = uuid.uuid4().hex
+    return RuntimeHandleScope(
+        store_identity=f"tests-{turn}", channel_id=f"tests-{turn}",
+        experiment_id="tests", task_id="tests", attempt=0, turn_key=turn)
+
+
 class TestEntryBetweenInstancesOfOneClass:
     """ido-8yb / F11. The recorder read "did this command enter a context?" off
     the context CLASS NAME, so a move from one TodoList to another -- a real,
@@ -194,13 +210,17 @@ class TestEntryBetweenInstancesOfOneClass:
 
     @pytest.fixture(autouse=True)
     def _alias(self, monkeypatch):
-        """The `O` alias of the execute step in flight, which the recorder reads
-        off the offloading runtime."""
+        """The `O` alias of the execute step in flight, and the turn scope the
+        entry is filed under -- both read off the offloading runtime."""
         import fastworkflow.result_handles as result_handles
 
         self.alias = None
+        self.scope = _turn_scope()
+        self.scope_id = self.scope.scope_id
         monkeypatch.setattr(
             result_handles, "current_execute_alias", lambda: self.alias)
+        monkeypatch.setattr(
+            result_handles, "current_scope", lambda: self.scope)
 
     def _enter(self, session, name_before, instance_before, command, alias, **params):
         self.alias = alias
@@ -236,8 +256,7 @@ class TestEntryBetweenInstancesOfOneClass:
         workflow.current_command_context = b
 
         workflow.current_command_context = manager  # the walk leaves TodoList
-        return session, a, b, auto_navigation.context_entries(
-            auto_navigation.current_scope_id())
+        return session, a, b, auto_navigation.context_entries(self.scope_id)
 
     def test_the_second_instance_is_registered_and_its_handle_resolves(
         self, inherited_entry_workflow, setup_test_environment
@@ -296,5 +315,115 @@ class TestEntryBetweenInstancesOfOneClass:
         session = _Session(workflow)
         workflow.current_command_context = b
         self._enter(session, "TodoList", a, "get_todo_list", "O7", id="bbbb2222")
-        assert auto_navigation.context_entries(
-            auto_navigation.current_scope_id()) == ()
+        assert auto_navigation.context_entries(self.scope_id) == ()
+
+
+# ---------------------------------------------------------------------------
+# ido-91o / F14: one auto-navigated step files ONE entry
+# ---------------------------------------------------------------------------
+
+class TestAnAutoNavigatedStepFilesOneEntry:
+    """`_auto_navigate` runs two commands through `invoke_command` and then
+    returns to the OUTER frame, which started outside the context and sees it
+    moved. Recording there files a second entry for the same entry, under the
+    same `O` alias, carrying the ORIGINAL command's name and parameters -- and
+    when the original command carries the entry contract's required parameter
+    names with other values, rule 3 then sees two entries behind one handle and
+    declines as ambiguous, for a handle this very dispatch produced.
+
+    Offline: the recorder driven directly with a stub session, the marks
+    `_auto_navigate` puts on the final output, and a hand-written contract.
+    """
+
+    def setup_method(self):
+        auto_navigation.reset_auto_navigation_state()
+
+    def teardown_method(self):
+        auto_navigation.reset_auto_navigation_state()
+
+    @pytest.fixture(autouse=True)
+    def _runtime(self, monkeypatch):
+        import fastworkflow.result_handles as result_handles
+
+        self.alias = "O4"
+        self.scope = _turn_scope()
+        self.scope_id = self.scope.scope_id
+        monkeypatch.setattr(
+            result_handles, "current_execute_alias", lambda: self.alias)
+        monkeypatch.setattr(result_handles, "current_scope", lambda: self.scope)
+
+    CONTRACT = auto_navigation.EntryContract(
+        context="TodoList", declaration="get_todo_list <id>",
+        command_name="get_todo_list",
+        qualified_command_name="TodoListManager/get_todo_list",
+        owner_contexts=("TodoList",), required_parameters=("id",))
+
+    @staticmethod
+    def _marked(output):
+        """The final output as `_auto_navigate` hands it back."""
+        output.command_response.artifacts.update({
+            auto_navigation.ATTR_AUTO_NAVIGATED: True,
+            auto_navigation.ATTR_AUTO_NAVIGATION_RULE: 3,
+            auto_navigation.ATTR_ENTERED_CONTEXT: "TodoList",
+        })
+        return output
+
+    def _dispatch(self, inherited_entry_workflow):
+        """One execute step: the entry step, the original step, and the outer
+        frame the two of them returned to."""
+        manager, a = _Manager(), _TodoList("aaaa1111")
+        workflow = _Workflow(inherited_entry_workflow, manager)
+        session = _Session(workflow)
+
+        workflow.current_command_context = a  # the entry step entered A
+        CommandExecutor._remember_context_entry(
+            session, _command_output("get_todo_list", _Params(id="aaaa1111")),
+            "Manager", manager)
+        # the original command, run inside A: no move, nothing to record
+        CommandExecutor._remember_context_entry(
+            session, _command_output("mark_completed", _Params(id="bbbb2222")),
+            "TodoList", a)
+        # ...and the outer frame, which started in Manager
+        CommandExecutor._remember_context_entry(
+            session,
+            self._marked(_command_output(
+                "mark_completed", _Params(id="bbbb2222"))),
+            "Manager", manager)
+        return auto_navigation.context_entries(self.scope_id)
+
+    def test_the_outer_frame_records_nothing(
+        self, inherited_entry_workflow, setup_test_environment
+    ):
+        entries = self._dispatch(inherited_entry_workflow)
+        assert [(e.command_name, e.parameters["id"], e.alias) for e in entries] == [
+            ("get_todo_list", "aaaa1111", "O4")]
+
+    def test_the_handle_the_dispatch_produced_still_resolves(
+        self, inherited_entry_workflow, setup_test_environment
+    ):
+        """The point of the entry: `O4` denotes the TodoList the step entered,
+        and rule 3 rebuilds the entry command from the values that entered it."""
+        entries = self._dispatch(inherited_entry_workflow)
+        decision = auto_navigation.decide(
+            command_name="mark_completed", utterance="mark_completed O4",
+            owner_contexts=["TodoList"], contracts={"TodoList": self.CONTRACT},
+            entries=entries)
+        assert decision.kind == auto_navigation.DISPATCH
+        assert decision.rule == auto_navigation.RULE_EXPLICIT_HANDLE
+        assert decision.entry_utterance == "get_todo_list <id>aaaa1111</id>"
+
+    def test_an_ordinary_step_that_moves_the_context_is_still_recorded(
+        self, inherited_entry_workflow, setup_test_environment
+    ):
+        """The skip is keyed on the marks, which live on the final output of a
+        two-step dispatch and nowhere else. An agent's own entry command, with
+        the same shape and no marks, records exactly as it did."""
+        manager, a = _Manager(), _TodoList("aaaa1111")
+        workflow = _Workflow(inherited_entry_workflow, manager)
+        session = _Session(workflow)
+        workflow.current_command_context = a
+        CommandExecutor._remember_context_entry(
+            session, _command_output("get_todo_list", _Params(id="aaaa1111")),
+            "Manager", manager)
+        entries = auto_navigation.context_entries(self.scope_id)
+        assert [e.command_name for e in entries] == ["get_todo_list"]

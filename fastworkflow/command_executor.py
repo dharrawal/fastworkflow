@@ -403,6 +403,20 @@ class CommandExecutor(CommandExecutorInterface):
         try:
             if not command_output.success:
                 return
+            if cls._was_auto_navigated(command_output):
+                # ido-91o (F14). This frame is the OUTER frame of a two-step
+                # dispatch: `_auto_navigate` ran the declared entry command and
+                # then the original command through `invoke_command`, and the
+                # entry step recorded the entry itself -- with the ENTRY
+                # command's name and the values that entered the context. This
+                # frame sees the context moved (it started outside) and the
+                # ORIGINAL command's name and parameters, so recording here
+                # files a second entry for one entry, under the same `O` alias.
+                # When the original command happens to carry the entry
+                # contract's required parameter names with other values, rule 3
+                # then sees two entries behind one handle and declines as
+                # ambiguous -- for a handle this very dispatch produced.
+                return
             context_name_after = cls._context_name(chat_session)
             if not context_name_after:
                 return
@@ -446,6 +460,22 @@ class CommandExecutor(CommandExecutorInterface):
             )
         except Exception:  # noqa: BLE001 - never fail a command over the registry
             pass
+
+    @staticmethod
+    def _was_auto_navigated(command_output: fastworkflow.CommandOutput) -> bool:
+        """Did this output come back from a two-step dispatch (ido-91o/F14)?
+
+        The marks are put on the artifacts of the FINAL output by
+        ``_auto_navigate`` and nowhere else; the two inner steps carry them on
+        their spans only, so the entry step still records its entry. Never
+        raises: an output whose artifacts cannot be read is treated as an
+        ordinary one, which is what it was before this check existed.
+        """
+        try:
+            artifacts = command_output.command_response.artifacts or {}
+            return bool(artifacts.get(auto_navigation.ATTR_AUTO_NAVIGATED))
+        except Exception:  # noqa: BLE001
+            return False
 
     @staticmethod
     def _active_workflow(chat_session: 'fastworkflow.ChatSession'):
