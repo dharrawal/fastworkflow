@@ -70,6 +70,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from fastworkflow.answer_coverage import (
     INSTRUCTED_KINDS,
     Entity,
+    drop_zero_match_echo,
     named_entities,
     normalise,
     request_text,
@@ -229,7 +230,17 @@ def observations(
                 declaration = handle_store.get_declaration(selected, alias)
             except Exception:  # noqa: BLE001
                 continue
-            if declaration is None or str(declaration.get("parent_alias") or ""):
+            if declaration is None:
+                continue
+            if str(declaration.get("parent_alias") or ""):
+                # (ido-3f8) A filtered page that carried no rows retrieved
+                # nothing, so its own text may not be the reason its literal
+                # looks retrieved here either. Same marker, same removal, one
+                # observation at a time.
+                texts[alias] = [
+                    drop_zero_match_echo(chunk, declaration)
+                    for chunk in texts[alias]
+                ]
                 continue
             try:
                 texts[alias].append(

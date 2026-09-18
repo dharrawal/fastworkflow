@@ -46,7 +46,7 @@ from fastworkflow.observation_offloading.state import (
     record_context_clause,
     reset_runtime_state,
 )
-from fastworkflow.result_handles import ResultHandleStore
+from fastworkflow.result_handles import ResultHandleStore, normalize_literal
 
 from tests.test_answer_rehydration import declaration_payload, page_record
 
@@ -524,6 +524,42 @@ class Evidence(unittest.TestCase):
             )
             self.assertEqual(flags_of(report),
                              [("Ada Lovelace", "Analytical Engine_Drive Wheel")])
+
+    def test_a_filtered_page_that_matched_nothing_lends_no_evidence(self) -> None:
+        """ido-3f8: a literal the run typed and did not find is not a row."""
+        with tempfile.TemporaryDirectory() as directory:
+            reset_runtime_state()
+            self.addCleanup(reset_runtime_state)
+            scope = scope_for(directory)
+            path = os.path.join(directory, "obs.sqlite3")
+            archive = RuntimeHandleArchive(path)
+            store = ResultHandleStore(path)
+            miss = (
+                'result_handle=O2 filter="Charles Babbage" page 1 rows 0 of 0 '
+                "matched=0 outcome=complete-zero\n"
+                "No person matching Charles Babbage was found."
+            )
+            archive.persist(
+                scope, alias="O3", offload_order=3,
+                command_name="fetch_result_page", step_index=2, text=miss,
+                text_sha256=hashlib.sha256(miss.encode("utf-8")).hexdigest(),
+            )
+            record_context_clause(scope, "O3", "Person 1815 Ada Lovelace")
+            store.put_declaration(scope, "O2", declaration_payload(total=2))
+            store.put_declaration(scope, "O3", declaration_payload(
+                kind="parts-page", parent_alias="O2", materialized=0,
+                query_scope=normalize_literal("Charles Babbage").scope,
+            ))
+            found = observations(scope=scope, archive=archive, handle_store=store)
+            self.assertEqual([item.alias for item in found], ["O3"])
+            self.assertNotIn("charles babbage", found[0].text)
+            # ...so Ada's own observations are not reported as containing him.
+            self.assertEqual(
+                [(subject.text, [item.text for item in items])
+                 for subject, items in answer_attribution.subject_evidence(
+                     named_entities(REQUEST), found)],
+                [("Ada Lovelace", [])],
+            )
 
     def test_a_search_answer_is_not_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

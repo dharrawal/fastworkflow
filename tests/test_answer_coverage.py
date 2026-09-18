@@ -28,6 +28,7 @@ from fastworkflow.answer_coverage import (
     build_nudge,
     build_statement,
     coverage_block,
+    drop_zero_match_echo,
     evidence_by_subject,
     evidence_sentence,
     issued_commands,
@@ -51,7 +52,7 @@ from fastworkflow.observation_offloading.state import (
     reset_runtime_state,
     snapshot_events,
 )
-from fastworkflow.result_handles import ResultHandleStore
+from fastworkflow.result_handles import ResultHandleStore, normalize_literal
 
 from tests.test_answer_rehydration import (  # reuse: one fixture, one meaning
     Recorder,
@@ -390,6 +391,164 @@ class QueryEchoes(unittest.TestCase):
             "appear in no retrieved observation: Christopher Hubbard.", block)
         self.assertNotIn(
             "DO appear in this run's observations: Christopher Hubbard", block)
+
+
+class ZeroMatchPages(unittest.TestCase):
+    """ido-3f8: a filtered page that matched nothing retrieved nothing.
+
+    The textual half (``ido-mng``) strips the two echoes the framework itself
+    writes and the one a miss QUOTES. A backend that words its miss without
+    quotes -- "No identity matching Christopher Hubbard was found" -- was still
+    putting the agent's own literal into the haystack, and widening the regular
+    expression to unquoted spans was refused because a removal bounded by a
+    sentence end could swallow real rows.
+
+    So the page layer's own record answers instead: a page filed under a filter
+    scope with no rows carried nothing, whatever anyone wrote about it.
+    """
+
+    ZERO_HEADER = (
+        'result_handle=O2 filter="Christopher Hubbard" filter_columns=name '
+        "page 1 rows 0 of 0 matched=0 materialized=12 total=12 "
+        "source_complete=true matched_complete=true continuation=complete "
+        "outcome=complete-zero has_more=false"
+    )
+    #: The backend's own wording, unquoted: the class this fix exists for.
+    BACKEND_MISS = "No identity matching Christopher Hubbard was found."
+    QUERY = "Find Christopher Hubbard and list his rights."
+
+    def fixture(self, directory: str):
+        reset_runtime_state()
+        self.addCleanup(reset_runtime_state)
+        scope = scope_for(directory)
+        path = os.path.join(directory, "obs.sqlite3")
+        return scope, RuntimeHandleArchive(path), ResultHandleStore(path)
+
+    @staticmethod
+    def archive_text(archive, scope, alias: str, text: str, order: int) -> None:
+        archive.persist(
+            scope, alias=alias, offload_order=order,
+            command_name="fetch_result_page", step_index=order, text=text,
+            text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+
+    def listing(self, store, scope, rows: list[str]) -> None:
+        store.put_declaration(
+            scope, "O2", declaration_payload(total=len(rows),
+                                             materialized=len(rows)))
+        store.put_page(
+            scope, alias="O2", query_scope="", start_offset=0,
+            limit_requested=25, source="resolver", backend_total=len(rows),
+            record=page_record(rows),
+        )
+
+    def page_declaration(self, store, scope, *, literal: str, materialized: int,
+                         alias: str = "O3") -> None:
+        store.put_declaration(scope, alias, declaration_payload(
+            kind="holder-page", parent_alias="O2", materialized=materialized,
+            query_scope=normalize_literal(literal).scope if literal else "",
+        ))
+
+    # ---------------------------------------------------------------- ido-3f8
+    def test_an_unquoted_backend_miss_is_not_a_retrieval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            scope, archive, store = self.fixture(directory)
+            self.listing(store, scope, ["uid-1  Alan Cooper  active"])
+            self.archive_text(archive, scope, "O3",
+                              self.ZERO_HEADER + "\n" + self.BACKEND_MISS, 1)
+            self.page_declaration(store, scope, literal="Christopher Hubbard",
+                                  materialized=0)
+            haystack, aliases = retrieved_corpus(
+                scope=scope, archive=archive, handle_store=store)
+            self.assertEqual(aliases, ["O3"])
+            self.assertNotIn(normalise("Christopher Hubbard"), haystack)
+
+    def test_the_block_then_states_the_only_true_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            scope, archive, store = self.fixture(directory)
+            self.listing(store, scope, ["uid-1  Alan Cooper  active"])
+            self.archive_text(archive, scope, "O3",
+                              self.ZERO_HEADER + "\n" + self.BACKEND_MISS, 1)
+            self.page_declaration(store, scope, literal="Christopher Hubbard",
+                                  materialized=0)
+            copy, report = build_statement(
+                {}, user_query=self.QUERY, exhausted=False, scope=scope,
+                archive=archive, handle_store=store,
+            )
+            self.assertEqual(report.unobserved, ["Christopher Hubbard"])
+            self.assertEqual(report.observed_named, [])
+            block = copy[COVERAGE_KEY]
+            self.assertIn(
+                "appear in no retrieved observation: Christopher Hubbard.", block)
+            self.assertNotIn(
+                "DO appear in this run's observations: Christopher Hubbard", block)
+
+    def test_a_filtered_page_that_matched_rows_keeps_its_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            scope, archive, store = self.fixture(directory)
+            self.listing(store, scope, ["uid-1  Alan Cooper  active"])
+            text = (
+                'result_handle=O2 filter="Alan Cooper" page 1 rows 1-1 of 1 '
+                "matched=1 outcome=rows\nuid-1  Alan Cooper  active"
+            )
+            self.archive_text(archive, scope, "O3", text, 1)
+            self.page_declaration(store, scope, literal="Alan Cooper",
+                                  materialized=1)
+            haystack, _ = retrieved_corpus(
+                scope=scope, archive=archive, handle_store=store)
+            self.assertIn(normalise("Alan Cooper"), haystack)
+
+    def test_an_unfiltered_page_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            scope, archive, store = self.fixture(directory)
+            self.listing(store, scope, ["uid-1  Alan Cooper  active"])
+            text = (
+                "result_handle=O2 page 2 rows 0 of 1 matched=1 outcome=rows\n"
+                "No further rows for Christopher Hubbard were returned."
+            )
+            self.archive_text(archive, scope, "O3", text, 1)
+            self.page_declaration(store, scope, literal="", materialized=0)
+            haystack, _ = retrieved_corpus(
+                scope=scope, archive=archive, handle_store=store)
+            self.assertIn(normalise("Christopher Hubbard"), haystack)
+
+    def test_a_name_in_retrieved_rows_survives_a_miss_on_another_page(self) -> None:
+        """The removal is one observation wide, never the turn's haystack."""
+        with tempfile.TemporaryDirectory() as directory:
+            scope, archive, store = self.fixture(directory)
+            self.listing(store, scope, ["uid-9  Christopher Hubbard  active"])
+            self.archive_text(archive, scope, "O2", "result_handle=O2 page 1", 1)
+            self.archive_text(archive, scope, "O3",
+                              self.ZERO_HEADER + "\n" + self.BACKEND_MISS, 2)
+            self.page_declaration(store, scope, literal="Christopher Hubbard",
+                                  materialized=0)
+            haystack, aliases = retrieved_corpus(
+                scope=scope, archive=archive, handle_store=store)
+            self.assertEqual(aliases, ["O2", "O3"])
+            self.assertIn(normalise("Christopher Hubbard"), haystack)
+            copy, report = build_statement(
+                {}, user_query=self.QUERY, exhausted=False, scope=scope,
+                archive=archive, handle_store=store,
+            )
+            self.assertEqual(report.unobserved, [])
+
+    def test_the_literal_is_the_one_the_store_proves_and_no_other(self) -> None:
+        """A page filed under another filter's scope is left exactly as it is."""
+        declaration = {
+            "parent_alias": "O2", "materialized": 0,
+            "query_scope": normalize_literal("Alisha Ochoa").scope,
+        }
+        text = self.ZERO_HEADER + "\n" + self.BACKEND_MISS
+        self.assertEqual(drop_zero_match_echo(text, declaration), text)
+        self.assertEqual(drop_zero_match_echo(text, None), text)
+
+    def test_a_page_that_carried_rows_is_never_stripped(self) -> None:
+        declaration = {
+            "parent_alias": "O2", "materialized": 1,
+            "query_scope": normalize_literal("Christopher Hubbard").scope,
+        }
+        text = self.ZERO_HEADER + "\nuid-9  Christopher Hubbard  active"
+        self.assertEqual(drop_zero_match_echo(text, declaration), text)
 
 
 class Block(unittest.TestCase):

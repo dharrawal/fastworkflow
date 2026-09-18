@@ -1351,6 +1351,122 @@ class BackendFilterTests(unittest.TestCase):
         self.assertEqual(second.position, len(first.rows))
 
 
+class ZeroMatchMarkerTests(unittest.TestCase):
+    """ido-3f8: what a page observation records about the query it ran.
+
+    A coverage reader has to tell three states apart -- a page nobody fetched,
+    an unfiltered page, and a filtered page that came back with nothing -- and
+    it must not have to read prose to do it. The page declaration this module
+    already files answers all three, so nothing new is written or persisted.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+
+    def tearDown(self) -> None:
+        reset_result_handle_state()
+        reset_runtime_state()
+        self.temp.cleanup()
+
+    @staticmethod
+    def host(trajectory):
+        agent = SimpleNamespace(current_trajectory=trajectory,
+                                continuation_scope=scope())
+        return SimpleNamespace(workflow_tool_agent=agent)
+
+    def page_for(self, contains=None):
+        """Declare a complete listing at O1 and fetch one page of it at O2."""
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        with tracing.host_scope(self.host(trajectory)):
+            declare(
+                ResultHandleSpec(kind="holder", summary="6 holder(s).",
+                                 items=holders(6), total=6),
+                scope=scope(), selected_store=self.store, alias="O1",
+            )
+        trajectory["observation_0"] = "rows"
+        trajectory["tool_name_1"] = "execute_workflow_query"
+        with tracing.host_scope(self.host(trajectory)):
+            page = fetch_page("O1", None, contains, scope=scope(),
+                              selected_store=self.store, budget_bytes=100_000)
+        return page, self.store.get_declaration(scope(), page.page_alias)
+
+    def test_a_filtered_page_that_matched_nothing_says_so_in_its_record(self):
+        page, filed = self.page_for("Christopher Hubbard")
+        self.assertEqual(page.matched, 0)
+        self.assertEqual(filed["parent_alias"], "O1")
+        self.assertEqual(filed["query_scope"],
+                         normalize_literal("Christopher Hubbard").scope)
+        self.assertEqual(filed["materialized"], 0)
+        self.assertTrue(result_handles.page_matched_nothing(filed))
+
+    def test_a_filtered_page_that_matched_rows_does_not(self):
+        page, filed = self.page_for("Cooper")
+        self.assertEqual(len(page.rows), filed["materialized"])
+        self.assertGreater(filed["materialized"], 0)
+        self.assertFalse(result_handles.page_matched_nothing(filed))
+
+    def test_an_unfiltered_page_and_an_unfetched_one_are_not_markers(self):
+        _, filed = self.page_for(None)
+        self.assertEqual(filed["query_scope"], "")
+        self.assertFalse(result_handles.page_matched_nothing(filed))
+        self.assertFalse(result_handles.page_matched_nothing(
+            self.store.get_declaration(scope(), "O9")))
+        # A listing is not a page of anything, whatever it holds.
+        self.assertFalse(result_handles.page_matched_nothing(
+            self.store.get_declaration(scope(), "O1")))
+
+    def test_the_literal_is_recovered_from_the_page_and_proved_by_the_record(self):
+        page, filed = self.page_for("Christopher Hubbard")
+        self.assertEqual(
+            result_handles.echoed_literal(filed, page.as_observation()),
+            "Christopher Hubbard",
+        )
+        # Any other text, and any other scope, proves nothing.
+        self.assertEqual(result_handles.echoed_literal(filed, "no rows"), "")
+        self.assertEqual(
+            result_handles.echoed_literal(
+                dict(filed, query_scope=normalize_literal("Ochoa").scope),
+                page.as_observation(),
+            ),
+            "",
+        )
+
+    def test_the_marker_holds_for_a_backend_filter_too(self):
+        rows = portal_rows(20)
+        portal = FakePortal(rows)
+        result_handles.register_resolver("fake-portal", portal)
+        self.addCleanup(result_handles.unregister_resolver, "fake-portal")
+        rendered = ["%s  %s" % (row["identity__id"], row["identity_displayname"])
+                    for row in rows[:5]]
+        trajectory = {"tool_name_0": "execute_workflow_query"}
+        with tracing.host_scope(self.host(trajectory)):
+            declare(
+                ResultHandleSpec(kind="holder", summary="20 holder(s).",
+                                 items=rendered, total=20, source_complete=False,
+                                 page_size=5),
+                source=SourceDescriptor(
+                    resolver="fake-portal", view="ido_permissiondetail_identity",
+                    uid_field="identity__id",
+                    label_fields=("identity_displayname",),
+                    filter_columns=("identity_displayname",),
+                    page_size=5, materialized=5),
+                scope=scope(), selected_store=self.store, alias="O1",
+            )
+        trajectory["observation_0"] = "rows"
+        trajectory["tool_name_1"] = "execute_workflow_query"
+        with tracing.host_scope(self.host(trajectory)):
+            page = fetch_page("O1", None, "Ochoa", scope=scope(),
+                              selected_store=self.store)
+        filed = self.store.get_declaration(scope(), page.page_alias)
+        self.assertEqual(page.outcome, "complete-zero")
+        self.assertTrue(result_handles.page_matched_nothing(filed))
+        self.assertEqual(
+            result_handles.echoed_literal(filed, page.as_observation()), "Ochoa")
+
+
 class CompactionPolicyTests(unittest.TestCase):
     """A page observation is an execute observation. Nothing about compaction
     treats it specially, and this slice changed none of it."""

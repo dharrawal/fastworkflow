@@ -3213,6 +3213,15 @@ def _link_page(
     alias, is archived under it and is searchable like any other. This records
     the internal link, so a search that lands on the page can find the listing
     it came from without the page pretending to be that listing.
+
+    It is also where a page's own coverage is recorded (``ido-3f8``). The three
+    fields below say, per page observation: which listing this is a page OF
+    (``parent_alias``), which query it ran (``query_scope``, empty for the
+    unfiltered listing and otherwise the content-addressed name of the filter
+    literal) and how many rows it carried (``materialized``). A filtered page
+    with no rows is a page that retrieved nothing, and saying so in three
+    columns is what keeps a reader from having to infer it from the prose the
+    page or its backend wrote -- see :func:`page_matched_nothing`.
     """
     if not page.page_alias or page.page_alias == declaration["alias"]:
         return
@@ -3225,6 +3234,9 @@ def _link_page(
                 "summary": page.summary,
                 "ordering": declaration["ordering"],
                 "total": page.total,
+                # The rows THIS page carried, never the listing's count: a zero
+                # here under a filtered query scope is the zero-match marker
+                # (``ido-3f8``).
                 "materialized": len(page.rows),
                 "source_complete": page.source_complete,
                 "page_size": declaration["page_size"],
@@ -3250,6 +3262,78 @@ def _link_page(
         )
         return
     _stamp_page_clause(scope, store_, page.page_alias, declaration["alias"])
+
+
+# ---------------------------------------------------------------------------
+# What a page observation proves about a name (ido-3f8)
+# ---------------------------------------------------------------------------
+
+#: The ``filter="..."`` span :func:`_header` prints. Read back HERE, by the
+#: module that writes it, so the one place that knows the header's shape is the
+#: one place that parses it.
+_HEADER_FILTER_RE = re.compile(r'filter="([^"\n]*)"')
+
+
+def page_matched_nothing(declaration: Optional[Mapping[str, Any]]) -> bool:
+    """Is this the declaration of a FILTERED page observation that carried no rows?
+
+    (``ido-3f8``) The marker a coverage reader needs, and the page layer already
+    files it: ``_link_page`` records, for every page observation's own ``O``
+    alias, the listing it paged (``parent_alias``), the traversal it ran
+    (``query_scope``, the content-addressed name of the filter literal — see
+    :attr:`Literal.scope`) and the rows that page actually carried
+    (``materialized``). Those three columns are the structured fact, so nothing
+    new is written and nothing new is persisted; what was missing was a reader
+    and a name for it.
+
+    The three states a reader has to tell apart are exactly the three answers
+    here. A page nobody fetched has no declaration at all, so there is nothing
+    to ask and the answer is False. An unfiltered page has an empty
+    ``query_scope`` — it ran no literal, and no literal of its can be echoed —
+    so it is False. A filtered page with no rows is True.
+
+    Zero rows, not "zero matches proven": a filtered page that carried no rows
+    retrieved nothing whatever the reason (a complete zero, a search that
+    stopped early, a refused resolver, a cursor past the last match), and the
+    only use of this answer is to say that such a page cannot be the reason a
+    name looks retrieved. That is sound for every one of those reasons, and
+    reading it as "the thing does not exist" would not be sound for any of them.
+    It is deliberately NOT read that way: see
+    :func:`fastworkflow.answer_coverage.drop_zero_match_echo`.
+    """
+    if not declaration:
+        return False
+    if not str(declaration.get("parent_alias") or ""):
+        return False
+    if not str(declaration.get("query_scope") or ""):
+        return False
+    return int(declaration.get("materialized") or 0) == 0
+
+
+def echoed_literal(
+    declaration: Optional[Mapping[str, Any]], text: Any
+) -> str:
+    """The literal a zero-row filtered page ran, or ``""`` (``ido-3f8``).
+
+    Taken from the page's own header and PROVED against the stored declaration:
+    the candidate counts only when its digest is the ``query_scope`` the page
+    was filed under, so this can never return a literal some other text happened
+    to spell. The store keeps that digest and not the literal text
+    (``answer_rehydration.stored_rows_block``), which is why the text is asked
+    for the spelling and the store is asked whether it is the right one.
+
+    Normalised, because the digest is over the normalised literal: what comes
+    back is the literal as it was really matched, which is also the form a
+    reader will look for.
+    """
+    if not page_matched_nothing(declaration):
+        return ""
+    query_scope = str((declaration or {}).get("query_scope") or "")
+    for candidate in _HEADER_FILTER_RE.findall(str(text or "")):
+        literal = normalize_literal(candidate)
+        if literal.text and literal.scope == query_scope:
+            return literal.text
+    return ""
 
 
 def _stamp_page_clause(
@@ -3358,6 +3442,8 @@ __all__ = [
     "fetch_page",
     "handle_declaration",
     "normalize_literal",
+    "echoed_literal",
+    "page_matched_nothing",
     "declaring_alias",
     "page_max_bytes_from_env",
     "parent_handle",

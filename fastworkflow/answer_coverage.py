@@ -440,7 +440,10 @@ def retrieved_corpus(
         own filter literal in its header and a backend may quote the literal it
         did not match, so the contract is finished by
         :func:`strip_query_echoes`, which ``split_by_presence`` applies before
-        it decides presence (``ido-mng``);
+        it decides presence (``ido-mng``), and by
+        :func:`drop_zero_match_echo`, which is applied HERE, per alias, for the
+        echoes no wording rule can recognise: what a page retrieved is a fact
+        its own record already holds (``ido-3f8``);
     (b) every stored row behind every result handle the turn declared -- the
         rows ``answer_rehydration`` puts in front of the extractor, whole.
 
@@ -461,6 +464,11 @@ def retrieved_corpus(
 
     parts: list[str] = []
     aliases: list[str] = []
+    # Where each alias's OWN archived text sits in ``parts``. The haystack is
+    # still one string; this is only so the declaration pass below can correct
+    # the text of the alias it is reading (``ido-3f8``) without disturbing the
+    # order anything else here produces.
+    text_at: dict[str, int] = {}
     hot = stored_handles(selected)
     try:
         rows = archive.list(selected)
@@ -474,6 +482,7 @@ def retrieved_corpus(
         if not alias or alias in aliases or is_search_answer_key(alias):
             return
         aliases.append(alias)
+        text_at[alias] = len(parts)
         parts.append(strip_alias_line(str(handle.get("text") or "")))
         parts.append(
             context_clause_of(selected, alias, selected_archive=archive) or "")
@@ -496,7 +505,17 @@ def retrieved_corpus(
                 declaration = handle_store.get_declaration(selected, alias)
             except Exception:  # noqa: BLE001
                 continue
-            if declaration is None or str(declaration.get("parent_alias") or ""):
+            if declaration is None:
+                continue
+            if str(declaration.get("parent_alias") or ""):
+                # A page observation of a listing declared elsewhere. Its rows
+                # are read under that listing, so there is nothing to add here
+                # -- but if it is a FILTERED page that carried no rows, its own
+                # text quotes a literal it never retrieved, and that echo comes
+                # out (``ido-3f8``).
+                index = text_at.get(alias)
+                if index is not None:
+                    parts[index] = drop_zero_match_echo(parts[index], declaration)
                 continue
             try:
                 parts.append(
@@ -651,6 +670,46 @@ def strip_query_echoes(text: str) -> str:
     """
     out = _FILTER_ECHO_RE.sub(" ", str(text or ""))
     return _MISS_ECHO_RE.sub(lambda match: match.group(0)[:match.start(1) - match.start(0)], out)
+
+
+def drop_zero_match_echo(text: str, declaration: Optional[Mapping[str, Any]]) -> str:
+    """*text* without the filter literal of a page that carried no rows (``ido-3f8``).
+
+    :func:`strip_query_echoes` is textual: it knows the two shapes the framework
+    itself writes and the one a miss quotes. It cannot know the shape a BACKEND
+    writes -- "No identity matching Christopher Hubbard was found" quotes
+    nothing -- and widening it to unquoted spans was refused on purpose, because
+    normalisation collapses newlines and a removal bounded by a sentence end
+    could swallow real rows and cause the very false absence this module exists
+    to prevent.
+
+    This is the structural half, and it needs no wording at all. The page layer
+    already records, per page observation, that a filtered page carried no rows
+    (``result_handles.page_matched_nothing``). A page that carried no rows
+    retrieved nothing, so EVERY occurrence of its filter literal in its own
+    observation is the run's own query quoted back -- by the header, by the
+    framework's zero message, by whatever sentence the backend chose -- and
+    removing the literal there cannot remove a retrieved row, because that
+    observation has none.
+
+    Two bounds keep it honest. The removal is confined to the ONE observation
+    the marker is about, so a name retrieved in some other observation, or on a
+    page of the same listing that did match, is untouched and stays observed.
+    And the literal is the one the store proves that page ran, not any name the
+    text mentions: an unfiltered page, a page that matched rows, and an alias
+    with no declaration are all returned unchanged.
+    """
+    try:
+        from fastworkflow import result_handles
+
+        literal = result_handles.echoed_literal(declaration, text)
+    except Exception:  # noqa: BLE001 - an unreadable marker is no marker
+        logger.debug("answer coverage could not read a page's filter", exc_info=True)
+        return text
+    if not literal:
+        return text
+    hunted = normalise(literal)
+    return normalise(text).replace(hunted, " ") if hunted else text
 
 
 def split_by_presence(
@@ -1507,6 +1566,7 @@ __all__ = [
     "build_nudge",
     "build_statement",
     "coverage_block",
+    "drop_zero_match_echo",
     "evidence_by_subject",
     "evidence_sentence",
     "issued_commands",
