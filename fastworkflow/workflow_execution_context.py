@@ -1260,12 +1260,20 @@ class WorkflowExecutionContext:
         Best effort by construction: failing to seal or to reclaim memory must
         never turn a session close into an error the caller has to handle.
         """
-        agent = self._workflow_tool_agent
+        # getattr, not plain attribute access: ``close`` is reachable on a
+        # context built through ``__new__`` without ``__init__`` -- the
+        # context-change listener test constructs one exactly that way -- so
+        # neither attribute is guaranteed to exist. A context with no agent has
+        # no scope to seal or reclaim, which is the same answer as an agent
+        # with no scope. A context that cannot say whether it is awaiting the
+        # user is assumed to be mid-turn, because declining to seal costs a
+        # deferred seal while sealing early would redact a live turn.
+        agent = getattr(self, "_workflow_tool_agent", None)
         scope = getattr(agent, "continuation_scope", None)
         if scope is None:
             return
         try:
-            if self._awaiting_user or agent.export_suspended() is not None:
+            if getattr(self, "_awaiting_user", True) or agent.export_suspended() is not None:
                 return
             from fastworkflow.observation_offloading import state as offload_state
 
