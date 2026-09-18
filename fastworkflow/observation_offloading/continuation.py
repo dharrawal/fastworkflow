@@ -30,6 +30,7 @@ from fastworkflow.observation_offloading.state import (
     default_scope,
     reclaim_scope,
     record_event,
+    seal_scope,
 )
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.utils.react import NoSuspendedAgentStateError, fastWorkflowReAct
@@ -241,6 +242,14 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         A suspension is the one thing that is not over, so a still-suspended
         agent reclaims nothing. ``forward`` clears the suspension before it gets
         here, so the guard is for a caller that binds a scope by hand.
+
+        ido-6sc. The same guard now also decides when the previous turn's
+        stored evidence is SEALED into its redacted form, because "the agent
+        has bound the next turn" is the strongest statement this process can
+        make that the previous one is finished -- its summary is recorded, its
+        answer is delivered, and no read of it can still be part of it. The
+        seal runs before the reclaim so it still has the scope's hot copies to
+        drop, and both are skipped for a suspension by the one condition below.
         """
         factory = getattr(self, "_scope_factory", None)
         if factory is None:
@@ -252,6 +261,10 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             and previous != scope
             and getattr(self, "_suspended", None) is None
         ):
+            seal_scope(
+                previous,
+                selected_archive=getattr(self, "observation_archive", None),
+            )
             reclaim_scope(previous)
         self.continuation_scope = scope
         self.continuation_scope_id = scope.scope_id

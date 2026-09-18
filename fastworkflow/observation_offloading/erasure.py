@@ -25,10 +25,10 @@ age/size retention never reached the file.
    file, which is the other place a turn's text lands.
 3. *Evidence preservation is explicit, and it is ON for experiment runs.* See
    below. Retention and erasure are both refused for a preserved scope.
-4. *Sensitive data: redaction is a toggle, and it is ON by default.* The
-   sidecar's response bytes now pass through the trace sink's own credential
-   scrub and capture policy on their way to disk -- the same two protections,
-   called in the same order, by way of
+4. *Sensitive data: redaction is a toggle, it is ON by default, and it happens
+   when the TURN COMPLETES.* The sidecar's response bytes pass through the
+   trace sink's own credential scrub and capture policy -- the same two
+   protections, called in the same order, by way of
    ``observability.store.protect_offload_observation`` rather than by a second
    implementation that would drift from the first (``ido-zlm``). The toggle is
    ``FW_OFFLOAD_EVIDENCE_REDACTION``: ``on`` (the DEFAULT, and what an
@@ -36,6 +36,35 @@ age/size retention never reached the file.
    about and treated as the default, exactly as the preservation mode below is.
    The mechanism lives in ``observation_offloading.archive``; the policy is
    written here so it is read together with the retention above.
+
+   WHEN it happens is an explicit owner decision (``ido-6sc``) and it is not
+   at the write. Nothing is redacted while a turn is IN FLIGHT, and in flight
+   means the whole life of the turn -- an ask_user wait and any
+   serialize/deserialize round trip into a fresh process included. ``persist``
+   therefore stores what the command returned, verbatim, and the row is SEALED
+   into its redacted form by ``archive.seal_scope`` at the moment the turn is
+   genuinely over. Every read an agent can make during its own turn returns
+   raw: the live trajectory, ``search_memory``, rehydration, and those same
+   reads after a resume. So does the in-memory action log the turn's
+   conversation summary is built from, which is what the NEXT turn's query
+   refinement reads, and which never came from this file in the first place.
+
+   The owner accepted the consequence in as many words: raw bytes sit in this
+   file for the duration of a turn. The acceptance is conditional and
+   time-boxed -- it holds until someone demonstrates that redaction does not
+   affect answer quality -- and it is BOUNDED in two ways rather than open
+   ended. A turn that completes seals its own evidence, through the two guards
+   that already know a turn is over and skip a suspension
+   (``WorkflowExecutionContext._reclaim_offloading_scope`` and
+   ``StructuredContinuationReAct.bind_scope``). A turn whose process DIED is
+   swept: ``archive.sweep_unsealed`` seals any row still raw whose owning
+   process is not the one running and whose write is older than
+   ``FW_OFFLOAD_SEAL_GRACE_SECONDS`` (a day by default, ``off`` to disable),
+   and it is triggered both when a process opens the sidecar and by ``prune``
+   below, which is the only thing that visits a store whose processes are all
+   gone. What neither closes: a sidecar nobody ever opens or prunes again, the
+   grace window itself, a turn that outlives the window, and the free page
+   space a rewritten row leaves behind until this module's own VACUUM runs.
 
    Both states are first-class and neither is degraded:
 
@@ -55,14 +84,27 @@ age/size retention never reached the file.
    ``observation_capture_policy``: the capture-policy contract version, the
    profile consulted, the toggle state, and whether the stored bytes actually
    DIFFER from what the command returned. The last of those is what lets a
-   reader tell a redacted row from one that never contained a secret. That
-   table is scope-keyed like every other, so it is discovered structurally and
-   erased with its channel, and a row written before it existed has no entry
-   and reads as UNKNOWN -- never as an assumption of full fidelity.
+   reader tell a redacted row from one that never contained a secret. Beside
+   it, ``observation_seal_state`` records WHICH STATE the row is in --
+   ``pending`` (still raw, seal owed), ``sealed``, ``not_required`` (the toggle
+   was off) or, for a row written before that table existed, ``unknown`` --
+   which is what lets a reader tell an unsealed row from a sealed one, and
+   both from a row that never held a secret. Both tables are scope-keyed like
+   every other, so they are discovered structurally and erased with their
+   channel, and a row written before either existed has no entry and reads as
+   UNKNOWN -- never as an assumption of full fidelity.
+
+   Erasure and retention do not ask. A pending row and a sealed row are the
+   same row to ``forget_channel`` and to ``prune``, and a preserved scope
+   refuses both whichever state it is in: the seal is a CAPTURE decision, and
+   preservation governs DELETION. An experiment scope's observations are
+   therefore sealed at completion exactly like a chatbot channel's, which is
+   the same thing ``ido-zlm`` did at write time and not a new policy.
 
    Two things the toggle does NOT change. It does not change ERASABILITY: this
-   module removes a redacted row and a verbatim one alike, so the toggle
-   governs how long a secret is exposed, not whether it can be removed.
+   module removes a redacted row, an unsealed one and a verbatim one alike, so
+   the toggle governs how long a secret is exposed, not whether it can be
+   removed.
    And it does not protect what leaves this process by another route -- the
    agent's own prompt, and the observation-search call, still carry the text the
    command returned.
@@ -548,6 +590,36 @@ def forget_all_channels(
 # ---------------------------------------------------------------------------
 
 
+def _sweep_unsealed_observations(
+    db_path: str, *, now: Optional[datetime] = None
+) -> int:
+    """Seal what a turn that never completed left raw; return how many (``ido-6sc``).
+
+    Best effort and never fatal: retention's job is to delete, and a sweep that
+    cannot run must not stop it. The file is compacted afterwards when anything
+    was sealed, because a seal rewrites a row in place and the bytes it replaced
+    stay in that page's free space until a VACUUM -- which is the same reason
+    ``_compact`` exists for the deletions below.
+    """
+    try:
+        from fastworkflow.observation_offloading.archive import RuntimeHandleArchive
+
+        archive = RuntimeHandleArchive(db_path)
+        # Opening the file already swept it at the real clock, so that count is
+        # part of the answer; the explicit call below is what honours a caller
+        # supplied ``now`` and is a no-op when the open did the work.
+        sealed = int((getattr(archive, "open_sweep", None) or {}).get("sealed") or 0)
+        outcome = archive.sweep_unsealed(now=now)
+        sealed += int(outcome.get("sealed") or 0)
+        if sealed:
+            archive.compact()
+        return sealed
+    except Exception:  # noqa: BLE001 - retention must not fail on a sweep
+        logger.debug("could not sweep unsealed observations in %s", db_path,
+                     exc_info=True)
+        return 0
+
+
 def prune(
     db_path: str,
     *,
@@ -567,11 +639,22 @@ def prune(
     Preserved scopes are never counted towards the cap's solution and never
     deleted: a file that is over the cap entirely because of experiment
     evidence stays over the cap, and says so through ``over_cap``.
+
+    It also SWEEPS before it deletes (``ido-6sc``). Retention is the only thing
+    that runs against a sidecar whose processes are all long gone, so it is the
+    only place that can seal an observation left raw by a turn that died before
+    it completed and whose store no agent ever opens again. The sweep runs
+    whatever the preservation mode says, and before the preserved-file return
+    below, because sealing is a capture decision and preservation governs
+    deletion: a preserved evaluation corpus still must not hold a crashed
+    turn's credentials forever. It never touches a row whose turn is still in
+    flight -- see ``archive.sweep_unsealed`` for exactly how it knows.
     """
     result: dict[str, int] = {"scopes": 0, "size_scopes": 0, "preserved_scopes": 0}
     path = os.path.abspath(os.path.expanduser(str(db_path)))
     if not os.path.exists(path):
         return {}
+    result["sealed_by_sweep"] = _sweep_unsealed_observations(path, now=now)
     if file_is_preserved(path, mode):
         result["file_preserved"] = 1
         return result

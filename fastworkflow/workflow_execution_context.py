@@ -1224,7 +1224,7 @@ class WorkflowExecutionContext:
             return False
 
     def _reclaim_offloading_scope(self) -> None:
-        """Release this session's process-local offloading state (``ido-1ew``).
+        """Seal and release this session's offloading state (``ido-1ew``, ``ido-6sc``).
 
         ``close`` is the one production signal that a session is over in this
         process: the fleet's session cache calls it when it retires or removes a
@@ -1242,8 +1242,23 @@ class WorkflowExecutionContext:
         count are the agent's own memory, they die with it, and a resume
         rebuilds them from the suspension payload.
 
-        Best effort by construction: failing to reclaim memory must never turn a
-        session close into an error the caller has to handle.
+        ido-6sc added the other half of "this turn is over" to the same guard.
+        Redaction of the evidence sidecar is no longer a write-time transform:
+        a turn's stored observations are written verbatim and SEALED into their
+        redacted form when the turn completes, so that nothing an agent can
+        read during its own turn is ever degraded. The two conditions below are
+        exactly the notion of "not finished" a seal needs, and they are reused
+        rather than restated -- a suspended turn is not sealed, for the same
+        reason and by the same test as it is not reclaimed.
+
+        This runs strictly after the turn's conversation summary, which
+        ``_finalize_agent_output`` produced out of ``_action_log`` before the
+        turn ever returned. That ordering is what keeps the summary fed to the
+        NEXT turn's query refinement accurate, and it is pinned by a test
+        rather than left to be noticed.
+
+        Best effort by construction: failing to seal or to reclaim memory must
+        never turn a session close into an error the caller has to handle.
         """
         agent = self._workflow_tool_agent
         scope = getattr(agent, "continuation_scope", None)
@@ -1254,11 +1269,15 @@ class WorkflowExecutionContext:
                 return
             from fastworkflow.observation_offloading import state as offload_state
 
+            offload_state.seal_scope(
+                scope,
+                selected_archive=getattr(agent, "observation_archive", None),
+            )
             offload_state.reclaim_scope(scope)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
-                "WorkflowExecutionContext.close: could not reclaim offloading "
-                f"state ({type(exc).__name__}: {exc})"
+                "WorkflowExecutionContext.close: could not seal or reclaim "
+                f"offloading state ({type(exc).__name__}: {exc})"
             )
 
     # ------------------------------------------------------------------

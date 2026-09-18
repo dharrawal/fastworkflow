@@ -458,6 +458,77 @@ def forget_context_clause(
         logger.debug("could not drop the stored subject of %s", alias, exc_info=True)
 
 
+def seal_scope(
+    scope: RuntimeHandleScope, *, selected_archive: Any = None
+) -> dict[str, Any]:
+    """Seal one FINISHED turn's stored evidence into its redacted form (``ido-6sc``).
+
+    The owner's decision made redaction a turn-COMPLETION step rather than a
+    write-time transform: nothing is redacted while a turn is in flight, and in
+    flight is the whole life of the turn, an ask_user wait and every
+    serialize/deserialize round trip included. This is the moment the rest of
+    that decision is paid for.
+
+    It deliberately has exactly the two callers ``reclaim_scope`` has, and it
+    runs immediately before it in both. That is not a coincidence, it is the
+    requirement: the guards those callers already carry --
+    ``WorkflowExecutionContext._reclaim_offloading_scope`` returning early when
+    ``self._awaiting_user`` or ``agent.export_suspended() is not None``, and
+    ``StructuredContinuationReAct.bind_scope`` skipping while ``self._suspended
+    is not None`` -- already mean exactly "this turn is not finished", which is
+    the property a seal needs. Inventing a second notion of over would be
+    inventing a second way to be wrong about a suspension.
+
+    Both callers also run strictly LATER than the turn's summary. The
+    conversation summary that feeds the next turn's query refinement is
+    produced inside ``WorkflowExecutionContext._finalize_agent_output``, out of
+    the in-memory ``_action_log`` whose ``response`` was captured at execution
+    time and is never read back from this archive -- so the summary sees raw
+    text by ordering, and the ordering is pinned by a test.
+
+    The scope's hot observations go with the seal. They hold the raw copy, the
+    turn that could read it is over, and leaving them would mean memory and
+    disk disagreeing for a scope nobody may read again. ``reclaim_scope`` drops
+    them anyway at both callers; doing it here too is what makes a seal reached
+    any other way -- the sweep, a test -- leave nothing raw behind in process.
+
+    Never raises. Failing to seal is a fidelity and exposure problem to report,
+    never a reason to fail a session close or the turn that is starting.
+    """
+    store = durable_archive(selected_archive)
+    if store is None:
+        return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
+                "errors": ["no_archive"]}
+    try:
+        result = store.seal_scope(scope)
+    except Exception as error:  # noqa: BLE001 - a seal must not fail a turn
+        record_event(
+            {
+                "kind": "seal_refused",
+                "scope_id": scope.scope_id,
+                "error": type(error).__name__,
+            }
+        )
+        logger.warning(
+            "could not seal the evidence of scope %s: %s", scope.scope_id, error
+        )
+        return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
+                "errors": [type(error).__name__]}
+    clear_hot_handles(scope)
+    if result.get("sealed") or result.get("failed"):
+        record_event(
+            {
+                "kind": "observations_sealed",
+                "scope_id": scope.scope_id,
+                "sealed": int(result.get("sealed") or 0),
+                "redacted": int(result.get("redacted") or 0),
+                "failed": int(result.get("failed") or 0),
+                "aliases": list(result.get("aliases") or ()),
+            }
+        )
+    return result
+
+
 def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
     """Drop every process-local cache one FINISHED turn scope holds (``ido-1ew``).
 
@@ -481,6 +552,11 @@ def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
     (``WorkflowExecutionContext.close``). Neither fires for a SUSPENDED turn,
     because a suspension is state that must outlive the process, not state to
     reclaim.
+
+    ``seal_scope`` runs immediately before this at both of them (``ido-6sc``),
+    on the strength of those same two guards: the earliest honest moment to
+    release a turn's residency is also the earliest honest moment to redact its
+    evidence, and one notion of "over" serves both.
     """
     scope_id = scope if isinstance(scope, str) else scope.scope_id
     prefix = f"{scope_id}:"

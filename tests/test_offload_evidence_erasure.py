@@ -72,6 +72,12 @@ KNOWN_EVIDENCE_TABLES = {
     # structurally and goes with the channel -- a record of what was kept must
     # not outlive what it describes.
     "observation_capture_policy": "recorded_at",
+    # ido-6sc. Whether an observation's bytes are still the RAW ones the
+    # command returned (the turn is in flight, or its process died before it
+    # completed) or have been sealed into their redacted form. Scope-keyed for
+    # the same reason, and dated by ``opened_at`` rather than ``sealed_at`` so
+    # a scope's retention horizon stays the moment its turn began.
+    "observation_seal_state": "opened_at",
 }
 
 needs_erasure_module = unittest.skipIf(
@@ -107,6 +113,16 @@ def experiment_scope(
 
 def rows(marker: str, count: int = 30) -> list[str]:
     return ["%s-%03d  confidential row %d" % (marker, i, i) for i in range(count)]
+
+
+def present_tables(conn: sqlite3.Connection) -> set[str]:
+    """The tables this revision actually created in the file."""
+    return {
+        name
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
 
 
 def counts(db_path: str, scope_id: str | None = None) -> dict[str, int]:
@@ -232,7 +248,13 @@ class EvidenceFixture(unittest.TestCase):
             datetime.now(timezone.utc) - timedelta(days=days)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
         with sqlite3.connect(self.sidecar) as conn:
+            present = present_tables(conn)
             for table, column in KNOWN_EVIDENCE_TABLES.items():
+                # A table this revision does not create is simply absent, which
+                # is what keeps these cases runnable against the revision each
+                # table arrived in (``observation_seal_state`` is ido-6sc's).
+                if table not in present:
+                    continue
                 clause = " WHERE scope_id=?" if scope_id else ""
                 conn.execute(
                     f'UPDATE "{table}" SET "{column}"=?{clause}',
@@ -287,7 +309,12 @@ class ChannelErasureTests(EvidenceFixture):
         self.seed_turn(erased)
         self.seed_turn(kept)
         before = counts(self.sidecar, erased.scope_id)
-        self.assertEqual(sorted(before), sorted(KNOWN_EVIDENCE_TABLES))
+        # Every known evidence table THIS revision creates: a table that
+        # arrived later is absent rather than empty, which is what keeps this
+        # case runnable against the revision each one arrived in.
+        with sqlite3.connect(self.sidecar) as conn:
+            known_present = sorted(set(KNOWN_EVIDENCE_TABLES) & present_tables(conn))
+        self.assertEqual(sorted(before), known_present)
         self.assertTrue(all(value == 1 for value in before.values()), before)
 
         deleted = run_forget_channel(self.db_path, "erase")
@@ -300,6 +327,8 @@ class ChannelErasureTests(EvidenceFixture):
         self.assertEqual(deleted["offload_scopes"], 1)
         self.assertEqual(deleted["offload_preserved_scopes"], 0)
         for table in KNOWN_EVIDENCE_TABLES:
+            if f"offload_{table}" not in deleted:
+                continue  # a table this revision does not create
             self.assertEqual(deleted[f"offload_{table}"], 1, table)
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(
@@ -312,6 +341,7 @@ class ChannelErasureTests(EvidenceFixture):
         self.populate(chatbot_scope("erase"), "marker")
         with sqlite3.connect(self.sidecar) as conn:
             discovered = erasure.evidence_tables(conn)
+            known_present = set(KNOWN_EVIDENCE_TABLES) & present_tables(conn)
             # A table added later -- as result_handle_walks was in 173e14b --
             # is erased with the channel without this module being edited.
             conn.execute(
@@ -328,7 +358,9 @@ class ChannelErasureTests(EvidenceFixture):
                 ),
             )
             conn.commit()
-        self.assertEqual(set(discovered), set(KNOWN_EVIDENCE_TABLES))
+        self.assertEqual(
+            set(discovered), set(KNOWN_EVIDENCE_TABLES) & known_present
+        )
         self.assertIn("result_handle_walks", discovered)
         self.assertEqual(discovered["result_handle_walks"]["timestamp"], "recorded_at")
 
@@ -516,6 +548,8 @@ class RetentionTests(EvidenceFixture):
         self.assertEqual(deleted["offload_scopes"], 1)
         self.assertEqual(deleted["offload_size_scopes"], 0)
         for table in KNOWN_EVIDENCE_TABLES:
+            if f"offload_{table}" not in deleted:
+                continue  # a table this revision does not create
             self.assertEqual(deleted[f"offload_{table}"], 1, table)
 
     @needs_erasure_module

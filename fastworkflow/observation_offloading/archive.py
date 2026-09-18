@@ -9,14 +9,32 @@ not only its digest: a row must be able to say which channel it came from,
 and whether it belongs to an experiment run, long after the process that
 wrote it is gone (ido-gls).
 
-Redaction lives next door as well, in the sense that matters: the bytes
-``persist`` stores are the bytes ``observability.store`` would have stored for
+Redaction lives next door as well, in the sense that matters: the bytes a
+SEALED row holds are the bytes ``observability.store`` would have stored for
 the same text, because they are produced by calling into that module's own
 scrub-and-capture pipeline rather than by a second one written here (ido-zlm).
 The toggle, its default and the full policy are stated in
 ``observation_offloading.erasure``'s docstring, beside the retention policy,
 because a reader deciding what this file may keep needs both at once. The
 mechanism is below, in ``redaction_mode`` and ``capture_record_for``.
+
+WHEN that happens changed in ido-6sc, by an explicit owner decision. Redaction
+is no longer a write-time transform: ``persist`` stores what the command
+returned, VERBATIM, and the row is SEALED into its redacted form when the turn
+that produced it is genuinely over. Nothing is redacted while a turn is in
+flight, and in flight means the whole life of the turn -- an ask_user wait and
+any serialize/deserialize round trip included -- so every read an agent can
+make during its own turn returns raw: the live trajectory, ``search_memory``,
+rehydration, and those same reads after a resume in a fresh process. The owner
+accepted raw bytes on disk for the duration of a turn, conditionally, until
+someone demonstrates that redaction does not affect answer quality.
+
+Two consequences live in this file. ``seal_scope`` is the completion step, and
+it is only ever reached through the two places that already know a turn is over
+(``StructuredContinuationReAct.bind_scope`` and
+``WorkflowExecutionContext._reclaim_offloading_scope``). ``sweep_unsealed`` is
+the backstop for a process that died mid-turn, so the accepted window is
+bounded rather than open-ended.
 """
 from __future__ import annotations
 
@@ -25,10 +43,11 @@ import json
 import logging
 import os
 import sqlite3
+import uuid
 from contextlib import closing
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +162,89 @@ def capture_record_for(text: str, *, mode: Optional[str] = None) -> tuple[str, d
     stored = text if stored is None else str(stored)
     record["redacted"] = stored != text
     return stored, record
+
+
+# ---------------------------------------------------------------------------
+# Seal timing (ido-6sc)
+# ---------------------------------------------------------------------------
+
+#: Raw bytes are on disk and the seal is OWED. The state every row is written
+#: in while its turn is in flight, under redaction ``on``.
+SEAL_PENDING = "pending"
+#: ``capture_record_for`` has run over this row's bytes and rewritten them.
+SEAL_SEALED = "sealed"
+#: Redaction was ``off`` at the write, so nothing is owed and the verbatim
+#: bytes are the policy rather than a window. Distinct from ``sealed`` on
+#: purpose: a reader must be able to tell "the pipeline ran and found nothing"
+#: from "the pipeline was never going to run".
+SEAL_NOT_REQUIRED = "not_required"
+#: No seal row at all: written before ido-6sc, by code that redacted at write
+#: time. Nothing is owed, and nothing here claims to know which it is.
+SEAL_UNKNOWN = "unknown"
+_SEAL_STATES = (SEAL_PENDING, SEAL_SEALED, SEAL_NOT_REQUIRED, SEAL_UNKNOWN)
+
+#: How long after a row was opened raw the crash sweep may seal it without the
+#: turn ever having said it was over. It is the bound on the owner's accepted
+#: risk: a process that dies mid-turn leaves raw bytes for at most this long
+#: after the write, once any process opens the sidecar again.
+SEAL_GRACE_ENV = "FW_OFFLOAD_SEAL_GRACE_SECONDS"
+#: A day. Long enough that a user who walks away from an ask_user question and
+#: comes back after lunch still resumes into raw evidence, short enough that a
+#: crashed turn's bytes are not a permanent exposure. Spelled as a constant
+#: because the two mistakes are not symmetric: too short seals a live turn and
+#: costs answer quality, which is the thing the owner is protecting.
+DEFAULT_SEAL_GRACE_SECONDS = 86_400
+#: Spellings that turn the sweep OFF. An operator who wants raw evidence kept
+#: until a turn says it is over, and nothing else, says so here.
+_SWEEP_DISABLED = ("off", "never", "disabled", "no", "none")
+
+_warned_grace: set[str] = set()
+
+#: This process's identity, for the one question the sweep has to answer: is
+#: this pending row MINE. A pid alone is not enough -- pids are reused, and a
+#: sidecar outlives the process that wrote it -- so a random token per process
+#: is appended. It is written into the seal row and compared, never parsed.
+_OWNER_ID = f"pid-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+
+
+def owner_id() -> str:
+    """The token this process stamps on the rows it opens raw."""
+    return _OWNER_ID
+
+
+def seal_grace_seconds(override: Optional[str] = None) -> Optional[int]:
+    """The sweep's horizon in seconds, or ``None`` when the sweep is OFF.
+
+    An unrecognised value warns once and falls back to the default, by the same
+    rule as ``redaction_mode`` and ``erasure.preservation_mode``: a typo must
+    not quietly leave a crashed turn's credentials on disk forever, and it must
+    not quietly seal a live turn either.
+    """
+    raw = override if override is not None else os.environ.get(SEAL_GRACE_ENV, "")
+    value = str(raw or "").strip().lower()
+    if not value:
+        return DEFAULT_SEAL_GRACE_SECONDS
+    if value in _SWEEP_DISABLED:
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        seconds = -1
+    if seconds >= 0:
+        return seconds
+    if value not in _warned_grace:
+        _warned_grace.add(value)
+        logger.warning(
+            "ignoring %s=%s: expected a non-negative integer of seconds or one "
+            "of %s; using %d",
+            SEAL_GRACE_ENV, raw, ", ".join(_SWEEP_DISABLED),
+            DEFAULT_SEAL_GRACE_SECONDS,
+        )
+    return DEFAULT_SEAL_GRACE_SECONDS
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass(frozen=True)
@@ -289,6 +391,75 @@ class RuntimeHandleArchive:
                 )
                 """
             )
+            # (ido-6sc) Whether this row's bytes are still the RAW ones the
+            # command returned, and who left them that way. The owner's
+            # decision moved redaction off the write path and onto turn
+            # COMPLETION, so an archived observation now has two honest states
+            # and a reader must be able to tell them apart -- an unsealed row
+            # reproduces the agent's reading exactly and is a live exposure; a
+            # sealed one is neither.
+            #
+            # Its own table, additive and created on open, for the third time
+            # on this branch and for the same reason: an existing sidecar gains
+            # it the first time new code opens the file and no migration, ALTER
+            # or script ever runs against a store holding real evidence. A row
+            # written before this table existed has no entry, reads back as
+            # ``unknown``, and is never swept -- the code that wrote it redacted
+            # at write time, so it owes nothing and guessing otherwise would
+            # rewrite bytes that are already final.
+            #
+            # ``owner_id`` is what makes the crash sweep safe: a pending row
+            # stamped by a process that is not this one, and older than the
+            # grace horizon, belongs to a turn that will never say it is over.
+            # A row this process opened is never swept by this process, so the
+            # sweep cannot reach a turn that is still running.
+            #
+            # ``opened_at`` is deliberately the FIRST ``_at`` column here, so
+            # ``erasure.evidence_tables`` dates this table by the moment the
+            # row was written rather than by the moment it was sealed, and a
+            # scope's retention horizon stays the moment its turn began.
+            #
+            # No raw digest is stored. While the row is pending its own
+            # ``text_sha256`` already covers the raw bytes sitting beside it;
+            # once sealed, a digest of the unredacted text would be exactly the
+            # confirmation oracle ``persist`` refused to write in ido-zlm.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS observation_seal_state (
+                    scope_id TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    seal_state TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    opened_at TEXT NOT NULL,
+                    sealed_at TEXT NOT NULL,
+                    PRIMARY KEY (scope_id, alias)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS observation_seal_state_pending
+                ON observation_seal_state(seal_state, opened_at)
+                """
+            )
+        # (ido-6sc) Opening the sidecar is the crash-recovery trigger: see
+        # ``sweep_unsealed``. It must never fail the open, for the same reason
+        # ``UnavailableHandleArchive`` exists -- a turn does not stop because
+        # an evidence optimisation could not tidy up after a previous one.
+        #: What the sweep on THIS open sealed, so a caller that opened the file
+        #: in order to sweep it (``erasure.prune``) can report the whole count
+        #: rather than nothing -- the open already did the work.
+        self.open_sweep: dict[str, Any] = {"sealed": 0, "redacted": 0,
+                                           "failed": 0, "aliases": [],
+                                           "errors": [], "swept": False}
+        try:
+            self.open_sweep = self.sweep_unsealed()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "could not sweep unsealed observations in %s", self.db_path,
+                exc_info=True,
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0)
@@ -306,41 +477,44 @@ class RuntimeHandleArchive:
         text: str,
         text_sha256: str,
     ) -> dict[str, Any]:
-        """Store one observation and return the row as the archive now holds it.
+        """Store one observation VERBATIM and return the row as it now holds it.
 
-        ``text``/``text_sha256`` are checked against each other first and always:
-        that pair is the caller's integrity claim about what the command
-        returned, and it is verified against the RAW text whatever the redaction
-        toggle says.
+        ``text``/``text_sha256`` are checked against each other first and
+        always: that pair is the caller's integrity claim about what the command
+        returned.
 
-        What is then STORED may be shorter (ido-zlm). With redaction on, the
-        bytes go through ``capture_record_for`` -- the observability store's own
-        credential scrub and capture policy -- and ``text_sha256`` in the row
-        covers the bytes the archive actually holds, because that column is what
-        ``_decode_row`` verifies a read against and a digest that covers
-        something other than the bytes beside it is a digest that fails every
-        reader. The RAW digest keeps its meaning where its meaning is needed and
-        is unchanged: ``compact`` computes it, hands it in here, and remembers it
-        in ``state.mark_archived`` as the key that says this text is already
-        written. It is deliberately not persisted beside the redacted bytes; a
-        digest of unredacted text stored next to the redaction is a confirmation
-        oracle for the credential the redaction just removed, which is
-        `_protected_text`'s own reasoning applied one file over.
+        What is stored is that same text, byte for byte, whatever the redaction
+        toggle says (ido-6sc). The turn that produced it is in flight, and
+        nothing is redacted while a turn is in flight -- so the row's
+        ``text_sha256`` is the caller's RAW digest, ``_decode_row`` verifies a
+        read against the raw bytes beside it, and the hot cache a caller fills
+        from the returned row agrees with the agent's own prompt. With redaction
+        ``on`` the row is also marked ``pending``: the seal is OWED, and
+        ``seal_scope`` pays it when the turn is over. With redaction ``off`` it
+        is marked ``not_required``, which is that toggle's whole meaning.
 
-        The returned row is the archive's answer to "what did you keep?", which
-        is what a caller should put in a hot cache so that the same alias reads
-        the same way whichever tier serves it.
+        Idempotence survives the seal. The insert is insert-or-nothing, so a
+        re-persist of the same alias is a readback -- and when the row it reads
+        back has already been sealed, its digest covers the SEALED bytes and no
+        longer matches the caller's raw digest. That is not a collision, and
+        ``_agrees_after_a_seal`` re-derives the answer rather than patching it:
+        it seals the candidate text the same way the row was sealed and
+        compares. Nothing raw is persisted to make that comparison possible,
+        which is what keeps ido-zlm's refusal to write a confirmation oracle
+        intact.
         """
         payload = text.encode("utf-8")
         if hashlib.sha256(payload).hexdigest() != text_sha256:
             raise PersistenceError("runtime handle digest does not match its text")
-        stored_text, capture = capture_record_for(text)
-        stored_payload = stored_text.encode("utf-8")
-        stored_sha256 = hashlib.sha256(stored_payload).hexdigest()
+        # The policy is resolved here, at the write, because the row has to be
+        # able to say which rules it is OWED while it is still pending. The
+        # seal re-records whichever rules actually ran.
+        prospective = capture_record_for(text)[1]
+        pending = prospective["redaction"] == REDACTION_ON
         scope_json = json.dumps(
             asdict(scope), ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
-        recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recorded_at = _utc_now()
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -358,8 +532,8 @@ class RuntimeHandleArchive:
                     offload_order,
                     command_name,
                     step_index,
-                    stored_payload,
-                    stored_sha256,
+                    payload,
+                    text_sha256,
                     recorded_at,
                 ),
             )
@@ -381,21 +555,71 @@ class RuntimeHandleArchive:
                     scope.scope_id,
                     scope_json,
                     alias,
-                    capture["capture_policy_version"],
-                    capture["capture_profile"],
-                    capture["redaction"],
-                    1 if capture["redacted"] else 0,
-                    int(capture["raw_utf8_bytes"]),
+                    prospective["capture_policy_version"],
+                    prospective["capture_profile"],
+                    prospective["redaction"],
+                    # Nothing has been redacted yet, and the row must not claim
+                    # it has. The seal sets this to what actually happened.
+                    0,
+                    int(prospective["raw_utf8_bytes"]),
                     recorded_at,
+                ),
+            )
+            # And DO NOTHING a third time, for the reason above squared: the
+            # seal state describes the bytes in the file, so a re-persist that
+            # kept an existing row must not reopen a sealed one as pending.
+            conn.execute(
+                """
+                INSERT INTO observation_seal_state (
+                    scope_id, scope_json, alias, seal_state, owner_id,
+                    opened_at, sealed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_id, alias) DO NOTHING
+                """,
+                (
+                    scope.scope_id,
+                    scope_json,
+                    alias,
+                    SEAL_PENDING if pending else SEAL_NOT_REQUIRED,
+                    _OWNER_ID,
+                    recorded_at,
+                    "" if pending else recorded_at,
                 ),
             )
             conn.commit()
         stored = self.get(scope, alias)
-        if stored is None or stored["text_sha256"] != stored_sha256:
+        if stored is None:
+            raise PersistenceError(
+                "runtime handle alias collides with different text in this turn"
+            )
+        if stored["text_sha256"] != text_sha256 and not self._agrees_after_a_seal(
+            scope, alias, text, stored["text_sha256"]
+        ):
             raise PersistenceError(
                 "runtime handle alias collides with different text in this turn"
             )
         return stored
+
+    def _agrees_after_a_seal(
+        self, scope: RuntimeHandleScope, alias: str, text: str, stored_sha256: str
+    ) -> bool:
+        """Whether *text* is what the SEALED row at *alias* was sealed from.
+
+        The one case where a stored digest may legitimately differ from the
+        caller's raw digest (ido-6sc). Asked only when the digests already
+        disagree, and answered by re-deriving: seal the candidate the way the
+        row was sealed, and compare. A real collision -- two different
+        observations under one alias -- still fails, because two different
+        texts do not seal to the same bytes unless the redaction removed the
+        only thing that told them apart, in which case the archive genuinely
+        cannot distinguish them and refusing would be a false alarm about
+        evidence it no longer holds.
+        """
+        if self.seal_state(scope, alias) != SEAL_SEALED:
+            return False
+        sealed_text, _ = capture_record_for(text)
+        digest = hashlib.sha256(sealed_text.encode("utf-8")).hexdigest()
+        return digest == stored_sha256
 
     def get(self, scope: RuntimeHandleScope, alias: str) -> Optional[dict[str, Any]]:
         with closing(self._connect()) as conn:
@@ -516,6 +740,15 @@ class RuntimeHandleArchive:
         ``None`` is what a row written before this table existed reads as, and
         it is the only honest answer for one: nothing in the file says whether
         those bytes are full fidelity, so nothing here claims they are.
+
+        ``seal_state`` (ido-6sc) is the field that makes the other five
+        readable now that redaction happens at turn completion. ``pending``
+        means the bytes are still the raw ones and ``redacted`` is ``False``
+        because nothing has run yet, not because there was nothing to find;
+        ``sealed`` means the pipeline has run and ``redacted`` says whether it
+        found anything; ``not_required`` means the toggle was off; ``unknown``
+        means the row predates the seal ledger. Those are three different rows
+        and they used to be indistinguishable.
         """
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -527,6 +760,7 @@ class RuntimeHandleArchive:
                 """,
                 (scope.scope_id, str(alias)),
             ).fetchone()
+            seal = self._seal_row(conn, scope.scope_id, str(alias))
         if row is None:
             return UNKNOWN_CAPTURE_RECORD
         return {
@@ -536,7 +770,261 @@ class RuntimeHandleArchive:
             "redacted": bool(row["redacted"]),
             "raw_utf8_bytes": int(row["raw_utf8_bytes"]),
             "recorded_at": str(row["recorded_at"]),
+            "seal_state": SEAL_UNKNOWN if seal is None else str(seal["seal_state"]),
+            "sealed_at": "" if seal is None else str(seal["sealed_at"]),
         }
+
+    # -- seal timing (ido-6sc) ---------------------------------------------
+
+    @staticmethod
+    def _seal_row(
+        conn: sqlite3.Connection, scope_id: str, alias: str
+    ) -> Optional[sqlite3.Row]:
+        try:
+            return conn.execute(
+                """
+                SELECT seal_state, owner_id, opened_at, sealed_at
+                FROM observation_seal_state
+                WHERE scope_id = ? AND alias = ?
+                """,
+                (scope_id, alias),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # A sidecar opened read-only, or one whose schema this process did
+            # not create. An absent ledger is an UNKNOWN row, never a pending
+            # one, so nothing is swept on the strength of a missing table.
+            return None
+
+    def seal_state(self, scope: RuntimeHandleScope, alias: str) -> str:
+        """``pending``, ``sealed``, ``not_required`` or ``unknown``."""
+        with closing(self._connect()) as conn:
+            row = self._seal_row(conn, scope.scope_id, str(alias))
+        return SEAL_UNKNOWN if row is None else str(row["seal_state"])
+
+    def pending_aliases(self, scope: RuntimeHandleScope) -> list[str]:
+        """Every alias of one scope whose bytes are still raw, in order."""
+        with closing(self._connect()) as conn:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT alias FROM observation_seal_state
+                    WHERE scope_id = ? AND seal_state = ?
+                    ORDER BY alias
+                    """,
+                    (scope.scope_id, SEAL_PENDING),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [str(row["alias"]) for row in rows]
+
+    def seal_scope(
+        self, scope: RuntimeHandleScope, *, mode: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Seal every pending observation of one FINISHED turn (ido-6sc).
+
+        The completion step the owner's decision asks for. It is reached only
+        through the two callers that already know a turn is over -- see
+        ``state.seal_scope`` -- so a suspended turn, whose whole point is that
+        it is not over, is never sealed.
+
+        Per alias, in one transaction: the raw bytes are read back and verified
+        against their own digest, run through ``capture_record_for``, and
+        written back with a digest that covers the bytes now in the file. The
+        fidelity record is rewritten to name the policy that actually ran and
+        whether it found anything, and the seal row moves to ``sealed``.
+
+        Idempotent by state, not by digest: only ``pending`` rows are touched,
+        so sealing a scope twice is a no-op and sealing one whose turn ran
+        under redaction ``off`` is too. A per-alias failure is recorded and the
+        rest of the scope is still sealed -- one unreadable row must not leave
+        the whole turn raw.
+        """
+        return self._seal_aliases(
+            [(scope.scope_id, alias) for alias in self.pending_aliases(scope)],
+            mode=mode,
+        )
+
+    def _seal_aliases(
+        self, keys: Iterable[tuple[str, str]], *, mode: Optional[str] = None
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {"sealed": 0, "redacted": 0, "failed": 0,
+                                  "aliases": [], "errors": []}
+        for scope_id, alias in keys:
+            try:
+                changed = self._seal_one(scope_id, str(alias), mode=mode)
+            except Exception as error:  # noqa: BLE001 - one row must not stop the rest
+                result["failed"] += 1
+                result["errors"].append(f"{alias}: {type(error).__name__}")
+                logger.warning(
+                    "could not seal observation %s in %s: %s",
+                    alias, self.db_path, error,
+                )
+                continue
+            if changed is None:
+                continue
+            result["sealed"] += 1
+            result["aliases"].append(str(alias))
+            if changed:
+                result["redacted"] += 1
+        return result
+
+    def _seal_one(
+        self, scope_id: str, alias: str, *, mode: Optional[str] = None
+    ) -> Optional[bool]:
+        """Seal one pending row; ``None`` if it was not pending after all.
+
+        The read, the redaction and the two writes are one ``BEGIN IMMEDIATE``
+        transaction, and the ``seal_state = 'pending'`` predicate is re-checked
+        inside it, so two processes sweeping the same file cannot both seal the
+        same row and cannot seal a row a turn-completion call just sealed.
+        """
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    """
+                    SELECT h.text_utf8 AS text_utf8, h.text_sha256 AS text_sha256
+                    FROM observation_seal_state AS s
+                    JOIN observation_offload_handles AS h
+                      ON h.scope_id = s.scope_id AND h.alias = s.alias
+                    WHERE s.scope_id = ? AND s.alias = ? AND s.seal_state = ?
+                    """,
+                    (scope_id, alias, SEAL_PENDING),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return None
+                raw_payload = bytes(row["text_utf8"])
+                if hashlib.sha256(raw_payload).hexdigest() != row["text_sha256"]:
+                    raise PersistenceError(
+                        "runtime archive text failed digest verification"
+                    )
+                raw_text = raw_payload.decode("utf-8")
+                sealed_text, capture = capture_record_for(raw_text, mode=mode)
+                sealed_payload = sealed_text.encode("utf-8")
+                sealed_sha256 = hashlib.sha256(sealed_payload).hexdigest()
+                sealed_at = _utc_now()
+                conn.execute(
+                    """
+                    UPDATE observation_offload_handles
+                    SET text_utf8 = ?, text_sha256 = ?
+                    WHERE scope_id = ? AND alias = ?
+                    """,
+                    (sealed_payload, sealed_sha256, scope_id, alias),
+                )
+                conn.execute(
+                    """
+                    UPDATE observation_capture_policy
+                    SET capture_policy_version = ?, capture_profile = ?,
+                        redaction = ?, redacted = ?
+                    WHERE scope_id = ? AND alias = ?
+                    """,
+                    (
+                        capture["capture_policy_version"],
+                        capture["capture_profile"],
+                        capture["redaction"],
+                        1 if capture["redacted"] else 0,
+                        scope_id,
+                        alias,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE observation_seal_state
+                    SET seal_state = ?, sealed_at = ?
+                    WHERE scope_id = ? AND alias = ?
+                    """,
+                    (SEAL_SEALED, sealed_at, scope_id, alias),
+                )
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        return bool(capture["redacted"])
+
+    def sweep_unsealed(
+        self,
+        *,
+        grace_seconds: Optional[str] = None,
+        now: Optional[datetime] = None,
+        mode: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Seal rows whose turn never said it was over (ido-6sc).
+
+        The bound on the owner's accepted risk. A turn seals its own evidence
+        at completion, but a process that is killed between the write and the
+        completion leaves raw bytes behind with nobody left to seal them, and
+        "until the next deletion request" is not a bound.
+
+        TRIGGERED from two places, both of them moments when somebody is
+        already touching the file. Opening the sidecar, which is what the next
+        process to run a turn against this store does, and which makes recovery
+        automatic rather than operational. And ``erasure.prune``, the retention
+        job, which is the only thing that runs against a store whose processes
+        are all long gone.
+
+        WHAT IT LOOKS FOR: a row still ``pending`` whose ``owner_id`` is not
+        this process's, and whose ``opened_at`` is older than the grace
+        horizon. Both halves matter. The owner check is what makes the sweep
+        unable to reach a turn THIS process is running, which is the case the
+        owner's decision is actually about. The horizon is what makes it unable
+        to reach a turn ANOTHER live process is running, since the sweep cannot
+        ask another process whether its turn is still in flight -- only how
+        long ago it started.
+
+        WHAT IT CANNOT COVER, stated here because a bound nobody can see is not
+        a bound. A sidecar that no process ever opens again and that retention
+        never visits keeps its raw bytes. The horizon itself is an exposure
+        window, by construction. A turn that outlives the horizon -- including
+        an ask_user question nobody answers for a day -- is swept while it is
+        arguably still in flight, so a very late resume reads sealed evidence;
+        that is the deliberate trade, and it is why the horizon is long and
+        configurable. And a seal rewrites a row in place, which does not scrub
+        the freed page space the old bytes occupied until something VACUUMs the
+        file, which ``erasure`` does and this does not.
+        """
+        horizon_seconds = seal_grace_seconds(grace_seconds)
+        if horizon_seconds is None:
+            return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
+                    "errors": [], "swept": False}
+        moment = now or datetime.now(timezone.utc)
+        horizon = (moment - timedelta(seconds=horizon_seconds)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        with closing(self._connect()) as conn:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT scope_id, alias FROM observation_seal_state
+                    WHERE seal_state = ? AND owner_id <> ? AND opened_at < ?
+                    ORDER BY opened_at, scope_id, alias
+                    """,
+                    (SEAL_PENDING, _OWNER_ID, horizon),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
+                        "errors": [], "swept": False}
+        result = self._seal_aliases(
+            [(str(row["scope_id"]), str(row["alias"])) for row in rows], mode=mode
+        )
+        result["swept"] = True
+        result["horizon"] = horizon
+        if result["sealed"]:
+            logger.info(
+                "sealed %d observation(s) left unsealed by a turn that never "
+                "completed in %s", result["sealed"], self.db_path,
+            )
+        return result
+
+    def compact(self) -> None:
+        """VACUUM the file, so a sealed row's old bytes leave its free pages.
+
+        A seal is an in-place UPDATE, and SQLite does not zero what a shorter
+        blob stopped using. ``erasure`` already vacuums after it deletes; this
+        is the same call, reachable from a sweep that sealed something.
+        """
+        with closing(self._connect()) as conn:
+            conn.execute("VACUUM")
 
     # -- auto-navigation entries (ido-dhw, F3) -----------------------------
 
@@ -663,6 +1151,29 @@ class UnavailableHandleArchive:
     def capture_record(
         self, scope: RuntimeHandleScope, alias: str
     ) -> Optional[dict[str, Any]]:
+        return None
+
+    # Nothing was stored, so nothing is owed and nothing can be swept. The
+    # seal surface answers that rather than raising, on this class's own rule:
+    # every read says "nothing recorded here", and nothing claims a durability
+    # this object cannot provide (ido-6sc).
+    def seal_state(self, scope: RuntimeHandleScope, alias: str) -> str:
+        return SEAL_UNKNOWN
+
+    def pending_aliases(self, scope: RuntimeHandleScope) -> list[str]:
+        return []
+
+    def seal_scope(
+        self, scope: RuntimeHandleScope, *, mode: Optional[str] = None
+    ) -> dict[str, Any]:
+        return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
+                "errors": [], "unavailable": self.reason}
+
+    def sweep_unsealed(self, **_: Any) -> dict[str, Any]:
+        return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
+                "errors": [], "swept": False, "unavailable": self.reason}
+
+    def compact(self) -> None:
         return None
 
     def get(self, scope: RuntimeHandleScope, alias: str) -> Optional[dict[str, Any]]:

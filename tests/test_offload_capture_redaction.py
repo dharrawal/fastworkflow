@@ -12,6 +12,14 @@ archive's whole job is to reproduce what the agent read, and devops leave it on
 so a secret is not written to disk. Each archived observation records which
 mode produced it, so an archive stays auditable about its own fidelity.
 
+ido-6sc moved WHEN it happens, by an explicit owner decision: the toggle still
+decides WHETHER, and the SEAL at turn completion is when. So every claim below
+about what is or is not in the file is made after ``seal_scope``, which is what
+a completed turn runs -- the mid-turn state, where the file holds raw bytes on
+purpose and with the owner's stated acceptance, is the subject of
+``test_offload_seal_timing``. The cases here are unchanged in substance: the
+protection is the same protection, and it is reached one step later.
+
 The claims here are made in BYTES wherever a leak is the thing being denied: a
 row read back through the archive's own API proves what the API returns, not
 what is in the file, and the file is what a deletion request and a stolen disk
@@ -181,7 +189,7 @@ class RedactionFixture(unittest.TestCase):
                     blob += handle.read()
         return blob
 
-    def persist(self, text: str, *, scope=None, alias: str = "O1"):
+    def persist(self, text: str, *, scope=None, alias: str = "O1", seal: bool = True):
         scope = scope or chatbot_scope()
         archive = RuntimeHandleArchive(self.sidecar)
         stored = archive.persist(
@@ -189,9 +197,28 @@ class RedactionFixture(unittest.TestCase):
             command_name="execute_workflow_query", step_index=1,
             text=text, text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
+        # ido-6sc: the turn is over by the time these cases look at the file,
+        # so seal it -- the same call a completing turn makes. On a revision
+        # before the seal existed this is a no-op and the row was already
+        # redacted at the write, which is what makes these cases runnable
+        # against both revisions.
+        if seal:
+            self.seal(scope, archive=archive)
         # A revision whose ``persist`` returns nothing still stored a row; read
         # it back so the byte-level claims below are about that revision too.
-        return archive, stored if stored is not None else archive.get(scope, alias)
+        row = archive.get(scope, alias)
+        return archive, row if row is not None else stored
+
+    def seal(self, scope=None, *, archive=None):
+        """Complete the turn: seal its stored evidence (ido-6sc).
+
+        A no-op on a revision that redacted at write time, so every case that
+        calls it states its claim about the same end state on both.
+        """
+        scope = scope or chatbot_scope()
+        target = archive or RuntimeHandleArchive(self.sidecar)
+        sealer = getattr(target, "seal_scope", None)
+        return None if sealer is None else sealer(scope)
 
 
 class DefaultIsOnTests(RedactionFixture):
@@ -222,6 +249,12 @@ class DefaultIsOnTests(RedactionFixture):
         with self.assertLogs(archive_module.logger, level="WARNING"):
             self.persist(response_with_credential())
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
+        # And the fallback reached the SEAL, not only the warning: a typo that
+        # left the row pending forever would leave the credential too.
+        record = capture_record(archive_module.RuntimeHandleArchive(self.sidecar),
+                                chatbot_scope(), "O1")
+        if record is not None and "seal_state" in record:
+            self.assertEqual(record["seal_state"], archive_module.SEAL_SEALED)
 
     @needs_the_toggle
     def test_the_operator_spellings_resolve(self) -> None:
@@ -238,7 +271,8 @@ class DefaultIsOnTests(RedactionFixture):
 class StoredBytesTests(RedactionFixture):
     """What is on disk, in both states, scanned as bytes."""
 
-    def test_a_credential_is_not_stored_verbatim_by_default(self) -> None:
+    def test_a_credential_is_not_left_in_the_file_by_default(self) -> None:
+        """Once the turn is over. Mid-turn is ``test_offload_seal_timing``."""
         self.plant_env_secret()
         text = response_with_credential()
         archive, stored = self.persist(text)
@@ -290,6 +324,13 @@ class CapturePolicyRecordTests(RedactionFixture):
     """An archive that can be asked about its own fidelity."""
 
     def test_the_policy_version_is_recorded_with_redaction_on(self) -> None:
+        """The record names the policy that produced the bytes now in the file.
+
+        Which, since ido-6sc, is the policy resolved at the SEAL rather than at
+        the write. Nothing about this assertion changes, and that is the
+        point: the seal re-records the version, the profile and ``redacted``
+        from the run that actually rewrote the bytes.
+        """
         self.plant_env_secret()
         archive, _ = self.persist(response_with_credential())
         record = capture_record(archive, chatbot_scope(), "O1")
@@ -319,7 +360,8 @@ class CapturePolicyRecordTests(RedactionFixture):
 
     def test_a_redacted_row_is_distinguishable_from_one_with_no_secret(self) -> None:
         """The requirement the version alone does not meet."""
-        archive, _ = self.persist(response_with_credential(), alias="O1")
+        archive, _ = self.persist(response_with_credential(), alias="O1",
+                                  seal=False)
         archive.persist(
             chatbot_scope(), alias="O2", offload_order=2,
             command_name="execute_workflow_query", step_index=2,
@@ -328,6 +370,8 @@ class CapturePolicyRecordTests(RedactionFixture):
                 innocent_response().encode("utf-8")
             ).hexdigest(),
         )
+        # One turn, two observations, one completion: the seal is per SCOPE.
+        self.seal(chatbot_scope(), archive=archive)
         leaky = capture_record(archive, chatbot_scope(), "O1")
         clean = capture_record(archive, chatbot_scope(), "O2")
         self.assertEqual(leaky["redaction"], clean["redaction"], REDACTION_ON)
@@ -370,19 +414,28 @@ class CapturePolicyRecordTests(RedactionFixture):
         self.assertIsNone(capture_record(archive, scope, "O404"))
 
     def test_the_record_describes_the_bytes_that_were_actually_kept(self) -> None:
-        """A second persist of the same alias does not rewrite either half."""
+        """A second persist of the same alias does not rewrite either half.
+
+        The row was written, and sealed, under redaction ``off``: its bytes are
+        verbatim by policy and nothing is owed. Turning the toggle on afterwards
+        and re-persisting the SAME text must not change either the bytes or the
+        record that describes them, because ``persist`` is insert-or-nothing and
+        a record that outran its bytes would describe a file that does not
+        exist. It is also not a collision -- it is the same observation -- so it
+        is accepted rather than refused.
+        """
         os.environ[REDACTION_ENV] = REDACTION_OFF
         archive, _ = self.persist(response_with_credential())
         os.environ[REDACTION_ENV] = REDACTION_ON
-        with self.assertRaises(PersistenceError):
-            archive.persist(
-                chatbot_scope(), alias="O1", offload_order=1,
-                command_name="execute_workflow_query", step_index=1,
-                text=response_with_credential(),
-                text_sha256=hashlib.sha256(
-                    response_with_credential().encode("utf-8")
-                ).hexdigest(),
-            )
+        again = archive.persist(
+            chatbot_scope(), alias="O1", offload_order=1,
+            command_name="execute_workflow_query", step_index=1,
+            text=response_with_credential(),
+            text_sha256=hashlib.sha256(
+                response_with_credential().encode("utf-8")
+            ).hexdigest(),
+        )
+        self.assertEqual(again["text"], response_with_credential())
         # The stored bytes are the first write's, so the record must still be
         # the first write's too, or it describes bytes that are not there.
         self.assertEqual(
@@ -391,6 +444,23 @@ class CapturePolicyRecordTests(RedactionFixture):
         self.assertEqual(
             capture_record(archive, chatbot_scope(), "O1")["redaction"], REDACTION_OFF
         )
+        # And sealing the scope now leaves it alone: nothing was ever owed.
+        self.seal(chatbot_scope(), archive=archive)
+        self.assertEqual(
+            archive.get(chatbot_scope(), "O1")["text"], response_with_credential()
+        )
+
+    def test_a_different_text_under_one_alias_is_still_a_collision(self) -> None:
+        """The refusal ``persist`` exists to make is not softened by the seal."""
+        archive, _ = self.persist(response_with_credential())
+        other = "an entirely different observation\n"
+        with self.assertRaises(PersistenceError):
+            archive.persist(
+                chatbot_scope(), alias="O1", offload_order=1,
+                command_name="execute_workflow_query", step_index=1,
+                text=other,
+                text_sha256=hashlib.sha256(other.encode("utf-8")).hexdigest(),
+            )
 
 
 class DigestMeaningTests(RedactionFixture):
@@ -407,6 +477,7 @@ class DigestMeaningTests(RedactionFixture):
             )
 
     def test_the_stored_digest_covers_the_stored_bytes(self) -> None:
+        """Whichever bytes those are: raw in flight, redacted once sealed."""
         self.plant_env_secret()
         archive, stored = self.persist(response_with_credential())
         self.assertEqual(
@@ -441,18 +512,22 @@ class DigestMeaningTests(RedactionFixture):
         # archiver rewrite every step at every step.
         self.assertEqual(archived[0]["text_sha256"], raw_digest)
         self.assertEqual(archived_digest(scope, "O1"), raw_digest)
-        # The archive's own digest covers what the archive kept.
+        # ido-6sc. While the turn is in flight the archive's own digest covers
+        # the raw bytes, because those are the bytes it holds -- so all three
+        # digests are one digest and the hot copy, the row and the agent's
+        # prompt agree.
+        self.assertEqual(archive.get(scope, "O1")["text_sha256"], raw_digest)
+        self.assertEqual(stored_handles(scope)["O1"]["text"], text)
+        self.seal(scope, archive=archive)
+        # And once the turn is over the archive's digest covers what the
+        # archive kept, while the idempotence key is still the raw digest.
         stored = archive.get(scope, "O1")
         self.assertNotEqual(stored["text_sha256"], raw_digest)
         self.assertEqual(
             stored["text_sha256"],
             hashlib.sha256(stored["text"].encode("utf-8")).hexdigest(),
         )
-        # And the hot cache holds what the archive kept, so one alias reads the
-        # same way whether it is served from memory or from SQLite.
-        hot = stored_handles(scope)["O1"]
-        self.assertEqual(hot["text"], stored["text"])
-        self.assertEqual(hot["text_sha256"], stored["text_sha256"])
+        self.assertEqual(archived_digest(scope, "O1"), raw_digest)
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
 
     def test_with_redaction_off_every_digest_is_the_same_digest(self) -> None:

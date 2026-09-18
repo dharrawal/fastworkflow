@@ -304,10 +304,16 @@ def archive_execute_observations(
         # from anything else would make the archiver rewrite every step at every
         # step. The hot cache keeps what the ARCHIVE KEPT, so that one alias
         # reads the same way whether ``search_memory`` is served from memory or
-        # from SQLite after an eviction -- which it would not if redaction were
-        # applied to only one of the two. With redaction off, and with it on for
-        # a response that held no secret, the two are the same bytes and this
-        # distinction costs nothing.
+        # from SQLite after an eviction.
+        #
+        # Since ido-6sc those are the SAME BYTES for the whole life of this
+        # turn, and that is the point rather than a coincidence: the archive
+        # stores the raw response and seals it only once the turn is over, so
+        # the hot copy, the row on disk and the observation still sitting in
+        # the agent's own prompt all agree while the agent can still read any
+        # of them. Reading ``stored`` rather than ``original`` is still the
+        # right call -- the archive is the authority on what it kept, and this
+        # line should not have to know when the seal happens.
         mark_archived(selected_scope, alias, text_sha256=digest, inline=True)
         remember_handle(
             selected_scope,
@@ -521,8 +527,9 @@ def compact_trajectory(
                 )
                 decisions.append(decision)
                 continue
-            # The hot cache holds what the archive kept, not what the command
-            # returned; see the note at the eager archiver above (ido-zlm).
+            # The hot cache holds what the archive kept, which for the whole
+            # life of this turn is what the command returned; see the note at
+            # the eager archiver above (ido-zlm, ido-6sc).
             remember_handle(
                 selected_scope,
                 {
