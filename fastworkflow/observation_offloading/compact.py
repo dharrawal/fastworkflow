@@ -277,7 +277,7 @@ def archive_execute_observations(
         if isinstance(args, Mapping):
             command = str(args.get("command") or "")
         try:
-            store.persist(
+            stored = store.persist(
                 selected_scope,
                 alias=alias,
                 offload_order=ordinal,
@@ -298,13 +298,23 @@ def archive_execute_observations(
                 }
             )
             continue
+        # Two digests, two meanings, and neither is the other (ido-zlm).
+        # ``mark_archived`` keeps the digest of what the COMMAND RETURNED: it is
+        # the key that says "this text is already written", and computing it
+        # from anything else would make the archiver rewrite every step at every
+        # step. The hot cache keeps what the ARCHIVE KEPT, so that one alias
+        # reads the same way whether ``search_memory`` is served from memory or
+        # from SQLite after an eviction -- which it would not if redaction were
+        # applied to only one of the two. With redaction off, and with it on for
+        # a response that held no secret, the two are the same bytes and this
+        # distinction costs nothing.
         mark_archived(selected_scope, alias, text_sha256=digest, inline=True)
         remember_handle(
             selected_scope,
             {
                 "alias": alias,
-                "text": original,
-                "text_sha256": digest,
+                "text": stored["text"],
+                "text_sha256": stored["text_sha256"],
                 "command": command,
                 "step_index": step_index,
                 "offload_order": ordinal,
@@ -488,7 +498,7 @@ def compact_trajectory(
             digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
             packed_utf8_bytes_before = len(packed_text.encode("utf-8"))
             try:
-                store.persist(
+                stored = store.persist(
                     selected_scope,
                     alias=alias,
                     offload_order=ordinal,
@@ -511,12 +521,14 @@ def compact_trajectory(
                 )
                 decisions.append(decision)
                 continue
+            # The hot cache holds what the archive kept, not what the command
+            # returned; see the note at the eager archiver above (ido-zlm).
             remember_handle(
                 selected_scope,
                 {
                     "alias": alias,
-                    "text": original,
-                    "text_sha256": digest,
+                    "text": stored["text"],
+                    "text_sha256": stored["text_sha256"],
                     "command": command,
                     "step_index": step_index,
                     "offload_order": ordinal,

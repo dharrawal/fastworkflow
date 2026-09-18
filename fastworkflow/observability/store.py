@@ -477,6 +477,12 @@ POLICY_PATH_SPAN_CONTEXT = "span.context"
 POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
 POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
+# (ido-zlm) The sixth surface, and the only one that is not a column of this
+# database: the RAW command response the offload evidence sidecar persists.
+# `observation_offloading.archive` writes it to a file beside this one, so it
+# escaped both protections entirely -- a credential in a command response was
+# stored verbatim where the same text inside a span attribute was scrubbed.
+POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
 
 
 def _protected_text(
@@ -727,6 +733,12 @@ POLICY_PATH_SPAN_CONTEXT = "span.context"
 POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
 POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
+# (ido-zlm) The sixth surface, and the only one that is not a column of this
+# database: the RAW command response the offload evidence sidecar persists.
+# `observation_offloading.archive` writes it to a file beside this one, so it
+# escaped both protections entirely -- a credential in a command response was
+# stored verbatim where the same text inside a span attribute was scrubbed.
+POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
 
 
 def _protected_text(
@@ -766,6 +778,40 @@ def _protected_text(
     if capture_policy_module.is_capture_envelope(captured):
         return json.dumps(captured, ensure_ascii=False)
     return captured
+
+
+def protect_offload_observation(text: str) -> str:
+    """Scrub-then-police one raw command response bound for the evidence sidecar.
+
+    (ido-zlm) The sidecar is not a table of this database, so it cannot ride the
+    TurnResult pipeline. What it can do -- and what this function exists for --
+    is call the SAME two protections in the SAME order as every other policed
+    surface, instead of growing a second redactor that drifts from this one.
+    `observation_offloading.archive.persist` passes the response text through
+    here and stores whatever comes back.
+
+    `opaque-payload`, for the reason `failure_reason` carries that
+    classification: a command response is whatever a workflow's command chose to
+    return, so nobody can say what is inside it. Under the `debug` profile --
+    the default, and what every evaluation run to date was captured under --
+    that classification has no effect and this is the credential scrub alone,
+    which is exactly the protection a span attribute already had. Under
+    `evidence` it withholds the response behind a badge; a deployment that wants
+    default-deny spans and full-fidelity observations spells
+    `POLICY_PATH_OFFLOAD_OBSERVATION` in a `CaptureFieldPolicy`, which is what
+    these path constants exist for.
+
+    Returns TEXT, always, like `_protected_text`: the sidecar stores UTF-8 bytes,
+    and a withheld response is stored as its serialized badge -- size, digest and
+    class -- never as silence.
+    """
+    return _protected_text(
+        text,
+        redactor=Redactor(),
+        policy=resolve_capture_policy(),
+        field_path=POLICY_PATH_OFFLOAD_OBSERVATION,
+        classification="opaque-payload",
+    )
 
 
 class IncompatibleObservabilityDB(RuntimeError):

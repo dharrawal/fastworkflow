@@ -778,8 +778,15 @@ def test_every_declared_policy_path_is_reachable_from_a_write_site():
         obs.POLICY_PATH_CONVERSATION_TOPIC,
         obs.POLICY_PATH_CONVERSATION_SUMMARY,
         obs.POLICY_PATH_TRAIN_METRICS,
+        # ido-zlm. The sixth surface is not a column of this database at all:
+        # the offload evidence sidecar's raw command response, written by
+        # `observation_offloading.archive.persist` through
+        # `protect_offload_observation`. It is listed here for the same reason
+        # as the other five -- a deployment re-admitting it under the evidence
+        # profile has to be able to spell the path.
+        obs.POLICY_PATH_OFFLOAD_OBSERVATION,
     }
-    assert len(paths) == 6
+    assert len(paths) == 7
     # The turn-column paths `_policed_column` builds must not collide with them.
     turn_paths = {f"turn.{column}" for column, _ in obs._POLICED_TURN_COLUMNS}
     assert not paths & turn_paths

@@ -66,6 +66,12 @@ KNOWN_EVIDENCE_TABLES = {
     # their names -- which is exactly the property this constant checks.
     "observation_subjects": "recorded_at",
     "observation_context_entries": "recorded_at",
+    # ido-zlm. The fidelity record of each archived observation: which capture
+    # policy produced its stored bytes, and whether they were redacted. It
+    # names its channel like every other evidence row, so it is discovered
+    # structurally and goes with the channel -- a record of what was kept must
+    # not outlive what it describes.
+    "observation_capture_policy": "recorded_at",
 }
 
 needs_erasure_module = unittest.skipIf(

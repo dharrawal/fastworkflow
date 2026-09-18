@@ -25,15 +25,52 @@ age/size retention never reached the file.
    file, which is the other place a turn's text lands.
 3. *Evidence preservation is explicit, and it is ON for experiment runs.* See
    below. Retention and erasure are both refused for a preserved scope.
-4. *Sensitive data.* The sidecar writes RAW response bytes: it does not pass
-   through the trace sink's credential and capture-policy pipeline, so a
-   credential in a command response is stored verbatim where the same text in a
-   span would have been redacted. That gap is deliberately NOT closed here and
-   is a separate, scoped follow-up, because redaction at this boundary is a
-   capture decision with an evidence cost -- a redacted archive no longer
-   reproduces the observation the agent actually reasoned over, which is what
-   this file exists to hold. What this module changes is that such a leak is
-   now erasable and time-bounded instead of permanent.
+4. *Sensitive data: redaction is a toggle, and it is ON by default.* The
+   sidecar's response bytes now pass through the trace sink's own credential
+   scrub and capture policy on their way to disk -- the same two protections,
+   called in the same order, by way of
+   ``observability.store.protect_offload_observation`` rather than by a second
+   implementation that would drift from the first (``ido-zlm``). The toggle is
+   ``FW_OFFLOAD_EVIDENCE_REDACTION``: ``on`` (the DEFAULT, and what an
+   unconfigured deployment gets) or ``off``, with an unrecognised value warned
+   about and treated as the default, exactly as the preservation mode below is.
+   The mechanism lives in ``observation_offloading.archive``; the policy is
+   written here so it is read together with the retention above.
+
+   Both states are first-class and neither is degraded:
+
+   * DEVELOPERS turn it ``off`` for debugging and optimisation. The archive's
+     reason for existing is to reproduce exactly what the agent read, and a
+     redacted archive no longer does. Full fidelity is a legitimate posture for
+     a development environment and is not a misconfiguration.
+   * DEVOPS leave it ``on`` in production, so a credential that appears in a
+     command response is not written verbatim to disk where the same text in a
+     span would have been scrubbed.
+   * The DEFAULT is ``on`` because the two mistakes are not symmetric. A wrong
+     default in this direction costs archive fidelity, which re-running
+     recovers; the other direction writes a credential to disk, which nothing
+     recovers.
+
+   Every archived observation records which mode produced it, in
+   ``observation_capture_policy``: the capture-policy contract version, the
+   profile consulted, the toggle state, and whether the stored bytes actually
+   DIFFER from what the command returned. The last of those is what lets a
+   reader tell a redacted row from one that never contained a secret. That
+   table is scope-keyed like every other, so it is discovered structurally and
+   erased with its channel, and a row written before it existed has no entry
+   and reads as UNKNOWN -- never as an assumption of full fidelity.
+
+   Two things the toggle does NOT change. It does not change ERASABILITY: this
+   module removes a redacted row and a verbatim one alike, so the toggle
+   governs how long a secret is exposed, not whether it can be removed.
+   And it does not protect what leaves this process by another route -- the
+   agent's own prompt, and the observation-search call, still carry the text the
+   command returned.
+
+   Encryption at rest is explicitly OUT of scope and deferred. It is the control
+   that protects a secret WITHOUT costing evidence fidelity, so it may later
+   reduce how often redaction needs to be on; nothing here is designed around
+   it.
 
 **The preservation mode.** ``RuntimeHandleScope.experiment_id`` is the signal.
 ``scope_for_host`` sets it from the experiment claim bound to the session and
