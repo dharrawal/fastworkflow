@@ -130,17 +130,32 @@ MAX_CURSOR_PAGE = 999_999
 #: pages - but narrow enough that int() on the match is always cheap and always
 #: fits a SQLite INTEGER.
 MAX_CURSOR_PAGE_DIGITS = 12
+#: (ido-bdo) Digits of the HANDLE ordinal a token may name, and of the alias a
+#: declaration may be filed under: the two are one pattern, so a token can name
+#: every alias ``declare`` can create and nothing else. F22 capped the page
+#: ordinal and left this group open. It never crashed -- an alias is only ever a
+#: string lookup, with no ``int()`` to overflow -- but a 5,000-digit alias still
+#: reached the store and the "no page token has been issued for ..." message it
+#: builds, so it is capped for symmetry. An ``O`` is an execute ordinal in one
+#: turn; nine digits is past any turn that has ever run.
+MAX_ALIAS_DIGITS = 9
+#: (ido-h0c, F28) Digits of a traversal tag. ``cursor_tag`` hands out ``f1``,
+#: ``f2``, ... per distinct filter on one handle in one turn and never stopped
+#: at three digits, so a handle filtered a thousand times printed ``f1000`` in
+#: its own next_cursor and then refused to parse it. Six digits is past any
+#: turn, and the tag is a string lookup, so no numeric bound is owed.
+MAX_TAG_DIGITS = 6
 _CURSOR_TOKEN_RE = re.compile(
-    r"^(?P<alias>[OD][1-9]\d*)/(?P<tag>[a-z]\d{1,3})?p(?P<page>[1-9]\d{0,%d})$"
-    % (MAX_CURSOR_PAGE_DIGITS - 1),
+    r"^(?P<alias>[OD][1-9]\d{0,%d})/(?P<tag>[a-z]\d{1,%d})?p(?P<page>[1-9]\d{0,%d})$"
+    % (MAX_ALIAS_DIGITS - 1, MAX_TAG_DIGITS, MAX_CURSOR_PAGE_DIGITS - 1),
     re.IGNORECASE,
 )
 #: The same shape with an ordinal too long for the pattern above, so a token
 #: whose only fault is an absurd page number is refused for THAT, rather than
 #: falling through to "this is not a page token".
 _CURSOR_TOKEN_OVERLONG_RE = re.compile(
-    r"^[OD][1-9]\d*/(?:[a-z]\d{1,3})?p(?P<page>[1-9]\d{%d,})$"
-    % MAX_CURSOR_PAGE_DIGITS,
+    r"^[OD][1-9]\d{0,%d}/(?:[a-z]\d{1,%d})?p(?P<page>[1-9]\d{%d,})$"
+    % (MAX_ALIAS_DIGITS - 1, MAX_TAG_DIGITS, MAX_CURSOR_PAGE_DIGITS),
     re.IGNORECASE,
 )
 #: Quoting and punctuation a model wraps a copied value in.
@@ -180,12 +195,45 @@ WILDCARD_CHARACTERS = "%_*"
 _SPACE_LIKE = {0x00A0: " ", 0x2007: " ", 0x202F: " ", 0x2009: " ", 0x2011: "-"}
 _ZERO_WIDTH = re.compile(r"[​‌‍﻿]")
 
-_ALIAS_RE = re.compile(r"^(?:O[1-9]\d*|D[1-9]\d*)$")
+#: (ido-h0c, F28) What an alias may be, ENFORCED by ``declare``. It was dead
+#: code: ``declare(alias="handle-x")`` was accepted, page 1 served and printed
+#: ``handle-x/p2`` as its own next_cursor, and that token could never parse,
+#: so the listing was unpageable and said so only on the second call. It is the
+#: same shape ``_CURSOR_TOKEN_RE`` accepts -- an ``O`` execute ordinal or the
+#: ``D`` key used where there is no agent step -- so an alias that declares is
+#: an alias a token can name.
+_ALIAS_RE = re.compile(r"^[OD][1-9]\d{0,%d}$" % (MAX_ALIAS_DIGITS - 1))
 
 #: How the producer renders a row: `uid` then two spaces then the label. Kept
 #: identical to the listing text the command returned, because a filter has to
 #: be able to find "Alan Cooper" in the row the agent was shown.
 ROW_SEPARATOR = "  "
+
+#: (ido-56z, F26) Characters that would end the line a row is rendered on. A
+#: row is user text by contract, and a page observation is a header line
+#: followed by one line per row: a label carrying a newline is therefore not a
+#: long row, it is a second line the reader has no way to tell from a header
+#: this module wrote. The observed case printed
+#: ``result_handle=O1 page 1 ... outcome=rows`` out of a backend label. They are
+#: escaped rather than stripped, because the bytes a source returned are
+#: evidence and deleting them would invent a shorter label.
+_LINE_BREAK_ESCAPES = {
+    "\n": "\\n",
+    "\r": "\\r",
+    "\v": "\\v",
+    "\f": "\\f",
+    "\x85": "\\x85",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
+_LINE_BREAK_RE = re.compile("[%s]" % "".join(_LINE_BREAK_ESCAPES))
+
+
+def one_line(text: Any) -> str:
+    """*text* as a single line: every line break spelled, none removed."""
+    return _LINE_BREAK_RE.sub(
+        lambda match: _LINE_BREAK_ESCAPES[match.group(0)], str(text)
+    )
 
 
 class ResultHandleError(RuntimeError):
@@ -708,6 +756,18 @@ class ResultHandleStore:
         and the read-back is the value returned, so a retry of the same offset
         can never produce a second row or a different answer than the first
         attempt already recorded.
+
+        (ido-h0c, F28) ``row_count`` is the count of the RECORDS the page
+        carries -- see ``_stored_row_count``. Reading it off ``rows`` alone made
+        the column read 0 for every producer page ever written, because a
+        producer files its rendered lines under ``records`` and leaves ``rows``
+        empty. Rows written before that fix keep their 0 and are not rewritten:
+        this is an append-only table and a stored page is evidence. A reader
+        that spans the change therefore sees 0 on old producer pages and the
+        real count on new ones, and the way to tell them apart is that
+        ``record_json`` was always right -- ``len(record["records"] or
+        record["rows"])`` is the count for a page of either vintage, and is what
+        a reader wanting one number across the boundary should use.
         """
         payload = _canonical_json(dict(record))
         digest = _digest(payload)
@@ -729,7 +789,7 @@ class ResultHandleStore:
                     int(start_offset),
                     int(limit_requested),
                     source,
-                    int(len(record.get("rows") or [])),
+                    _stored_row_count(record),
                     None if backend_total is None else int(backend_total),
                     payload,
                     digest,
@@ -1129,8 +1189,30 @@ def hot_rows_max_bytes_from_env() -> int:
 
 
 def page_max_bytes_from_env() -> int:
-    """The page-observation budget for this run. See ``fastworkflow.context_budget``."""
-    return context_budget.result_page_max_bytes()
+    """The page-observation budget for this run. See ``fastworkflow.context_budget``.
+
+    (ido-h0c, F28) Bounded at both ends here. ``context_budget`` refuses an
+    override below the budget's floor and accepts anything at all above it, so
+    ``FW_RESULT_PAGE_MAX_BYTES=99999999999999999999999`` was taken at its word
+    and a page would be packed until the rows ran out. One page observation
+    cannot usefully be larger than the whole prompt it has to fit in, so the
+    ceiling is the resolved context window in bytes: an override past it is a
+    typo, is warned about, and the ceiling stands. This bounds the budget this
+    module reads; an explicit ``budget_bytes=`` argument is a caller measuring
+    its own observation and is left alone.
+    """
+    budget = context_budget.result_page_max_bytes()
+    ceiling = (
+        int(context_budget.context_window_tokens()[0])
+        * context_budget.BYTES_PER_TOKEN
+    )
+    if budget > ceiling:
+        logger.warning(
+            "%s=%d is larger than the whole %d-byte context window; using %d",
+            RESULT_PAGE_MAX_BYTES_ENV, budget, ceiling, ceiling,
+        )
+        return ceiling
+    return budget
 
 
 def store() -> ResultHandleStore:
@@ -1805,9 +1887,43 @@ def _uid_of_line(line: str) -> str:
 def _records_from_items(items: Iterable[str]) -> list[dict[str, Any]]:
     records = []
     for line in items:
-        text = str(line)
+        # (ido-56z, F26) One item is one row, so a producer item that carries a
+        # newline is flattened here rather than becoming two lines of a page.
+        text = one_line(line)
         records.append({"uid": _uid_of_line(text), "line": text, "row": None})
     return records
+
+
+def _stored_row_count(record: Mapping[str, Any]) -> int:
+    """How many rows one stored page carries. (ido-h0c, F28)
+
+    ``records`` is the rendered sequence a page is served from and is what every
+    reader of a page means by its rows; ``rows`` is the backend's raw reply and
+    a producer has none. They are the same length whenever both are present --
+    ``records`` is one ``_render_row`` per row -- so this is the count of the
+    page for a producer page and for a resolver page alike.
+    """
+    return len(record.get("records") or record.get("rows") or [])
+
+
+def _dedupe_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Distinct uids in first-seen order. (ido-h0c, F28)
+
+    The same rule ``_walk_records`` and ``_extend_walk`` apply when they read a
+    stored page back, stated once and applied where a listing is first stored,
+    so a declaration's ``materialized`` and its pages' ``matched`` are counts of
+    the same rows. A row with no uid is never a duplicate of anything: there is
+    nothing to compare it on.
+    """
+    seen: set[str] = set()
+    distinct: list[dict[str, Any]] = []
+    for record in records:
+        uid = str(record["uid"])
+        if uid and uid in seen:
+            continue
+        seen.add(uid)
+        distinct.append(dict(record))
+    return distinct
 
 
 def _record_of(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -1928,6 +2044,13 @@ def _pack(page: "ResultPage", *, budget_bytes: int) -> tuple[list[str], bool]:
     This is the ONLY place that decides how many rows a page shows. The cursor
     is computed from its answer and the text is assembled from the same list, so
     a header that grows after packing can never silently swallow a row.
+
+    (ido-56z, F26) The overage is measured on the OBSERVATION, not on the rows.
+    Gating it on there being rows made a page with none of them unable to report
+    an overage it certainly had: a zero-row page carrying a 200 KB filter
+    literal in its header rendered 400,382 bytes against a 3,072-byte budget
+    with ``warnings=[]``. Everything above the rows costs the prompt exactly
+    what a row costs it.
     """
     fixed = _fixed_lines(page)
     overhead = sum(len(line.encode("utf-8")) + 1 for line in fixed)
@@ -1940,7 +2063,7 @@ def _pack(page: "ResultPage", *, budget_bytes: int) -> tuple[list[str], bool]:
             break
         shown.append(line)
         used += cost
-    return shown, bool(shown) and overhead + used > budget_bytes
+    return shown, overhead + used > budget_bytes
 
 
 def _assemble(
@@ -1992,8 +2115,39 @@ def declare(
             else SourceDescriptor.from_mapping(source)
         )
     selected_scope = scope or current_scope()
-    items = [str(item) for item in (spec.items or ())]
     handle = alias or current_execute_alias() or _local_alias(selected_scope)
+    if not _ALIAS_RE.match(str(handle)):
+        # (ido-h0c, F28) A programming error in the opting-in workflow, raised
+        # like a malformed spec: an alias a page token cannot name is a listing
+        # whose second page can never be asked for, and finding that out on the
+        # second fetch is worse than finding it out here.
+        raise ResultHandleError(
+            "%r is not a usable result handle alias. A handle is the O alias of "
+            "the execute step that declared it (O1, O2, ...), or a D key where "
+            "there is no agent step; a page token names the handle literally, "
+            "so an alias of any other shape has no second page." % (str(handle)[:40],)
+        )
+    # (ido-h0c, F28) One uid is one row. The walk keeps distinct uids in
+    # first-seen order, so a producer that filed the same uid twice had its
+    # duplicate dropped on the way back out and the declaration went on
+    # advertising a count no page of it could ever show -- declare said
+    # materialized=6 where every page said 3. Deduplicated HERE instead, once,
+    # so the number the declaration reports is the number the rows amount to.
+    # ``total`` is untouched: that is the producer's claim about the relation,
+    # not about what it filed.
+    declared_items = [str(item) for item in (spec.items or ())]
+    records = _dedupe_records(_records_from_items(declared_items))
+    items = [str(record["line"]) for record in records]
+    if len(items) != len(declared_items):
+        record_event(
+            {
+                "kind": "result_handle_duplicate_items_dropped",
+                "scope_id": selected_scope.scope_id,
+                "alias": handle,
+                "declared": len(declared_items),
+                "distinct": len(items),
+            }
+        )
     descriptor_payload = descriptor.as_dict() if descriptor is not None else {}
     descriptor_sha256 = _digest(_canonical_json(descriptor_payload))
     payload = {
@@ -2021,9 +2175,7 @@ def declare(
         # walk's first offset would be read back as the empty page that ends a
         # walk, and the walk would stop before it started.
         start_offset = int(descriptor.start_offset) if descriptor else 0
-        producer_record = (
-            {"rows": [], "records": _records_from_items(items)} if items else None
-        )
+        producer_record = {"rows": [], "records": records} if records else None
         # (ido-ecd, F19) Digested here, before anything is written, because it
         # is half of the identity `put_declaration` refuses a redeclaration on.
         # It is the digest of the bytes `put_page` would store, so it compares
@@ -2257,7 +2409,63 @@ def _coerce_rows(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "row %d is %s, not a mapping" % (index, type(row).__name__)
             )
         rows.append(dict(row))
+        unstorable = _unstorable_value(rows[-1])
+        if unstorable is not None:
+            # (ido-bdo) Refused on the spot, with the rest of this reply. A page
+            # is the stored evidence of what the source returned, and
+            # ``_canonical_json`` serialises with ``default=str``: a value with
+            # no string form of its own therefore stored as its MEMORY ADDRESS,
+            # so the same query stored a different page - a different
+            # record_sha256 - on every call. Nothing about that is repairable
+            # here, and it used to surface as the walk being unable to make
+            # progress: the row was stored, its uid deduplicated against the
+            # identical one from the previous offset, the walk advanced without
+            # growing, and the fetch spent its whole shared resolver-call purse
+            # before giving up with ``resolver_call_limit``. Eight calls to say
+            # what the first reply already said.
+            raise MalformedResolverResponse(
+                "row %d field %r is a %s with no value a stored page could "
+                "keep: it has no string form of its own, so it would be "
+                "recorded as its memory address"
+                % (index, unstorable[0], type(unstorable[1]).__name__)
+            )
     return rows
+
+
+#: How deep into a row's own containers the check below looks. A row is one
+#: record of a relation, not a document; past this it is opaque either way.
+_UNSTORABLE_SCAN_DEPTH = 6
+
+
+def _unstorable_value(
+    row: Mapping[str, Any], depth: int = _UNSTORABLE_SCAN_DEPTH
+) -> Optional[tuple[str, Any]]:
+    """The first field of *row* holding a value only its address could name.
+
+    (ido-bdo) Narrow on purpose. It is not "JSON cannot take this": a
+    ``datetime``, a ``Decimal`` and a ``UUID`` all serialise through
+    ``default=str`` to the value they mean, and a resolver returning one has
+    returned data. What is refused is the value that falls back to
+    ``object.__repr__`` -- ``<object object at 0x7f...>`` -- which is not the
+    row's content, is different in the next process, and makes an immutable
+    page unreproducible.
+    """
+    for name, value in row.items():
+        if _is_addressless(value, depth):
+            return str(name), value
+    return None
+
+
+def _is_addressless(value: Any, depth: int) -> bool:
+    if value is None or isinstance(value, (str, bytes, bool, int, float)):
+        return False
+    if depth > 0:
+        if isinstance(value, Mapping):
+            return any(_is_addressless(item, depth - 1) for item in value.values())
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(_is_addressless(item, depth - 1) for item in value)
+    kind = type(value)
+    return kind.__str__ is object.__str__ and kind.__repr__ is object.__repr__
 
 
 def _coerce_row_count(value: Any, field: str) -> Optional[int]:
@@ -2282,12 +2490,16 @@ def _render_row(row: Mapping[str, Any], descriptor: Mapping[str, Any]) -> dict[s
     uid_field = str(descriptor.get("uid_field") or "")
     if not uid_field:
         uid_field = next(iter(row), "")
-    uid = "" if uid_field not in row else str(row.get(uid_field) or "")
+    # (ido-56z, F26) Escaped as they are read out of the row, so the record the
+    # walk keeps and the line the page prints are the same single line. The row
+    # itself is stored verbatim in ``record_json``: this changes how a label is
+    # SHOWN, never what the source is recorded as having returned.
+    uid = "" if uid_field not in row else one_line(row.get(uid_field) or "")
     label = ""
     for field_name in descriptor.get("label_fields") or ():
         value = row.get(field_name)
         if value not in (None, ""):
-            label = str(value)
+            label = one_line(value)
             break
     line = (uid + ROW_SEPARATOR + label) if label else uid
     return {"uid": uid, "line": line, "row": dict(row)}
@@ -2829,6 +3041,37 @@ def fetch_page(
     descriptor = declaration["descriptor"] or {}
     filter_columns = tuple(descriptor.get("filter_columns") or ())
     descriptor_sha256 = declaration["descriptor_sha256"]
+    # (ido-56z, F26) A filter that normalisation empties is refused HERE, before
+    # a plan is chosen. ``contains="%"`` and ``contains="   "`` both strip to
+    # nothing, and an empty literal has an empty ``scope``, so the call fell
+    # through to the unfiltered enumeration and printed a page with no
+    # ``filter=`` in its header at all: the agent asked a question, got every
+    # row of the listing, and nothing on the page said its filter had been
+    # dropped. Refused rather than repaired -- there is no literal to guess at.
+    # It never ran, so it is never tagged, never stored and never a page of a
+    # traversal: ``_unsupported_page`` files no page declaration, which is what
+    # keeps it out of the zero-match echo marker (``page_matched_nothing``).
+    if contains is not None and str(contains) != "" and not literal.text:
+        return _unsupported_page(
+            declaration=declaration,
+            literal=literal,
+            materialized=int(declaration["materialized"]),
+            total=int(declaration["total"]),
+            budget_bytes=budget_bytes,
+            scope=selected_scope,
+            store_=store_,
+            reason="empty_filter_literal",
+            message=(
+                "contains=%r leaves no literal to match: after normalisation "
+                "and the removal of the characters the backend treats as LIKE "
+                "wildcards there is nothing left of it. This filter was NOT "
+                "run, so no rows are shown and none is a zero. Pass a "
+                "literal with at least one character the backend can "
+                "match, or omit contains to page the listing."
+                % (str(contains)[:60],)
+            ),
+            notes=literal.notes,
+        )
     position = 0
     if cursor:
         position = _check_cursor(
@@ -2868,6 +3111,7 @@ def fetch_page(
                 reason=("no_verified_filter_columns" if descriptor
                         else "producer_materialized_subset"),
                 message=(
+                    "Filtering is unsupported for this handle. "
                     "This handle holds %d of %d rows and has no verified "
                     "filterable columns for this view, so a filter over it could "
                     "not speak for the whole relation. Page it, or re-run the "
@@ -3129,6 +3373,7 @@ def _unsupported_page(
     store_: ResultHandleStore,
     reason: str,
     message: str,
+    notes: Sequence[str] = (),
 ) -> ResultPage:
     page = ResultPage(
         handle=declaration["alias"],
@@ -3149,7 +3394,7 @@ def _unsupported_page(
         parent_alias=declaration["alias"],
         page_alias=current_execute_alias(),
         literal=literal.text or None,
-        notes=(("Filtering is unsupported for this handle. " + message),),
+        notes=(message,) + tuple(notes),
     )
     budget = budget_bytes or page_max_bytes_from_env()
     shown, over_budget = _pack(page, budget_bytes=budget)
