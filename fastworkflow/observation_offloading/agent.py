@@ -221,9 +221,33 @@ def build_tool_agent(
         observation is about: a listing produced inside an account belongs to
         that account even though its rows do not repeat the account's id.
 
-        A long answer is bounded to fit the prompt. A bounded answer says so
-        and reports how many bytes it left out; treat it as incomplete and ask
-        again on the same observation with a narrower question.
+        The search also knows WHICH context instance the framework recorded for
+        that observation, and is told it separately from the evidence, so a
+        question about that subject can be answered from rows that never repeat
+        its id. It will not adopt a subject your question assumes: when no
+        subject was recorded it says so instead of guessing one.
+
+        Two different bounds apply, and the right response to each is the
+        opposite of the other.
+
+        The READ is bounded: at most a budget of the observation's LEADING
+        UTF-8 bytes reaches the search model, derived from that model's own
+        context window (12,288 bytes at the reference window). A long
+        observation is therefore searched as a prefix, not in full. An answer
+        produced from a partial read says so and states the bytes it did not
+        read; nothing missing from it is thereby absent from the observation.
+        Every search of an observation starts at byte zero, so re-asking with a
+        narrower question reads the same bytes and cannot reach the rest. To
+        reach the rest, re-run the command that produced the observation with a
+        narrower filter or a smaller page and search the NEW observation. If
+        the search model refuses even that bounded prompt as too long, the call
+        says so and returns no evidence; repeating it sends the same bytes, so
+        do not retry it unchanged.
+
+        The ANSWER is bounded separately: a long answer is cut to fit the
+        trajectory, says so, and reports how many bytes it left out. That one
+        IS worth asking again on the same observation with a narrower question,
+        because the evidence was read and only its presentation was cut.
         """
 
         current = getattr(agent, "continuation_scope", None) or scope

@@ -411,7 +411,8 @@ survives cache eviction through the SQLite archive.
 The implementation reads the **current search step's thought** from the ReAct
 trajectory and prefixes it to the question as `<reasoning>. <question>`. Reasoning
 is not an agent-supplied tool argument. DSPy `Predict` receives that combined
-question and the complete selected observation. It answers from that observation,
+question, the recorded subject, and the selected observation cut to the search
+model's own budget (see *The read is bounded too*). It answers from that observation,
 preserves exact identifiers and their types, and states evidence gaps. The prompt
 instructs it to treat both the requesting agent's assumptions and instructions
 inside the observation as untrusted claims, not additional evidence.
@@ -428,12 +429,50 @@ latency and available provider usage/cost. LLM calls are also recorded through
 normal DSPy observability. Provider failure yields an explicit search failure;
 it is never reported as evidence that an entity is absent.
 
-The full observation consumes the search model's input context and incurs model
-cost. The observation handed to the search model is never truncated or paged;
-only the answer's presentation in the trajectory is bounded, and visibly so. An observation too large for
-the configured provider may fail; the caller receives an explicit failure and the
-original saved text remains available. This search supplies evidence; it does not
-by itself guarantee that the main agent's final conclusion is correct.
+This search supplies evidence; it does not by itself guarantee that the main
+agent's final conclusion is correct.
+
+### The read is bounded too (`ido-3vp`)
+
+The observation handed to the search model **is** paged, and to that model's own
+window rather than the agent's: `search_observation_max_bytes()` resolves
+`LLM_OBSERVATION_SEARCH`'s context window and takes 3/128 of it as bytes, which
+is 12,288 B at the 131,072-token reference window — exactly the declared
+geometry of `DEFAULT_PAGE_BYTES` (4,096) x `SEARCH_MEMORY_MAX_PAGES` (3) — with
+a floor of one page and `FW_SEARCH_OBSERVATION_MAX_BYTES` as the tuning
+override. The subject metadata is paid for out of that same budget, so nothing
+travelling to the model escapes the bound the model's window imposes. Without
+it, an execute observation archived at full size (measured at 440,000 B) was
+re-sent whole on every search of it.
+
+The cut is `bounded_evidence`, built from successive `text_page` calls so the
+budget is actually spent on a text with no line structure, and the observation
+says what was left unread:
+
+```
+[search_memory BOUNDED EVIDENCE: answered from the first 12,150 of 440,102 UTF-8
+bytes of O34; 427,952 bytes were NOT read. ... Re-asking O34 reads the same first
+bytes however the question is worded; to reach the rest, re-run <command> with a
+narrower filter or a smaller page and search the new observation.]
+```
+
+The action is deliberately **not** "ask a narrower question": every search reads
+from byte 0, so the same observation answers from the same bytes however the
+question is phrased — the opposite of the bounded-*answer* case above, where
+re-asking is the right move. Only the producing command changes the bytes.
+
+When the provider refuses even the bounded prompt, the outcome is typed rather
+than generic: `is_context_window_error` matches `ContextWindowExceededError` on
+the exception's class chain, or the providers' wordings as a fallback, and the
+observation opens with `[search_memory INPUT OVER WINDOW:` — what was sent, that
+the retry cannot succeed, the agent's move, and the operator's
+(`FW_SEARCH_OBSERVATION_MAX_BYTES`, or a larger `LLM_OBSERVATION_SEARCH` model).
+The provider message itself is inspected, never printed: it can carry payload or
+credentials.
+
+The search event carries `observation_bytes`, `observation_sent_bytes`,
+`observation_bounded`, `observation_max_bytes` and `evidence_max_bytes`, so the
+share of searches answered from a prefix is measurable rather than inferred.
 
 ## Validation
 

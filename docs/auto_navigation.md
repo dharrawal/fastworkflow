@@ -51,6 +51,38 @@ the 86 misroutes ido-8ps.6.1 counted would have been "fixed" by exactly such an
 inference — which is the reason it is forbidden rather than the reason to allow
 it.
 
+### Which token is the command name (`ido-y12`)
+
+"A known command name" means one token, and always the same one: the first
+whitespace-delimited token of the utterance, cut again at a `(` and lowercased —
+`command.split(" ", 1)[0].split("(", 1)[0].lower()` in
+`intent_detection.py`. That token is looked up first in this context's own
+candidate set (the pre-existing exact-name layer, unchanged) and then, only at
+the `INTENT_DETECTION` stage, in `command_inventory()`, which is every context's
+names including root's. A non-empty owner list that does not include this
+context is the R1 condition.
+
+Two consequences an author of a command name should know:
+
+* **Only the opening token is examined.** A command name further along the
+  sentence is invisible to R1 and to this mechanism; nothing is scanned for.
+* **A single-word command name costs free text.** If any context owns
+  `calculate`, then `calculate the total for March` typed in a context that
+  does not own it is refused at intent detection — deterministically, before
+  fuzzy matching, the embedding cache or the classifier. The parent walk
+  carries it to the owner (a root `*` name is always reachable), whose
+  exact-name matcher strips the token and hands the remainder to parameter
+  extraction as that command's arguments. For a real invocation that is exactly
+  the intended routing; for prose that happens to start with the word it is a
+  misread, and the classifier that would previously have caught it does not
+  run.
+
+Multi-word `snake_case` names cannot open an English sentence, so they cannot
+collide: `list_permissions`, `fetch_result_page`, `get_holder_details`. Prefer
+them. The shipped examples (`calculate` in the retail workflow, `startup` in
+several) are the single-word case, and are the ones to look at when judging the
+cost for a workflow of your own.
+
 ### Why the rule-3 registry is not history
 
 `decide()` receives the registry as an argument and consults it **only** for a
