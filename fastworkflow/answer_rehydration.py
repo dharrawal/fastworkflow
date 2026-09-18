@@ -407,12 +407,24 @@ def rehydrate(
     report.bytes_before = trajectory_bytes(trajectory)
     used = report.bytes_before
     seen_blocks: set[str] = set()
+    seen_labels: set[str] = set()
     candidates = _candidates(trajectory)
     stopped = False
 
     for position, (index, alias, text) in enumerate(candidates):
         if stopped:
-            report.dropped_aliases.append(alias)
+            # ``ido-1tu``/F34. The note says evidence EXISTS under these
+            # observations and was not put back, so only an alias that had
+            # something to put back belongs in it. A plain inline observation
+            # whose full text is already in the trajectory lost nothing to the
+            # stop, and listing it would tell the extractor to treat present
+            # evidence as unresolved.
+            if _evidence_behind(
+                alias, text, scope=selected_scope, archive=archive,
+                store=handle_store, report=report,
+                seen_labels=seen_labels, seen_blocks=seen_blocks,
+            ):
+                report.dropped_aliases.append(alias)
             continue
         kind = ""
         listing_alias = ""
@@ -421,6 +433,14 @@ def rehydrate(
         # observation's own text otherwise.
         base = text
         if is_offload_label(text):
+            if alias in seen_labels:
+                # ``ido-1tu``/F34. One alias names one archived observation,
+                # however many steps print its label. A more recent step
+                # already carries that text in full, so restoring it again
+                # would spend the budget twice on bytes the extractor is
+                # holding -- the rule ``seen_blocks`` applies to a handle's
+                # rows, applied to a label.
+                continue
             restored = rehydrated_label(
                 alias, scope=selected_scope, archive=archive
             )
@@ -485,6 +505,10 @@ def rehydrate(
         report.counts[kind] += 1
         if listing_alias:
             seen_blocks.add(listing_alias)
+        if kind == KIND_LABEL:
+            # ``ido-1tu``/F34. This alias's archived text is now in the copy;
+            # an older step printing the same label needs nothing further.
+            seen_labels.add(alias)
         report.rehydrated.append({
             "alias": alias,
             "kind": kind,
@@ -524,6 +548,53 @@ def _declaration(store: Any, scope: RuntimeHandleScope, alias: str) -> Optional[
             alias, exc_info=True,
         )
         return None
+
+
+def _evidence_behind(
+    alias: str,
+    text: str,
+    *,
+    scope: RuntimeHandleScope,
+    archive: RuntimeHandleArchive,
+    store: Any,
+    report: RehydrationReport,
+    seen_labels: set[str],
+    seen_blocks: set[str],
+) -> bool:
+    """Would the walk have put anything back for this observation?
+
+    ``ido-1tu``/F34. Asked only after the budget stopped the walk, and it
+    answers exactly what the walk above would have done for the same
+    observation, so the dropped list names the aliases that really lost
+    evidence and nothing else:
+
+    * an offload label counts when the archive still holds its text, and not
+      when a more recent step already restored the same alias (``seen_labels``)
+      or the archive cannot be read -- an alias with nothing behind it is
+      ``unresolved``, not dropped, and the note's "evidence exists" would be
+      untrue of it;
+    * any other observation counts only when it declared a handle with stored
+      rows that no more recent observation has already printed in full
+      (``seen_blocks``);
+    * a plain inline observation counts for nothing: its whole text is in the
+      trajectory the extractor is reading.
+    """
+    if is_offload_label(text):
+        if alias in seen_labels:
+            return False
+        if archived_observation(alias, scope=scope, archive=archive) is None:
+            report.unresolved_aliases.append(alias)
+            return False
+        return True
+    declaration = _declaration(store, scope, alias)
+    if declaration is None:
+        return False
+    of_handle = str(declaration.get("parent_alias") or "") or alias
+    if of_handle in seen_blocks:
+        return False
+    return bool(
+        stored_rows_block(of_handle, scope=scope, store=store, shown_for=alias)
+    )
 
 
 __all__ = [

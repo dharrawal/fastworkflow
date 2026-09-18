@@ -743,5 +743,140 @@ class OffloadedListing(unittest.TestCase):
             before_pages)
 
 
+class WhatTheStopActuallyCost(unittest.TestCase):
+    """``ido-1tu``/F34: the note names lost evidence, and each alias costs once.
+
+    The dropped list is read by the extractor as "evidence exists under these
+    observations and you have not got it", so an observation that lost nothing
+    to the stop must not be in it, and one archived observation must not be
+    paid for twice because two steps printed its label.
+    """
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.addCleanup(reset_runtime_state)
+        self.fixture = Fixture(self.directory.name)
+
+    def rehydrate(self, trajectory, budget):
+        return rehydrate(
+            trajectory, scope=self.fixture.scope, archive=self.fixture.archive,
+            handle_store=self.fixture.store, budget=budget,
+        )
+
+    def with_a_plain_step(self) -> dict:
+        """The fixture, with a plain inline observation O9 older than the page.
+
+        O1 (label) stays at step 0, O9 goes in at step 1, and the listing and
+        the page move up to 2 and 3 -- so O9 is older than the stop and has
+        nothing behind it but its own text.
+        """
+        base = self.fixture.trajectory()
+        out = {key: value for key, value in base.items() if key.endswith("_0")}
+        out.update({
+            "thought_1": "count them",
+            "tool_name_1": "execute_workflow_query",
+            "tool_args_1": {"command": "count_identities"},
+            "observation_1": (alias_line("O9", "DirectoryExplorer")
+                              + "There are 5 identities."),
+        })
+        for key, value in base.items():
+            if key.endswith("_1"):
+                out[key[:-1] + "2"] = value
+            elif key.endswith("_2"):
+                out[key[:-1] + "3"] = value
+        return out
+
+    def test_a_plain_observation_is_not_listed_as_not_rehydrated(self) -> None:
+        trajectory = self.with_a_plain_step()
+        copy, report = self.rehydrate(
+            trajectory, budget=trajectory_bytes(trajectory) + 10)
+        # The walk stops on the newest candidate, so everything else is older.
+        self.assertEqual(report.stopped_on, "O3")
+        self.assertEqual(report.rehydrated, [])
+        # O9 is whole in the copy, so nothing about it is unresolved.
+        self.assertEqual(copy["observation_1"], trajectory["observation_1"])
+        self.assertIn("There are 5 identities.", copy["observation_1"])
+        self.assertNotIn("O9", report.dropped_aliases)
+        self.assertNotIn("O9", copy[NOT_REHYDRATED_KEY])
+        self.assertNotIn("O9", report.as_event()["dropped_aliases"])
+        # And the aliases that really did lose evidence are still all named.
+        self.assertEqual(report.dropped_aliases, ["O1", "O2", "O3"])
+
+    def test_a_plain_observation_older_than_a_partial_stop(self) -> None:
+        """The other stop: the label was kept and only its rows were omitted."""
+        trajectory = self.with_a_plain_step()
+        page_block = answer_rehydration.stored_rows_block(
+            "O2", scope=self.fixture.scope, store=self.fixture.store,
+            shown_for="O3")
+        budget = (trajectory_bytes(trajectory)
+                  + len(page_block.encode("utf-8")) + 1)
+        _, report = self.rehydrate(trajectory, budget=budget)
+        self.assertEqual([item["alias"] for item in report.rehydrated], ["O3"])
+        self.assertNotIn("O9", report.dropped_aliases)
+        self.assertEqual(report.dropped_aliases, ["O1"])
+
+    def test_nothing_is_dropped_for_rows_a_newer_observation_already_holds(self):
+        """O2's rows come back under O3, so O2 lost nothing when the walk stopped."""
+        trajectory = self.fixture.trajectory()
+        page_block = answer_rehydration.stored_rows_block(
+            "O2", scope=self.fixture.scope, store=self.fixture.store,
+            shown_for="O3")
+        budget = (trajectory_bytes(trajectory)
+                  + len(page_block.encode("utf-8")) + 1)
+        _, report = self.rehydrate(trajectory, budget=budget)
+        self.assertEqual([item["alias"] for item in report.rehydrated], ["O3"])
+        self.assertEqual(report.dropped_aliases, ["O1"])
+
+    def test_one_label_alias_on_two_steps_spends_the_budget_once(self) -> None:
+        base = self.fixture.trajectory()
+        _, plain = self.rehydrate(base, budget=DEFAULT_MAX_BYTES)
+        single = [item for item in plain.rehydrated if item["alias"] == "O1"][0]
+
+        twice = dict(base)
+        twice.update({
+            "thought_5": "read it again",
+            "tool_name_5": "execute_workflow_query",
+            "tool_args_5": {"command": "list_permissions"},
+            "observation_5": base["observation_0"],
+        })
+        copy, report = self.rehydrate(twice, budget=DEFAULT_MAX_BYTES)
+        entries = [item for item in report.rehydrated if item["alias"] == "O1"]
+        self.assertEqual(len(entries), 1)
+        # The most recent step is the one that carries the archived text...
+        self.assertEqual(entries[0]["step_index"], 5)
+        self.assertEqual(entries[0]["added_bytes"], single["added_bytes"])
+        self.assertEqual(report.counts[KIND_LABEL], 1)
+        # ...and the older step keeps its label, unpaid for and undropped.
+        self.assertEqual(copy["observation_0"], base["observation_0"])
+        self.assertNotIn("O1", report.dropped_aliases)
+        self.assertEqual(
+            report.bytes_after - report.bytes_before,
+            sum(item["added_bytes"] for item in report.rehydrated),
+        )
+
+    def test_a_duplicate_label_older_than_the_stop_is_not_dropped(self) -> None:
+        """Its text is in the copy under the newer step: nothing was lost."""
+        base = self.fixture.trajectory()
+        twice = dict(base)
+        twice.update({
+            "thought_5": "read it again",
+            "tool_name_5": "execute_workflow_query",
+            "tool_args_5": {"command": "list_permissions"},
+            "observation_5": base["observation_0"],
+        })
+        label_added = len(
+            rehydrated_label("O1", scope=self.fixture.scope,
+                             archive=self.fixture.archive).encode("utf-8")
+        ) - len(base["observation_0"].encode("utf-8"))
+        budget = trajectory_bytes(twice) + label_added
+        copy, report = self.rehydrate(twice, budget=budget)
+        self.assertEqual([item["alias"] for item in report.rehydrated], ["O1"])
+        self.assertEqual(report.stopped_on, "O3")
+        self.assertNotIn("O1", report.dropped_aliases)
+        self.assertEqual(copy["observation_0"], base["observation_0"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -264,6 +265,79 @@ class Presence(unittest.TestCase):
         observed, _ = split_by_presence(
             entities, normalise("Ａｌａｎ Cooper"))
         self.assertEqual([e.text for e in observed], ["Alan Cooper"])
+
+    # -- ido-c7m / F36: an invisible character cannot hide a name ---------
+
+    def test_a_zero_width_space_in_a_row_leaves_the_name_observed(self) -> None:
+        """Standing where the name's space is, and beside it."""
+        entities = named_entities("Find Alan Cooper.")
+        for row in ("Identity 1  Alan\u200bCooper",
+                    "Identity 1  Alan \u200bCooper",
+                    "Identity 1  Alan\u200b Cooper"):
+            observed, unobserved = split_by_presence(entities, normalise(row))
+            self.assertEqual([e.text for e in observed], ["Alan Cooper"], row)
+            self.assertEqual(unobserved, [], row)
+
+    def test_a_zero_width_space_inside_a_token_splits_that_token(self) -> None:
+        """The deliberate half of the trade-off, pinned so it is not silent.
+
+        U+200B is a break opportunity, so it folds to a space and one inside a
+        token separates it. The other invisible characters -- the soft hyphen
+        and the rest -- are removed, which is what a within-token break needs;
+        only the one character that is named a space behaves like one.
+        """
+        self.assertEqual(normalise("Al\u200ban Cooper"), "al an cooper")
+        self.assertEqual(normalise("Al\u00adan Cooper"), "alan cooper")
+
+    def test_a_soft_hyphen_in_a_row_leaves_the_name_observed(self) -> None:
+        entities = named_entities("Find Brandon Miller.")
+        observed, unobserved = split_by_presence(
+            entities, normalise("Identity 2  Brandon Mil\u00adler"))
+        self.assertEqual([e.text for e in observed], ["Brandon Miller"])
+        self.assertEqual(unobserved, [])
+
+    def test_a_byte_order_mark_in_a_row_leaves_the_name_observed(self) -> None:
+        entities = named_entities("Find Anna Garcia.")
+        observed, _ = split_by_presence(
+            entities, normalise("\ufeffIdentity 3  Anna\ufeff Garcia"))
+        self.assertEqual([e.text for e in observed], ["Anna Garcia"])
+
+    def test_two_different_names_do_not_collide_once_stripped(self) -> None:
+        """Only what renders as nothing is removed: visible spellings stay apart."""
+        rows = normalise(
+            "Identity 4  Alan\u200bCooperman\n"
+            "Identity 5  Alan Coop\u00ader\n"      # Alan Cooper, hidden
+            "Identity 6  Brandon Mill\u00ader"     # Brandon Miller, hidden
+        )
+        for absent in ("Alisha Ochoa", "Alan Cooperman Jr", "Brandon Millerman",
+                       "Alan Coopér", "Brendon Miller", "Cooperman Alan"):
+            _, unobserved = split_by_presence(
+                named_entities("Find %s." % absent), rows)
+            self.assertEqual([e.text for e in unobserved], [absent], absent)
+        # And what WAS hidden is found, so those rows really were stripped.
+        for present in ("Alan Cooper", "Brandon Miller"):
+            observed, _ = split_by_presence(
+                named_entities("Find %s." % present), rows)
+            self.assertEqual([e.text for e in observed], [present], present)
+
+    def test_stripping_does_not_join_two_names_into_a_third(self) -> None:
+        """A zero-width SPACE folds to a space, so it can only split a run."""
+        self.assertEqual(normalise("Alan\u200bCooper"), "alan cooper")
+        self.assertEqual(normalise("Anna\u200bGarcia Brandon\u200bMiller"),
+                         "anna garcia brandon miller")
+        _, unobserved = split_by_presence(
+            named_entities("Find Garcia Brandon."),
+            normalise("Identity 7  Anna\u200bGarcia\nIdentity 8  Brandon Miller"))
+        self.assertEqual([e.text for e in unobserved], ["Garcia Brandon"])
+
+    def test_text_with_nothing_invisible_in_it_is_untouched(self) -> None:
+        for text in ("Identity 1  Alan Cooper", "ALAN\n  COOPER", "Ａｌａｎ Cooper",
+                     "", "Alan Coopér"):
+            self.assertEqual(
+                normalise(text),
+                " ".join(unicodedata.normalize("NFKC", text).casefold().split()),
+                text,
+            )
 
     def test_a_name_only_in_a_context_clause_counts_as_retrieved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

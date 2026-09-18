@@ -126,14 +126,58 @@ INSTRUCTED_KINDS = frozenset({"name", "uid", "email"})
 # Normalisation
 # ---------------------------------------------------------------------------
 
+#: ``ido-c7m``/F36. A zero-width space is a break opportunity -- the character
+#: is literally named a space -- so it folds to one rather than being removed.
+#: Deleting it would turn ``Alan<ZWSP>Cooper`` into ``alancooper`` and leave
+#: the request's ``Alan Cooper`` unobserved, which is the very false absence
+#: this is about. The cost is the other reading: a zero-width space INSIDE a
+#: token splits it, so ``Al<ZWSP>an Cooper`` still does not match. That reading
+#: is what the soft hyphen is for and what every other invisible character here
+#: gets, and a fold to a space can only split a run, never join two -- which is
+#: the side a presence test may err on.
+_IGNORABLE_TO_SPACE = "\u200b"
+
+
+def _strip_format_characters(text: str) -> str:
+    """Drop the format (``Cf``) characters, folding a zero-width space to a space.
+
+    ``ido-c7m``/F36. Soft hyphen (U+00AD), byte-order mark (U+FEFF), the zero-
+    width joiner and non-joiner, the word joiner and the bidi controls are
+    default-ignorable: they render as nothing, so a row carrying one inside a
+    name prints exactly the name the request wrote, while the request's
+    spelling reads as unobserved and the coverage block instructs a false
+    absence. They are removed here, BEFORE the compatibility fold, so a fold
+    that spans one still composes.
+
+    Removal is by Unicode category, not by the list of characters one review
+    happened to try: any other ``Cf`` character is invisible for the same
+    reason. It cannot make two visibly different names collide -- every
+    character it removes renders as nothing -- and the one character that could
+    have joined two visible runs into a third spelling is folded to a space
+    instead.
+    """
+    if not any(unicodedata.category(ch) == "Cf" for ch in text):
+        return text
+    return "".join(
+        " " if ch in _IGNORABLE_TO_SPACE
+        else "" if unicodedata.category(ch) == "Cf"
+        else ch
+        for ch in text
+    )
+
+
 def normalise(text: Any) -> str:
     """NFKC, casefolded, whitespace collapsed -- the one comparison form.
 
     Presence is decided on this form and nothing else, so a name broken across a
     line in a rendered row still matches the name written on one line in the
     request, and a full-width or ligature variant matches its plain spelling.
+    Invisible format characters go first (:func:`_strip_format_characters`), so
+    a soft hyphen or a byte-order mark inside a name in a row cannot hide that
+    name from the presence test.
     """
-    folded = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    stripped = _strip_format_characters(str(text or ""))
+    folded = unicodedata.normalize("NFKC", stripped).casefold()
     return " ".join(folded.split())
 
 
