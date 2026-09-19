@@ -31,6 +31,11 @@ This work does not introduce a universal evidence schema, a plan verifier, or a 
 answer completeness. Outcome, coverage, and support remain distinct concepts. Existing answer
 coverage and finish policies stay unchanged until their separate ablations justify a change.
 
+Selected policy change `fix-iq53.3.5` separately disables answer-coverage instruction injection and
+its postcheck by default while retaining finish reminders; `fix-vsxf` is the later cleanup and
+remeasurement of that change. The runtime ownership boundaries and all other behavior described
+here remain unchanged.
+
 ## Current ownership
 
 | Current module | Responsibility it currently carries | Boundary problem |

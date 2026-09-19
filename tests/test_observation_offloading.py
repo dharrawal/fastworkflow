@@ -1227,8 +1227,13 @@ class AgentConstruction(unittest.TestCase):
         self.assertIsInstance(agent, StructuredContinuationReAct)
         self.assertEqual(set(agent.tools), {"noop_tool", "search_memory", "finish"})
         self.assertEqual(agent.max_iters, 3)
+        self.assertFalse(agent.coverage_instructions_enabled)
+        self.assertTrue(agent.finish_reminders_enabled)
         installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
         self.assertEqual(len(installed), 1)
+        self.assertNotIn(
+            "evaluation_controls", [event["kind"] for event in snapshot_events()]
+        )
 
     def test_multiple_agents_share_one_idempotent_manifest_enricher(self) -> None:
         uninstall_span_policy()
@@ -1257,6 +1262,25 @@ class AgentConstruction(unittest.TestCase):
         self.assertEqual(agent.total_segments, 3)
         installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
         self.assertEqual(installed[0]["max_forced_replans"], 2)
+
+    def test_evaluation_control_overrides_are_recorded_unambiguously(self) -> None:
+        self._set_env("FW_EVAL_COVERAGE_INSTRUCTIONS", "0")
+        agent = build_tool_agent(
+            SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
+        )
+        events = [
+            event for event in snapshot_events()
+            if event["kind"] == "evaluation_controls"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertFalse(events[0]["coverage_instructions_enabled"])
+        self.assertTrue(events[0]["finish_reminders_enabled"])
+        self.assertEqual(
+            events[0]["overrides"],
+            {"FW_EVAL_COVERAGE_INSTRUCTIONS": "0"},
+        )
+        self.assertFalse(agent.coverage_instructions_enabled)
+        self.assertTrue(agent.finish_reminders_enabled)
 
 
 class PlannerFailure(unittest.TestCase):

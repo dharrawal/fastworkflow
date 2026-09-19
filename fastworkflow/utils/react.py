@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
@@ -14,6 +15,24 @@ from fastworkflow import tracing
 from fastworkflow.utils.dspy_logger import DSPyForward
 
 logger = logging.getLogger(__name__)
+
+# Temporary disable-only controls retained for controlled runs and provenance.
+# Historical four-arm reproduction uses its pinned revisions. Coverage
+# instructions are now off in production, and this is not a product re-enable
+# switch.
+EVAL_COVERAGE_INSTRUCTIONS_ENV = "FW_EVAL_COVERAGE_INSTRUCTIONS"
+EVAL_FINISH_REMINDERS_ENV = "FW_EVAL_FINISH_REMINDERS"
+
+
+def _evaluation_control(
+    name: str, *, default_enabled: bool = True
+) -> tuple[bool, str | None]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default_enabled, None
+    if raw != "0":
+        raise ValueError(f"{name} must be exactly 0 when set")
+    return False, raw
 
 if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
@@ -71,6 +90,20 @@ class fastWorkflowReAct(Module):
         self.signature = signature = ensure_signature(signature)
         self.max_iters = max_iters
         self.iteration_counter = 0
+        self.coverage_instructions_enabled, coverage_override = _evaluation_control(
+            EVAL_COVERAGE_INSTRUCTIONS_ENV, default_enabled=False
+        )
+        self.finish_reminders_enabled, reminder_override = _evaluation_control(
+            EVAL_FINISH_REMINDERS_ENV
+        )
+        self.evaluation_control_overrides = {
+            name: value
+            for name, value in (
+                (EVAL_COVERAGE_INSTRUCTIONS_ENV, coverage_override),
+                (EVAL_FINISH_REMINDERS_ENV, reminder_override),
+            )
+            if value is not None
+        }
 
         tools = [t if isinstance(t, Tool) else Tool(t) for t in tools]
         tools = {tool.name: tool for tool in tools}
@@ -513,6 +546,9 @@ class fastWorkflowReAct(Module):
         """
         from fastworkflow import answer_coverage
 
+        if not getattr(self, "finish_reminders_enabled", True):
+            return ""
+
         if getattr(self, "_roster_nudges_fired", 0) >= 1:
             return ""
 
@@ -610,6 +646,9 @@ class fastWorkflowReAct(Module):
         """
         from fastworkflow import answer_coverage
         from fastworkflow.observation_offloading.state import record_event
+
+        if not getattr(self, "coverage_instructions_enabled", False):
+            return trajectory, None
 
         try:
             covered, report = answer_coverage.build_statement(

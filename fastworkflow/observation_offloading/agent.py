@@ -271,6 +271,16 @@ def build_tool_agent(
     agent.observation_archive = selected_archive
     agent.turn_runtime = turn_runtime
     agent.describe_output = lambda command, response: describe_command_output(chat_session, command, response)
+    if agent.evaluation_control_overrides:
+        record_event(
+            {
+                "kind": "evaluation_controls",
+                "scope_id": scope.scope_id,
+                "coverage_instructions_enabled": agent.coverage_instructions_enabled,
+                "finish_reminders_enabled": agent.finish_reminders_enabled,
+                "overrides": dict(agent.evaluation_control_overrides),
+            }
+        )
     record_event(
         {
             "kind": "agent_installed",

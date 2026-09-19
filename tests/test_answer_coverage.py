@@ -54,6 +54,11 @@ from fastworkflow.observation_offloading.state import (
     snapshot_events,
 )
 from fastworkflow.result_handles import ResultHandleStore, normalize_literal
+from fastworkflow.utils.react import (
+    EVAL_COVERAGE_INSTRUCTIONS_ENV,
+    EVAL_FINISH_REMINDERS_ENV,
+    fastWorkflowReAct,
+)
 
 from tests.test_answer_rehydration import (  # reuse: one fixture, one meaning
     Recorder,
@@ -924,6 +929,9 @@ class ExtractHook(unittest.TestCase):
         )
         self.agent = fastWorkflowReAct("user_query -> final_answer",
                                        tools=[a_tool], max_iters=2)
+        # Most tests in this class exercise the retained coverage machinery
+        # directly. Production construction leaves it disabled.
+        self.agent.coverage_instructions_enabled = True
         self.agent.continuation_scope = self.scope
         self.agent.observation_archive = self.archive
         self.trajectory = {
@@ -937,8 +945,25 @@ class ExtractHook(unittest.TestCase):
         return mock.patch("fastworkflow.result_handles.store",
                           return_value=self.store)
 
-    def test_the_block_is_prepended_with_nothing_set(self) -> None:
-        """ido-pyw.1: no setting, no override -- the block is simply there."""
+    def test_the_default_extract_has_no_coverage_block_or_measurement(self) -> None:
+        agent = fastWorkflowReAct(
+            "user_query -> final_answer", tools=[], max_iters=2
+        )
+        agent.continuation_scope = self.scope
+        agent.observation_archive = self.archive
+        recorder = Recorder()
+        agent.extract = recorder
+        with self._patch_store():
+            agent._extract_prediction(self.trajectory, user_query=CARD)
+        rendered = recorder.calls[0]
+        self.assertFalse(agent.coverage_instructions_enabled)
+        self.assertTrue(agent.finish_reminders_enabled)
+        self.assertNotIn("Coverage of this run:", rendered)
+        kinds = [event["kind"] for event in snapshot_events()]
+        self.assertNotIn("coverage_statement", kinds)
+        self.assertNotIn("coverage_post_check", kinds)
+
+    def test_the_retained_helper_prepends_the_block_when_enabled(self) -> None:
         recorder = Recorder()
         self.agent.extract = recorder
         with self._patch_store():
@@ -1095,6 +1120,62 @@ class ExtractHook(unittest.TestCase):
         kinds = [e["kind"] for e in snapshot_events()]
         self.assertLess(kinds.index("rehydration_started"),
                         kinds.index("coverage_statement"))
+
+    def test_coverage_can_be_disabled_without_disabling_rehydration(self) -> None:
+        label = offload_label(
+            alias="O1", command_name="find_identity",
+            response="1 identity.\nuid-1  Alan Cooper", description="the identity",
+        )
+        recorder = Recorder()
+        self.agent.extract = recorder
+        self.agent.coverage_instructions_enabled = False
+        with self._patch_store():
+            self.agent._extract_prediction(
+                dict(self.trajectory, observation_0=label), user_query=CARD
+            )
+        rendered = recorder.calls[0]
+        self.assertIn("uid-1  Alan Cooper", rendered)
+        self.assertNotIn("Coverage of this run:", rendered)
+        kinds = [event["kind"] for event in snapshot_events()]
+        self.assertIn("rehydration_started", kinds)
+        self.assertNotIn("coverage_statement", kinds)
+        self.assertNotIn("coverage_post_check", kinds)
+
+    def test_controls_are_independent_and_frozen_at_construction(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {EVAL_COVERAGE_INSTRUCTIONS_ENV: "0"},
+            clear=False,
+        ):
+            os.environ.pop(EVAL_FINISH_REMINDERS_ENV, None)
+            agent = fastWorkflowReAct(
+                "user_query -> final_answer", tools=[], max_iters=2
+            )
+            os.environ[EVAL_FINISH_REMINDERS_ENV] = "0"
+            self.assertFalse(agent.coverage_instructions_enabled)
+            self.assertTrue(agent.finish_reminders_enabled)
+        self.assertEqual(
+            agent.evaluation_control_overrides,
+            {EVAL_COVERAGE_INSTRUCTIONS_ENV: "0"},
+        )
+        with mock.patch.dict(
+            os.environ, {EVAL_FINISH_REMINDERS_ENV: "0"}, clear=False
+        ):
+            os.environ.pop(EVAL_COVERAGE_INSTRUCTIONS_ENV, None)
+            inverse = fastWorkflowReAct(
+                "user_query -> final_answer", tools=[], max_iters=2
+            )
+        self.assertFalse(inverse.coverage_instructions_enabled)
+        self.assertFalse(inverse.finish_reminders_enabled)
+
+    def test_invalid_evaluation_control_is_rejected(self) -> None:
+        with mock.patch.dict(
+            os.environ, {EVAL_COVERAGE_INSTRUCTIONS_ENV: "false"}, clear=False
+        ):
+            with self.assertRaisesRegex(ValueError, "must be exactly 0"):
+                fastWorkflowReAct(
+                    "user_query -> final_answer", tools=[], max_iters=2
+                )
 
 
 class WhyAnItemIsMissing(unittest.TestCase):
@@ -1436,6 +1517,30 @@ class LoopHook(unittest.TestCase):
         self.assertEqual(trajectory["observation_0"], "Completed.")
         self.assertEqual([e["kind"] for e in snapshot_events()],
                          ["roster_nudge_failed"])
+
+    def test_finish_reminders_can_be_disabled_independently(self) -> None:
+        self.agent.finish_reminders_enabled = False
+        self.agent.coverage_instructions_enabled = True
+        trajectory = self._run([("finish", {}), ("a_tool", {"value": "more"})])
+        self.assertEqual(trajectory["observation_0"], "Completed.")
+        self.assertNotIn("tool_name_1", trajectory)
+        recorder = Recorder()
+        self.agent.extract = recorder
+        self.agent._extract_prediction(trajectory, user_query=CARD)
+        self.assertEqual(len(recorder.calls), 1)
+        self.assertIn("Coverage of this run:", recorder.calls[0])
+
+    def test_both_controls_can_be_disabled(self) -> None:
+        self.agent.finish_reminders_enabled = False
+        self.agent.coverage_instructions_enabled = False
+        trajectory = self._run([("finish", {}), ("a_tool", {"value": "more"})])
+        self.assertEqual(trajectory["observation_0"], "Completed.")
+        self.assertNotIn("tool_name_1", trajectory)
+        recorder = Recorder()
+        self.agent.extract = recorder
+        self.agent._extract_prediction(trajectory, user_query=CARD)
+        self.assertEqual(len(recorder.calls), 1)
+        self.assertNotIn("Coverage of this run:", recorder.calls[0])
 
 
 if __name__ == "__main__":
