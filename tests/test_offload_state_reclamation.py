@@ -27,6 +27,7 @@ from pathlib import Path
 import dspy
 
 import fastworkflow
+from fastworkflow.agent_runtime import build_turn_runtime
 from fastworkflow import auto_navigation, result_handles, tracing
 from fastworkflow.observation_offloading import state as offload_state
 from fastworkflow.observation_offloading.agent import build_tool_agent
@@ -53,6 +54,7 @@ from fastworkflow.result_handles import (
     fetch_page,
     reset_result_handle_state,
 )
+from fastworkflow.result_handles import paging as result_handles
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -280,6 +282,60 @@ class CompletedSessionReclamationTests(OffloadStateFixture):
         self.assertTrue(all("live" in row for row in page.rows))
         self.assertEqual(context_clause_of(live_scope, "O1"), "Fixture live")
         self.close_session(live_ctx, live_workflow)
+
+    def test_two_built_agents_resolve_their_runtime_bindings_independently(self) -> None:
+        """Host switching uses each built agent's scope, store, and archive."""
+        first_ctx, first_workflow, first_agent = self.make_session(
+            channel="owner-a", turn="turn-a"
+        )
+        second_ctx, second_workflow, second_agent = self.make_session(
+            channel="owner-b", turn="turn-b"
+        )
+        first_scope = RuntimeHandleScope(
+            store_identity="wf", channel_id="owner-a", experiment_id="",
+            task_id="", attempt=0, turn_key="turn-a",
+        )
+        second_scope = RuntimeHandleScope(
+            store_identity="wf", channel_id="owner-b", experiment_id="",
+            task_id="", attempt=0, turn_key="turn-b",
+        )
+        first_archive = RuntimeHandleArchive(os.path.join(self.temp.name, "a.sqlite3"))
+        second_archive = RuntimeHandleArchive(os.path.join(self.temp.name, "b.sqlite3"))
+        for agent, scope, archive in (
+            (first_agent, first_scope, first_archive),
+            (second_agent, second_scope, second_archive),
+        ):
+            agent.observation_archive = archive
+            agent.continuation_scope = scope
+            agent.continuation_scope_id = scope.scope_id
+            agent.turn_runtime = build_turn_runtime(scope, archive=archive)
+
+        for ctx, scope, archive, label in (
+            (first_ctx, first_scope, first_archive, "first"),
+            (second_ctx, second_scope, second_archive, "second"),
+        ):
+            with tracing.host_scope(ctx):
+                self.assertEqual(current_scope(), scope)
+                self.assertEqual(result_handles.store().db_path, archive.db_path)
+                auto_navigation.record_context_entry(
+                    scope.scope_id,
+                    context="Account",
+                    command_name="open_account",
+                    parameters={"name": label},
+                    scope=scope,
+                )
+                auto_navigation.forget_scope(scope.scope_id)
+                restored = auto_navigation.context_entries(scope.scope_id)
+                self.assertEqual(restored[0].parameters["name"], label)
+
+        first_ctx._awaiting_user = False
+        self.close_session(first_ctx, first_workflow)
+        with tracing.host_scope(second_ctx):
+            auto_navigation.forget_scope(second_scope.scope_id)
+            restored = auto_navigation.context_entries(second_scope.scope_id)
+            self.assertEqual(restored[0].parameters["name"], "second")
+            self.assertEqual(result_handles.store().db_path, second_archive.db_path)
+        self.close_session(second_ctx, second_workflow)
 
     def test_a_suspended_turn_survives_its_sessions_close_and_still_resumes(self) -> None:
         """A suspension is state to keep, not state to reclaim (ido-7qd guard)."""

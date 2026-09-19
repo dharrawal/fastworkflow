@@ -1275,13 +1275,15 @@ class WorkflowExecutionContext:
         try:
             if getattr(self, "_awaiting_user", True) or agent.export_suspended() is not None:
                 return
-            from fastworkflow.observation_offloading import state as offload_state
+            runtime = getattr(agent, "turn_runtime", None)
+            if runtime is None:
+                from fastworkflow.agent_runtime import build_turn_runtime
 
-            offload_state.seal_scope(
-                scope,
-                selected_archive=getattr(agent, "observation_archive", None),
-            )
-            offload_state.reclaim_scope(scope)
+                runtime = build_turn_runtime(
+                    scope, archive=getattr(agent, "observation_archive", None)
+                )
+                agent.turn_runtime = runtime
+            runtime.finish_scope(scope)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "WorkflowExecutionContext.close: could not seal or reclaim "

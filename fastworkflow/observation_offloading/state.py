@@ -124,7 +124,7 @@ def durable_archive(selected_archive: Any = None) -> Any:
     if selected_archive is not None:
         return selected_archive
     try:
-        from fastworkflow.result_handles import _current_agent
+        from fastworkflow.result_handles.paging import _current_agent
 
         found = getattr(_current_agent(), "observation_archive", None)
         if found is not None:
@@ -469,8 +469,8 @@ def seal_scope(
     serialize/deserialize round trip included. This is the moment the rest of
     that decision is paid for.
 
-    It deliberately has exactly the two callers ``reclaim_scope`` has, and it
-    runs immediately before it in both. That is not a coincidence, it is the
+    It deliberately runs only through the runtime owner's two finished-turn
+    paths, immediately before aggregate release. That is not a coincidence: it is the
     requirement: the guards those callers already carry --
     ``WorkflowExecutionContext._reclaim_offloading_scope`` returning early when
     ``self._awaiting_user`` or ``agent.export_suspended() is not None``, and
@@ -529,8 +529,8 @@ def seal_scope(
     return result
 
 
-def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
-    """Drop every process-local cache one FINISHED turn scope holds (``ido-1ew``).
+def release_scope(scope: "RuntimeHandleScope | str") -> None:
+    """Drop this component's process-local cache for one finished scope.
 
     Residency, never evidence: the archive and the result-handle tables keep
     every row, so a scope reclaimed here is still fully readable from disk --
@@ -571,23 +571,14 @@ def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
         ]
         if len(kept) != len(_events):
             _events[:] = kept
-    from fastworkflow import auto_navigation, result_handles
-
-    result_handles.release_scope(scope_id)
-    auto_navigation.forget_scope(scope_id)
 
 
-def reset_runtime_state() -> None:
+def reset_observation_state() -> None:
     """Drop every process-local cache the offloading runtime holds.
 
-    The result-handle caches go with them: they are keyed by the same scope and
-    hold rows for the same turn, so leaving them behind would let a new turn
-    read a previous one's hot copy. Stored SQLite rows are untouched on both
-    sides — this resets residency, never evidence.
-
-    The auto-navigation registry goes with them for the same reason: it is
-    turn-scoped by contract (ido-8ps.9), so a handle written in one turn must
-    never resolve to a context instance another turn entered.
+    Result-handle and auto-navigation caches are reset by the runtime owner,
+    which calls each component's reset hook. Stored SQLite rows are untouched:
+    this resets residency, never evidence.
 
     The PROCESS-DEFAULT sidecar's durable subject and navigation rows go too
     (ido-dhw). That file is ``fw-offload-handles-<pid>.sqlite3`` in the temp
@@ -609,10 +600,20 @@ def reset_runtime_state() -> None:
         _default_archive = None
         _archives_by_path.clear()
     clear_default_cold_records()
-    from fastworkflow import auto_navigation, result_handles
 
-    result_handles.reset_result_handle_state()
-    auto_navigation.reset_auto_navigation_state()
+
+def reclaim_scope(scope: "RuntimeHandleScope | str") -> None:
+    """Compatibility import; aggregate ownership lives in ``agent_runtime``."""
+    from fastworkflow.agent_runtime import reclaim_scope as runtime_reclaim_scope
+
+    runtime_reclaim_scope(scope)
+
+
+def reset_runtime_state() -> None:
+    """Compatibility import; aggregate ownership lives in ``agent_runtime``."""
+    from fastworkflow.agent_runtime import reset_runtime_state as runtime_reset
+
+    runtime_reset()
 
 
 def stored_handles(scope: Optional[RuntimeHandleScope] = None) -> dict[str, dict[str, Any]]:

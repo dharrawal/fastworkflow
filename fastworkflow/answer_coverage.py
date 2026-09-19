@@ -651,18 +651,24 @@ def evidence_by_subject(
     "in that subject's own observations" needs and what one haystack cannot
     give. A third reader would be a third thing to keep true.
 
-    Imported inside the function: ``answer_attribution`` imports this module, and
-    the dependency only ever runs one way at import time.
+    The shared reader contract keeps this module independent of attribution.
     """
-    from fastworkflow import answer_attribution
+    from fastworkflow import evidence_readers
+    from fastworkflow import answer_rehydration
 
     found = (
         observations if observations is not None
-        else answer_attribution.observations(
-            scope=scope, archive=archive, handle_store=handle_store
+        else evidence_readers.observations(
+            scope=scope, archive=archive, handle_store=handle_store,
+            strip_alias_line=strip_alias_line,
+            stored_rows_block=answer_rehydration.stored_rows_block,
+            drop_zero_match_echo=drop_zero_match_echo,
+            normalise=normalise,
         )
     )
-    return answer_attribution.subject_evidence(entities, found)
+    return evidence_readers.subject_evidence(
+        entities, found, normalise=normalise,
+    )
 
 
 #: ``ido-mng``. A rendered result page states the query in its own header --

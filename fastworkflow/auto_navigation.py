@@ -392,6 +392,17 @@ _entries: dict[str, list[ContextEntry]] = {}
 _sequence: dict[str, int] = {}
 
 
+def _runtime_archive() -> Any:
+    """The active owner's archive, or ``None`` for standalone fallback."""
+    try:
+        from fastworkflow.result_handles.paging import _current_agent
+
+        runtime = getattr(_current_agent(), "turn_runtime", None)
+        return getattr(runtime, "archive", None)
+    except Exception:  # noqa: BLE001 - discovery must not fail navigation
+        return None
+
+
 def record_context_entry(
     scope_id: str,
     *,
@@ -460,7 +471,9 @@ def _persist_entry(
             # would be keyed by another. A row filed under a turn that did not
             # record it is worse than no row, so nothing is written.
             return
-        store = durable_archive(selected_archive)
+        store = durable_archive(
+            selected_archive if selected_archive is not None else _runtime_archive()
+        )
         if store is None:
             return
         store.put_context_entry(
@@ -578,6 +591,8 @@ def context_entries(
             "distinguish one turn from the next", scope_id,
         )
         return ()
+    if selected_archive is None:
+        selected_archive = _runtime_archive()
     with _lock:
         found = tuple(_entries.get(scope_id, ()))
     return found or _restore_entries(scope_id, selected_archive)
@@ -588,8 +603,8 @@ def forget_scope(scope_id: str) -> None:
 
     ``ido-1ew``. The registry is turn-scoped by contract (``ido-8ps.9``) but was
     only ever emptied wholesale, by a test helper; a long-lived process
-    therefore kept one list per turn it had ever run. Called from
-    ``observation_offloading.state.reclaim_scope``, never on its own.
+    therefore kept one list per turn it had ever run. Called by the runtime
+    coordinator, never as a lifecycle decision on its own.
     """
     with _lock:
         _entries.pop(scope_id, None)
@@ -929,7 +944,7 @@ def recent_execute_observations(agent: Any = None, steps: Optional[int] = None) 
     if limit <= 0:
         return []
     try:
-        from fastworkflow.result_handles import _current_agent
+        from fastworkflow.result_handles.paging import _current_agent
 
         agent = agent if agent is not None else _current_agent()
         trajectory = getattr(agent, "current_trajectory", None)

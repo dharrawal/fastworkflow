@@ -1230,6 +1230,22 @@ class AgentConstruction(unittest.TestCase):
         installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
         self.assertEqual(len(installed), 1)
 
+    def test_multiple_agents_share_one_idempotent_manifest_enricher(self) -> None:
+        uninstall_span_policy()
+        self.addCleanup(uninstall_span_policy)
+        first = build_tool_agent(
+            SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3)
+        second = build_tool_agent(
+            SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3)
+        self.assertIsInstance(first, StructuredContinuationReAct)
+        self.assertIsInstance(second, StructuredContinuationReAct)
+        payload = json.dumps([{
+            "role": "user",
+            "content": "[[ ## observation_0 ## ]]\none\n[[ ## answer ## ]]\ndone",
+        }])
+        capped = tracing._capped({"messages": payload})
+        self.assertEqual(capped["trajectory_manifest"]["observation_count"], 1)
+
     def test_the_replan_bound_is_the_module_constant(self) -> None:
         """ido-pyw.1: FW_MAX_FORCED_REPLANS is gone, and the agent the framework
         builds carries the constant -- 2 forced replans, 3 segments."""

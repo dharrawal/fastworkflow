@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional
 
 import fastworkflow
 from fastworkflow import state_paths
+from fastworkflow.agent_runtime import build_turn_runtime
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
@@ -195,6 +196,7 @@ def build_tool_agent(
     # failures, and this is the one storage failure that used to happen too
     # early for it to catch.
     selected_archive = open_handle_archive(archive_path, scope=scope)
+    turn_runtime = build_turn_runtime(scope, archive=selected_archive)
     agent: Any = None
 
     compacting_step = build_compacting_step(
@@ -263,9 +265,11 @@ def build_tool_agent(
         max_iters=int(max_iters or DEFAULT_MAX_ITERS),
         on_step_complete=compacting_step,
         scope_factory=lambda: _scope_for_session(chat_session),
+        turn_runtime=turn_runtime,
     )
     agent.continuation_scope_id = scope.scope_id
     agent.observation_archive = selected_archive
+    agent.turn_runtime = turn_runtime
     agent.describe_output = lambda command, response: describe_command_output(chat_session, command, response)
     record_event(
         {

@@ -1677,9 +1677,9 @@ class EvidenceInTheBlock(unittest.TestCase):
 
     def test_a_failure_in_the_reader_costs_the_sentence_and_nothing_else(self) -> None:
         record_context_clause(self.scope, "O1", "Identity 28c5  Alan Cooper")
-        from fastworkflow import answer_attribution
+        from fastworkflow import evidence_readers
 
-        with mock.patch.object(answer_attribution, "observations",
+        with mock.patch.object(evidence_readers, "observations",
                                side_effect=RuntimeError("boom")):
             _, report = self._build()
         self.assertEqual(report.statement, STATEMENT_AT_90A1565)

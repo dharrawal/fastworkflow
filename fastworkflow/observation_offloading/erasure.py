@@ -415,13 +415,13 @@ def _reclaim_caches(scope_ids: Iterable[str]) -> None:
     if not ordered:
         return
     try:
-        from fastworkflow.observation_offloading import state as offload_state
+        from fastworkflow.agent_runtime import reclaim_scope
     except Exception:  # pragma: no cover - import guard only
         logger.debug("offload cache reclamation unavailable", exc_info=True)
         return
     for scope_id in ordered:
         try:
-            offload_state.reclaim_scope(scope_id)
+            reclaim_scope(scope_id)
         except Exception:  # noqa: BLE001 - a cache drop must not fail erasure
             logger.warning(
                 "could not drop process caches for erased scope %s", scope_id,

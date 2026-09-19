@@ -68,6 +68,7 @@ from fastworkflow.observation_offloading.search import (
     search_answer_max_bytes_from_env,
     search_memory,
 )
+from fastworkflow.agent_runtime import reclaim_scope, reset_runtime_state
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
     clear_hot_handles,
@@ -77,9 +78,7 @@ from fastworkflow.observation_offloading.state import (
     forget_context_clause,
     hot_payload_bytes,
     observation_inline,
-    reclaim_scope,
     record_context_clause,
-    reset_runtime_state,
     seal_scope,
     stored_handles,
 )

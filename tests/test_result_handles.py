@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import dspy
 
-from fastworkflow import result_handles
+from fastworkflow.result_handles import paging as result_handles
+from fastworkflow.result_handles import cursors as result_cursors
 from fastworkflow import tracing
 from fastworkflow.observation_offloading.agent import build_compacting_step
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope
@@ -3076,7 +3077,7 @@ class ResultHandleMinorDefectTests(unittest.TestCase):
                 )
                 self.assertTrue(payload["declared"])
                 self.assertEqual(
-                    result_handles._parse_cursor_token("%s/p2" % alias),
+                    result_cursors._parse_cursor_token("%s/p2" % alias),
                     (alias, "", 2),
                 )
 
@@ -3085,16 +3086,16 @@ class ResultHandleMinorDefectTests(unittest.TestCase):
         for tag in ("f1", "f999", "f1000", "f999999"):
             with self.subTest(tag=tag):
                 self.assertEqual(
-                    result_handles._parse_cursor_token("O7/%sp2" % tag),
+                    result_cursors._parse_cursor_token("O7/%sp2" % tag),
                     ("O7", tag, 2),
                 )
         with self.assertRaises(ResultHandleError):
-            result_handles._parse_cursor_token("O7/f1234567p2")
+            result_cursors._parse_cursor_token("O7/f1234567p2")
 
     def test_a_tag_this_store_hands_out_is_one_a_token_can_carry(self):
         """The generator and the parser agree past f999."""
         self.assertEqual(
-            result_handles._parse_cursor_token(
+            result_cursors._parse_cursor_token(
                 result_handles.cursor_token("O7", "f1000", 2)),
             ("O7", "f1000", 2),
         )
@@ -3149,7 +3150,7 @@ class CursorAliasAndUnstorableRowTests(unittest.TestCase):
                 self.assertNotIn("9" * 100, str(raised.exception))
 
     def test_an_alias_a_token_may_name_is_unchanged(self):
-        self.assertEqual(result_handles._parse_cursor_token("O999999999/p2"),
+        self.assertEqual(result_cursors._parse_cursor_token("O999999999/p2"),
                          ("O999999999", "", 2))
 
     def test_an_unstorable_row_is_refused_on_the_first_call(self):

@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
 from fastworkflow import runtime_manifest
-from fastworkflow.observability import capture_policy, decision_signals
+from fastworkflow.observability import capture_policy, decision_signals, enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -686,7 +686,9 @@ def cap_attr_value(value: Any) -> Any:
 def _capped(attributes: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not attributes:
         return {}
-    return {key: cap_attr_value(value) for key, value in attributes.items()}
+    capped = {key: cap_attr_value(value) for key, value in attributes.items()}
+    enrichment._apply(attributes, capped)
+    return capped
 
 
 # ----------------------------------------------------------------------

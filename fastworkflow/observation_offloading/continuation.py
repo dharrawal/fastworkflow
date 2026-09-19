@@ -28,9 +28,7 @@ from fastworkflow.observation_offloading.labels import (
 from fastworkflow.observation_offloading.state import (
     archive,
     default_scope,
-    reclaim_scope,
     record_event,
-    seal_scope,
 )
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.utils.react import NoSuspendedAgentStateError, fastWorkflowReAct
@@ -204,6 +202,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self,
         *args: Any,
         scope_factory: Optional[Callable[[], RuntimeHandleScope]] = None,
+        turn_runtime: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -222,6 +221,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.continuation_scope: RuntimeHandleScope | None = None
         self.continuation_scope_id: str | None = None
         self._scope_factory = scope_factory
+        self.turn_runtime = turn_runtime
         self.max_forced_replans = MAX_FORCED_REPLANS
 
     @property
@@ -256,18 +256,24 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             return getattr(self, "continuation_scope", None)
         previous = getattr(self, "continuation_scope", None)
         scope = factory()
+        runtime = getattr(self, "turn_runtime", None)
+        if runtime is None:
+            from fastworkflow.agent_runtime import build_turn_runtime
+
+            runtime = build_turn_runtime(
+                previous or scope,
+                archive=getattr(self, "observation_archive", None),
+            )
+            self.turn_runtime = runtime
         if (
             previous is not None
             and previous != scope
             and getattr(self, "_suspended", None) is None
         ):
-            seal_scope(
-                previous,
-                selected_archive=getattr(self, "observation_archive", None),
-            )
-            reclaim_scope(previous)
+            runtime.finish_scope(previous)
         self.continuation_scope = scope
         self.continuation_scope_id = scope.scope_id
+        runtime.bind_scope(scope)
         return scope
 
     def export_suspended(self) -> dict[str, Any] | None:
@@ -289,6 +295,16 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             scope = RuntimeHandleScope(**raw_scope)
             self.continuation_scope = scope
             self.continuation_scope_id = scope.scope_id
+            runtime = getattr(self, "turn_runtime", None)
+            if runtime is None:
+                from fastworkflow.agent_runtime import build_turn_runtime
+
+                runtime = build_turn_runtime(
+                    scope, archive=getattr(self, "observation_archive", None)
+                )
+                self.turn_runtime = runtime
+            else:
+                runtime.bind_scope(scope)
         # ido-7qd. The turn continues here, so its numbering must too. Nothing
         # new is persisted for this: the suspended trajectory carries every
         # execute step that survives, and ``truncated_execute_steps`` carries

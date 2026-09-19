@@ -62,7 +62,6 @@ the other side. :func:`writes` is the one containment test both halves use.
 """
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -75,21 +74,23 @@ from fastworkflow.answer_coverage import (
     normalise,
     request_text,
 )
+from fastworkflow.evidence_readers import (
+    MIN_SEGMENT_CHARS,
+    Observation,
+    _SEGMENT_SEPARATORS,
+)
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
 )
 from fastworkflow.observation_offloading.labels import (
-    is_search_answer_key,
     strip_alias_line,
 )
-from fastworkflow.observation_offloading.state import (
-    context_clause_of,
-    default_scope,
-    stored_handles,
-)
 
-logger = logging.getLogger(__name__)
+# This module has no logger of its own any more. The two ``logger.debug`` calls
+# it had -- an unreadable archive, an unreadable set of rows -- went with the
+# reads to ``evidence_readers``, which reports them under its own name. Nothing
+# left here reaches a store, so nothing left here has anything to report.
 
 #: Bounds. Every one of them is a backstop against a runaway answer, never a
 #: budget: the entities come from one request and the units from one answer.
@@ -102,10 +103,15 @@ MAX_FLAGS = 256
 SPAN_MAX_CHARS = 400
 SPAN_CONTEXT_CHARS = 120
 
-#: The shortest last segment of a qualified name that may stand for the whole
-#: name. Short tails ("Officer", "1") are ambiguous in any workflow.
-MIN_SEGMENT_CHARS = 8
-_SEGMENT_SEPARATORS = "_/:\\"
+#: ``MIN_SEGMENT_CHARS`` -- the shortest last segment of a qualified name that
+#: may stand for the whole name; short tails ("Officer", "1") are ambiguous in
+#: any workflow -- and ``_SEGMENT_SEPARATORS`` are DEFINED in
+#: ``evidence_readers`` and imported above, not restated here. That module owns
+#: the segmentation rule this one delegates to (:func:`match_forms`,
+#: :func:`writes`), so a second copy here would be a number a reader could
+#: change without changing the rule that runs. ``MIN_SEGMENT_CHARS`` stays in
+#: this module's ``__all__``: it is a released name and callers import it from
+#: here.
 
 #: Kinds that can carry an attribution. The same set ``answer_coverage``
 #: instructs on: a quoted phrase of a request is narrative framing, and the
@@ -157,21 +163,6 @@ REASON_SUBJECT_NOT_OBSERVED = "subject_not_observed"
 # Evidence
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class Observation:
-    """One observation of the turn, with the subject it was stamped against.
-
-    ``text`` is the evidence -- archived observation text, and the stored rows
-    behind a declared result handle. ``clause`` is the ``ido-8ps.13``
-    context-instance line recorded for that alias, and it is read for one thing
-    only: which subject this evidence belongs to.
-    """
-
-    alias: str
-    clause: str
-    text: str
-
-
 def observations(
     *,
     scope: Optional[RuntimeHandleScope] = None,
@@ -189,77 +180,15 @@ def observations(
     ``retrieved_corpus`` excludes them: a model's summary repeats the agent's own
     question back.
     """
-    from fastworkflow import answer_rehydration
+    from fastworkflow import answer_rehydration, evidence_readers
 
-    selected = scope or default_scope()
-    if archive is None:
-        from fastworkflow.observation_offloading import state as offload_state
-
-        archive = offload_state.archive()
-    try:
-        rows = archive.list(selected)
-    except Exception:  # noqa: BLE001 - an unreadable archive is an empty one
-        logger.debug("attribution check could not list the archive", exc_info=True)
-        rows = []
-
-    texts: dict[str, list[str]] = {}
-    order: list[str] = []
-    def take(alias: str, handle: Mapping[str, Any]) -> None:
-        if not alias or is_search_answer_key(alias):
-            return
-        if alias not in texts:
-            texts[alias] = []
-            order.append(alias)
-        texts[alias].append(strip_alias_line(str(handle.get("text") or "")))
-
-    for handle in rows:
-        take(str(handle.get("alias") or ""), handle)
-    for alias, handle in stored_handles(selected).items():
-        take(str(alias), handle or {})
-
-    if handle_store is None:
-        try:
-            from fastworkflow import result_handles
-
-            handle_store = result_handles.store()
-        except Exception:  # noqa: BLE001
-            handle_store = None
-    if handle_store is not None:
-        for alias in order:
-            try:
-                declaration = handle_store.get_declaration(selected, alias)
-            except Exception:  # noqa: BLE001
-                continue
-            if declaration is None:
-                continue
-            if str(declaration.get("parent_alias") or ""):
-                # (ido-3f8) A filtered page that carried no rows retrieved
-                # nothing, so its own text may not be the reason its literal
-                # looks retrieved here either. Same marker, same removal, one
-                # observation at a time.
-                texts[alias] = [
-                    drop_zero_match_echo(chunk, declaration)
-                    for chunk in texts[alias]
-                ]
-                continue
-            try:
-                texts[alias].append(
-                    answer_rehydration.stored_rows_block(
-                        alias, scope=selected, store=handle_store
-                    )
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug("attribution check could not read rows for %s", alias,
-                             exc_info=True)
-    return [
-        Observation(
-            alias=alias,
-            clause=normalise(
-                context_clause_of(selected, alias, selected_archive=archive) or ""),
-            text=normalise("\n".join(texts[alias])),
-        )
-        for alias in order
-    ]
+    return evidence_readers.observations(
+        scope=scope, archive=archive, handle_store=handle_store,
+        strip_alias_line=strip_alias_line,
+        stored_rows_block=answer_rehydration.stored_rows_block,
+        drop_zero_match_echo=drop_zero_match_echo,
+        normalise=normalise,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,28 +213,17 @@ def match_forms(
     (``ido-rf3``). Callers that hold the whole set should use
     :func:`match_forms_index`, which applies this to every item at once.
     """
-    forms = [entity.key]
-    if not allow_segments:
-        return forms
-    tail = _segment_tail(entity)
-    if not tail:
-        return forms
-    for other in among or ():
-        if other.key != entity.key and tail in other.key:
-            return forms
-    forms.append(tail)
-    return forms
+    from fastworkflow import evidence_readers
+
+    return evidence_readers.match_forms(
+        entity, allow_segments=allow_segments, among=among or ()
+    )
 
 
-def _segment_tail(entity: Entity) -> str:
-    """The last segment of *entity* when it is long enough to stand alone."""
-    tail = entity.key
-    for separator in _SEGMENT_SEPARATORS:
-        tail = tail.rsplit(separator, 1)[-1]
-    tail = tail.strip()
-    if tail and tail != entity.key and len(tail) >= MIN_SEGMENT_CHARS:
-        return tail
-    return ""
+# ``_segment_tail`` -- the last segment of an entity when it is long enough to
+# stand alone -- is not defined here any more. :func:`match_forms` above
+# delegates to ``evidence_readers``, which is where the tail is now cut; a copy
+# left behind here would be an unreferenced second answer to the same question.
 
 
 def match_forms_index(
@@ -317,11 +235,11 @@ def match_forms_index(
     evidence sentence and the after-the-fact check can never disagree about what
     a tail means.
     """
-    items = list(entities)
-    return {
-        entity.key: match_forms(entity, allow_segments=allow_segments, among=items)
-        for entity in items
-    }
+    from fastworkflow import evidence_readers
+
+    return evidence_readers.match_forms_index(
+        entities, allow_segments=allow_segments
+    )
 
 
 def _tail_of_a_longer_name(text: str, at: int) -> bool:
@@ -345,15 +263,9 @@ def writes(text: str, forms: Sequence[str]) -> bool:
     of a longer qualified name. The one containment test of this module, so the
     clause side, the evidence side and the answer side cannot disagree.
     """
-    for index, form in enumerate(forms):
-        if not form:
-            continue
-        at = text.find(form)
-        while at >= 0:
-            if index == 0 or not _tail_of_a_longer_name(text, at):
-                return True
-            at = text.find(form, at + 1)
-    return False
+    from fastworkflow import evidence_readers
+
+    return evidence_readers.writes(text, list(forms))
 
 
 @dataclass(frozen=True)
@@ -682,24 +594,12 @@ def subject_evidence(
     between the two cases is real and belongs to the caller. Nothing here
     phrases anything, and nothing here decides what an empty list means.
     """
-    items = list(entities)
-    evidence = _normalised(observations)
-    index = subject_index(items, evidence, allow_segments=allow_segments)
-    forms = match_forms_index(items, allow_segments=allow_segments)
-    out: list[tuple[Entity, list[Entity]]] = []
-    for entity in items:
-        where = index.get(entity.key) or []
-        if not where:
-            continue
-        out.append((
-            entity,
-            [
-                other for other in items
-                if other.key != entity.key
-                and any(writes(item.text, forms[other.key]) for item in where)
-            ],
-        ))
-    return out
+    from fastworkflow import evidence_readers
+
+    return evidence_readers.subject_evidence(
+        entities, observations, normalise=normalise,
+        allow_segments=allow_segments,
+    )
 
 
 def check_attribution(
