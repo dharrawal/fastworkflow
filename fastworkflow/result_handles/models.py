@@ -17,7 +17,7 @@ class SourceDescriptor:
     """Everything needed to re-issue the producing query, and nothing callable.
 
     Six fields, and every one of them is something the FRAMEWORK reads. F1
-    (fix-iq53.2.5) removed the eight that encoded one backend's findings —
+    (fix-iq53.2.5) removed the nine that encoded one backend's findings —
     ``view``, ``params``, ``role``, ``extra``, ``ordering``, ``timeslot``,
     ``start_offset``, ``materialized``, ``count_only`` — because a framework
     type that names a SQL view, an offset origin and a snapshot pin is not a

@@ -131,7 +131,14 @@ SourceDescriptor(
 )
 ```
 
-Six fields, and the framework reads every one of them. (F1, `fix-iq53.2.5`)
+Six fields. (F1, `fix-iq53.2.5`) Five of them the framework reads — they are
+how it finds a resolver, renders a row, sizes a batch and decides whether a
+literal can be mapped. The sixth, `state`, it carries and does not interpret,
+with exactly one exception that is named and tracked: the origin backstop
+described under `offset_origin_not_zero` below, which reads `start_offset` out
+of `state` and is scheduled to go when the adapter answers that question
+itself.
+
 There used to be fourteen: `view`, `params`, `role`, `extra`, `ordering`,
 `timeslot`, `start_offset`, `materialized` and `count_only` are gone, because
 a framework type that names a SQL view, an offset origin and a snapshot pin is
@@ -243,6 +250,59 @@ cache (`FW_RESULT_HANDLE_HOT_MAX_BYTES`, 256 KB at a 131,072-token window,
 oldest walk first) is a
 *residency* bound and not a retention bound: every evicted row came from a
 stored page and is rebuilt from SQLite on the next read.
+
+### Historical stores: the artifact policy
+
+A store that has been archived is evidence, and reading evidence must not
+change it. The hazard is not hypothetical and is not created by any rename:
+**merely constructing a `ResultHandleStore` over a frozen artifact rewrites
+it**, because `__init__` runs five `CREATE TABLE IF NOT EXISTS` statements over
+a read-write connection. Measured on a copy, a 135,168-byte store became
+192,512 bytes with five tables added and a different sha256. "Additive"
+describes the schema delta, not the file delta.
+
+The policy, in the order it has to be applied:
+
+1. **Never point the ordinary constructor at a historical path.** Use
+   `ResultHandleStore.open_readonly(path)`, which skips the create block and
+   connects through `file:<path>?mode=ro`. Inherited writers are not overridden
+   — SQLite refuses them itself with "attempt to write a readonly database",
+   which is the loud failure.
+2. **Work on copies.** Copy the store out and open the copy, even read-only.
+3. **Checksum before and after**, from a manifest that lives outside the tree
+   it is checksumming — a manifest inside that tree can be rewritten by the
+   same accident it exists to detect.
+4. **A plain read-only open is not free on a WAL store.** `mode=ro` still
+   creates an `-shm` sidecar (and a `-wal` where none is there); that is how 17
+   sidecars once appeared under a frozen evidence root, an incident rather than
+   a precaution. `immutable=1` suppresses both, but it also makes SQLite ignore
+   the WAL, so against a store with an uncheckpointed WAL it silently reads a
+   **truncated** database.
+5. Each of those is therefore wrong for some file, and which one depends on
+   whether the path is frozen evidence or a directory being written while it is
+   read. **The framework does not know that and does not learn it.** The
+   mechanism lives here and takes no policy parameter; the per-file judgment
+   lives with the caller, which expresses it by overriding the `_connect` seam
+   on `ReadOnlyResultHandleStore` — the way IDO's evaluation layer already
+   subclasses `ReadOnlyObservabilityStore`.
+
+`tests/test_historical_store_acceptance.py` is the seven-step bracket that
+enforces all of it: a checksum manifest first, a fresh-store schema test, a
+read-only open over a copy of a real frozen store, a **negative** test
+asserting the writing constructor does change that same copy (without which
+step 3 can pass because nothing happened at all), an old-shape read, a
+re-verification of every checksum, and only then may real state be opened for
+mutation. The census steps skip when the corpus checkout is absent;
+`FW_HISTORICAL_STORE_ROOTS` and `FW_HISTORICAL_STORE_MANIFEST_DIR` say where to
+look and where the manifest lives.
+
+**No published release contains this package.** `fastworkflow` on PyPI stops at
+3.3.0 (2026-09-10); there is no 3.4.0 sdist or wheel, and the 3.3.0 wheel ships
+no `fastworkflow/result_handles`, `observation_offloading`, `answer_coverage`,
+`auto_navigation`, `answer_rehydration` or `context_budget` at all. So no
+pip-installed consumer can import any of it, and none of the schema changes
+above needs a compatibility layer. Re-check before tagging 3.4.0; the answer is
+only true until someone publishes.
 
 **Scope.** Rows are keyed by the same `RuntimeHandleScope` the offload archive
 uses (store identity, channel, experiment, task, attempt, turn). A handle
@@ -378,6 +438,114 @@ rows already stored are still served and the cursor still advances, because a
 refusal is usually transient. A descriptor whose resolver this process has not
 registered is `resolver_unavailable`: stored rows are served and no cursor is
 offered, because it would not move.
+
+## Adapters that are not databases
+
+Nothing above is a database interface, and
+`tests/test_result_handles_non_database.py` (F6, `fix-iq53.2.11`) is what makes
+that expensive to get wrong. It walks the bundled `tests/todo_list_workflow` —
+in-memory `TodoList` objects with integer ids and a description, no SQL, no
+offsets, no view, no snapshot pin, no query language — through the same
+`fetch_page` a portal-backed handle walks, and gets the same pages out.
+
+The whole adapter is a dozen lines, and it walks by **one-item lookahead**:
+
+```python
+def todo_source(request):                      # batch callback
+    after = (request.continuation or {}).get("after_id")
+    window = children_after(after, request.limit + 1)         # ONE operation
+    batch, has_more = window[:request.limit], len(window) > request.limit
+    reply = {"rows": [{"id": t.id, "description": t.description} for t in batch]}
+    if has_more:
+        reply["continuation"] = {"after_id": batch[-1].id}
+    return reply                       # claims nothing; that is the terminal's job
+
+
+def todo_terminal(request):            # terminal callback, fired once
+    # Lookahead already proved exhaustion, so this costs ZERO backend operations.
+    return {"complete": True}
+```
+
+`{"after_id": n}` is a key into an object graph and means nothing anywhere
+else, which is the point of the resume point being opaque: no offset is
+computed, offered or stored anywhere in that walk.
+
+**`len(rows) < limit` is not a has-more rule, and an adapter must not use it as
+one.** It is wrong on an exact multiple: the last full batch is
+indistinguishable from a non-final one, so the rule cannot recognise the end
+and has to spend an extra empty round trip finding out. Use an explicit
+has-more from the source, or lookahead as above. The three shapes to test are
+empty, exact-multiple and partial-last:
+
+| population / `batch_size` | batch callbacks | terminal | page |
+| --- | --- | --- | --- |
+| 0 / 3 | 1, returning no rows | 1 | proven `complete-zero`, no cursor |
+| 6 / 3 | **2, and no third** | 1 | `complete`, all six rows |
+| 7 / 3 | 3, the last carrying one row | 1 | `complete`, all seven rows |
+
+**This adapter's terminal callback performs zero backend operations**, where
+IDO's performs one `countOnly`. Same single framework callback, same placement,
+same count; the work behind it differs by a whole backend operation. That
+difference is what a dedicated terminal callback can express and a per-callback
+operation allowance could not — an allowance large enough for IDO's terminal
+would have authorised a second operation on every batch of a walk that needs
+none. The framework bounds callbacks, never their contents, so "one operation
+per callback" is checkable only on the adapter's side of the line; the test
+counts it there and pins `[1, 1, 1, 0]`.
+
+**The non-paginated half needs no adapter at all.** A command whose result is
+small and already whole declares a `ResultHandleSpec` with `source=None`. There
+is no descriptor, so there is no resolver, nothing callable, no walk and no
+terminal callback: `fetch_page` takes the `local` plan, `source_complete` is the
+producer's own claim carried through, and the stored rows still page by token
+and still answer a whole-relation literal filter. `NonPaginatedHandleTests` in
+the same file is that exemplar, and it is worth a test precisely because it is
+the half nobody thinks to check after changing the other one.
+
+## The measured work profile
+
+The contract was accepted on the strength of traces, so the traces are in the
+tree. `tests/callback_trace.py` (F7, `fix-iq53.2.12`) drives the real
+`fetch_page` through the real `FakePortal` fixture and counts every callback;
+`tests/test_result_handle_callback_budget.py` turns the counts into assertions.
+Run it standalone to re-measure after a change:
+
+```
+python -m tests.callback_trace       # every shape, every edge, as JSON
+```
+
+`B` is a charged batch callback and `T` the uncharged terminal; an empty cell is
+a fetch served entirely from stored batches, costing the source nothing.
+
+| shape | fetches | callbacks | batch reads | terminals | per-fetch sequences |
+| --- | --- | --- | --- | --- | --- |
+| normal (540 rows, `batch_size` 40) | 6 | 15 | 14 | 1 | `BBB` `BB` `BBB` `BB` `BBB` `BT` |
+| filtered (120 rows, all match) | 6 | 7 | 6 | 1 | `BBBB` · · · `B` `BT` |
+| exhausted (80 rows, exact multiple) | 1 | 4 | 3 | 1 | `BBBT` |
+| capped (call limit, `batch_size` 1) | 1 | 8 | 8 | **0** | `BBBBBBBB` |
+
+These are identical to the numbers the design was measured at before any of it
+was implemented, which is the evidence that the terminal callback preserved
+`_reconcile`'s work profile rather than merely promising to. Four properties
+hold in every shape and are asserted in every shape:
+
+* **at most 9 callbacks in one fetch** — eight charged batch reads plus the one
+  uncharged terminal, and nothing reaches ten;
+* **at most 1 terminal callback in one fetch**, never two;
+* **the terminal is the last callback of its fetch** whenever it fires;
+* **a capped walk makes zero terminal callbacks** — the terminal is reached by
+  exhausting the population, never by exhausting a budget.
+
+The per-fetch maximum is reachable and is pinned: 280 rows at `batch_size` 40
+makes the empty terminal probe the eighth charged call and the fetch runs
+`BBBBBBBBT`. One row more and the purse bites first, the walk has not ended, and
+the terminal never fires.
+
+What these establish is the framework's callback sequence, its counts and where
+the terminal lands — properties of `paging.py`'s control flow, independent of
+what sits behind the resolver. Wall-clock latency and the relative backend cost
+of a terminal versus a batch read are not measurable offline and are not
+claimed.
 
 ## Filtering
 

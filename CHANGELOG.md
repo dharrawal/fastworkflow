@@ -26,6 +26,44 @@ Full notes, migration and the experiment lineage:
 - **Result handles** (`fastworkflow.result_handles`): one alias per listing,
   immutable stored pages, serialisable source descriptors, short cursor tokens,
   bounded page observations, literal filters and page references in artifacts.
+  The source-adapter boundary (`fix-iq53.2`) ships settled and generic: the
+  framework owns identity, storage, presentation and the decision of when and
+  how often to call out; the workflow owns ordering, filters, snapshots, the
+  opaque continuation state, the origin rule and every completeness judgment.
+  - `SourceDescriptor` is six generic fields — `resolver`, `uid_field`,
+    `label_fields`, `batch_size`, `filter_columns`, `state` — where an earlier
+    draft had fourteen. `view`, `params`, `role`, `extra`, `ordering`,
+    `timeslot`, `start_offset`, `materialized` and `count_only` live in
+    `state`, which the package carries verbatim and never interprets, and the
+    constructor rules that policed an ordering and a snapshot pin went with the
+    fields they policed. `filter_columns` deliberately stays a list of names
+    rather than a boolean, because the page header prints them and a complete
+    zero names the fields it searched.
+  - **Two callback shapes replace one overloaded request.** `SourceRequest`
+    (`descriptor`, `continuation`, `limit`, `contains`) asks for one batch and
+    is charged against the per-fetch purse. `TerminalRequest` (`descriptor`,
+    `continuation`, `contains`, `distinct_uids`) is issued once when a walk
+    reaches its end, is never charged, and is the only callback that may decide
+    completeness. There is no `count_only` mode flag and no `batches_read`.
+  - **An empty batch terminates the walk regardless of any continuation
+    offered**, and a batch response may not claim completeness. A batch that
+    returns rows and offers no resume point also ends the walk, after those
+    rows.
+  - One new `incomplete_reason`, `completeness_not_claimed`: the walk reached
+    its end and the adapter decided nothing, so the question is owed again next
+    fetch rather than answered by the framework. The framework never upgrades
+    an unclaimed walk to complete.
+  - Storage is `result_handle_batches`, keyed on a framework-allocated
+    `batch_index` rather than one backend's `start_offset`, with a
+    `continuation_json` column, and `result_handle_walk_terminals`, one column
+    lighter. Renames and not `ALTER`s, so a store written before the change
+    still parses and is never written to again.
+    `ResultHandleStore.open_readonly` opens a historical store without marking
+    it — see the artifact policy in
+    [`docs/result_handles.md`](docs/result_handles.md).
+  - The work profile is pinned rather than promised: at most nine callbacks and
+    one terminal per fetch, the terminal always last, and zero terminals on a
+    capped walk, measured by `tests/callback_trace.py` over nine walk shapes.
 - **Auto-navigation** (`fastworkflow.auto_navigation`): deterministic two-step
   dispatch on a known command name a foreign context owns, driven by an
   `enter_command` declaration on the context callback class, with a blocking
