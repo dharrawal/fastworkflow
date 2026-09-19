@@ -1530,35 +1530,6 @@ def _columns_of(response: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) 
     return {str(name): type(value).__name__ for name, value in rows[0].items()}
 
 
-def _origin_offset(descriptor: Optional[Mapping[str, Any]]) -> int:
-    """Backend offset the producer's own first row came from, from ``state``.
-
-    **Transitional, and the only place this package reaches into ``state``.**
-    F1 moved the origin out of the descriptor because it is a domain fact —
-    an offset means nothing to an adapter that walks by cursor, keyset or
-    one-item lookahead.
-
-    F3 removed two of the three callers this had: the walk no longer computes a
-    resume position from the origin (it resumes from the adapter's own stored
-    continuation) and ``declare`` no longer keys the producer's page on it (it is
-    batch 0). **The third caller survives on purpose.** It is the
-    ``offset_origin_not_zero`` rule in ``_issue_terminal``, which under the
-    settled boundary is the adapter's — it owns ``state`` and it answers the
-    origin question on its terminal callback before making any backend call. Until
-    that lands on the adapter side (IDO's ido-0rk.2.1 I4), deleting this would
-    leave a partway-origin handle's completeness to whatever the adapter happens
-    to answer, and the failure that guards against is silent: a handle that starts
-    partway into a relation reported as covering all of it. That is the one thing
-    the walk must never do, so the backstop outlives the arithmetic.
-
-    When I4 lands, this function and its last caller go together. Nothing else
-    inspects ``state``, and nothing new should: the contract is that the framework
-    carries it verbatim.
-    """
-    state = (descriptor or {}).get("state")
-    return int((state or {}).get("start_offset") or 0)
-
-
 def _walk_records(
     scope: RuntimeHandleScope,
     store_: ResultHandleStore,
@@ -2023,10 +1994,9 @@ def _issue_terminal(
 
     * ``complete=True`` settles the walk complete, with no reason.
     * ``complete=False`` settles it incomplete, with the adapter's own reason
-      verbatim -- IDO emits ``countonly_mismatch`` and ``countonly_unavailable``,
-      which the page prints exactly as it printed them when the framework owned
-      them. (``offset_origin_not_zero`` is designated the adapter's too but is
-      still produced by the backstop below.)
+      verbatim -- IDO emits ``countonly_mismatch``, ``countonly_unavailable`` and
+      ``offset_origin_not_zero``, which the page prints exactly as it printed
+      them when the framework owned them.
     * **``complete`` absent does NOT settle the walk.** The end is known and
       unjudged, so the callback is owed again and re-fires on the next fetch off
       the stored terminal, costing one callback and no batch read. This
@@ -2034,37 +2004,47 @@ def _issue_terminal(
       count-is-``None`` paths, which also return without settling. It is a
       deliberate carry-forward: a walk whose coverage nobody could decide keeps
       asking, rather than freezing an answer nobody gave.
+
+    (ido-0rk.2.1 I4) **The origin rule is the adapter's, and the framework's
+    backstop for it is gone.** What stood at the top of this function until IDO's
+    I4 landed was a short-circuit that answered ``offset_origin_not_zero`` before
+    any callback, reading ``start_offset`` out of ``state`` through a helper
+    (``_origin_offset``) to do it -- the only place this package ever looked
+    inside the adapter's opaque state. The rule is unchanged and so is the word
+    the page prints: a walk that starts partway into the relation can never
+    account for the rows before it, so it is never complete, and (ido-oon, F24) a
+    FILTERED walk starts at its first match regardless -- see ``_walk_records`` --
+    so the same origin says nothing about it, and reporting it there said the
+    query was unprovable when it had in fact just been asked wrongly. IDO's
+    ``_terminal_reply`` answers exactly that now, off the same
+    ``state["start_offset"]``, before it makes any backend call, at the same zero
+    cost the branch had.
+
+    Why it was kept as long as it was, because the reasoning outlives it: the
+    origin left the descriptor in F1 because it is a domain fact -- an offset
+    means nothing to an adapter that walks by cursor, keyset or one-item
+    lookahead -- and F3 removed two of that helper's three callers, the walk's
+    resume position (it resumes from the adapter's own stored continuation) and
+    ``declare``'s page key (the producer's page is batch 0). The third was this
+    branch, and deleting it before the adapter said the same thing would have left
+    a partway-origin handle's completeness to whatever the adapter happened to
+    answer. That failure is silent -- a handle covering part of a relation
+    reported as covering all of it -- which is the one kind this walk must never
+    produce, so the backstop outlived the arithmetic it was made of.
+
+    One thing does change, and it is bookkeeping rather than page output. The
+    backstop settled the walk without a ``claim``, so the guard in
+    ``_record_walk_terminal`` declined the write and the rule decided again for
+    free from the descriptor on every rebuild; marking the walk settled was all
+    that kept it from re-walking. A callback answering ``complete=False`` IS a
+    claim, so the verdict is persisted like any other and costs one uncharged
+    terminal callback where it used to cost nothing. The page is identical either
+    way: ``complete`` false, ``stop_reason`` ``offset_origin_not_zero``, no count.
+    Nothing in this package inspects ``state`` any more, and nothing new should --
+    the contract is that the framework carries it verbatim.
     """
     walk["count_only"] = None
     walk["claim"] = None
-    if not query_scope and _origin_offset(descriptor) != 0:
-        # (ido-oon, F24) The unfiltered proof only. A walk that starts partway
-        # into the relation can never account for the rows before it, so it is
-        # never complete. A FILTERED walk starts at the first match regardless
-        # (see `_walk_records`), so the same origin says nothing about it, and
-        # reporting it here said the query was unprovable when it had in fact
-        # just been asked wrongly.
-        #
-        # (fix-iq53.2.8, F4) THIS IS A BACKSTOP AND IT IS DELIBERATELY STILL
-        # HERE. Under the settled boundary the origin rule is the adapter's: it
-        # owns `state`, it knows what an offset means to its backend, and its
-        # terminal callback answers `offset_origin_not_zero` before making any
-        # backend call, at the same zero cost as this branch. Until that lands on
-        # the adapter side (IDO's ido-0rk.2.1 I4), deleting this would leave a
-        # partway-origin handle's completeness to whatever the adapter happens to
-        # answer -- and the failure it guards is silent, which is the one kind of
-        # failure this walk must never produce. So it stays, the walk keeps
-        # reaching into `state` through `_origin_offset` for this one value, and
-        # removing it is a two-line deletion once the adapter says this itself.
-        walk["complete"] = False
-        # Settled but NOT claimed, and so not persisted: `claim` stays None, the
-        # guard in `_record_walk_terminal` declines the write, and the rule
-        # decides again for free from the descriptor on the next rebuild. That is
-        # today's behaviour exactly -- the old guard read `count_only`, which this
-        # branch also left unset -- and it is right for a rule with no call behind
-        # it. Marking the walk settled is what keeps it from re-walking.
-        _settle_walk(walk, "offset_origin_not_zero")
-        return
     walk["terminal_callbacks"] = int(walk.get("terminal_callbacks") or 0) + 1
     try:
         response = _call_resolver(

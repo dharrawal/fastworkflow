@@ -692,7 +692,7 @@ words or the prose, and the page prints both groups identically.
 | `countonly_error` | framework | the terminal callback raised; stored rows still served |
 | `countonly_mismatch` | adapter | the walk and the source's own count disagree |
 | `countonly_unavailable` | adapter | the source offers no independent count to prove coverage |
-| `offset_origin_not_zero` | adapter, *framework for now* | the handle starts partway into the relation, so a count cannot prove its coverage |
+| `offset_origin_not_zero` | adapter | the handle starts partway into the relation, so a count cannot prove its coverage |
 
 `countonly_error` sits in the framework's group because it is what the framework
 says when the terminal callback *raised* rather than answered — the same guard, in
@@ -700,16 +700,25 @@ the same place, saying the same thing about the same call as before F4. An adapt
 that answers with that word for its own reasons is reported with it too, like any
 other.
 
-`offset_origin_not_zero` is designated the adapter's and is **still emitted by the
-framework**, from a short-circuit in `_issue_terminal` that reads `start_offset`
-out of `state` before any callback is made. That short-circuit is the one place
-this package looks inside `state`, and it is a deliberate backstop rather than a
-leftover: until the adapter answers the origin question itself (IDO's
-`ido-0rk.2.1` I4), removing it would leave a partway-origin handle's completeness
-to whatever the adapter happens to say, and the failure that guards against — a
-handle covering part of a relation reported as covering all of it — is silent.
-When I4 lands, the short-circuit and `_origin_offset` go together, at no change to
-the page.
+`offset_origin_not_zero` is the adapter's, and as of IDO's `ido-0rk.2.1` I4 it is
+also *emitted* by the adapter. The framework used to answer it from a short-circuit
+in `_issue_terminal` that read `start_offset` out of `state` before any callback was
+made — the one place this package looked inside `state`, and a deliberate backstop
+rather than a leftover. It was held until the adapter answered the origin question
+itself, because removing it earlier would have left a partway-origin handle's
+completeness to whatever the adapter happened to say, and the failure that guards
+against — a handle covering part of a relation reported as covering all of it — is
+silent. I4 landed, and the short-circuit and its `_origin_offset` helper went with
+it, at no change to the page: IDO's terminal callback returns the same word, from
+the same `state["start_offset"]`, before it makes any backend call.
+
+The framework now reads nothing inside `state` at all, which
+`tests/test_result_handle_boundary_surface.py` asserts directly by AST rather than
+by repeating the claim. One bookkeeping difference, invisible on the page: the
+backstop settled the walk without a `claim`, so the verdict was never persisted and
+was re-derived free from the descriptor on every rebuild, whereas a callback's
+`complete=False` is a claim and is stored like any other. The cost moves from
+nothing to one uncharged terminal callback.
 
 Only the framework's words are continuable, and only two of them
 (`resolver_call_limit` and `resolver_error`). Everything else serves its stored

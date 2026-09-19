@@ -1146,7 +1146,25 @@ class FakePortal:
 
         The number is reported alongside the verdict because the page's prose
         names it. Nothing in the framework compares it to anything.
+
+        (ido-oon / ido-0rk.2.1 I4) ``offset_origin_not_zero`` is the third such
+        word and the last to cross. The framework answered it from a backstop in
+        ``_issue_terminal`` that read ``start_offset`` out of ``state`` before
+        making any callback; IDO's ``_terminal_reply`` answers it now, and the
+        backstop is deleted, so this fixture has to answer it too or it is no
+        longer modelling an adapter that walks by offset. It reads the same
+        ``start_offset`` ``offset_of`` already reads, ahead of the count and at
+        no cost, and the page prints the same word it printed from the backstop.
+
+        The unfiltered case only: a FILTERED walk begins at its first match
+        whatever the handle's origin is, so the origin says nothing about it and
+        reporting it there would call a search unprovable when it had merely been
+        asked wrongly.
         """
+        origin = int((request.descriptor.get("state") or {}).get("start_offset") or 0)
+        if not request.contains and origin:
+            return {"complete": False,
+                    "incomplete_reason": "offset_origin_not_zero"}
         if not self.count:
             return {"complete": False, "incomplete_reason": "countonly_unavailable"}
         count = len(self.matching(request))
