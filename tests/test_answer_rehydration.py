@@ -107,7 +107,7 @@ class Fixture:
         self.listing_rows = rows("holder", listing_rows)
         for index in range(0, listing_rows, 25):
             self.store.put_page(
-                self.scope, alias="O2", query_scope="", start_offset=index,
+                self.scope, alias="O2", query_scope="", batch_index=index,
                 limit_requested=25, source="resolver",
                 record=page_record(self.listing_rows[index:index + 25]),
                 backend_total=listing_rows,
@@ -115,7 +115,7 @@ class Fixture:
         # a filtered traversal of the same handle
         self.filtered_rows = rows("filtered", 4)
         self.store.put_page(
-            self.scope, alias="O2", query_scope="c:abc123", start_offset=0,
+            self.scope, alias="O2", query_scope="c:abc123", batch_index=0,
             limit_requested=25, source="resolver",
             record=page_record(self.filtered_rows), backend_total=4,
         )

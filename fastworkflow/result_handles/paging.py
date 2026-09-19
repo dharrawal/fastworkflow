@@ -21,8 +21,12 @@ any other execute observation (A2), and it links internally back to the listing
 handle it paged, so the parent is discoverable from the page.
 
 Nothing callable is ever persisted. A resolver is registered in-process under a
-name; the stored descriptor only names it, alongside the view, params, verified
-filter columns, page size and ordering policy needed to re-issue the query.
+name; the stored descriptor only names it, alongside the row vocabulary this
+module renders and filters with — uid field, label fields, verified filter
+columns, batch size — and an opaque ``state`` blob the adapter owns. (F1) The
+view, the params, the offset origin and the ordering policy used to be fields
+here too; they are in ``state`` now, because naming a SQL view in a framework
+type is not an adapter boundary.
 """
 from __future__ import annotations
 
@@ -45,6 +49,7 @@ from fastworkflow.observation_offloading.state import (
 )
 from fastworkflow.result_handles.common import (
     CURSOR_TOKEN_EXAMPLE,
+    DEFAULT_BATCH_SIZE,
     DEFAULT_PAGE_SIZE,
     FIRST_CURSOR_PAGE,
     MAX_ALIAS_DIGITS,
@@ -71,17 +76,22 @@ HOT_ROWS_MAX_BYTES = context_budget.REFERENCE_RESULT_HANDLE_HOT_MAX_BYTES
 HOT_ROWS_MAX_BYTES_ENV = context_budget.RESULT_HANDLE_HOT.override_env
 
 
-#: The only ordering policy a descriptor may name. B0 (ido-gqv.6) measured an
-#: explicit ``sort`` combined with offset paging silently dropping 20 of 540
-#: group members while returning exactly ``total`` rows, so a stored descriptor
-#: cannot express a sorted walk at all: there is no field to put one in.
+#: The ordering a PRODUCER declares about the rows it rendered
+#: (``ResultHandleSpec.ordering``). B0 (ido-gqv.6) measured an explicit
+#: ``sort`` combined with offset paging silently dropping 20 of 540 group
+#: members while returning exactly ``total`` rows, which is why no walk here
+#: has ever sent one. (F1) The descriptor used to carry this too, and had a
+#: constructor rule refusing any other value; the field and the rule are both
+#: gone, so a stored descriptor still cannot express a sorted walk — now
+#: because there is no field to put one in at all. Choosing an ordering, and
+#: refusing one, belong to the adapter.
 
 #: Marker key of the raw-page REFERENCE a declaration returns for its artifacts
 #: (bead ido-986.14.3, D). It is deliberately NOT the observability store's
 #: ``__fw_artifact_ref__`` envelope, which points at a row of the turn's own
 #: ``artifacts`` table: that envelope's lifetime is the turn record and its
 #: payload is an opaque blob, while a listing page is owned by THIS store, is
-#: keyed by ``(scope_id, alias, query_scope, start_offset)``, and outlives the
+#: keyed by ``(scope_id, alias, query_scope, batch_index)``, and outlives the
 #: turn exactly as long as the archive file does. Pointing one at the other
 #: would let a mutable listing collection masquerade as an immutable blob, which
 #: is the thing ido-986.14.3 forbids in as many words.
@@ -175,15 +185,22 @@ def result_pages_reference(
 #: advertised number of backend pages. ``_PageCallBudget`` is what makes the
 #: number mean one fetch.
 #:
-#: What it counts is SOURCE PAGES. The independent ``countOnly`` of
-#: ``_reconcile`` is deliberately outside it: it is at most one call per fetch
-#: (the walk is marked reconciled and never re-proves itself), it does not grow
-#: with the number of pages read, and it is the coverage proof itself - charging
-#: it against the page budget would let a fetch that read exactly eight pages
+#: What it counts is SOURCE BATCHES. The terminal callback of ``_issue_terminal``
+#: is deliberately outside it: it is at most one call per fetch (the walk is
+#: marked reconciled and never re-asks a judged terminal), it does not grow with
+#: the number of batches read, and it is the coverage question itself - charging
+#: it against the batch budget would let a fetch that read exactly eight batches
 #: silently lose the one call that decides whether the enumeration was complete.
 MAX_RESOLVER_CALLS_PER_FETCH = 8
 #: How many times one call may widen its read to fill the byte budget.
 MAX_FILL_ROUNDS = 4
+#: (fix-iq53.2.7/2.9, F3/F5a) Ordinal of the producer's own page in every walk.
+#: Batch ordinals are the framework's, allocated from 0 and monotonic, and the
+#: rows the declaring command already rendered are batch 0 of the traversal that
+#: continues them. Before F3 this slot was the descriptor's ``start_offset`` --
+#: an offset into one backend's relation -- which meant the framework had to know
+#: a backend's pagination scheme to find its own stored rows again.
+PRODUCER_BATCH_INDEX = 0
 #: Pages of one handle in a turn after which the observation suggests a literal
 #: filter. It suggests; it never refuses and never narrows anything itself.
 PAGE_WARNING_AFTER = 3
@@ -1036,9 +1053,16 @@ def declare(
     stored_pages: list[dict[str, Any]] = []
     try:
         # Only when there are rows. A zero-row producer page stored at the
-        # walk's first offset would be read back as the empty page that ends a
+        # walk's first ordinal would be read back as the empty batch that ends a
         # walk, and the walk would stop before it started.
-        start_offset = int(descriptor.start_offset) if descriptor else 0
+        #
+        # (fix-iq53.2.7/2.9, F3/F5a) The producer's own page is batch 0. It used
+        # to be stored at the descriptor's `start_offset`, which made the
+        # storage key an offset into one backend's relation; the walk then had
+        # to know that offset to find the page again. Batch 0 is the same fact
+        # said in the framework's own terms, and where the producer's first row
+        # came from is now the adapter's business, in `state`.
+        producer_index = PRODUCER_BATCH_INDEX
         producer_record = {"rows": [], "records": records} if records else None
         # (ido-ecd, F19) Digested here, before anything is written, because it
         # is half of the identity `put_declaration` refuses a redeclaration on.
@@ -1054,7 +1078,13 @@ def declare(
             selected_scope,
             handle,
             payload,
-            first_page_offset=start_offset,
+            # Passed even when this declaration materialised nothing, and that
+            # is load-bearing: with the ordinal in hand and the digest None,
+            # `put_declaration` still asks what is stored at batch 0, so a
+            # SECOND declaration claiming no rows under an alias whose first
+            # declaration stored some is refused by name. Sending None here
+            # instead would skip the question and let it through.
+            first_page_index=producer_index,
             first_page_sha256=producer_sha256,
         )
         if producer_record is not None:
@@ -1062,18 +1092,28 @@ def declare(
                 selected_scope,
                 alias=handle,
                 query_scope="",
-                start_offset=start_offset,
+                batch_index=producer_index,
                 limit_requested=len(items),
                 source="producer",
                 record=producer_record,
                 backend_total=int(spec.total or len(items)),
+                # A producer page offers the walk no resume point: the rows came
+                # from the declaring command, not from a backend read, so there
+                # is nothing for the adapter to continue from. The walk's first
+                # batch callback therefore carries no continuation and the
+                # adapter picks its own starting point out of `state`.
+                continuation=None,
             )
             # `put_page` reads the row back and re-digests it, so this sha256 is
             # the STORED bytes and not the bytes this process meant to store.
             stored_pages.append(
                 {
                     "query_scope": "",
-                    "start_offset": start_offset,
+                    # (F5a) The REFERENCE an artifact carries names the ordinal
+                    # now, because that is the key `get_page` reads back. IDO's
+                    # offline evaluator looks a page up by this value and moves
+                    # to `batch_index` with it (its I5).
+                    "batch_index": producer_index,
                     "limit_requested": len(items),
                     "records": len(items),
                     "source": "producer",
@@ -1201,26 +1241,103 @@ def parent_handle(
 
 @dataclass(frozen=True)
 class SourceRequest:
-    """One call to a resolver: one offset window of one query, or its count.
+    """One batch of one query, and one backend operation to produce it.
 
     The descriptor arrives as the JSON that was stored, so a resolver reads
-    exactly what the evidence records — not an object assembled here. ``filter``
-    and ``filter_columns`` travel together and are never separable: the portal
-    silently ignores a filter that names no columns and hands back the whole
-    scope, which is a search that did not run wearing the answer of one that
-    did.
+    exactly what the evidence records — not an object assembled here. The
+    filter and the columns it may be mapped to travel together and are never
+    separable: the portal silently ignores a filter that names no columns and
+    hands back the whole scope, which is a search that did not run wearing the
+    answer of one that did. They travel on the DESCRIPTOR now rather than
+    being copied onto every request, which is F2's reason for dropping
+    ``filter_columns`` from this type: two copies of one fact are two chances
+    to send the ignored pair.
+
+    (F2, fix-iq53.2.6) There is no ``count_only`` mode flag. A request that
+    turned itself into a reconciliation by setting a boolean was one type
+    doing two jobs, and an adapter had to branch on it before it knew what it
+    had been asked. The count is its own callback now, ``TerminalRequest``.
+
+    **A batch response may not claim completeness.** It carries ``rows``
+    (required) and ``continuation`` (optional). ``complete`` and
+    ``incomplete_reason`` on a batch response are ignored — completeness is
+    decided at the terminal callback or nowhere — and this is enforced by
+    nothing here ever reading them.
+
+    **An empty batch terminates the walk regardless of any continuation
+    offered** (fix-iq53.2.4). See ``_batch_continuation``.
     """
 
     descriptor: Mapping[str, Any]
-    start: int
-    limit: int
+    #: The adapter's own resume point, as it last returned one. Opaque: the
+    #: framework stores it, hands it back, and never reads inside it.
+    continuation: Optional[Mapping[str, Any]] = None
+    limit: int = 0
     contains: Optional[str] = None
-    filter_columns: tuple[str, ...] = ()
-    count_only: bool = False
 
 
-def _call_resolver(resolver: Callable[..., Any], request: SourceRequest) -> dict[str, Any]:
-    """Normalise whatever a resolver returns into rows / total / count / columns."""
+@dataclass(frozen=True)
+class TerminalRequest:
+    """The walk reached its end. Decide whether that end covers the query.
+
+    Issued by the framework, at most once per walk terminal, at the one call
+    site the reconciliation already occupies, and never charged against
+    ``MAX_RESOLVER_CALLS_PER_FETCH`` — preserving ``_PageCallBudget``'s
+    "Count-only reconciliation is not charged here" exactly.
+
+    ``distinct_uids`` is the framework reporting its OWN bookkeeping, not
+    asking the adapter to justify anything: the dedup is framework-side
+    (``walk["seen"]``) and a completeness rule of the form "independent count
+    == distinct uids" has always consumed this number. F4 moved that comparison
+    across the boundary, and this field is how the input followed it — it is the
+    same number the framework used to compare for itself, out of
+    ``walk["records"]``.
+
+    (fix-iq53.2.6) There is no ``batches_read``, and that is now a RULING rather
+    than a reversible default. The framework knows the number and no consumer on
+    the adapter side was ever named for it; a field with no consumer across the
+    boundary is the shape two earlier revisions were rejected for. The count
+    still reaches the observability store, on the ``result_handle_reconciled``
+    event, which is framework-side and needs no boundary crossing to get there.
+
+    **Terminal response**, and every key is optional:
+
+    * ``complete`` — the decision. ``True`` settles the walk complete, ``False``
+      settles it incomplete, and ABSENT settles nothing: the end is known and
+      unjudged, so the callback is owed again on the next fetch.
+    * ``incomplete_reason`` — the adapter's own typed word, passed through
+      verbatim and never rewritten. Absent, with a ``False`` or missing
+      ``complete``, becomes ``completeness_not_claimed``.
+    * ``count``/``total`` — whatever number the adapter's own rule ran on, if it
+      cares to report one. Recorded for the page's prose and the reconciliation
+      event, compared against nothing.
+    """
+
+    descriptor: Mapping[str, Any]
+    #: The last continuation the adapter returned, or ``None`` if it offered
+    #: none — including the ``None`` an empty terminal batch is forced to.
+    continuation: Optional[Mapping[str, Any]] = None
+    contains: Optional[str] = None
+    distinct_uids: int = 0
+
+
+def _call_resolver(
+    resolver: Callable[..., Any], request: "SourceRequest | TerminalRequest"
+) -> dict[str, Any]:
+    """Normalise whatever a resolver returns into the keys a response may carry.
+
+    Both callback shapes arrive here, and an adapter tells them apart by type
+    rather than by a flag on one of them.
+
+    (fix-iq53.2.7/2.8, F3/F4) The attribute branch below lists ``continuation``,
+    ``complete`` and ``incomplete_reason`` as well, and the omission would have
+    been silent on both: a resolver answering with an object rather than a mapping
+    would have had its resume point dropped, ending every walk after one batch,
+    and its completeness decision dropped, making every terminal unjudged. A
+    mapping keeps every key it carries, so neither failure was reachable through
+    the shape almost every adapter uses -- which is exactly what would have made
+    it hard to find.
+    """
     response = resolver(request)
     if response is None:
         return {"rows": []}
@@ -1231,7 +1348,41 @@ def _call_resolver(resolver: Callable[..., Any], request: SourceRequest) -> dict
         "total": getattr(response, "total", None),
         "count": getattr(response, "count", None),
         "columns": getattr(response, "columns", None),
+        "continuation": getattr(response, "continuation", None),
+        "complete": getattr(response, "complete", None),
+        "incomplete_reason": getattr(response, "incomplete_reason", None),
     }
+
+
+def _batch_continuation(
+    response: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> Optional[dict[str, Any]]:
+    """The resume point a batch response offers, or ``None``.
+
+    **(fix-iq53.2.4) An empty batch terminates the walk regardless of any
+    continuation offered.** An adapter that returns no rows and still hands
+    back a resume point is describing a walk that never ends: the framework
+    would ask again, get nothing again, and spend up to
+    ``MAX_RESOLVER_CALLS_PER_FETCH`` doing it on every fetch for the life of
+    the handle, with every page looking like legitimate progress. Within a
+    fetch the purse bounds it; across fetches nothing does. That is the
+    ido-1r0 failure mode in a new costume, and it is the one the walk's
+    "serve the stored rows and stop" default exists to refuse.
+
+    So the offer is discarded here, at the boundary, rather than trusted and
+    guarded against later. Recognising the terminal by an absent continuation
+    (F3) and recognising it by an empty batch then agree BY CONSTRUCTION, and
+    the independent stop condition the framework has today — the empty page,
+    which ``_extend_walk`` calls "THE stop condition, and the only one" — is
+    kept rather than traded away for adapter goodwill.
+
+    ``complete`` and ``incomplete_reason`` are not read: a batch response may
+    not claim completeness (F2).
+    """
+    if not rows:
+        return None
+    continuation = response.get("continuation")
+    return dict(continuation) if isinstance(continuation, Mapping) else None
 
 
 class MalformedResolverResponse(ValueError):
@@ -1379,6 +1530,35 @@ def _columns_of(response: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) 
     return {str(name): type(value).__name__ for name, value in rows[0].items()}
 
 
+def _origin_offset(descriptor: Optional[Mapping[str, Any]]) -> int:
+    """Backend offset the producer's own first row came from, from ``state``.
+
+    **Transitional, and the only place this package reaches into ``state``.**
+    F1 moved the origin out of the descriptor because it is a domain fact —
+    an offset means nothing to an adapter that walks by cursor, keyset or
+    one-item lookahead.
+
+    F3 removed two of the three callers this had: the walk no longer computes a
+    resume position from the origin (it resumes from the adapter's own stored
+    continuation) and ``declare`` no longer keys the producer's page on it (it is
+    batch 0). **The third caller survives on purpose.** It is the
+    ``offset_origin_not_zero`` rule in ``_issue_terminal``, which under the
+    settled boundary is the adapter's — it owns ``state`` and it answers the
+    origin question on its terminal callback before making any backend call. Until
+    that lands on the adapter side (IDO's ido-0rk.2.1 I4), deleting this would
+    leave a partway-origin handle's completeness to whatever the adapter happens
+    to answer, and the failure that guards against is silent: a handle that starts
+    partway into a relation reported as covering all of it. That is the one thing
+    the walk must never do, so the backstop outlives the arithmetic.
+
+    When I4 lands, this function and its last caller go together. Nothing else
+    inspects ``state``, and nothing new should: the contract is that the framework
+    carries it verbatim.
+    """
+    state = (descriptor or {}).get("state")
+    return int((state or {}).get("start_offset") or 0)
+
+
 def _walk_records(
     scope: RuntimeHandleScope,
     store_: ResultHandleStore,
@@ -1399,23 +1579,29 @@ def _walk_records(
         return cached
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    # (ido-oon, F24) Where this traversal begins. The descriptor's start_offset
-    # is an offset into the RELATION, and it is the right origin for the
-    # unfiltered walk, which re-walks the relation the producer paged. It is the
-    # wrong origin for a filtered one: the backend applies `contains` first, so
-    # `start` there counts MATCHES. Seeding a filtered walk at 100 asked for the
-    # matches after the hundredth one, a relation with 68 of them answered
-    # nothing at all, and the walk called itself finished with zero. A filter
-    # begins at the first match, whatever part of the relation the handle was
-    # declared over.
-    next_offset = (
-        0 if query_scope
-        else int((declaration["descriptor"] or {}).get("start_offset") or 0)
-    )
+    # (fix-iq53.2.7, F3) Where this traversal resumes: the ordinal after the
+    # last stored batch, and the resume point THAT batch handed back. Both come
+    # out of the store, so a rebuild continues the adapter's own walk instead of
+    # reconstructing a position in it.
+    #
+    # (ido-oon, F24) What this replaces, and why the replacement is not a
+    # regression. The seed used to be the descriptor's `start_offset` for an
+    # unfiltered walk and 0 for a filtered one, because `start_offset` is an
+    # offset into the RELATION: it is the right origin for the unfiltered walk,
+    # which re-walks the relation the producer paged, and the wrong one for a
+    # filtered walk, where the backend applies `contains` first so the number
+    # counts MATCHES. Seeding a filtered walk at 100 asked for the matches after
+    # the hundredth one, a relation with 68 of them answered nothing at all, and
+    # the walk called itself finished with zero. Neither origin is computed here
+    # any more: a fresh walk of either kind resumes from no continuation at all,
+    # and which row that means is the adapter's answer to give, from `state`. The
+    # framework can no longer get this wrong because it no longer decides it.
+    next_batch_index = 0
+    continuation: Optional[Mapping[str, Any]] = None
     backend_total: Optional[int] = None
-    terminal_offset: Optional[int] = None
-    # (ido-7ce, F8) Page at a time, not the whole traversal at once: see
-    # ``iter_pages``. Only the uid and the line of each row outlive the page.
+    terminal_batch_index: Optional[int] = None
+    # (ido-7ce, F8) A batch at a time, not the whole traversal at once: see
+    # ``iter_pages``. Only the uid and the line of each row outlive the batch.
     with closing(
         store_.iter_pages(scope, alias=alias, query_scope=query_scope)
     ) as pages:
@@ -1427,9 +1613,15 @@ def _walk_records(
                 # (ido-1r0) The stored end of the walk, recognised here exactly
                 # as ``_extend_walk`` recognises it live. Seeding the rebuilt
                 # walk PAST it is what made every rebuild ask the source to find
-                # the end again, one page further out, and store another empty
-                # page.
-                terminal_offset = page["start_offset"]
+                # the end again, one batch further out, and store another empty
+                # batch.
+                terminal_batch_index = page["batch_index"]
+                # Read before breaking, because the terminal batch reports a
+                # total like any other and this is the last chance to see it. The
+                # offset-keyed rebuild skipped it here and picked it up when
+                # `_extend_walk` re-read the same page; F3 does not re-read it.
+                if page["backend_total"] is not None:
+                    backend_total = page["backend_total"]
                 break
             for entry in entries:
                 item = _record_of(entry)
@@ -1437,11 +1629,24 @@ def _walk_records(
                     continue
                 seen.add(item["uid"])
                 records.append(item)
-            next_offset = max(
-                next_offset, page["start_offset"] + page["limit_requested"]
-            )
+            next_batch_index = max(next_batch_index, page["batch_index"] + 1)
+            continuation = page["continuation"]
             if page["backend_total"] is not None:
                 backend_total = page["backend_total"]
+            if continuation is None and page["source"] != "producer":
+                # (fix-iq53.2.7, F3) The OTHER stored end of a walk, and the one
+                # the offset-keyed rebuild had no way to record. A batch that
+                # returned rows and offered no resume point is the last batch
+                # there will ever be; asking again would restart a traversal
+                # that is over. The empty batch above is the same statement with
+                # no rows attached, which is why `_batch_continuation` forces an
+                # empty batch's continuation to None: the two tests are one test.
+                #
+                # A producer page is not a terminal. It carries no continuation
+                # because nothing fetched it, and the walk it begins has not
+                # asked the adapter anything yet.
+                terminal_batch_index = page["batch_index"]
+                break
     # Without a descriptor the producer's own rows are all there will ever be,
     # so the producer's own claim about coverage is the walk's.
     complete = bool(declaration["source_complete"]) and not query_scope
@@ -1449,38 +1654,59 @@ def _walk_records(
     stop_reason: Optional[str] = None
     reconciled = False
     verdict = store_.get_walk_terminal(scope, alias=alias, query_scope=query_scope)
-    if verdict is not None and verdict["count_only"] is None:
-        # A row without a count is not a verdict: the end was recorded but
-        # nothing proved what it covered, so the reconciliation still owes a
-        # call. Nothing this module writes looks like that; a hand-written or
-        # migrated row might.
+    if verdict is not None and verdict["complete"] is None:
+        # (fix-iq53.2.9, F5a) A row with no `complete` decision is not a verdict:
+        # the end was recorded but the adapter never judged what it covered, so
+        # the terminal callback still owes a call. This was "a row without a
+        # count is not a verdict" while the framework held the count; the shape
+        # of the rule is unchanged and the column it reads moved. Nothing this
+        # module writes looks like that -- `_record_walk_terminal` declines to
+        # write an unjudged terminal at all -- but a hand-written or migrated row
+        # might.
         verdict = None
     if verdict is not None:
-        # The end was reached and judged against the source's own count in some
-        # earlier call or process. Nothing about that is worth asking twice.
-        terminal_offset = verdict["terminal_offset"]
-        next_offset = verdict["terminal_offset"]
+        # The end was reached and the adapter judged it in some earlier call or
+        # process. Nothing about that is worth asking twice.
+        terminal_batch_index = verdict["terminal_batch_index"]
+        next_batch_index = verdict["terminal_batch_index"]
         complete = verdict["complete"]
-        count_only = verdict["count_only"]
         stop_reason = verdict["stop_reason"] or None
         reconciled = True
-    elif terminal_offset is not None:
-        # The end is stored but was never judged: resume AT the empty page, so
-        # the reconciliation runs once off a stored page and costs no fetch.
-        next_offset = terminal_offset
+    elif terminal_batch_index is not None:
+        # The end is stored but was never judged: resume AT the terminal batch,
+        # so the terminal callback runs once off a stored batch and costs no
+        # fetch. The batch is re-read from the store, its rows are deduped away
+        # if it had any, and it presents the same end it presented live.
+        next_batch_index = terminal_batch_index
     walk = {
         "alias": alias,
         "query_scope": query_scope,
         "records": records,
         "seen": seen,
-        "next_offset": next_offset,
+        # (fix-iq53.2.7, F3) The walk's two resume values, both rebuilt from the
+        # store. The ordinal is the framework's own bookkeeping -- where the next
+        # batch will be filed, and where to look for one already filed there.
+        # The continuation is the ADAPTER's, carried verbatim and never read
+        # into: it is what a batch callback is handed, and `None` means the
+        # adapter is being asked to start wherever it starts.
+        "next_batch_index": next_batch_index,
+        "continuation": continuation,
         "complete": complete,
         "backend_total": backend_total,
+        # Not persisted since F5a, so this is None on every rebuild. It is the
+        # count an adapter chose to report alongside its verdict, kept for the
+        # page's own prose and the reconciliation event and compared against
+        # nothing. See `_issue_terminal`.
         "count_only": count_only,
         "stop_reason": stop_reason,
-        "terminal_offset": terminal_offset,
+        "terminal_batch_index": terminal_batch_index,
         "terminal_stop_reason": stop_reason,
         "reconciled": reconciled,
+        # (fix-iq53.2.8, F4) The adapter's last completeness decision for this
+        # walk: True, False, or None for "it did not make one". Only a decision
+        # is persisted, and only a persisted decision settles the walk.
+        "claim": verdict["complete"] if verdict is not None else None,
+        "terminal_callbacks": 0,
         "error": None,
         "bytes": 0,
     }
@@ -1522,15 +1748,22 @@ def _extend_walk(
     needed: int,
     budget: Optional["_PageCallBudget"] = None,
 ) -> dict[str, Any]:
-    """Walk offsets until ``needed`` rows are known or the walk ends.
+    """Ask the adapter for batches until ``needed`` rows are known or it ends.
 
-    **The walk stops on an empty page and on nothing else.** B0 measured a
-    sorted offset walk on ``ido_groupDetail_identity`` returning exactly
-    ``total`` rows while 20 of 540 members were never shown, so a pager that
-    stops at ``rows == total`` reports a complete enumeration that is missing
-    people. ``rows == total`` is not a stop condition here and is not a
-    completeness proof anywhere; the proof is distinct uids reconciled against
-    ``countOnly`` (see ``_reconcile``).
+    **The walk stops when the adapter offers no resume point, and on nothing
+    else.** (fix-iq53.2.7, F3) Two things say that, and they say the same thing:
+    an empty batch, and a batch that returns rows and no ``continuation``.
+    ``_batch_continuation`` discards any resume point offered alongside an empty
+    batch, so the two tests cannot disagree and neither can be satisfied while
+    the other is not.
+
+    **``rows == total`` is not a stop condition here and is not a completeness
+    proof anywhere.** B0 measured a sorted offset walk on
+    ``ido_groupDetail_identity`` returning exactly ``total`` rows while 20 of 540
+    members were never shown, so a pager that stops at ``rows == total`` reports
+    a complete enumeration that is missing people. The proof is the adapter's own
+    judgment on the terminal callback, against the distinct uids this walk found
+    (see ``_issue_terminal``).
 
     Never sends a sort: the descriptor has no field for one.
 
@@ -1561,16 +1794,26 @@ def _extend_walk(
         walk["error"] = str(error)
         _remember_walk(key, walk)
         return walk
-    limit = max(1, int(descriptor.get("page_size") or DEFAULT_PAGE_SIZE))
-    columns_for = tuple(descriptor.get("filter_columns") or ()) if query_scope else ()
-    while len(walk["records"]) < needed:
-        start = int(walk["next_offset"])
+    limit = max(1, int(descriptor.get("batch_size") or DEFAULT_BATCH_SIZE))
+    if walk["terminal_batch_index"] is not None:
+        # (fix-iq53.2.7/2.8, F3/F4) The end of this walk is STORED and was never
+        # judged: `_walk_records` found the terminal batch and no verdict row.
+        # The only work owed is one terminal callback, so it is owed here and
+        # nothing is read to get to it -- not from the source, which is the point,
+        # and not from the store either. The offset-keyed walk resumed AT the
+        # terminal page and re-read it, which was free only because that page was
+        # always empty; a terminal batch that carries rows would be re-counted,
+        # and rows a source gives no uid for would be counted twice, because a
+        # row with no uid is never a duplicate of anything (`_dedupe_records`).
+        walk["complete"] = True
+    while not walk["complete"] and len(walk["records"]) < needed:
+        index = int(walk["next_batch_index"])
         try:
             stored = store_.get_page(
-                scope, alias=alias, query_scope=query_scope, start_offset=start
+                scope, alias=alias, query_scope=query_scope, batch_index=index
             )
         except (sqlite3.Error, OSError) as error:
-            _refuse_for_store(scope, walk, alias, query_scope, start, error)
+            _refuse_for_store(scope, walk, alias, query_scope, index, error)
             break
         if stored is None:
             if budget.exhausted:
@@ -1578,7 +1821,7 @@ def _extend_walk(
                 # the next call resumes exactly here.
                 walk["stop_reason"] = "resolver_call_limit"
                 break
-            # Charged before the call, so a page the source refused still costs
+            # Charged before the call, so a batch the source refused still costs
             # what it cost the source.
             budget.spend()
             try:
@@ -1586,10 +1829,18 @@ def _extend_walk(
                     resolver,
                     SourceRequest(
                         descriptor=dict(descriptor),
-                        start=start,
+                        # (fix-iq53.2.7, F3) The adapter's OWN resume point,
+                        # handed back exactly as it was last returned. F1/F2
+                        # minted `{"offset": index}` here because the framework
+                        # still walked by offset; nothing is minted now, and
+                        # `None` on the first batch of a walk means "start
+                        # wherever you start" -- which row that is, and whether
+                        # it accounts for the rows the producer already
+                        # rendered, is the adapter's answer to give out of
+                        # `state`.
+                        continuation=walk["continuation"],
                         limit=limit,
                         contains=literal.text or None if query_scope else None,
-                        filter_columns=columns_for,
                     ),
                 )
                 # (ido-94h, F20) Reading the reply is part of the resolver
@@ -1599,6 +1850,9 @@ def _extend_walk(
                 # rows already stored still served.
                 rows = _coerce_rows(response)
                 backend_total = _coerce_row_count(response.get("total"), "total")
+                # (fix-iq53.2.4) An empty batch keeps no resume point, however
+                # insistently one was offered. See `_batch_continuation`.
+                offered = _batch_continuation(response, rows)
             except Exception as error:  # noqa: BLE001
                 walk["stop_reason"] = "resolver_error"
                 walk["error"] = "%s: %s" % (type(error).__name__, error)
@@ -1608,7 +1862,7 @@ def _extend_walk(
                         "scope_id": scope.scope_id,
                         "alias": alias,
                         "query_scope": query_scope,
-                        "start": start,
+                        "batch_index": index,
                         "error": type(error).__name__,
                         "detail": str(error)[:300],
                     }
@@ -1621,8 +1875,9 @@ def _extend_walk(
             # file past the busy timeout all arrive as the same sqlite3 error,
             # and all three mean the same thing to the agent: the rows already
             # walked are still served, this call stopped, and the reason says
-            # the store and not the source. The offset is NOT advanced, so the
-            # same page is asked for again when the store comes back, and no
+            # the store and not the source. Neither the ordinal NOR the
+            # continuation is advanced, so the same batch is asked for again,
+            # from the same resume point, when the store comes back -- and no
             # cursor is offered for a walk whose continuation could not be
             # recorded either.
             try:
@@ -1630,12 +1885,13 @@ def _extend_walk(
                     scope,
                     alias=alias,
                     query_scope=query_scope,
-                    start_offset=start,
+                    batch_index=index,
                     limit_requested=limit,
                     source="resolver",
                     record={"rows": rows, "records": records,
                             "columns": _columns_of(response, rows)},
                     backend_total=backend_total,
+                    continuation=offered,
                 )
                 if rows:
                     store_.set_verified_columns(
@@ -1644,18 +1900,28 @@ def _extend_walk(
                         sample_row=rows[0],
                     )
             except (sqlite3.Error, OSError) as error:
-                _refuse_for_store(scope, walk, alias, query_scope, start, error)
+                _refuse_for_store(scope, walk, alias, query_scope, index, error)
                 break
         record = stored["record"]
         page_records = record.get("records") or []
+        # (fix-iq53.2.7, F3) Read back off the STORED batch, not off the response
+        # this call may or may not have made. One source of truth for a resume
+        # point that outlives the process, and the write is what makes it
+        # authoritative: a batch whose row could not be written does not move the
+        # walk, because the store is what a later fetch will read.
+        walk["continuation"] = stored["continuation"]
         if not page_records and not (record.get("rows") or []):
             if stored["source"] == "producer":
                 # Nothing the producer stored; the backend has not been asked.
-                walk["next_offset"] = start + max(1, int(stored["limit_requested"]))
+                walk["next_batch_index"] = index + 1
                 continue
-            # THE stop condition, and the only one.
+            # THE stop condition. (fix-iq53.2.4) An empty batch terminates the
+            # walk regardless of any continuation offered, and
+            # `_batch_continuation` already discarded the offer, so
+            # `walk["continuation"]` is None here by construction and the test
+            # below would reach the same verdict on the same batch.
             walk["complete"] = True
-            walk["terminal_offset"] = start
+            walk["terminal_batch_index"] = index
             break
         for entry in page_records:
             item = _record_of(entry)
@@ -1663,11 +1929,22 @@ def _extend_walk(
                 continue
             walk["seen"].add(item["uid"])
             walk["records"].append(item)
-        walk["next_offset"] = start + limit
+        walk["next_batch_index"] = index + 1
         if stored["backend_total"] is not None:
             walk["backend_total"] = stored["backend_total"]
+        if walk["continuation"] is None and stored["source"] != "producer":
+            # (fix-iq53.2.7, F3) The SAME stop condition, with rows attached. A
+            # batch that answered and offered no way to resume is the end of the
+            # walk; asking again would either restart a finished traversal or
+            # invent a position in it, and inventing one is what the offset
+            # arithmetic used to do. The rows this batch carried are kept -- they
+            # were appended above -- and the walk ends after them, not instead of
+            # them.
+            walk["complete"] = True
+            walk["terminal_batch_index"] = index
+            break
     if walk["complete"]:
-        _reconcile(
+        _issue_terminal(
             scope, store_, declaration, walk, descriptor=descriptor,
             query_scope=query_scope, literal=literal, resolver=resolver,
         )
@@ -1680,7 +1957,7 @@ def _refuse_for_store(
     walk: dict[str, Any],
     alias: str,
     query_scope: str,
-    start: int,
+    batch_index: int,
     error: BaseException,
 ) -> None:
     """Stop a walk on a store failure the way it stops on a source failure. (ido-2mk, F21)
@@ -1697,17 +1974,20 @@ def _refuse_for_store(
             "scope_id": scope.scope_id,
             "alias": alias,
             "query_scope": query_scope,
-            "start": start,
+            # (F3) The batch this walk could not read or write, by its ordinal.
+            # The key was `start`, a backend offset, which named something the
+            # framework no longer allocates.
+            "batch_index": batch_index,
             "error": type(error).__name__,
             "detail": str(error)[:300],
         }
     )
     logger.warning(
-        "result handle page store unavailable at %s@%d: %s", alias, start, error
+        "result handle batch store unavailable at %s#%d: %s", alias, batch_index, error
     )
 
 
-def _reconcile(
+def _issue_terminal(
     scope: RuntimeHandleScope,
     store_: ResultHandleStore,
     declaration: Mapping[str, Any],
@@ -1718,66 +1998,123 @@ def _reconcile(
     literal: "Literal",
     resolver: Callable[..., Any],
 ) -> None:
-    """Prove coverage by distinct uids against an independent ``countOnly``.
+    """The walk reached its end: ask the adapter whether that end covers the query.
 
-    An empty page ends the walk; it does not prove the walk saw everything.
-    ``countOnly`` honours the filter, so this is as available for a filtered
-    query as for the whole relation. Completeness is claimed only when the two
-    numbers agree — a mismatch leaves the walk incomplete and says so, which is
-    exactly the case a ``rows == total`` pager reports as finished.
+    (fix-iq53.2.8, F4) This replaces ``_reconcile``, at the same call site, with
+    the same structural guarantees and none of the policy. What was deleted was
+    the framework's own coverage rule -- an independent ``countOnly`` call, the
+    comparison against distinct uids, and the verdict words that came out of it.
+    What is kept is exactly the part the framework can enforce, because it is the
+    framework's own control flow:
+
+    * **At most one terminal callback per walk terminal.** Three guards, the
+      same three ``_reconcile`` had: ``reconciled`` and ``complete`` short-circuit
+      ``_extend_walk`` before it reaches here, and ``fetch_page``'s fill loop
+      breaks on a complete walk.
+    * **Never charged** against ``MAX_RESOLVER_CALLS_PER_FETCH``. The purse is a
+      bound on batch reads, and the coverage question is not one: charging it
+      would let a fetch that read exactly eight batches silently lose the call
+      that decides whether the enumeration was complete.
+    * **Never an upgrade.** An adapter that says nothing leaves the walk
+      incomplete. The framework has no rule that could make a walk complete and
+      does not acquire one by being handed a number.
+
+    The judgment is the adapter's, in its own words, recorded and not audited:
+
+    * ``complete=True`` settles the walk complete, with no reason.
+    * ``complete=False`` settles it incomplete, with the adapter's own reason
+      verbatim -- IDO emits ``countonly_mismatch`` and ``countonly_unavailable``,
+      which the page prints exactly as it printed them when the framework owned
+      them. (``offset_origin_not_zero`` is designated the adapter's too but is
+      still produced by the backstop below.)
+    * **``complete`` absent does NOT settle the walk.** The end is known and
+      unjudged, so the callback is owed again and re-fires on the next fetch off
+      the stored terminal, costing one callback and no batch read. This
+      reproduces the measured behaviour of today's ``countonly_error`` and
+      count-is-``None`` paths, which also return without settling. It is a
+      deliberate carry-forward: a walk whose coverage nobody could decide keeps
+      asking, rather than freezing an answer nobody gave.
     """
     walk["count_only"] = None
-    if not query_scope and int(descriptor.get("start_offset") or 0) != 0:
+    walk["claim"] = None
+    if not query_scope and _origin_offset(descriptor) != 0:
         # (ido-oon, F24) The unfiltered proof only. A walk that starts partway
         # into the relation can never account for the rows before it, so it is
-        # never complete. A FILTERED walk now starts at the first match
-        # regardless (see `_walk_records`), so the same origin says nothing
-        # about it, and reporting it here said the query was unprovable when it
-        # had in fact just been asked wrongly.
+        # never complete. A FILTERED walk starts at the first match regardless
+        # (see `_walk_records`), so the same origin says nothing about it, and
+        # reporting it here said the query was unprovable when it had in fact
+        # just been asked wrongly.
+        #
+        # (fix-iq53.2.8, F4) THIS IS A BACKSTOP AND IT IS DELIBERATELY STILL
+        # HERE. Under the settled boundary the origin rule is the adapter's: it
+        # owns `state`, it knows what an offset means to its backend, and its
+        # terminal callback answers `offset_origin_not_zero` before making any
+        # backend call, at the same zero cost as this branch. Until that lands on
+        # the adapter side (IDO's ido-0rk.2.1 I4), deleting this would leave a
+        # partway-origin handle's completeness to whatever the adapter happens to
+        # answer -- and the failure it guards is silent, which is the one kind of
+        # failure this walk must never produce. So it stays, the walk keeps
+        # reaching into `state` through `_origin_offset` for this one value, and
+        # removing it is a two-line deletion once the adapter says this itself.
         walk["complete"] = False
-        # Read off the descriptor, so it is free to decide again and needs no
-        # stored verdict; marking it settled keeps the walk from re-walking.
+        # Settled but NOT claimed, and so not persisted: `claim` stays None, the
+        # guard in `_record_walk_terminal` declines the write, and the rule
+        # decides again for free from the descriptor on the next rebuild. That is
+        # today's behaviour exactly -- the old guard read `count_only`, which this
+        # branch also left unset -- and it is right for a rule with no call behind
+        # it. Marking the walk settled is what keeps it from re-walking.
         _settle_walk(walk, "offset_origin_not_zero")
         return
-    if not descriptor.get("count_only", True):
-        walk["complete"] = False
-        _settle_walk(walk, "countonly_unavailable")
-        return
+    walk["terminal_callbacks"] = int(walk.get("terminal_callbacks") or 0) + 1
     try:
         response = _call_resolver(
             resolver,
-            SourceRequest(
+            TerminalRequest(
                 descriptor=dict(descriptor),
-                start=0,
-                limit=0,
+                continuation=walk.get("continuation"),
                 contains=literal.text or None if query_scope else None,
-                filter_columns=(tuple(descriptor.get("filter_columns") or ())
-                                if query_scope else ()),
-                count_only=True,
+                distinct_uids=len(walk["records"]),
             ),
         )
-        # (ido-94h, F20) The count is read inside the guard too: a countOnly
-        # that answers "n/a" is a source failure, reported as countonly_error,
-        # not a ValueError out of the command.
-        count = _coerce_row_count(response.get("count"), "count")
-        if count is None:
-            count = _coerce_row_count(response.get("total"), "total")
+        claim = response.get("complete")
+        reason = response.get("incomplete_reason")
+        # (F4) Recorded, and compared against nothing. The adapter may report the
+        # number its own rule ran on; the framework keeps it for the page's prose
+        # and the reconciliation event, and has no rule that consumes it. Read
+        # inside the guard and forgiving of junk: a malformed number is not worth
+        # failing a judgment the adapter already made.
+        try:
+            count = _coerce_row_count(response.get("count"), "count")
+            if count is None:
+                count = _coerce_row_count(response.get("total"), "total")
+        except MalformedResolverResponse:
+            count = None
     except Exception as error:  # noqa: BLE001
+        # (ido-94h, F20) A terminal callback that raises is a source failure
+        # reported as `countonly_error`, not a traceback out of the command, and
+        # the rows already stored are still served. Revision 4 §3.6 keeps this
+        # word rather than minting a new one: it is the same guard, in the same
+        # place, saying the same thing about the same call.
         walk["complete"] = False
         walk["stop_reason"] = "countonly_error"
         walk["error"] = "%s: %s" % (type(error).__name__, error)
         return
-    if count is None:
+    if count is not None:
+        walk["count_only"] = int(count)
+    if claim is None:
+        # No decision. The walk is not settled and the callback is owed again.
+        # `completeness_not_claimed` is the one word F4 adds, and it is the
+        # framework's: it says the adapter was asked and answered nothing, which
+        # is distinct from every reason an adapter gives for its own "no".
         walk["complete"] = False
-        walk["stop_reason"] = "countonly_unavailable"
+        walk["stop_reason"] = str(reason) if reason else "completeness_not_claimed"
         return
-    distinct = len(walk["records"])
-    walk["count_only"] = int(count)
-    if int(count) != distinct:
-        walk["complete"] = False
-        _settle_walk(walk, "countonly_mismatch")
-    else:
+    walk["claim"] = bool(claim)
+    walk["complete"] = bool(claim)
+    if walk["complete"]:
         _settle_walk(walk, None)
+    else:
+        _settle_walk(walk, str(reason) if reason else "completeness_not_claimed")
     _record_walk_terminal(scope, store_, declaration, walk, query_scope=query_scope)
     record_event(
         {
@@ -1785,9 +2122,15 @@ def _reconcile(
             "scope_id": scope.scope_id,
             "alias": declaration["alias"],
             "query_scope": query_scope,
-            "distinct_uids": distinct,
-            "count_only": int(count),
+            "distinct_uids": len(walk["records"]),
+            "count_only": walk["count_only"],
             "complete": bool(walk["complete"]),
+            # (Revision 4 §3.5) Both numbers the framework already knows, added so
+            # that a work-profile regression is visible in the store instead of
+            # being invisible. Telemetry, and described as nothing else: neither
+            # is a bound, and no code reads either back.
+            "batches_read": int(walk["next_batch_index"]),
+            "terminal_callbacks": int(walk["terminal_callbacks"]),
         }
     )
 
@@ -1807,22 +2150,27 @@ def _record_walk_terminal(
     *,
     query_scope: str,
 ) -> None:
-    """Persist the verdict so the next process inherits it instead of re-proving it.
+    """Persist the verdict so the next process inherits it instead of re-asking.
 
     Best effort, like every other write on a page's path: a walk whose verdict
     could not be written still serves its rows and is still right for this
-    process; it only pays for the proof again next time.
+    process; it only pays for the judgment again next time.
+
+    (fix-iq53.2.8/2.9, F4/F5a) The guard reads ``claim`` where it read
+    ``count_only``, and the rule behind it is unchanged: only a DECISION is worth
+    a later process inheriting. A terminal the adapter declined to judge is not
+    written, so the callback is owed again -- which is the same thing the absent
+    ``count_only`` guard used to accomplish while the framework held the count.
     """
-    if walk.get("terminal_offset") is None or walk.get("count_only") is None:
+    if walk.get("terminal_batch_index") is None or walk.get("claim") is None:
         return
     try:
         store_.put_walk_terminal(
             scope,
             alias=declaration["alias"],
             query_scope=query_scope,
-            terminal_offset=int(walk["terminal_offset"]),
-            complete=bool(walk["complete"]),
-            count_only=int(walk["count_only"]),
+            terminal_batch_index=int(walk["terminal_batch_index"]),
+            complete=bool(walk["claim"]),
             distinct_uids=len(walk["records"]),
             stop_reason=str(walk.get("terminal_stop_reason") or ""),
         )
@@ -1847,6 +2195,18 @@ def _filter_records(
     ]
 
 
+#: Prose for the reason a page carries, keyed by the reason word.
+#:
+#: (fix-iq53.2.8, F4) Four of these words are the ADAPTER's now, not the
+#: framework's: ``countonly_mismatch``, ``countonly_unavailable``,
+#: ``countonly_error`` and ``offset_origin_not_zero`` come back verbatim from a
+#: terminal callback and are passed through untouched. Their entries stay here
+#: anyway, and that is not an oversight. This table is how a page turns a reason
+#: word into a sentence an agent can act on; dropping the four would not stop
+#: them appearing, it would only stop them being explained, and every one of them
+#: would fall through to the bare word "incomplete" on the page whose job is to
+#: say why the rows in front of the agent are not all the rows. Owning a
+#: vocabulary and rendering it are different things.
 _STOP_REASON_NOTES = {
     "resolver_error": "the source refused a page of this query",
     "resolver_unavailable": "this process cannot reach the source that produced these rows",
@@ -1855,6 +2215,12 @@ _STOP_REASON_NOTES = {
     "countonly_unavailable": "the source offers no independent count to prove coverage",
     "countonly_error": "the source refused the count that would prove coverage",
     "offset_origin_not_zero": "this handle starts partway into the relation",
+    # (fix-iq53.2.8, F4) The one word F4 adds, and the framework's own: the walk
+    # reached its end, the adapter was asked whether that end covers the query,
+    # and it answered without deciding. Not the same as any adapter's reason for
+    # deciding "no", and deliberately not written to the store, so the question
+    # is asked again on the next fetch rather than answered by default.
+    "completeness_not_claimed": "the source did not say whether these are all the rows",
     "store_unavailable": "the page store could not be written, so this walk stopped where it was",
     "producer_materialized_subset": "the producing command did not materialise every row",
 }
@@ -1947,7 +2313,13 @@ def fetch_page(
             descriptor_sha256=descriptor_sha256,
         )
     budget = budget_bytes or page_max_bytes_from_env()
-    page_size = max(1, int(descriptor.get("page_size") or declaration["page_size"]
+    # The packer's row-budget FLOOR, not a backend read size — `_rows_wanted`
+    # asks for whichever is larger, this or what fills the observation. It
+    # prefers the descriptor's `batch_size` (F1's name for what was
+    # `page_size`) because a source that reads in batches of 40 should not be
+    # asked to fill a page in units of 25; the producer's own page size is the
+    # fallback for a handle with no descriptor.
+    page_size = max(1, int(descriptor.get("batch_size") or declaration["page_size"]
                            or DEFAULT_PAGE_SIZE))
     notes: list[str] = list(literal.notes)
     warnings: list[str] = []
@@ -2085,12 +2457,26 @@ def fetch_page(
     else:
         page.outcome = "rows"
     if page.incomplete_reason == "countonly_mismatch":
-        notes.append(
-            "The walk reached %d distinct rows and the source's own count says "
-            "%s. Rows retrieved equalling the reported total is not coverage; "
-            "the disagreement is reported rather than resolved."
-            % (len(walk["records"]), walk.get("count_only"))
-        )
+        # (fix-iq53.2.8/2.9, F4/F5a) The number is the adapter's to report and is
+        # no longer persisted, so it is known on the fetch that made the judgment
+        # and not after a restart. Both sentences say the same thing about the
+        # same page; the first one says it with the number when there is one.
+        # Nothing here compares the number to anything -- the adapter already did,
+        # which is why this branch is reading its word and not its arithmetic.
+        if walk.get("count_only") is not None:
+            notes.append(
+                "The walk reached %d distinct rows and the source's own count "
+                "says %s. Rows retrieved equalling the reported total is not "
+                "coverage; the disagreement is reported rather than resolved."
+                % (len(walk["records"]), walk.get("count_only"))
+            )
+        else:
+            notes.append(
+                "The walk reached %d distinct rows and the source's own count "
+                "disagrees. Rows retrieved equalling the reported total is not "
+                "coverage; the disagreement is reported rather than resolved."
+                % (len(walk["records"]),)
+            )
     if page.page_index >= PAGE_WARNING_AFTER and not literal.text:
         warnings.append(
             "Note: this is page %d of %s in this turn. For a named lookup one "
@@ -2111,9 +2497,23 @@ def fetch_page(
         # cost nothing to pass again. A resolver this process cannot reach, or a
         # walk that ended without proving coverage, is not continuable, and the
         # page says so rather than offering a cursor that would not move.
+        #
+        # (fix-iq53.2.8, F4) THIS ALLOWLIST IS THE SPECIFICATION for an adapter
+        # that supplies no resume point, and it needs no new entry to be one. A
+        # walk whose adapter returned no continuation and claimed no completeness
+        # stops with `completeness_not_claimed`, or with the adapter's own word,
+        # and neither is in this tuple -- so the walk is not continuable, every
+        # stored row is still served, and the page prints
+        # `continuation=source-incomplete has_more=false`. Adding any
+        # adapter-owned reason here would offer a cursor that cannot move and
+        # would silently restart the traversal behind it, which is the one
+        # behaviour Revision 4 §4.2 rejects outright.
         and walk.get("stop_reason") in (None, "resolver_call_limit", "resolver_error")
     )
     page.rows = list(shown)
+    # Rows left over from THIS page still get a cursor even when the walk itself
+    # cannot continue: the remainder is already stored and paging through it costs
+    # the source nothing. Only the last page of a stalled walk offers none.
     if remaining > 0 or walk_can_continue:
         page.continuation = "cursor"
         page.next_cursor = encode_cursor(
@@ -2523,6 +2923,7 @@ def _stamp_page_clause(
 
 
 __all__ = [
+    "DEFAULT_BATCH_SIZE",
     "DEFAULT_PAGE_SIZE",
     "HOT_ROWS_MAX_BYTES",
     "HOT_ROWS_MAX_BYTES_ENV",
@@ -2537,6 +2938,7 @@ __all__ = [
     "ResultPage",
     "SourceDescriptor",
     "SourceRequest",
+    "TerminalRequest",
     "UNSORTED_OFFSET",
     "WILDCARD_CHARACTERS",
     "CURSOR_TOKEN_EXAMPLE",
@@ -2560,6 +2962,7 @@ __all__ = [
     "page_max_bytes_from_env",
     "parent_handle",
     "MAX_RESOLVER_CALLS_PER_FETCH",
+    "PRODUCER_BATCH_INDEX",
     "PAGE_WARNING_AFTER",
     "register_resolver",
     "registered_resolvers",

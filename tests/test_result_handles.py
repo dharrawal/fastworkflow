@@ -40,7 +40,70 @@ from fastworkflow.result_handles import (
     normalize_literal,
     parent_handle,
     reset_result_handle_state,
+    TerminalRequest,
 )
+
+
+def offset_of(request) -> int:
+    """The backend offset a batch request resumes at.
+
+    (F2) The framework no longer sends a ``start``; it sends back the
+    adapter's own ``continuation``, and ``{"offset": n}`` is the key these
+    fixtures chose — the same one IDO's resolver reads. Unpacking it here is
+    the adapter doing its own bookkeeping, which is the whole point of making
+    the resume point opaque to the framework.
+
+    (fix-iq53.2.7, F3) And when there is no continuation to unpack, the ORIGIN
+    is the adapter's business too. The first batch of a walk carries
+    ``continuation=None`` — the framework has nothing to hand back yet and no
+    longer computes a starting offset of its own — so this derives one the way
+    IDO's adapter derives it, out of ``state``: begin after the rows the
+    producer already rendered, which is ``start_offset + materialized``. A
+    fixture that answered 0 here instead would re-read rows the walk already
+    has and lean on uid dedup to hide it.
+
+    (ido-oon, F24) **A FILTERED walk begins at zero**, whatever part of the
+    relation the handle was declared over, because the backend applies
+    ``contains`` first and an offset there counts MATCHES rather than relation
+    rows. Seeding a filtered walk at 100 asked for the matches after the
+    hundredth one, a relation with 68 of them answered nothing at all, and the
+    walk called itself finished with zero. ``_walk_records`` used to encode this
+    with ``0 if query_scope else ...``; the rule did not change, its OWNER did.
+    It is a fact about how one backend composes a filter with an offset, which is
+    exactly the kind of thing the framework should not have known.
+    """
+    if request.continuation is not None:
+        return int(request.continuation.get("offset") or 0)
+    if request.contains:
+        return 0
+    state = request.descriptor.get("state") or {}
+    return int(state.get("start_offset") or 0) + int(state.get("materialized") or 0)
+
+
+def next_offset_continuation(request, rows) -> dict | None:
+    """The resume point an offset-walking adapter offers after *rows*.
+
+    (fix-iq53.2.7, F3) The walk ends when the adapter stops offering one, so a
+    fixture that returns no continuation ends the walk after one batch. Offering
+    the next offset whenever rows came back, and nothing when they did not, is
+    the smallest adapter that walks: it reaches the empty batch the same way
+    IDO's offset resolver does, because an offset resolver cannot know its last
+    full batch was last.
+    """
+    if not rows:
+        return None
+    return {"offset": offset_of(request) + max(1, int(request.limit))}
+
+
+def batch_offsets(calls) -> list[int]:
+    """Offsets of the BATCH callbacks in *calls*, terminal callbacks excluded.
+
+    (F2) ``not call.count_only`` used to say "this call is a batch, not the
+    reconciliation". The mode flag is gone: the two callbacks are separate
+    types, so the same question is asked of the type.
+    """
+    return [offset_of(call) for call in calls
+            if not isinstance(call, TerminalRequest)]
 
 
 def scope(turn: str = "turn-1", *, task: str = "task-1") -> RuntimeHandleScope:
@@ -144,7 +207,7 @@ class ResultHandleStoreTests(unittest.TestCase):
         self.assertEqual(len(reference["pages"]), 1)
         page = reference["pages"][0]
         self.assertEqual(page["query_scope"], "")
-        self.assertEqual(page["start_offset"], 0)
+        self.assertEqual(page["batch_index"], 0)
         self.assertEqual(page["records"], 6)
         self.assertEqual(page["source"], "producer")
         self.assertRegex(page["sha256"], r"^[0-9a-f]{64}$")
@@ -156,7 +219,7 @@ class ResultHandleStoreTests(unittest.TestCase):
         reference = payload["raw_pages"]["pages"][0]
         reopened = ResultHandleStore(self.path)
         stored = reopened.get_page(scope(), alias="O4", query_scope="",
-                                   start_offset=0)
+                                   batch_index=0)
         self.assertEqual(reference["sha256"], stored["record_sha256"])
         # And it really is a digest OVER THE BYTES, recomputable by anyone.
         import json as _json
@@ -185,23 +248,42 @@ class ResultHandleStoreTests(unittest.TestCase):
         self.assertEqual(payload["raw_pages"]["pages"], [])
         self.assertEqual(payload["raw_pages"]["alias"], "O9")
 
-    def test_the_reference_start_offset_follows_the_descriptor(self):
+    def test_the_producer_page_is_batch_zero_whatever_its_backend_origin(self):
+        """(fix-iq53.2.7/2.9, F3/F5a) The storage key is an ordinal, not an offset.
+
+        This test asserted the opposite until F3: the reference named the
+        descriptor's ``start_offset`` and the page was filed under it, so the
+        framework had to know where in one backend's relation the producer's
+        first row came from in order to find its own stored rows again. An
+        adapter that walks by cursor or keyset has no such number to give. The
+        origin has not stopped mattering — it is in ``state``, the adapter reads
+        it, and it still decides whether a partway handle can claim coverage —
+        but it is no longer a key the framework allocates storage by.
+        """
         source = SourceDescriptor(
-            resolver="test.resolver", view="v", params={},
-            filter_columns=(), uid_field="uid", label_fields=("label",),
-            page_size=3, start_offset=12, materialized=6,
+            resolver="test.resolver", uid_field="uid", label_fields=("label",),
+            filter_columns=(), batch_size=3,
+            state={"view": "v", "params": {}, "start_offset": 12,
+                   "materialized": 6},
         )
         payload = self.declare_listing(alias="O7", source=source)
-        self.assertEqual(payload["raw_pages"]["pages"][0]["start_offset"], 12)
-        stored = ResultHandleStore(self.path).get_page(
-            scope(), alias="O7", query_scope="", start_offset=12)
-        self.assertIsNotNone(stored)
+        self.assertEqual(payload["raw_pages"]["pages"][0]["batch_index"], 0)
+        reopened = ResultHandleStore(self.path)
+        self.assertIsNotNone(
+            reopened.get_page(scope(), alias="O7", query_scope="", batch_index=0))
+        # And nothing is filed at the origin: the number in `state` is not a key.
+        self.assertIsNone(
+            reopened.get_page(scope(), alias="O7", query_scope="", batch_index=12))
+        # A producer page offers the walk no resume point.
+        self.assertIsNone(
+            reopened.get_page(scope(), alias="O7", query_scope="",
+                              batch_index=0)["continuation"])
 
     def test_pages_are_immutable_and_refetch_is_idempotent(self):
         self.declare_listing()
-        first = self.store.get_page(scope(), alias="O4", query_scope="", start_offset=0)
+        first = self.store.get_page(scope(), alias="O4", query_scope="", batch_index=0)
         again = self.store.put_page(
-            scope(), alias="O4", query_scope="", start_offset=0,
+            scope(), alias="O4", query_scope="", batch_index=0,
             limit_requested=6, source="producer",
             record={"rows": [], "records": [{"uid": "other", "line": "other  x",
                                              "row": None}]},
@@ -216,7 +298,8 @@ class ResultHandleStoreTests(unittest.TestCase):
         with self.assertRaises(ResultHandleError):
             declare(
                 ResultHandleSpec(kind="member", items=holders(2), total=2),
-                source=SourceDescriptor(resolver="probe", view="other_view"),
+                source=SourceDescriptor(resolver="probe",
+                                        state={"view": "other_view"}),
                 scope=scope(),
                 selected_store=self.store,
                 alias="O4",
@@ -264,21 +347,41 @@ class ResultHandleStoreTests(unittest.TestCase):
         self.assertIn("O4", str(caught.exception))
 
     def test_descriptor_refuses_a_sorted_walk_and_an_invented_timeslot(self):
+        # (F1) The two constructor rules that used to refuse an ordering other
+        # than UNSORTED_OFFSET (ido-gqv.6 B0) and a non-None timeslot
+        # (ido-986.14.1) are gone, because the fields they policed are gone.
+        # What they bought is stronger now and is what this asserts: there is
+        # no field to put an ordering, a snapshot pin or a sort in, so the
+        # framework cannot send one however a workflow fills the descriptor.
+        stored = SourceDescriptor(resolver="probe").as_dict()
+        for absent in ("sort", "ordering", "timeslot", "view", "params",
+                       "role", "extra", "start_offset", "count_only"):
+            self.assertNotIn(absent, stored)
+        with self.assertRaises(TypeError):
+            SourceDescriptor(resolver="probe", ordering="sorted-offset")
+        with self.assertRaises(TypeError):
+            SourceDescriptor(resolver="probe", timeslot="2026-09-14")
+        # An adapter that needs one carries it in `state`, which this package
+        # never reads and therefore can never turn into a sorted walk.
+        carried = SourceDescriptor(
+            resolver="probe", state={"ordering": "sorted-offset"}).as_dict()
+        self.assertEqual(carried["state"], {"ordering": "sorted-offset"})
+
+    def test_a_descriptor_must_name_a_resolver_and_a_usable_batch_size(self):
         with self.assertRaises(ResultHandleError):
-            SourceDescriptor(resolver="probe", view="v", ordering="sorted-offset")
+            SourceDescriptor(resolver="")
         with self.assertRaises(ResultHandleError):
-            SourceDescriptor(resolver="probe", view="v", timeslot="2026-09-14")
-        self.assertNotIn(
-            "sort", SourceDescriptor(resolver="probe", view="v").as_dict()
-        )
+            SourceDescriptor(resolver="probe", batch_size=0)
 
     def test_no_callable_is_persisted(self):
         result_handles.register_resolver("probe", lambda request: {"rows": []})
         try:
             self.declare_listing(
-                source=SourceDescriptor(resolver="probe", view="ido_permissiondetail_identity",
-                                        filter_columns=("identity_displayname",),
-                                        uid_field="identity__id", page_size=3)
+                source=SourceDescriptor(
+                    resolver="probe",
+                    filter_columns=("identity_displayname",),
+                    uid_field="identity__id", batch_size=3,
+                    state={"view": "ido_permissiondetail_identity"})
             )
             stored = self.store.get_declaration(scope(), "O4")
             self.assertEqual(stored["descriptor"]["resolver"], "probe")
@@ -1002,37 +1105,75 @@ class FakePortal:
         self.count = count
         self.calls = []
 
+    def columns(self, request):
+        """The filter columns, read off the descriptor rather than the request.
+
+        (F2) They used to be copied onto every ``SourceRequest`` beside the
+        literal. They are not any more: two copies of one fact are two
+        chances to send the ignored pair, and the descriptor is already on
+        every request of both shapes.
+        """
+        return tuple(request.descriptor.get("filter_columns") or ())
+
     def matching(self, request):
         if not request.contains:
             return list(self.rows)
-        if not request.filter_columns:
+        columns = self.columns(request)
+        if not columns:
             # The ignored case: the portal hands back the whole scope. A caller
             # that can emit this pair cannot tell a search from a non-search.
             return list(self.rows)
-        for column in request.filter_columns:
+        for column in columns:
             if column not in VERIFIED_COLUMNS:
                 raise PortalError("Error executing view with query: %s" % column)
         needle = request.contains.lower()
         return [
             row for row in self.rows
             if any(needle in str(row.get(column, "")).lower()
-                   for column in request.filter_columns)
+                   for column in columns)
         ]
+
+    def terminal(self, request):
+        """The coverage judgment, made HERE and not by the framework.
+
+        (fix-iq53.2.8, F4) ``_reconcile`` used to make this decision: the
+        framework asked for a ``countOnly``, compared it against its own distinct
+        uids and picked the reason word. All three moved across the boundary, so
+        this fixture does what IDO's adapter does — compare, decide, and answer
+        in its own vocabulary. ``countonly_mismatch`` and
+        ``countonly_unavailable`` are the adapter's words now; the page prints
+        them exactly as it printed them when the framework owned them.
+
+        The number is reported alongside the verdict because the page's prose
+        names it. Nothing in the framework compares it to anything.
+        """
+        if not self.count:
+            return {"complete": False, "incomplete_reason": "countonly_unavailable"}
+        count = len(self.matching(request))
+        if count != request.distinct_uids:
+            return {"complete": False, "incomplete_reason": "countonly_mismatch",
+                    "count": count}
+        return {"complete": True, "count": count}
 
     def __call__(self, request):
         self.calls.append(request)
         assert "sort" not in request.descriptor, "a sort must never be sent"
-        if request.count_only:
-            if not self.count:
-                return {}
-            return {"count": len(self.matching(request))}
-        if self.fail_at is not None and request.start == self.fail_at:
+        # (F2) The two callbacks are told apart by TYPE, not by a mode flag
+        # the batch request carried. `countOnly` is what this adapter does on
+        # the terminal callback; a batch never answers one.
+        if isinstance(request, TerminalRequest):
+            return self.terminal(request)
+        start = offset_of(request)
+        if self.fail_at is not None and start == self.fail_at:
             raise PortalError("Cannot get view results")
         matched = self.matching(request)
-        if self.lossy and not request.contains:
-            return {"rows": self.lossy_page(matched, request), "total": len(matched)}
-        return {"rows": matched[request.start:request.start + request.limit],
-                "total": len(matched)}
+        rows = (self.lossy_page(matched, request) if self.lossy and not request.contains
+                else matched[start:start + request.limit])
+        # (fix-iq53.2.7, F3) The resume point. An offset walker cannot know its
+        # last full batch was last, so it offers one whenever rows came back and
+        # the framework reaches the empty batch by asking once more.
+        return {"rows": rows, "total": len(matched),
+                "continuation": next_offset_continuation(request, rows)}
 
     def lossy_page(self, matched, request):
         """Exactly ``total`` rows over the walk, with the tail repeating rows.
@@ -1041,10 +1182,11 @@ class FakePortal:
         complete enumeration while the last 20 members were never shown.
         """
         drop = 20
+        start = offset_of(request)
         body = matched[:len(matched) - drop]
-        if request.start < len(body):
-            return body[request.start:request.start + request.limit]
-        shown = request.start - len(body)
+        if start < len(body):
+            return body[start:start + request.limit]
+        shown = start - len(body)
         if shown >= drop:
             return []
         return matched[shown:shown + min(request.limit, drop - shown)]
@@ -1081,16 +1223,26 @@ class BackendPagingTests(unittest.TestCase):
         self.temp.cleanup()
 
     def descriptor(self, **kwargs):
+        """Six generic fields, with every portal fact in opaque ``state``.
+
+        (F1) The view, its params and the offset bookkeeping this descriptor
+        used to name are domain facts now, so they go in ``state``, which the
+        framework carries verbatim and never reads. Leftover keyword
+        arguments land there, which is what IDO's own descriptor builder does
+        with them.
+        """
         return SourceDescriptor(
             resolver="fake-portal",
-            view="ido_groupDetail_identity",
-            params={"scope": "f737245119f5ee6347e6f10cb569fe86"},
             filter_columns=kwargs.pop("filter_columns",
                                       ("identity_displayname", "identity_surname")),
             uid_field="identity__id",
             label_fields=("identity_displayname",),
-            page_size=kwargs.pop("page_size", 40),
-            **kwargs,
+            batch_size=kwargs.pop("batch_size", 40),
+            state={
+                "view": "ido_groupDetail_identity",
+                "params": {"scope": "f737245119f5ee6347e6f10cb569fe86"},
+                **kwargs,
+            },
         )
 
     def declare_handle(self, *, materialized=0, total=540, complete=False, **kwargs):
@@ -1125,7 +1277,7 @@ class BackendPagingTests(unittest.TestCase):
         self.assertEqual(seen, ["%s  %s" % (row["identity__id"],
                                             row["identity_displayname"])
                                 for row in self.rows])
-        starts = [call.start for call in self.portal.calls if not call.count_only]
+        starts = batch_offsets(self.portal.calls)
         # 540 rows at page size 40: the cumulative count reaches `total` at
         # offset 520. The walk must read past it and find the empty page.
         self.assertIn(520, starts)
@@ -1158,11 +1310,10 @@ class BackendPagingTests(unittest.TestCase):
     def test_a_refetched_offset_is_served_from_the_store(self):
         self.declare_handle()
         self.walk_everything()
-        first = [call.start for call in self.portal.calls if not call.count_only]
+        first = batch_offsets(self.portal.calls)
         reset_result_handle_state()
         seen, page = self.walk_everything()
-        second = [call.start for call in self.portal.calls
-                  if not call.count_only][len(first):]
+        second = batch_offsets(self.portal.calls)[len(first):]
         self.assertEqual(len(seen), 540)
         # Not one stored offset was read from the source a second time. The
         # walk re-proves only its end, which is memory the store does not keep.
@@ -1189,7 +1340,7 @@ class BackendPagingTests(unittest.TestCase):
         self.assertEqual(page.outcome, "partial")
 
     def test_one_call_is_bounded_and_the_cursor_carries_on(self):
-        self.declare_handle(page_size=1)
+        self.declare_handle(batch_size=1)
         page = fetch_page("O7", scope=scope(), selected_store=self.store,
                           budget_bytes=3_072)
         self.assertEqual(page.incomplete_reason, "resolver_call_limit")
@@ -1245,9 +1396,12 @@ class BackendFilterTests(unittest.TestCase):
                              items=rendered, total=120, source_complete=False,
                              page_size=25),
             source=SourceDescriptor(
-                resolver="fake-portal", view="ido_permissiondetail_identity",
+                resolver="fake-portal",
                 uid_field="identity__id", label_fields=("identity_displayname",),
-                page_size=25, materialized=25, **kwargs),
+                batch_size=25,
+                state={"view": "ido_permissiondetail_identity",
+                       "materialized": 25},
+                **kwargs),
             scope=scope(), selected_store=self.store, alias="O3",
         )
 
@@ -1257,8 +1411,11 @@ class BackendFilterTests(unittest.TestCase):
         sent = [call for call in self.portal.calls if call.contains]
         self.assertTrue(sent)
         self.assertEqual(sent[0].contains, "Alan Cooper 0")
-        self.assertEqual(sent[0].filter_columns,
-                         ("identity_displayname", "identity_surname"))
+        # (F2) The columns travel on the descriptor, not copied onto every
+        # request beside the literal. The pair is still inseparable: this is
+        # the same assertion against the one place that now carries them.
+        self.assertEqual(sent[0].descriptor["filter_columns"],
+                         ["identity_displayname", "identity_surname"])
         self.assertEqual(page.matched, 1)
         self.assertTrue(page.matched_complete)
         self.assertEqual(page.continuation, "complete")
@@ -1303,8 +1460,9 @@ class BackendFilterTests(unittest.TestCase):
         declare(
             ResultHandleSpec(kind="holder", items=["uid1  Alan Cooper"], total=120,
                              source_complete=False, page_size=25),
-            source=SourceDescriptor(resolver="fake-portal", view="v",
-                                    uid_field="identity__id", page_size=25),
+            source=SourceDescriptor(resolver="fake-portal",
+                                    uid_field="identity__id", batch_size=25,
+                                    state={"view": "v"}),
             scope=scope(), selected_store=store, alias="O3",
         )
         before = len(self.portal.calls)
@@ -1350,6 +1508,587 @@ class BackendFilterTests(unittest.TestCase):
                              selected_store=self.store, budget_bytes=900)
         self.assertEqual(second.rows, retried.rows)
         self.assertEqual(second.position, len(first.rows))
+
+
+class AdapterBoundaryContractTests(unittest.TestCase):
+    """The two conditions Revision 4 was accepted with.
+
+    fix-iq53.2.3 — the agent-visible page keeps the names of the columns a
+    filtered search ran against. fix-iq53.2.4 — an empty batch terminates the
+    walk regardless of any continuation offered. Both are properties of the
+    CONTRACT rather than of any one walk, and both are things the F3/F4 walk
+    rewrite could quietly drop, which is why they are pinned here now.
+    """
+
+    ROWS = [{"uid": "u%d" % index, "name": "Alan Cooper %d" % index}
+            for index in range(3)]
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(reset_result_handle_state)
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.calls: list[object] = []
+
+    def register(self, resolver) -> None:
+        result_handles.register_resolver("contract", resolver)
+        self.addCleanup(result_handles.unregister_resolver, "contract")
+
+    def declare_handle(self, *, filter_columns=("name",)):
+        return declare(
+            ResultHandleSpec(kind="row", summary="3 row(s).", items=[], total=3,
+                             source_complete=False, page_size=3),
+            source=SourceDescriptor(
+                resolver="contract", uid_field="uid", label_fields=("name",),
+                filter_columns=filter_columns, batch_size=3,
+                state={"view": "rows"}),
+            scope=scope(), selected_store=self.store, alias="O1",
+        )
+
+    def batches(self):
+        return [call for call in self.calls
+                if not isinstance(call, TerminalRequest)]
+
+    def terminals(self):
+        return [call for call in self.calls
+                if isinstance(call, TerminalRequest)]
+
+    # ---- fix-iq53.2.4: an empty batch terminates the walk ----
+
+    def test_an_empty_batch_ends_the_walk_whatever_continuation_it_offers(self):
+        """The independent stop condition survives, and it outranks the offer.
+
+        An adapter that answers "no rows, but there is more" describes a walk
+        with no end. Nothing across the fetch boundary bounds it: within one
+        fetch the purse caps it at MAX_RESOLVER_CALLS_PER_FETCH, and every
+        page of it looks like progress. Two batch callbacks here, never eight.
+        """
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return {"complete": request.distinct_uids == 3, "count": 3}
+            if offset_of(request) == 0:
+                return {"rows": self.ROWS, "continuation": {"offset": 3},
+                        "total": 3}
+            return {"rows": [], "continuation": {"offset": 999}, "total": 3}
+
+        self.register(resolver)
+        self.declare_handle()
+        page = fetch_page("O1", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        self.assertEqual(len(self.batches()), 2)
+        self.assertEqual(len(self.terminals()), 1)
+        self.assertTrue(page.source_complete)
+        self.assertEqual(page.continuation, "complete")
+        self.assertEqual(len(page.rows), 3)
+
+    def test_the_terminal_callback_is_handed_no_resume_point_after_an_empty_batch(self):
+        """The rule is observable at the boundary, not only in the outcome.
+
+        `TerminalRequest.continuation` is "the last one the adapter returned".
+        After an empty terminal batch that is None even though the adapter
+        offered one, because `_batch_continuation` discarded it. F3 resumes
+        from this value; if it could be a live offer here, F3 would resume a
+        walk that already ended.
+        """
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return {"complete": True, "count": 3}
+            if offset_of(request) == 0:
+                return {"rows": self.ROWS, "continuation": {"offset": 3}}
+            return {"rows": [], "continuation": {"offset": 999}}
+
+        self.register(resolver)
+        self.declare_handle()
+        fetch_page("O1", scope=scope(), selected_store=self.store,
+                   budget_bytes=100_000)
+        self.assertIsNone(self.terminals()[0].continuation)
+        self.assertEqual(self.terminals()[0].distinct_uids, 3)
+
+    def test_a_batch_that_returned_rows_keeps_the_resume_point_it_offered(self):
+        """The negative half: the rule drops an offer, it does not drop them all."""
+        self.assertEqual(
+            result_handles._batch_continuation(
+                {"rows": [{"uid": "u1"}], "continuation": {"after": "u1"}},
+                [{"uid": "u1"}]),
+            {"after": "u1"},
+        )
+        self.assertIsNone(
+            result_handles._batch_continuation(
+                {"rows": [], "continuation": {"after": "u1"}}, []),
+        )
+        self.assertIsNone(
+            result_handles._batch_continuation({"rows": [{"uid": "u1"}]},
+                                               [{"uid": "u1"}]),
+        )
+
+    def test_a_batch_response_may_not_claim_completeness(self):
+        """Completeness is decided at the terminal callback or nowhere.
+
+        This adapter claims `complete` on every batch and then decides nothing
+        at the terminal. The page must report the terminal's answer, not the
+        batch's — and the terminal's answer here is the absence of one, which
+        (fix-iq53.2.8, F4) is `completeness_not_claimed`: the framework's single
+        new word for "asked, and told nothing". An adapter with a reason of its
+        own is reported in its own words instead; this one has none.
+        """
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return {}
+            if offset_of(request) == 0:
+                return {"rows": self.ROWS, "complete": True,
+                        "incomplete_reason": "nothing_to_see_here"}
+            return {"rows": [], "complete": True}
+
+        self.register(resolver)
+        self.declare_handle()
+        page = fetch_page("O1", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        self.assertFalse(page.matched_complete)
+        self.assertFalse(page.source_complete)
+        self.assertEqual(page.incomplete_reason, "completeness_not_claimed")
+        self.assertEqual(len(page.rows), 3)
+
+    # ---- fix-iq53.2.3: the page keeps the filter column names ----
+
+    def test_the_header_names_the_columns_a_filtered_search_ran_against(self):
+        """A `filterable` boolean could not reconstruct this line."""
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return {"complete": request.distinct_uids == 3, "count": 3}
+            if offset_of(request):
+                return {"rows": []}
+            return {"rows": self.ROWS, "continuation": {"offset": 3}}
+
+        self.register(resolver)
+        self.declare_handle(filter_columns=("name", "surname"))
+        page = fetch_page("O1", None, "cooper", scope=scope(),
+                          selected_store=self.store, budget_bytes=100_000)
+        self.assertEqual(page.filter_columns, ("name", "surname"))
+        self.assertIn("filter_columns=name,surname", page.as_observation())
+
+    def test_a_complete_zero_names_the_fields_it_searched(self):
+        """...rather than "the rendered rows", which is the boolean's page.
+
+        This is the page whose whole job is to stop a zero being over-read, so
+        it is the worst page on which to stop naming what was searched.
+        """
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return {"complete": request.distinct_uids == 0, "count": 0}
+            return {"rows": []}
+
+        self.register(resolver)
+        self.declare_handle(filter_columns=("name", "surname"))
+        page = fetch_page("O1", None, "ochoa", scope=scope(),
+                          selected_store=self.store, budget_bytes=100_000)
+        observation = page.as_observation()
+        self.assertEqual(page.outcome, "complete-zero")
+        self.assertIn("in these fields: name, surname", observation)
+        self.assertNotIn("the rendered rows", observation)
+
+
+class WalkContinuationTests(unittest.TestCase):
+    """fix-iq53.2.7 (F3): the walk is driven by the adapter's own resume point.
+
+    The framework allocates batch ordinals and carries the continuation; it does
+    not compute a position in the source. These cases are the ones that would
+    still pass if it secretly did, and so are the ones worth having: a keyset
+    adapter with no offsets anywhere, a resume across a cold rebuild, and a batch
+    that ends the walk while carrying rows.
+    """
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(reset_result_handle_state)
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.calls: list[object] = []
+        self.rows = [{"uid": "u%02d" % index, "name": "Name %d" % index}
+                     for index in range(9)]
+
+    def register(self, resolver) -> None:
+        result_handles.register_resolver("keyset", resolver)
+        self.addCleanup(result_handles.unregister_resolver, "keyset")
+
+    def declare_handle(self, *, batch_size=3):
+        return declare(
+            ResultHandleSpec(kind="row", summary="9 row(s).", items=[], total=9,
+                             source_complete=False, page_size=3),
+            source=SourceDescriptor(
+                resolver="keyset", uid_field="uid", label_fields=("name",),
+                filter_columns=("name",), batch_size=batch_size,
+                state={"view": "rows"}),
+            scope=scope(), selected_store=self.store, alias="O1",
+        )
+
+    def keyset_resolver(self, request):
+        """An adapter with no offsets at all: it resumes after a uid.
+
+        (fix-iq53.2.7, F3) This is the shape the offset-keyed walk could not
+        serve. There is no number the framework could have computed to page this
+        source, and nothing in ``state`` for it to read one out of — the only
+        thing that advances the walk is the token this adapter handed back on the
+        previous batch, carried verbatim through storage and handed back to it.
+        """
+        self.calls.append(request)
+        if isinstance(request, TerminalRequest):
+            return {"complete": request.distinct_uids == len(self.rows),
+                    "count": len(self.rows)}
+        after = (request.continuation or {}).get("after")
+        start = 0 if after is None else (
+            next(i for i, row in enumerate(self.rows) if row["uid"] == after) + 1
+        )
+        served = self.rows[start:start + request.limit]
+        return {
+            "rows": served, "total": len(self.rows),
+            "continuation": {"after": served[-1]["uid"]} if served else None,
+        }
+
+    def batches(self):
+        return [call for call in self.calls
+                if not isinstance(call, TerminalRequest)]
+
+    def test_a_keyset_adapter_walks_to_the_end_with_no_offset_anywhere(self):
+        self.register(self.keyset_resolver)
+        self.declare_handle()
+        seen, cursor = [], None
+        for _ in range(20):
+            page = fetch_page("O1", cursor, scope=scope(),
+                              selected_store=self.store, budget_bytes=200)
+            seen.extend(page.rows)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        self.assertEqual(len(seen), 9)
+        self.assertEqual(seen, ["u%02d  Name %d" % (index, index)
+                                for index in range(9)])
+        self.assertTrue(page.source_complete)
+        self.assertEqual(page.continuation, "complete")
+        # Every resume point the framework sent back is one this adapter minted.
+        self.assertEqual(
+            [call.continuation for call in self.batches()],
+            [None, {"after": "u02"}, {"after": "u05"}, {"after": "u08"}],
+        )
+
+    def test_the_stored_continuation_is_what_a_cold_rebuild_resumes_from(self):
+        """The resume point survives eviction, because it is in the store.
+
+        A walk stopped mid-traversal and rebuilt in a fresh process has to resume
+        from the adapter's token, and the only place that token exists is
+        ``result_handle_batches.continuation_json``. If the rebuild lost it, the
+        next batch would carry ``continuation=None`` and this adapter would start
+        the traversal over from its first row.
+        """
+        self.register(self.keyset_resolver)
+        self.declare_handle()
+        first = fetch_page("O1", scope=scope(), selected_store=self.store,
+                           budget_bytes=200)
+        self.assertIsNotNone(first.next_cursor)
+        sent_before = len(self.batches())
+
+        # Hot eviction and a process restart are the same thing to this module.
+        reset_result_handle_state()
+        second = fetch_page("O1", first.next_cursor, scope=scope(),
+                            selected_store=self.store, budget_bytes=200)
+
+        resumed = self.batches()[sent_before:]
+        self.assertTrue(resumed, "the rebuilt walk asked the source for nothing")
+        self.assertIsNotNone(resumed[0].continuation)
+        self.assertNotEqual(resumed[0].continuation, {"after": "u00"})
+        # And the rows carry on rather than starting again.
+        self.assertEqual(second.rows[0], "u%02d  Name %d" % (len(first.rows),
+                                                             len(first.rows)))
+
+    def test_a_batch_with_rows_and_no_resume_point_ends_the_walk_after_them(self):
+        """The second stop condition, and the rows are not the price of it.
+
+        (fix-iq53.2.7, F3) An adapter that answers and offers no way to continue
+        has said this is the last batch. The walk ends, and it ends AFTER the rows
+        that batch carried: a terminal is not a discard.
+        """
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return {"complete": request.distinct_uids == 5, "count": 5}
+            if request.continuation is None:
+                return {"rows": self.rows[:3], "continuation": {"after": "u02"}}
+            return {"rows": self.rows[3:5]}
+
+        self.register(resolver)
+        self.declare_handle()
+        page = fetch_page("O1", scope=scope(), selected_store=self.store,
+                          budget_bytes=100_000)
+        # Two batches and no probe: this adapter never had to be asked for an
+        # empty one, which is the whole economy of an explicit resume point.
+        self.assertEqual(len(self.batches()), 2)
+        self.assertEqual(len(page.rows), 5)
+        self.assertEqual(page.rows[-1], "u04  Name 4")
+        self.assertTrue(page.source_complete)
+        self.assertEqual(page.continuation, "complete")
+
+    def test_the_terminal_is_judged_once_and_the_rows_are_not_recounted(self):
+        """A rows-bearing terminal, reached again after a rebuild, costs nothing.
+
+        The offset-keyed walk resumed AT its terminal page and re-read it, which
+        was free only because that page was always empty. A terminal batch that
+        carries rows must not be re-read: rows a source gives no uid for are never
+        duplicates of anything (`_dedupe_records`), so re-reading one would count
+        them twice.
+        """
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                # Never settles: no `complete`, so the walk stays unjudged and
+                # the callback is owed on every fetch (the retry, kept as-is).
+                return {"incomplete_reason": "countonly_unavailable"}
+            if request.continuation is None:
+                return {"rows": [{"name": "unidentified row"}]}
+            return {"rows": []}
+
+        self.register(resolver)
+        self.declare_handle()
+        first = fetch_page("O1", scope=scope(), selected_store=self.store,
+                           budget_bytes=100_000)
+        self.assertEqual(first.rows, ["  unidentified row"])
+        batches_after_first = len(self.batches())
+
+        reset_result_handle_state()
+        second = fetch_page("O1", scope=scope(), selected_store=self.store,
+                            budget_bytes=100_000)
+
+        # The row is served once, not twice, and the source was not asked again.
+        self.assertEqual(second.rows, ["  unidentified row"])
+        self.assertEqual(len(self.batches()), batches_after_first)
+        self.assertEqual(second.incomplete_reason, "countonly_unavailable")
+
+
+class TerminalCallbackTests(unittest.TestCase):
+    """fix-iq53.2.8 (F4): the framework asks, the adapter decides."""
+
+    ROWS = [{"uid": "u%d" % index, "name": "Row %d" % index} for index in range(4)]
+
+    def setUp(self) -> None:
+        reset_result_handle_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(reset_result_handle_state)
+        self.store = ResultHandleStore(os.path.join(self.temp.name, "h.sqlite3"))
+        self.calls: list[object] = []
+        self.terminal_reply: dict = {}
+
+    def register(self):
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return dict(self.terminal_reply)
+            if request.continuation is None:
+                return {"rows": self.ROWS, "continuation": {"offset": 4}}
+            return {"rows": []}
+
+        result_handles.register_resolver("terminal", resolver)
+        self.addCleanup(result_handles.unregister_resolver, "terminal")
+
+    def declare_handle(self):
+        return declare(
+            ResultHandleSpec(kind="row", summary="4 row(s).", items=[], total=4,
+                             source_complete=False, page_size=4),
+            source=SourceDescriptor(
+                resolver="terminal", uid_field="uid", label_fields=("name",),
+                filter_columns=("name",), batch_size=4, state={"view": "rows"}),
+            scope=scope(), selected_store=self.store, alias="O1",
+        )
+
+    def fetch(self, cursor=None, *, budget=100_000):
+        return fetch_page("O1", cursor, scope=scope(), selected_store=self.store,
+                          budget_bytes=budget)
+
+    def counts(self):
+        batches = [call for call in self.calls
+                   if not isinstance(call, TerminalRequest)]
+        terminals = [call for call in self.calls
+                     if isinstance(call, TerminalRequest)]
+        return len(batches), len(terminals)
+
+    def verdict(self):
+        return self.store.get_walk_terminal(scope(), alias="O1", query_scope="")
+
+    def test_an_unsettled_terminal_refires_once_per_fetch_and_reads_no_batch(self):
+        """The retry, reproduced as measured and kept deliberately.
+
+        An adapter that answers the terminal without deciding leaves the walk
+        unjudged, so the question is asked again on the next fetch. Each retry
+        costs exactly one terminal callback and zero batch reads, and nothing is
+        written to the store — a walk whose coverage nobody could decide keeps
+        asking rather than freezing an answer nobody gave.
+        """
+        self.register()
+        self.declare_handle()
+        self.terminal_reply = {"incomplete_reason": "countonly_unavailable"}
+        self.fetch()
+        batches, terminals = self.counts()
+        self.assertEqual(terminals, 1)
+        self.assertIsNone(self.verdict(), "an unjudged terminal was persisted")
+
+        for expected in (2, 3, 4):
+            reset_result_handle_state()
+            page = self.fetch()
+            spent, asked = self.counts()
+            self.assertEqual(asked, expected, "the terminal did not re-fire")
+            self.assertEqual(spent, batches, "the retry read a batch")
+            self.assertEqual(page.incomplete_reason, "countonly_unavailable")
+            self.assertEqual(len(page.rows), 4)
+            self.assertIsNone(self.verdict())
+
+    def test_a_decision_is_stored_and_never_asked_twice(self):
+        """The other side of the retry: a judged terminal is judged once."""
+        self.register()
+        self.declare_handle()
+        self.terminal_reply = {"complete": True, "count": 4}
+        self.fetch()
+        self.assertEqual(self.counts()[1], 1)
+        self.assertIs(self.verdict()["complete"], True)
+
+        for _ in range(3):
+            reset_result_handle_state()
+            page = self.fetch()
+            self.assertEqual(self.counts()[1], 1, "a stored verdict was re-proved")
+            self.assertTrue(page.source_complete)
+            self.assertEqual(page.continuation, "complete")
+
+    def test_an_incomplete_decision_is_stored_with_the_adapters_own_word(self):
+        """``complete: False`` settles the walk. The reason is passed through."""
+        self.register()
+        self.declare_handle()
+        self.terminal_reply = {"complete": False,
+                               "incomplete_reason": "snapshot_rolled_over",
+                               "count": 99}
+        page = self.fetch()
+        self.assertEqual(page.incomplete_reason, "snapshot_rolled_over")
+        self.assertFalse(page.source_complete)
+        stored = self.verdict()
+        self.assertIs(stored["complete"], False)
+        self.assertEqual(stored["stop_reason"], "snapshot_rolled_over")
+
+        # Settled, so it is not asked again — the difference from the retry above
+        # is that this adapter answered.
+        reset_result_handle_state()
+        again = self.fetch()
+        self.assertEqual(self.counts()[1], 1)
+        self.assertEqual(again.incomplete_reason, "snapshot_rolled_over")
+
+    def test_a_refusal_to_decide_offers_no_cursor_on_the_final_page(self):
+        """fix-iq53.2.8: the no-resume reason stays outside `walk_can_continue`.
+
+        A walk that ends unjudged serves every stored row and then stops. The
+        intermediate pages of it DO carry a cursor, because the remaining rows are
+        already stored and paging them costs the source nothing; only the last
+        page offers none, and it says `source-incomplete` rather than `complete`.
+        """
+        self.register()
+        self.declare_handle()
+        self.terminal_reply = {}
+        first = self.fetch(budget=one_row_budget("O1", self.store))
+        self.assertEqual(first.continuation, "cursor")
+        self.assertIsNotNone(first.next_cursor)
+        self.assertLess(len(first.rows), 4, "the budget admitted the whole walk")
+
+        cursor, rows = first.next_cursor, list(first.rows)
+        for _ in range(10):
+            page = self.fetch(cursor, budget=one_row_budget("O1", self.store))
+            rows.extend(page.rows)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        self.assertEqual(len(rows), 4, "a stalled walk lost stored rows")
+        self.assertEqual(page.continuation, "source-incomplete")
+        self.assertIsNone(page.next_cursor)
+        self.assertEqual(page.incomplete_reason, "completeness_not_claimed")
+        self.assertFalse(page.source_complete)
+        self.assertIn("has_more=false", page.as_observation())
+
+    def test_the_terminal_callback_is_told_what_the_framework_counted(self):
+        """``distinct_uids`` is the framework's own tally, not a question."""
+        self.register()
+        self.declare_handle()
+        self.terminal_reply = {"complete": True, "count": 4}
+        self.fetch()
+        terminal = [call for call in self.calls
+                    if isinstance(call, TerminalRequest)][0]
+        self.assertEqual(terminal.distinct_uids, 4)
+        self.assertIsNone(terminal.continuation)
+        self.assertEqual(terminal.descriptor["resolver"], "terminal")
+        # And the field the owner ruled out is not on the type at all.
+        self.assertFalse(hasattr(terminal, "batches_read"))
+
+    def test_an_object_response_carries_its_continuation_and_its_decision(self):
+        """A resolver may answer with an object, and it keeps every key.
+
+        ``_call_resolver`` normalises a non-mapping reply by reading named
+        attributes off it, and the list of names it reads is a contract: a key
+        missing from that list is dropped SILENTLY. Before this was fixed,
+        ``continuation`` was absent from it, so an object-answering adapter had its
+        resume point discarded and every walk ended after one batch looking
+        complete-ish; ``complete`` was absent too, so every terminal came back
+        unjudged. A mapping keeps every key it carries, which is why neither
+        failure was reachable through the shape nearly every adapter uses.
+        """
+        class Batch:
+            def __init__(self, rows, continuation=None):
+                self.rows, self.continuation = rows, continuation
+                self.total = 4
+
+        class Verdict:
+            complete = True
+            incomplete_reason = None
+            count = 4
+
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return Verdict()
+            if request.continuation is None:
+                return Batch(self.ROWS[:2], {"offset": 2})
+            if request.continuation == {"offset": 2}:
+                return Batch(self.ROWS[2:], {"offset": 4})
+            return Batch([])
+
+        result_handles.register_resolver("terminal", resolver)
+        self.addCleanup(result_handles.unregister_resolver, "terminal")
+        self.declare_handle()
+        page = self.fetch()
+        self.assertEqual(len(page.rows), 4, "the object's continuation was lost")
+        self.assertEqual(self.counts(), (3, 1))
+        self.assertTrue(page.source_complete, "the object's verdict was lost")
+        self.assertEqual(page.continuation, "complete")
+
+    def test_a_capped_walk_makes_no_terminal_callback(self):
+        """Purse exhaustion is not a terminal: the walk has not ended."""
+        def resolver(request):
+            self.calls.append(request)
+            if isinstance(request, TerminalRequest):
+                return {"complete": True}
+            start = int((request.continuation or {}).get("offset") or 0)
+            return {"rows": [{"uid": "u%d" % (start + i), "name": "n"}
+                             for i in range(request.limit)],
+                    "continuation": {"offset": start + request.limit}}
+
+        result_handles.register_resolver("terminal", resolver)
+        self.addCleanup(result_handles.unregister_resolver, "terminal")
+        self.declare_handle()
+        page = self.fetch(budget=300)
+        self.assertEqual(self.counts()[1], 0, "a capped walk asked for a verdict")
+        self.assertEqual(page.incomplete_reason, "resolver_call_limit")
+        # Continuable, unlike an unjudged terminal: this one stopped for a budget
+        # reason and the next call carries on from where it stopped.
+        self.assertEqual(page.continuation, "cursor")
+        self.assertIsNotNone(page.next_cursor)
 
 
 class ZeroMatchMarkerTests(unittest.TestCase):
@@ -1449,11 +2188,13 @@ class ZeroMatchMarkerTests(unittest.TestCase):
                                  items=rendered, total=20, source_complete=False,
                                  page_size=5),
                 source=SourceDescriptor(
-                    resolver="fake-portal", view="ido_permissiondetail_identity",
+                    resolver="fake-portal",
                     uid_field="identity__id",
                     label_fields=("identity_displayname",),
                     filter_columns=("identity_displayname",),
-                    page_size=5, materialized=5),
+                    batch_size=5,
+                    state={"view": "ido_permissiondetail_identity",
+                           "materialized": 5}),
                 scope=scope(), selected_store=self.store, alias="O1",
             )
         trajectory["observation_0"] = "rows"
@@ -1683,11 +2424,13 @@ class WalkTerminalStateTests(unittest.TestCase):
                              items=rendered, total=total, source_complete=False,
                              page_size=40),
             source=SourceDescriptor(
-                resolver="fake-portal", view="ido_groupDetail_identity",
-                params={"scope": "f737"},
+                resolver="fake-portal",
                 filter_columns=("identity_displayname",),
                 uid_field="identity__id", label_fields=("identity_displayname",),
-                page_size=40, materialized=materialized, **kwargs,
+                batch_size=40,
+                state={"view": "ido_groupDetail_identity",
+                       "params": {"scope": "f737"},
+                       "materialized": materialized, **kwargs},
             ),
             scope=scope(), selected_store=self.store, alias="O7",
         )
@@ -1704,21 +2447,34 @@ class WalkTerminalStateTests(unittest.TestCase):
         return page
 
     def stored_pages(self):
-        return [(row["start_offset"], row["row_count"])
+        return [(row["batch_index"], row["row_count"])
                 for row in self.store.list_pages(scope(), alias="O7",
                                                  query_scope="")]
 
-    def test_the_end_of_a_walk_and_the_count_that_proved_it_are_stored(self):
+    def test_the_end_of_a_walk_and_the_decision_that_judged_it_are_stored(self):
+        """(fix-iq53.2.8/2.9, F4/F5a) What is persisted is the DECISION.
+
+        The stored row used to carry the framework's own ``count_only``, because
+        the framework did the comparing. It carries the adapter's ``complete``
+        instead, and no count: the number belonged to the arithmetic, the
+        arithmetic moved across the boundary, and a verdict that records the
+        answer does not need to record the working.
+        """
         self.declare_handle()
         page = self.whole_walk()
         self.assertEqual(page.continuation, "complete")
         verdict = self.store.get_walk_terminal(scope(), alias="O7", query_scope="")
         self.assertIsNotNone(verdict)
-        self.assertTrue(verdict["complete"])
-        self.assertEqual(verdict["count_only"], 120)
+        self.assertIs(verdict["complete"], True)
         self.assertEqual(verdict["distinct_uids"], 120)
-        # The offset of the empty page that ended it, not one page past it.
-        self.assertEqual(verdict["terminal_offset"], 120)
+        self.assertNotIn("count_only", verdict)
+        # The ORDINAL of the empty batch that ended it, not one batch past it.
+        # This handle materialises nothing, so it files no producer page and the
+        # walk's own first read is batch 0: 120 rows at batch_size 40 fills
+        # batches 0, 1 and 2, and batch 3 is the empty one the walk had to read
+        # to find the end. It was the OFFSET 120 before F3, which is the same
+        # place counted in the backend's units instead of the framework's.
+        self.assertEqual(verdict["terminal_batch_index"], 3)
         self.assertEqual(verdict["stop_reason"], "")
 
     def test_a_completed_walk_costs_the_source_nothing_after_a_restart(self):
@@ -2002,18 +2758,27 @@ class ShortRowResolver:
 
     def __call__(self, request):
         self.calls.append(request)
-        if request.count_only:
-            return {"count": len(self.rows)}
-        return {"rows": self.rows[request.start:request.start + request.limit],
-                "total": len(self.rows)}
+        if isinstance(request, TerminalRequest):
+            # (F4) The adapter decides, and this one has a real count to decide
+            # with: every row is distinct and none is dropped, so the walk that
+            # reached the end saw all of them.
+            return {"complete": len(self.rows) == request.distinct_uids,
+                    "incomplete_reason": "countonly_mismatch",
+                    "count": len(self.rows)}
+        start = offset_of(request)
+        rows = self.rows[start:start + request.limit]
+        return {"rows": rows, "total": len(self.rows),
+                "continuation": next_offset_continuation(request, rows)}
 
     @property
     def page_calls(self) -> int:
-        return len([call for call in self.calls if not call.count_only])
+        return len([call for call in self.calls
+                    if not isinstance(call, TerminalRequest)])
 
     @property
     def count_calls(self) -> int:
-        return len([call for call in self.calls if call.count_only])
+        return len([call for call in self.calls
+                    if isinstance(call, TerminalRequest)])
 
 
 class SharedResolverBudgetTests(unittest.TestCase):
@@ -2030,13 +2795,11 @@ class SharedResolverBudgetTests(unittest.TestCase):
                              total=600, source_complete=False, page_size=6),
             source=SourceDescriptor(
                 resolver="short-rows",
-                view="short_rows",
-                params={},
                 filter_columns=("name",),
                 uid_field="uid",
                 label_fields=("name",),
-                page_size=ShortRowResolver.PAGE_ROWS,
-                materialized=0,
+                state={"view": "short_rows", "params": {}, "materialized": 0},
+                batch_size=ShortRowResolver.PAGE_ROWS,
             ),
             scope=scope(), selected_store=self.store, alias="O7",
         )
@@ -2130,9 +2893,10 @@ class MalformedResolverOutputTests(unittest.TestCase):
                              items=["u000  n0", "u001  n1"], total=10,
                              source_complete=False, page_size=4),
             source=SourceDescriptor(
-                resolver="malformed", view="v", params={},
+                resolver="malformed",
                 filter_columns=("name",), uid_field="uid",
-                label_fields=("name",), page_size=4, materialized=2,
+                label_fields=("name",), batch_size=4,
+                state={"view": "v", "params": {}, "materialized": 2},
             ),
             scope=scope(), selected_store=self.store, alias="O1",
         )
@@ -2143,11 +2907,14 @@ class MalformedResolverOutputTests(unittest.TestCase):
         self.temp.cleanup()
 
     def resolve(self, request):
-        if request.count_only:
-            return self.count_reply
+        if isinstance(request, TerminalRequest):
+            # Callable replies let a case raise from inside the callback, which
+            # is a different failure from answering badly (F4).
+            return (self.count_reply(request) if callable(self.count_reply)
+                    else self.count_reply)
         return self.reply
 
-    count_reply: object = {"count": 10}
+    count_reply: object = {"complete": True, "count": 10}
 
     def fetch(self):
         return fetch_page("O1", scope=scope(), selected_store=self.store,
@@ -2166,13 +2933,46 @@ class MalformedResolverOutputTests(unittest.TestCase):
                 self.assertEqual(page.rows, ["u000  n0", "u001  n1"])
                 self.assertFalse(page.source_complete)
 
-    def test_a_non_numeric_count_is_a_countonly_error_not_a_ValueError(self):
+    def test_a_terminal_callback_that_raises_is_a_countonly_error_not_a_ValueError(self):
+        """(fix-iq53.2.8, F4) The raise path keeps the word it always had.
+
+        Revision 4 §3.6: a terminal callback that raises becomes an
+        ``incomplete_reason`` through the same guard that produced
+        ``countonly_error`` before, with the stored rows still served. No new word
+        is minted for it — it is the same guard, in the same place, saying the
+        same thing about the same call.
+        """
+        def raising(request):
+            raise PortalError("countOnly is unavailable for this view")
+
         self.reply = {"rows": []}
-        self.count_reply = {"count": "n/a"}
+        self.count_reply = raising
         page = self.fetch()
         self.assertEqual(page.incomplete_reason, "countonly_error")
         self.assertEqual(page.outcome, "partial")
         self.assertEqual(page.rows, ["u000  n0", "u001  n1"])
+
+    def test_a_non_numeric_count_beside_no_verdict_is_simply_no_verdict(self):
+        """A malformed count is no longer a framework error, because it is no
+        longer a framework input. (fix-iq53.2.8, F4)
+
+        ``_reconcile`` read ``count`` to decide coverage, so junk there was a
+        source failure it had to report. The decision is the adapter's now and
+        the number is decoration the page's prose may use, so an unusable one is
+        dropped and what is left is the real answer: this adapter was asked
+        whether the walk covers the query and said nothing. It is not settled,
+        the page offers no cursor, and the question is asked again next fetch.
+        """
+        self.reply = {"rows": []}
+        self.count_reply = {"count": "n/a"}
+        page = self.fetch()
+        self.assertEqual(page.incomplete_reason, "completeness_not_claimed")
+        self.assertEqual(page.outcome, "partial")
+        self.assertEqual(page.continuation, "source-incomplete")
+        self.assertIsNone(page.next_cursor)
+        self.assertEqual(page.rows, ["u000  n0", "u001  n1"])
+        self.assertIn("did not say whether these are all the rows",
+                      page.as_observation())
 
     def test_a_malformed_reply_is_never_raised_at_the_caller(self):
         for name, reply in self.SHAPES.items():
@@ -2319,9 +3119,10 @@ class HotCacheBoundTests(unittest.TestCase):
                              items=[], total=len(self.rows),
                              source_complete=False, page_size=page_size),
             source=SourceDescriptor(
-                resolver="fake-portal", view="wide_view", params={"scope": "s"},
+                resolver="fake-portal",
                 filter_columns=("name",), uid_field="uid",
-                label_fields=("name",), page_size=page_size,
+                label_fields=("name",), batch_size=page_size,
+                state={"view": "wide_view", "params": {"scope": "s"}},
             ),
             scope=scope(), selected_store=self.store, alias=alias,
         )
@@ -2526,8 +3327,9 @@ class RedeclarationIdentityTests(unittest.TestCase):
     def test_the_same_descriptor_over_changed_rows_is_refused_too(self):
         """A re-run of one query is a different listing when the rows differ."""
         descriptor = SourceDescriptor(
-            resolver="fake-portal", view="v", uid_field="uid",
-            label_fields=("name",), page_size=25, materialized=5,
+            resolver="fake-portal", uid_field="uid",
+            label_fields=("name",), batch_size=25,
+            state={"view": "v", "materialized": 5},
         )
         self.declare_rows("O2", holders(5, prefix="A"), total=5,
                           source=descriptor, complete=False)
@@ -2616,11 +3418,13 @@ class FilteredWalkOriginTests(unittest.TestCase):
                              items=rendered, total=200, source_complete=False,
                              page_size=25),
             source=SourceDescriptor(
-                resolver="fake-portal", view="v",
+                resolver="fake-portal",
                 uid_field="identity__id",
                 label_fields=("identity_displayname",),
                 filter_columns=("identity_displayname",),
-                page_size=25, start_offset=start, materialized=span),
+                batch_size=25,
+                state={"view": "v", "start_offset": start,
+                       "materialized": span}),
             scope=scope(), selected_store=self.store, alias=alias,
         )
 
@@ -2642,9 +3446,9 @@ class FilteredWalkOriginTests(unittest.TestCase):
         fetch_page("O1", None, "Christopher", scope=scope(),
                    selected_store=self.store, budget_bytes=100_000)
         filtered = [call for call in self.portal.calls
-                    if call.contains and not call.count_only]
+                    if call.contains and not isinstance(call, TerminalRequest)]
         self.assertTrue(filtered)
-        self.assertEqual(filtered[0].start, 0)
+        self.assertEqual(offset_of(filtered[0]), 0)
 
     def test_the_offset_origin_reason_still_guards_the_unfiltered_proof(self):
         """The reason it was borrowed from keeps its own case."""
@@ -2698,10 +3502,10 @@ class StoreUnavailableDuringWalkTests(unittest.TestCase):
                              items=rendered, total=120, source_complete=False,
                              page_size=25),
             source=SourceDescriptor(
-                resolver="fake-portal", view="v", uid_field="identity__id",
+                resolver="fake-portal", uid_field="identity__id",
                 label_fields=("identity_displayname",),
                 filter_columns=("identity_displayname",),
-                page_size=25, materialized=25),
+                batch_size=25, state={"view": "v", "materialized": 25}),
             scope=scope(), selected_store=self.store, alias="O3",
         )
 
@@ -2769,7 +3573,7 @@ class StoreUnavailableDuringWalkTests(unittest.TestCase):
         restore = self.refuse_writes()
         fetch_page("O3", scope=scope(), selected_store=self.store,
                    budget_bytes=100_000)
-        asked = [call.start for call in self.portal.calls if not call.count_only]
+        asked = batch_offsets(self.portal.calls)
         self.assertEqual(asked, [25])
         restore()
         reset_result_handle_state()
@@ -2778,8 +3582,7 @@ class StoreUnavailableDuringWalkTests(unittest.TestCase):
         self.assertEqual(page.matched, 120)
         self.assertTrue(page.matched_complete)
         self.assertEqual(
-            sorted({call.start for call in self.portal.calls
-                    if not call.count_only}),
+            sorted(set(batch_offsets(self.portal.calls))),
             [25, 50, 75, 100, 125],
         )
 
@@ -2878,9 +3681,10 @@ class EmptyLiteralAndOverBudgetTests(unittest.TestCase):
             ResultHandleSpec(kind="holder", summary="1 holder(s).", items=[],
                              total=1, source_complete=False, page_size=5),
             source=SourceDescriptor(
-                resolver="fake-portal", view="v", uid_field="identity__id",
+                resolver="fake-portal", uid_field="identity__id",
                 label_fields=("identity_displayname",),
-                filter_columns=("identity_displayname",), page_size=5),
+                filter_columns=("identity_displayname",), batch_size=5,
+                state={"view": "v"}),
             scope=scope(), selected_store=self.store, alias="O2",
         )
         page = fetch_page("O2", scope=scope(), selected_store=self.store,
@@ -3010,9 +3814,10 @@ class ResultHandleMinorDefectTests(unittest.TestCase):
             ResultHandleSpec(kind="holder", summary="12 holder(s).", items=[],
                              total=12, source_complete=False, page_size=5),
             source=SourceDescriptor(
-                resolver="fake-portal", view="v", uid_field="identity__id",
+                resolver="fake-portal", uid_field="identity__id",
                 label_fields=("identity_displayname",),
-                filter_columns=("identity_displayname",), page_size=5),
+                filter_columns=("identity_displayname",), batch_size=5,
+                state={"view": "v"}),
             scope=scope(), selected_store=self.store, alias="O2",
         )
         fetch_page("O2", scope=scope(), selected_store=self.store,
@@ -3157,7 +3962,7 @@ class CursorAliasAndUnstorableRowTests(unittest.TestCase):
         calls = []
 
         def resolver(request):
-            calls.append(request.start)
+            calls.append(offset_of(request))
             return {"rows": [{"identity__id": "u1",
                               "identity_displayname": object()}]}
 
@@ -3168,10 +3973,10 @@ class CursorAliasAndUnstorableRowTests(unittest.TestCase):
                              items=holders(2), total=10, source_complete=False,
                              page_size=5),
             source=SourceDescriptor(
-                resolver="fake-portal", view="v", uid_field="identity__id",
+                resolver="fake-portal", uid_field="identity__id",
                 label_fields=("identity_displayname",),
-                filter_columns=("identity_displayname",), page_size=5,
-                materialized=2),
+                filter_columns=("identity_displayname",), batch_size=5,
+                state={"view": "v", "materialized": 2}),
             scope=scope(), selected_store=self.store, alias="O1",
         )
         page = fetch_page("O1", scope=scope(), selected_store=self.store,
@@ -3200,9 +4005,10 @@ class CursorAliasAndUnstorableRowTests(unittest.TestCase):
             ResultHandleSpec(kind="holder", summary="1 holder(s).", items=[],
                              total=1, source_complete=False, page_size=5),
             source=SourceDescriptor(
-                resolver="fake-portal", view="v", uid_field="identity__id",
+                resolver="fake-portal", uid_field="identity__id",
                 label_fields=("identity_displayname",),
-                filter_columns=("identity_displayname",), page_size=5),
+                filter_columns=("identity_displayname",), batch_size=5,
+                state={"view": "v"}),
             scope=scope(), selected_store=self.store, alias="O1",
         )
         page = fetch_page("O1", scope=scope(), selected_store=self.store,

@@ -119,8 +119,9 @@ class OffloadStateFixture(unittest.TestCase):
             declare(
                 ResultHandleSpec(kind="fixture", summary=command, items=rows,
                                  total=len(rows), source_complete=True),
-                source=SourceDescriptor(resolver="offline-never-called",
-                                        view="fixture", params={"subject": command}),
+                source=SourceDescriptor(
+                    resolver="offline-never-called",
+                    state={"view": "fixture", "params": {"subject": command}}),
             )
             auto_navigation.record_context_entry(
                 scope.scope_id, context="Fixture", command_name=command, alias=alias

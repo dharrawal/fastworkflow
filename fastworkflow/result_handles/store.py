@@ -75,28 +75,47 @@ class ResultHandleStore:
                 )
                 """
             )
+            # (fix-iq53.2.9, F5a) Keyed on a framework-allocated batch ORDINAL,
+            # not on a backend offset. The old table was
+            # ``result_handle_pages`` with ``start_offset`` in the primary key,
+            # which made one backend's pagination scheme part of the storage
+            # contract: an adapter that walks by cursor, keyset or one-item
+            # lookahead has no offset to key on, and the framework had to
+            # invent one to have somewhere to put the rows. ``batch_index``
+            # counts from 0 -- 0 is always the producer's own page -- and
+            # ``continuation_json`` carries the adapter's own resume point
+            # verbatim, which is what the walk resumes from after an eviction
+            # or a restart.
+            #
+            # A NEW TABLE NAME rather than an ``ALTER``: a store written before
+            # this change keeps its ``result_handle_pages`` rows and still
+            # parses, and nothing here ever writes to that table again. This is
+            # the secondary line of the two that preserve a historical store;
+            # the primary one is never opening it read-write at all (see
+            # ``ReadOnlyResultHandleStore``).
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS result_handle_pages (
+                CREATE TABLE IF NOT EXISTS result_handle_batches (
                     scope_id TEXT NOT NULL,
                     alias TEXT NOT NULL,
                     query_scope TEXT NOT NULL,
-                    start_offset INTEGER NOT NULL,
+                    batch_index INTEGER NOT NULL,
                     limit_requested INTEGER NOT NULL,
                     source TEXT NOT NULL,
                     row_count INTEGER NOT NULL,
                     backend_total INTEGER,
+                    continuation_json TEXT,
                     record_json BLOB NOT NULL,
                     record_sha256 TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
-                    PRIMARY KEY (scope_id, alias, query_scope, start_offset)
+                    PRIMARY KEY (scope_id, alias, query_scope, batch_index)
                 )
                 """
             )
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS result_handle_pages_walk
-                ON result_handle_pages(scope_id, alias, query_scope, start_offset)
+                CREATE INDEX IF NOT EXISTS result_handle_batches_walk
+                ON result_handle_batches(scope_id, alias, query_scope, batch_index)
                 """
             )
             # (ido-1r0) Where a traversal ended and what proved it. The empty
@@ -107,15 +126,36 @@ class ResultHandleStore:
             # another empty page one offset further on, and did it again on the
             # next fetch. This row is that proof, written once the two numbers
             # are known, so the end of a walk costs the source nothing twice.
+            #
+            # (fix-iq53.2.9, F5a) Renamed from ``result_handle_walks`` and one
+            # column lighter. ``count_only`` is gone: it held the framework's
+            # OWN independent count, because the framework used to decide
+            # completeness by comparing it against the distinct uids it had
+            # walked. That comparison belongs to the adapter now, so what is
+            # stored is the adapter's decision -- ``complete`` -- and not the
+            # arithmetic behind it. ``complete`` is therefore NULLABLE where it
+            # used to be ``NOT NULL``: a terminal the adapter declined to judge
+            # is recorded as undecided rather than as false, and the rule "a row
+            # without a count is not a verdict" becomes "a row with no
+            # ``complete`` decision is not a verdict".
+            #
+            # ``terminal_offset`` becomes ``terminal_batch_index`` for the same
+            # reason ``result_handle_pages`` became ``result_handle_batches``.
+            #
+            # The name had to change, and could not simply be edited in place:
+            # ``CREATE TABLE IF NOT EXISTS`` is a no-op against a store that
+            # already holds the old table, so the old column set would survive
+            # invisibly and the first insert with the new columns would fail on
+            # a file written yesterday. A changed column set needs a changed
+            # table name for the same reason a changed key does.
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS result_handle_walks (
+                CREATE TABLE IF NOT EXISTS result_handle_walk_terminals (
                     scope_id TEXT NOT NULL,
                     alias TEXT NOT NULL,
                     query_scope TEXT NOT NULL,
-                    terminal_offset INTEGER NOT NULL,
-                    complete INTEGER NOT NULL,
-                    count_only INTEGER,
+                    terminal_batch_index INTEGER NOT NULL,
+                    complete INTEGER,
                     distinct_uids INTEGER NOT NULL,
                     stop_reason TEXT NOT NULL,
                     recorded_at TEXT NOT NULL,
@@ -200,7 +240,7 @@ class ResultHandleStore:
         alias: str,
         payload: Mapping[str, Any],
         *,
-        first_page_offset: Optional[int] = None,
+        first_page_index: Optional[int] = None,
         first_page_sha256: Optional[str] = None,
     ) -> dict[str, Any]:
         """Write a declaration once. A redeclaration of the same query is a no-op.
@@ -215,12 +255,21 @@ class ResultHandleStore:
         declared under an alias a restarted sequence handed out again reported
         itself declared with its own total while the alias went on serving the
         first listing's rows. What a listing actually IS, for this purpose, is
-        its first page of rows: pass ``first_page_offset`` with the digest of
+        its first page of rows: pass ``first_page_index`` with the digest of
         the producer page this declaration is about to write (``None`` for a
         listing that materialised nothing), and a redeclaration whose first page
         is not the stored first page is refused by name like any other different
         query. Callers that file something other than a producer listing -- a
         page observation's own alias -- pass neither and are unaffected.
+
+        (fix-iq53.2.9, F5a) ``first_page_offset`` became ``first_page_index``
+        and names a batch ORDINAL. The producer's own page is batch 0 of its
+        walk, always, whatever offset into the relation its first row came from,
+        so ``declare`` passes 0 here whether or not it has rows to store: with
+        the ordinal given and the digest ``None``, the check below still asks
+        what is at batch 0, which is what refuses a second, rowless declaration
+        under an alias whose first declaration stored rows. ``None`` is for the
+        callers that are not declaring a producer listing at all.
         """
         scope_json = json.dumps(
             asdict(scope), ensure_ascii=False, separators=(",", ":"), sort_keys=True
@@ -274,9 +323,9 @@ class ResultHandleStore:
                 "result handle %s already describes a different query in this "
                 "scope; an alias identifies one observation" % alias
             )
-        if redeclaration and first_page_offset is not None:
+        if redeclaration and first_page_index is not None:
             kept = self._producer_page_digest(
-                scope, alias=alias, start_offset=int(first_page_offset)
+                scope, alias=alias, batch_index=int(first_page_index)
             )
             if kept != first_page_sha256:
                 raise ResultHandleError(
@@ -287,16 +336,23 @@ class ResultHandleStore:
         return stored
 
     def _producer_page_digest(
-        self, scope: RuntimeHandleScope, *, alias: str, start_offset: int
+        self, scope: RuntimeHandleScope, *, alias: str, batch_index: int
     ) -> Optional[str]:
         """The digest of the rows the PRODUCER filed at this alias, if any.
 
-        Only a producer page answers: a page the walk stored at the same offset
-        is the backend's account of the same query, not the listing's own first
-        page, and a handle that materialised nothing has no first page at all.
+        Only a producer page answers: a batch the walk stored at the same
+        ordinal is the backend's account of the same query, not the listing's own
+        first page, and a handle that materialised nothing has no first page at
+        all.
+
+        (fix-iq53.2.9, F5a) Follows the ordinal, because that is what the batch
+        is keyed on now. The ``source`` test below is what carries the weight
+        either way: the producer's page and a backend batch could collide at one
+        offset before, and they can collide at one ordinal now, so the column
+        that says which one wrote the row is the discriminator and always was.
         """
         page = self.get_page(
-            scope, alias=alias, query_scope="", start_offset=int(start_offset)
+            scope, alias=alias, query_scope="", batch_index=int(batch_index)
         )
         if page is None or page["source"] != "producer":
             return None
@@ -377,7 +433,16 @@ class ResultHandleStore:
             "declared_at": str(row["declared_at"]),
         }
 
-    # -- immutable raw pages ----------------------------------------------
+    # -- immutable raw batches --------------------------------------------
+    #
+    # (fix-iq53.2.9, F5a) These five accessors keep the word "page" in their
+    # names and changed what they are keyed on. A stored "page" here has always
+    # been one batch record -- the rows one backend read returned, plus what was
+    # asked for and what came back with it -- and it is now addressed by its
+    # ordinal in the walk rather than by a backend offset. The names stay
+    # because ``answer_rehydration`` reaches them by ``getattr`` and degrades
+    # silently when a name is missing, so renaming them trades a schema change
+    # for a quiet loss of evidence in an unrelated module.
 
     def put_page(
         self,
@@ -385,18 +450,25 @@ class ResultHandleStore:
         *,
         alias: str,
         query_scope: str,
-        start_offset: int,
+        batch_index: int,
         limit_requested: int,
         source: str,
         record: Mapping[str, Any],
         backend_total: Optional[int],
+        continuation: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Append one raw page. Re-fetching an offset returns the stored page.
+        """Append one raw batch. Re-reading an ordinal returns the stored batch.
 
         Append-only and idempotent by construction: the insert cannot overwrite,
-        and the read-back is the value returned, so a retry of the same offset
+        and the read-back is the value returned, so a retry of the same ordinal
         can never produce a second row or a different answer than the first
         attempt already recorded.
+
+        ``continuation`` is the resume point the ADAPTER returned with this
+        batch, stored verbatim and never interpreted here. ``None`` -- for the
+        producer's own page, for a batch that offered none, and for the empty
+        batch that ends a walk -- is stored as SQL NULL, and NULL is what tells
+        a rebuild that the walk cannot be continued past this batch.
 
         (ido-h0c, F28) ``row_count`` is the count of the RECORDS the page
         carries -- see ``_stored_row_count``. Reading it off ``rows`` alone made
@@ -412,26 +484,31 @@ class ResultHandleStore:
         """
         payload = _canonical_json(dict(record))
         digest = _digest(payload)
+        continuation_json = (
+            None if continuation is None
+            else _canonical_json(dict(continuation)).decode("utf-8")
+        )
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
-                INSERT INTO result_handle_pages (
-                    scope_id, alias, query_scope, start_offset, limit_requested,
-                    source, row_count, backend_total, record_json,
-                    record_sha256, fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scope_id, alias, query_scope, start_offset) DO NOTHING
+                INSERT INTO result_handle_batches (
+                    scope_id, alias, query_scope, batch_index, limit_requested,
+                    source, row_count, backend_total, continuation_json,
+                    record_json, record_sha256, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_id, alias, query_scope, batch_index) DO NOTHING
                 """,
                 (
                     scope.scope_id,
                     alias,
                     query_scope,
-                    int(start_offset),
+                    int(batch_index),
                     int(limit_requested),
                     source,
                     _stored_row_count(record),
                     None if backend_total is None else int(backend_total),
+                    continuation_json,
                     payload,
                     digest,
                     _now(),
@@ -439,10 +516,10 @@ class ResultHandleStore:
             )
             conn.commit()
         stored = self.get_page(scope, alias=alias, query_scope=query_scope,
-                               start_offset=start_offset)
+                               batch_index=batch_index)
         if stored is None:
             raise ResultHandleError(
-                "page at offset %d of %s could not be stored" % (start_offset, alias)
+                "batch %d of %s could not be stored" % (batch_index, alias)
             )
         return stored
 
@@ -452,23 +529,23 @@ class ResultHandleStore:
         *,
         alias: str,
         query_scope: str,
-        start_offset: int,
+        batch_index: int,
     ) -> Optional[dict[str, Any]]:
         with closing(self._connect()) as conn:
             row = conn.execute(
                 """
-                SELECT * FROM result_handle_pages
+                SELECT * FROM result_handle_batches
                 WHERE scope_id = ? AND alias = ? AND query_scope = ?
-                  AND start_offset = ?
+                  AND batch_index = ?
                 """,
-                (scope.scope_id, alias, query_scope, int(start_offset)),
+                (scope.scope_id, alias, query_scope, int(batch_index)),
             ).fetchone()
         return None if row is None else self._decode_page(row)
 
     def iter_pages(
         self, scope: RuntimeHandleScope, *, alias: str, query_scope: str
     ) -> "Iterator[dict[str, Any]]":
-        """The stored pages of one traversal, in offset order, ONE AT A TIME.
+        """The stored batches of one traversal, in ORDINAL order, ONE AT A TIME.
 
         (ido-7ce, F8) ``list_pages`` decodes every page of a walk before the
         caller sees the first one, so rebuilding a large traversal held every
@@ -487,9 +564,9 @@ class ResultHandleStore:
         try:
             for row in conn.execute(
                 """
-                SELECT * FROM result_handle_pages
+                SELECT * FROM result_handle_batches
                 WHERE scope_id = ? AND alias = ? AND query_scope = ?
-                ORDER BY start_offset
+                ORDER BY batch_index
                 """,
                 (scope.scope_id, alias, query_scope),
             ):
@@ -520,7 +597,7 @@ class ResultHandleStore:
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
-                SELECT DISTINCT query_scope FROM result_handle_pages
+                SELECT DISTINCT query_scope FROM result_handle_batches
                 WHERE scope_id = ? AND alias = ?
                 ORDER BY query_scope
                 """,
@@ -539,32 +616,39 @@ class ResultHandleStore:
         *,
         alias: str,
         query_scope: str,
-        terminal_offset: int,
-        complete: bool,
-        count_only: Optional[int],
+        terminal_batch_index: int,
+        complete: Optional[bool],
         distinct_uids: int,
         stop_reason: str,
     ) -> None:
-        """Record the offset a walk ended at and the count that judged it.
+        """Record the batch a walk ended at and the decision that judged it.
 
-        Written only when the source returned a real count, because that is the
+        Written only when the ADAPTER actually decided, because that is the
         only verdict a later process can trust without asking again: the empty
-        page proves the pages ran out, and the count proves nothing was missed.
-        A verdict is replaceable — rows the walk did not have when it was
-        written would make a new one — so this is an upsert, unlike a page.
+        batch proves the batches ran out, and the adapter's ``complete`` is what
+        says nothing was missed. A verdict is replaceable — rows the walk did
+        not have when it was written would make a new one — so this is an
+        upsert, unlike a batch.
+
+        (fix-iq53.2.9, F5a) ``complete`` is ``Optional`` and ``count_only`` is
+        gone. The framework no longer holds a count to write: it hands the
+        adapter its own distinct-uid tally on the terminal callback and records
+        the answer. ``complete=None`` means the adapter declined to judge, which
+        a rebuild must read as "no verdict here" rather than as "judged
+        incomplete" — the difference being that the first re-asks and the second
+        does not.
         """
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
-                INSERT INTO result_handle_walks (
-                    scope_id, alias, query_scope, terminal_offset, complete,
-                    count_only, distinct_uids, stop_reason, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO result_handle_walk_terminals (
+                    scope_id, alias, query_scope, terminal_batch_index, complete,
+                    distinct_uids, stop_reason, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scope_id, alias, query_scope) DO UPDATE SET
-                    terminal_offset = excluded.terminal_offset,
+                    terminal_batch_index = excluded.terminal_batch_index,
                     complete = excluded.complete,
-                    count_only = excluded.count_only,
                     distinct_uids = excluded.distinct_uids,
                     stop_reason = excluded.stop_reason,
                     recorded_at = excluded.recorded_at
@@ -573,9 +657,8 @@ class ResultHandleStore:
                     scope.scope_id,
                     alias,
                     query_scope,
-                    int(terminal_offset),
-                    1 if complete else 0,
-                    None if count_only is None else int(count_only),
+                    int(terminal_batch_index),
+                    None if complete is None else (1 if complete else 0),
                     int(distinct_uids),
                     str(stop_reason or ""),
                     _now(),
@@ -590,7 +673,7 @@ class ResultHandleStore:
         with closing(self._connect()) as conn:
             row = conn.execute(
                 """
-                SELECT * FROM result_handle_walks
+                SELECT * FROM result_handle_walk_terminals
                 WHERE scope_id = ? AND alias = ? AND query_scope = ?
                 """,
                 (scope.scope_id, alias, query_scope),
@@ -600,10 +683,11 @@ class ResultHandleStore:
         return {
             "alias": str(row["alias"]),
             "query_scope": str(row["query_scope"]),
-            "terminal_offset": int(row["terminal_offset"]),
-            "complete": bool(row["complete"]),
-            "count_only": (None if row["count_only"] is None
-                           else int(row["count_only"])),
+            "terminal_batch_index": int(row["terminal_batch_index"]),
+            # Three-valued on purpose: None is "the adapter did not judge this
+            # terminal", which is not the same answer as False.
+            "complete": (None if row["complete"] is None
+                         else bool(row["complete"])),
             "distinct_uids": int(row["distinct_uids"]),
             "stop_reason": str(row["stop_reason"] or ""),
             "recorded_at": str(row["recorded_at"]),
@@ -615,18 +699,24 @@ class ResultHandleStore:
         digest = _digest(payload)
         if digest != row["record_sha256"]:
             raise ResultHandleError(
-                "stored page %s@%s failed digest verification"
-                % (row["alias"], row["start_offset"])
+                "stored batch %s@%s failed digest verification"
+                % (row["alias"], row["batch_index"])
             )
+        continuation_json = row["continuation_json"]
         return {
             "alias": str(row["alias"]),
             "query_scope": str(row["query_scope"]),
-            "start_offset": int(row["start_offset"]),
+            "batch_index": int(row["batch_index"]),
             "limit_requested": int(row["limit_requested"]),
             "source": str(row["source"]),
             "row_count": int(row["row_count"]),
             "backend_total": (None if row["backend_total"] is None
                               else int(row["backend_total"])),
+            # The adapter's own resume point, back out of storage in the shape
+            # it went in. NULL stays None: the walk cannot be continued past a
+            # batch that offered nothing to continue from.
+            "continuation": (None if continuation_json is None
+                             else json.loads(str(continuation_json))),
             "record": json.loads(payload.decode("utf-8")),
             "record_sha256": digest,
             "fetched_at": str(row["fetched_at"]),

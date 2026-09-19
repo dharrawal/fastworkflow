@@ -270,8 +270,9 @@ class InlineOnlyTurn(unittest.TestCase):
             declare(
                 ResultHandleSpec(kind="fixture", summary=command, items=rows,
                                  total=len(rows), source_complete=True),
-                source=SourceDescriptor(resolver="offline-never-called",
-                                        view="fixture", params={"q": command}),
+                source=SourceDescriptor(
+                    resolver="offline-never-called",
+                    state={"view": "fixture", "params": {"q": command}}),
                 alias=current_execute_alias(),
                 scope=current_scope(),
             )

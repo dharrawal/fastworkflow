@@ -57,8 +57,15 @@ SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 KNOWN_EVIDENCE_TABLES = {
     "observation_offload_handles": "persisted_at",
     "result_handle_declarations": "declared_at",
+    # (fix-iq53.2.9, F5a) Both renamed, and both old names kept: this dict is
+    # intersected with the tables a revision actually created, so an entry for a
+    # table this revision does not create simply sits idle. Keeping the old names
+    # is what lets these cases still run against the revision each table arrived
+    # in, which is the property the file's header comment claims.
     "result_handle_pages": "fetched_at",
+    "result_handle_batches": "fetched_at",
     "result_handle_walks": "recorded_at",
+    "result_handle_walk_terminals": "recorded_at",
     "result_handle_cursor_tags": "created_at",
     "result_handle_cursors": "issued_at",
     # ido-dhw (F3). Both carry scope_id and scope_json, so both are discovered
@@ -219,8 +226,8 @@ class EvidenceFixture(unittest.TestCase):
         )
         store.cursor_tag(scope, alias="O1", query_scope="name:cooper")
         store.put_walk_terminal(
-            scope, alias="O1", query_scope="", terminal_offset=30,
-            complete=True, count_only=30, distinct_uids=30,
+            scope, alias="O1", query_scope="", terminal_batch_index=3,
+            complete=True, distinct_uids=30,
             stop_reason="empty_page",
         )
         self.assertIsNotNone(page.next_cursor)
@@ -361,8 +368,14 @@ class ChannelErasureTests(EvidenceFixture):
         self.assertEqual(
             set(discovered), set(KNOWN_EVIDENCE_TABLES) & known_present
         )
-        self.assertIn("result_handle_walks", discovered)
-        self.assertEqual(discovered["result_handle_walks"]["timestamp"], "recorded_at")
+        # (fix-iq53.2.9, F5a) `result_handle_walks` under its post-rename name.
+        # The point of the assertion is unchanged: a table this module has never
+        # heard of is discovered by its `scope_id` column, and the rename is a
+        # small live demonstration of exactly that -- erasure.py was not edited
+        # for it.
+        self.assertIn("result_handle_walk_terminals", discovered)
+        self.assertEqual(
+            discovered["result_handle_walk_terminals"]["timestamp"], "recorded_at")
 
         deleted = erasure.forget_channel(self.sidecar, "erase")
 

@@ -45,7 +45,7 @@ class DefaultEvidenceSources(unittest.TestCase):
             record_context_clause(scope, "O91", "Person 1 Ada Lovelace")
             store.put_declaration(scope, "O91", declaration_payload(total=2))
             store.put_page(
-                scope, alias="O91", query_scope="", start_offset=0,
+                scope, alias="O91", query_scope="", batch_index=0,
                 limit_requested=25, source="resolver", backend_total=2,
                 record=page_record(["1  bounded row", "2  durable row"]),
             )

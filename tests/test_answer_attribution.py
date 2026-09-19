@@ -504,7 +504,7 @@ class Evidence(unittest.TestCase):
             record_context_clause(scope, "O2", "Person 1815 Ada Lovelace")
             store.put_declaration(scope, "O2", declaration_payload(total=2))
             store.put_page(
-                scope, alias="O2", query_scope="", start_offset=0,
+                scope, alias="O2", query_scope="", batch_index=0,
                 limit_requested=25, source="resolver", backend_total=2,
                 record=page_record(["1815  Analytical Engine_Mill Gear",
                                     "1816  Difference Engine_Crank"]),

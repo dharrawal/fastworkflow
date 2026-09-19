@@ -8,6 +8,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 DEFAULT_PAGE_SIZE = 25
+#: Rows a source descriptor asks its adapter for in one batch callback. Split
+#: from ``DEFAULT_PAGE_SIZE`` by F1: that one is the PRODUCER's own page — what
+#: the declaring command rendered and what the packer budgets against — while
+#: this one is the size of a backend read, which is the adapter's business and
+#: nothing to do with what fits in an observation.
+DEFAULT_BATCH_SIZE = 25
 UNSORTED_OFFSET = "unsorted-offset"
 #: Page 1 is the call that passes no cursor, so the first token a traversal
 #: issues is page 2.

@@ -2,13 +2,17 @@
 
 Root's requirement was *"preserve all historical stores and test the chosen
 fresh store/schema approach before any real workflow state is opened for
-mutation."* Revision 4 §5.4 turns that into seven ordered steps. This module is
-steps **1, 3, 4 and 6**, plus the step-7 gate (fix-iq53.2.10, F5b). Steps 2 and
-5 assert the post-rename schema and belong to F5a; they are deliberately not
-here, and F5a must not start until this module passes.
+mutation."* Revision 4 §5.4 turns that into seven ordered steps. This module is **all seven**:
+steps 1, 3, 4 and 6 plus the step-7 gate arrived with F5b (fix-iq53.2.10), and
+steps 2 and 5, which assert the post-rename schema, arrived with F5a
+(fix-iq53.2.9) once there was a renamed schema to assert.
 
   1. Checksum manifest, before anything — sha256 and byte size of every
      historical store, recorded OUTSIDE both trees.
+  2. Fresh-store schema: create a new store in a temporary directory, exercise
+     declare → walk → terminal → cursor → cold resume against it, and assert the
+     ``result_handle_batches`` shape, the ``continuation_json`` round trip,
+     ``batch_index`` allocation from 0, and the absence of ``count_only``.
   3. Read-only open over a COPY of a real historical store: reads what it
      should, creates no table, creates no ``-shm`` or ``-wal`` sidecar, leaves
      the copy's sha256 unchanged.
@@ -16,6 +20,9 @@ here, and F5a must not start until this module passes.
      Without this, step 3 can pass because nothing happened at all, and an
      ``open_readonly`` that silently fell back to read-write would still look
      green. This is the step that stops step 3 rotting.
+  5. Old-shape read: a store holding ``result_handle_pages`` and no
+     ``result_handle_batches`` is a historical record — returned, not continued —
+     and is not written to on the way to being recognised as one.
   6. Re-verify the manifest: every checksum from step 1 unchanged.
   7. Only then may any real workflow state be opened for mutation.
 
@@ -49,6 +56,8 @@ from typing import Iterable
 import pytest
 
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope
+from fastworkflow.result_handles import paging
+from fastworkflow.result_handles.models import ResultHandleSpec, SourceDescriptor
 from fastworkflow.result_handles.store import (
     ReadOnlyResultHandleStore,
     ResultHandleStore,
@@ -242,6 +251,12 @@ def written_store(tmp_path: Path) -> Path:
     The realistic corpus is optional; this is not. Steps 3 and 4 run against it
     too, so the bracket still means something on a machine that has no frozen
     evidence to copy.
+
+    (fix-iq53.2.9, F5a) The writes are keyed on batch ORDINALS now, and the
+    terminal row carries no ``count_only``. This fixture is deliberately spelled
+    out against the store's own API rather than driven through ``declare`` and
+    ``fetch_page``: it has to keep meaning the same thing when the walk above it
+    changes, which is precisely what happened here.
     """
     path = tmp_path / "written" / "handles.sqlite3"
     store = ResultHandleStore(str(path))
@@ -251,7 +266,7 @@ def written_store(tmp_path: Path) -> Path:
         handle_scope,
         alias="O1",
         query_scope="",
-        start_offset=0,
+        batch_index=0,
         limit_requested=10,
         source="producer",
         record={"records": ["uid000  Alan", "uid001  Bea", "uid002  Cy"]},
@@ -261,9 +276,8 @@ def written_store(tmp_path: Path) -> Path:
         handle_scope,
         alias="O1",
         query_scope="",
-        terminal_offset=3,
+        terminal_batch_index=1,
         complete=True,
-        count_only=3,
         distinct_uids=3,
         stop_reason="exhausted",
     )
@@ -328,6 +342,176 @@ def test_step1_checksum_manifest_exists_outside_both_trees() -> None:
 
 
 # ==========================================================================
+# Step 2 — the fresh store's schema, exercised end to end
+# ==========================================================================
+
+
+def walked_store(path: Path) -> tuple[ResultHandleStore, list[object]]:
+    """A fresh store with a whole traversal driven through the public API.
+
+    declare → walk → terminal → cursor → cold resume, against a resolver that
+    behaves like an offset-paging adapter: it offers a resume point whenever rows
+    came back, and the framework reaches the end by asking once more and getting
+    an empty batch. Nothing is hand-written into the tables, so what step 2
+    asserts is the shape the RUNTIME produces and not the shape a fixture
+    imagined.
+    """
+    rows = [{"uid": "u%03d" % index, "name": "Row %d" % index}
+            for index in range(7)]
+    calls: list[object] = []
+
+    def resolver(request):
+        calls.append(request)
+        if isinstance(request, paging.TerminalRequest):
+            # The adapter decides, in its own words, and reports the number its
+            # own rule ran on. The framework records the decision (fix-iq53.2.8).
+            return {"complete": request.distinct_uids == len(rows),
+                    "incomplete_reason": "countonly_mismatch",
+                    "count": len(rows)}
+        start = int((request.continuation or {}).get("offset") or 0)
+        served = rows[start:start + max(1, int(request.limit))]
+        return {
+            "rows": served,
+            "total": len(rows),
+            "continuation": ({"offset": start + max(1, int(request.limit))}
+                             if served else None),
+        }
+
+    store = ResultHandleStore(str(path))
+    paging.register_resolver("acceptance-step2", resolver)
+    try:
+        paging.declare(
+            ResultHandleSpec(kind="row", summary="7 row(s).", items=[], total=7,
+                             source_complete=False, page_size=3),
+            source=SourceDescriptor(
+                resolver="acceptance-step2", uid_field="uid",
+                label_fields=("name",), filter_columns=("name",), batch_size=3,
+                state={"view": "rows", "start_offset": 0, "materialized": 0},
+            ),
+            scope=scope(), selected_store=store, alias="O1",
+        )
+        cursor = None
+        for _ in range(20):
+            page = paging.fetch_page("O1", cursor, scope=scope(),
+                                    selected_store=store, budget_bytes=200)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        # The cold resume: a fresh process rebuilds the walk from these tables
+        # alone, so a page served after it is a page served out of storage.
+        paging.reset_result_handle_state()
+        resumed = paging.fetch_page("O1", scope=scope(), selected_store=store,
+                                   budget_bytes=100_000)
+        assert len(resumed.rows) == 7, "the cold resume did not serve the walk"
+        assert resumed.continuation == "complete"
+    finally:
+        paging.unregister_resolver("acceptance-step2")
+        paging.reset_result_handle_state()
+    return store, calls
+
+
+def columns_of(path: Path, table: str) -> list[str]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')]
+    finally:
+        conn.close()
+
+
+def test_step2_a_fresh_store_has_the_batch_shape_and_nothing_of_the_old_one(
+    tmp_path: Path,
+) -> None:
+    """The post-rename schema, asserted on a store the runtime just built.
+
+    Revision 4 §5.4 step 2, and the reason it comes BEFORE steps 3 to 6 touch
+    anything realistic: the new shape is proven on a store created for the
+    purpose, in a directory pytest owns, before any question of opening an
+    existing file arises.
+    """
+    path = tmp_path / "fresh" / "handles.sqlite3"
+    walked_store(path)
+
+    tables = table_names(path)
+    assert "result_handle_batches" in tables
+    assert "result_handle_walk_terminals" in tables
+    # The rename is a rename: a fresh store carries no trace of the old shape,
+    # which is what makes "a store with result_handle_pages and no
+    # result_handle_batches" a reliable signature of a historical record (step 5).
+    assert "result_handle_pages" not in tables
+    assert "result_handle_walks" not in tables
+
+    batch_columns = columns_of(path, "result_handle_batches")
+    assert "batch_index" in batch_columns
+    assert "continuation_json" in batch_columns
+    assert "start_offset" not in batch_columns
+
+    terminal_columns = columns_of(path, "result_handle_walk_terminals")
+    assert "terminal_batch_index" in terminal_columns
+    # The column the framework's own coverage arithmetic used to need. It is gone
+    # because the arithmetic is gone, not because the number stopped existing.
+    assert "count_only" not in terminal_columns
+    assert "terminal_offset" not in terminal_columns
+
+
+def test_step2_batch_ordinals_are_allocated_from_zero_and_are_contiguous(
+    tmp_path: Path,
+) -> None:
+    """``batch_index`` counts from 0, monotonically, with no gaps.
+
+    7 rows at batch_size 3 is batches 0, 1, 2 with rows and batch 3 empty — the
+    probe an offset walker cannot avoid, because it cannot know its last full
+    batch was last. The ordinals are the FRAMEWORK's: they do not encode 0, 3, 6,
+    9, which is where an offset-keyed store filed the same four batches.
+    """
+    path = tmp_path / "fresh" / "handles.sqlite3"
+    store, _ = walked_store(path)
+
+    batches = store.list_pages(scope(), alias="O1", query_scope="")
+    assert [batch["batch_index"] for batch in batches] == [0, 1, 2, 3]
+    assert [batch["row_count"] for batch in batches] == [3, 3, 1, 0]
+    assert [batch["source"] for batch in batches] == ["resolver"] * 4
+
+    terminal = store.get_walk_terminal(scope(), alias="O1", query_scope="")
+    assert terminal is not None
+    assert terminal["terminal_batch_index"] == 3
+    assert terminal["complete"] is True
+    assert terminal["distinct_uids"] == 7
+    assert "count_only" not in terminal
+
+
+def test_step2_the_continuation_round_trips_through_storage_verbatim(
+    tmp_path: Path,
+) -> None:
+    """What went into ``continuation_json`` is what comes back out.
+
+    This is the value the walk resumes from after an eviction or a restart, so it
+    is the one column in the new table that the framework must never interpret
+    and must never lose. The adapter's key here is ``offset``; the assertion is
+    about the round trip and not about the key, which is the point.
+    """
+    path = tmp_path / "fresh" / "handles.sqlite3"
+    store, _ = walked_store(path)
+
+    batches = store.list_pages(scope(), alias="O1", query_scope="")
+    assert [batch["continuation"] for batch in batches] == [
+        {"offset": 3}, {"offset": 6}, {"offset": 9}, None,
+    ]
+    # NULL and only NULL on the batch that ended the walk: an empty batch keeps
+    # no resume point however insistently one is offered (fix-iq53.2.4), and NULL
+    # is how a rebuild reads "this walk cannot be continued past here".
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        stored = conn.execute(
+            "SELECT batch_index, continuation_json FROM result_handle_batches "
+            "WHERE query_scope = '' ORDER BY batch_index"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert stored == [(0, '{"offset":3}'), (1, '{"offset":6}'),
+                      (2, '{"offset":9}'), (3, None)]
+
+
+# ==========================================================================
 # Step 3 — read-only open over a copy of a real historical store
 # ==========================================================================
 
@@ -374,7 +558,7 @@ def test_step3_readonly_open_reads_a_store_back_faithfully(
     reader = ResultHandleStore.open_readonly(str(written_store))
     declaration = reader.get_declaration(handle_scope, "O1")
     page = reader.get_page(
-        handle_scope, alias="O1", query_scope="", start_offset=0
+        handle_scope, alias="O1", query_scope="", batch_index=0
     )
     terminal = reader.get_walk_terminal(
         handle_scope, alias="O1", query_scope=""
@@ -409,7 +593,7 @@ def test_step3_readonly_open_refuses_to_write_through_an_inherited_writer(
             scope(),
             alias="O2",
             query_scope="",
-            start_offset=0,
+            batch_index=0,
             limit_requested=10,
             source="producer",
             record={"records": ["uid999  Nope"]},
@@ -467,10 +651,14 @@ def test_step4_writing_constructor_does_change_the_same_copy(
         "step 3 can now pass vacuously and must be re-anchored"
     )
     assert historical_copy.stat().st_size > before_size
+    # (fix-iq53.2.9, F5a) Still exactly five tables, two of them renamed. The
+    # count is what the §5.2 measurement rests on, so it is asserted as a SET and
+    # not as a length: a sixth table appearing here is a schema change nobody
+    # declared, and that is worth failing on.
     assert set(after_tables) - set(before_tables) == {
         "result_handle_declarations",
-        "result_handle_pages",
-        "result_handle_walks",
+        "result_handle_batches",
+        "result_handle_walk_terminals",
         "result_handle_cursor_tags",
         "result_handle_cursors",
     }
@@ -506,8 +694,183 @@ def test_step4_writing_constructor_changes_any_store_lacking_the_tables(
         "step 3 can now pass vacuously"
     )
     assert bare.stat().st_size > before_size
-    assert "result_handle_pages" in table_names(bare)
+    assert "result_handle_batches" in table_names(bare)
     assert "unrelated" in table_names(bare), "an existing table was lost"
+
+
+# ==========================================================================
+# Step 5 — a store of the old shape is a historical record, not a walk
+# ==========================================================================
+
+
+@pytest.fixture
+def old_shape_store(tmp_path: Path) -> Path:
+    """A store exactly as the pre-F5a constructor left it, built by hand.
+
+    By hand on purpose: the code that used to create these tables is gone, so the
+    only way to have one is to write the DDL out, and writing it out is what
+    pins what "the old shape" was. This is the schema at ``6cf4ba8``, verbatim,
+    with one producer page and one judged walk in it.
+    """
+    path = tmp_path / "old-shape" / "handles.sqlite3"
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE result_handle_pages (
+                scope_id TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                query_scope TEXT NOT NULL,
+                start_offset INTEGER NOT NULL,
+                limit_requested INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                row_count INTEGER NOT NULL,
+                backend_total INTEGER,
+                record_json BLOB NOT NULL,
+                record_sha256 TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (scope_id, alias, query_scope, start_offset)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE result_handle_walks (
+                scope_id TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                query_scope TEXT NOT NULL,
+                terminal_offset INTEGER NOT NULL,
+                complete INTEGER NOT NULL,
+                count_only INTEGER,
+                distinct_uids INTEGER NOT NULL,
+                stop_reason TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (scope_id, alias, query_scope)
+            )
+            """
+        )
+        record = b'{"records":["uid000  Alan"]}'
+        conn.execute(
+            "INSERT INTO result_handle_pages VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (scope().scope_id, "O1", "", 12, 10, "producer", 1, 1, record,
+             hashlib.sha256(record).hexdigest(), "2026-09-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO result_handle_walks VALUES (?,?,?,?,?,?,?,?,?)",
+            (scope().scope_id, "O1", "", 22, 1, 1, 1, "", "2026-09-01T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def test_step5_an_old_shape_store_is_returned_as_evidence_and_never_written(
+    old_shape_store: Path,
+) -> None:
+    """Revision 4 §5.4 step 5: recognised as a historical record.
+
+    "Returned, not continued", and both halves matter.
+
+    RETURNED: the rows are still there and still readable. A store written before
+    the rename keeps every byte it had, and a reader that wants them can have them
+    — through a read-only connection, in the shape they were written in. That is
+    what the new TABLE NAME buys over an ``ALTER``: nothing had to be migrated for
+    the old rows to still parse, so nothing had to be rewritten to read them.
+
+    NOT CONTINUED: the walk accessors do not silently answer "no batches" for a
+    store that simply keys its batches differently — that would read an archive of
+    540 rows as an empty traversal, which is the shape of a silently shorter
+    listing. They fail loudly instead, on a file the framework has no business
+    walking. Continuing one of these is the offline evaluator's job (IDO's I5),
+    against the old table, by ``start_offset``.
+    """
+    before_sha = sha256_of(old_shape_store)
+    before_size = old_shape_store.stat().st_size
+    assert table_names(old_shape_store) == [
+        "result_handle_pages", "result_handle_walks"
+    ]
+
+    reader = ResultHandleStore.open_readonly(str(old_shape_store))
+
+    # RETURNED. The old rows, through the store's own read-only connection.
+    conn = reader._connect()
+    try:
+        page = conn.execute(
+            "SELECT start_offset, row_count, record_json FROM result_handle_pages"
+        ).fetchone()
+        walk = conn.execute(
+            "SELECT terminal_offset, count_only, complete FROM result_handle_walks"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert page["start_offset"] == 12 and page["row_count"] == 1
+    assert json.loads(bytes(page["record_json"]).decode("utf-8")) == {
+        "records": ["uid000  Alan"]
+    }
+    assert (walk["terminal_offset"], walk["count_only"], walk["complete"]) == (22, 1, 1)
+
+    # NOT CONTINUED, and not silently either.
+    for call in (
+        lambda: reader.get_page(scope(), alias="O1", query_scope="", batch_index=0),
+        lambda: reader.list_pages(scope(), alias="O1", query_scope=""),
+        lambda: reader.list_page_query_scopes(scope(), alias="O1"),
+        lambda: reader.get_walk_terminal(scope(), alias="O1", query_scope=""),
+    ):
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            call()
+
+    # NEVER WRITTEN. Not by the open, and not by the four refusals either: the
+    # missing table is not created on the way to reporting that it is missing.
+    assert table_names(old_shape_store) == [
+        "result_handle_pages", "result_handle_walks"
+    ], "reading an old-shape store created a table"
+    assert sidecars_of(old_shape_store) == []
+    assert old_shape_store.stat().st_size == before_size
+    assert sha256_of(old_shape_store) == before_sha
+
+
+def test_step5_the_writing_constructor_adds_the_new_tables_beside_the_old(
+    old_shape_store: Path,
+) -> None:
+    """And if one is ever opened read-write, the old rows still survive it.
+
+    The read-only open is the primary mechanism and this is the secondary one,
+    measured rather than asserted from the DDL: a new table name means an
+    accidental read-write open of an old-shape store is additive. It still
+    REWRITES THE FILE — that is §5.2's finding and the reason the read-only open
+    comes first — but it does not drop a row, drop a table, or migrate anything.
+    """
+    before_sha = sha256_of(old_shape_store)
+
+    ResultHandleStore(str(old_shape_store))
+
+    assert sha256_of(old_shape_store) != before_sha, (
+        "an additive CREATE TABLE no longer rewrites the file; §5.2's measurement "
+        "and the ordering it justifies both need rereading"
+    )
+    assert table_names(old_shape_store) == [
+        "result_handle_batches",
+        "result_handle_cursor_tags",
+        "result_handle_cursors",
+        "result_handle_declarations",
+        "result_handle_pages",
+        "result_handle_walk_terminals",
+        "result_handle_walks",
+    ]
+    conn = sqlite3.connect(f"file:{old_shape_store}?mode=ro", uri=True)
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM result_handle_pages").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT start_offset FROM result_handle_pages").fetchone()[0] == 12
+        assert conn.execute(
+            "SELECT count(*) FROM result_handle_walks").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM result_handle_batches").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 # ==========================================================================

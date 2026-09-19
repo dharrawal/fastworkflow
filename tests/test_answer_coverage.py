@@ -395,7 +395,7 @@ class Presence(unittest.TestCase):
             )
             store.put_declaration(scope, "O2", declaration_payload(total=2))
             store.put_page(
-                scope, alias="O2", query_scope="", start_offset=0, limit_requested=25,
+                scope, alias="O2", query_scope="", batch_index=0, limit_requested=25,
                 source="resolver", backend_total=2,
                 record=page_record(["uid-1  Alan Cooper", "uid-2  Anna Garcia"]),
             )
@@ -516,7 +516,7 @@ class ZeroMatchPages(unittest.TestCase):
             scope, "O2", declaration_payload(total=len(rows),
                                              materialized=len(rows)))
         store.put_page(
-            scope, alias="O2", query_scope="", start_offset=0,
+            scope, alias="O2", query_scope="", batch_index=0,
             limit_requested=25, source="resolver", backend_total=len(rows),
             record=page_record(rows),
         )
