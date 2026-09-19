@@ -167,9 +167,30 @@ class ResultHandleStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
+        """Every statement in this class goes through here. It is a SEAM.
+
+        (fix-iq53.2.10, F5b) A subclass that overrides this one method changes
+        how the whole store reaches SQLite without touching a query. That is
+        how ``ReadOnlyResultHandleStore`` below opens a file it must not write,
+        and how a caller that knows more about a particular file than the
+        framework ever can -- whether it is frozen evidence or a live run
+        directory -- routes the same reads through its own connection policy.
+        The seam is the reason this class takes no ``immutable`` parameter, and
+        no other parameter, for read-only opens.
+        """
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         return conn
+
+    @classmethod
+    def open_readonly(cls, db_path: str) -> "ReadOnlyResultHandleStore":
+        """Open an EXISTING store without writing a byte to it.
+
+        The named entry point for reading a historical store. See
+        ``ReadOnlyResultHandleStore`` for why the ordinary constructor is not
+        safe to point at one.
+        """
+        return ReadOnlyResultHandleStore(db_path)
 
     # -- declarations ------------------------------------------------------
 
@@ -766,3 +787,69 @@ class ResultHandleStore:
             }
             for row in rows
         ]
+
+
+class ReadOnlyResultHandleStore(ResultHandleStore):
+    """Read-only view of an existing handle store. Never creates, migrates, or
+    writes the file — a store that has been archived is evidence, and reading
+    evidence must not change it. Construction raises when the file is absent or
+    unopenable (``sqlite3.OperationalError``); callers degrade gracefully.
+
+    Same shape, deliberately, as ``ReadOnlyObservabilityStore`` in
+    ``fastworkflow/observability/store.py``: an ``__init__`` that skips the
+    parent's create/migrate block entirely, and a ``_connect`` override that
+    goes through ``file:<path>?mode=ro``. Inherited writers are not overridden
+    — SQLite refuses them by itself with "attempt to write a readonly
+    database", which is the loud failure and needs no help from here.
+
+    WHY THIS EXISTS AT ALL (fix-iq53.2.10, F5b). ``ResultHandleStore.__init__``
+    runs five ``CREATE TABLE IF NOT EXISTS`` statements over a read-write
+    connection, so merely CONSTRUCTING one over a frozen artifact rewrites it:
+    measured on a copy, a 135 168-byte store became 192 512 bytes with five
+    tables added and a different sha256. "Additive" describes the SCHEMA delta,
+    not the FILE delta. A read-only open is the mechanism that actually holds;
+    new table names are a second line, not the first.
+
+    WHY THERE IS NO ``immutable`` PARAMETER, and why ``_connect`` is a seam
+    instead. A plain ``mode=ro`` connection to a WAL-mode database STILL
+    CREATES an ``-shm`` sidecar beside it (and a ``-wal``, when none is there);
+    that is how 17 sidecars once appeared under a frozen evidence root, an
+    incident and not a precaution. ``immutable=1`` suppresses both, but it also
+    makes SQLite ignore the WAL, so against a store with an uncheckpointed WAL
+    it silently reads a TRUNCATED database. So the two options are each wrong
+    for some file, and which one is wrong depends on whether that path is
+    frozen evidence or a directory being written while it is read. The
+    framework cannot know that, and should not learn it. The MECHANISM lives
+    here; the per-file JUDGMENT lives with the caller, which expresses it by
+    overriding ``_connect`` — the way IDO's evaluation layer already subclasses
+    ``ReadOnlyObservabilityStore`` to route it through its own sidecar-safe
+    policy. This is the owner's ruling on the question Revision 4 §9.3 left
+    open, and it is none of that section's three options: no new framework
+    parameter is added, because a parameter is the overreach that got two
+    earlier revisions rejected.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        # Normalized like the parent so ``db_path`` means the same thing on
+        # both classes. No ``makedirs``: the parent creates the containing
+        # directory, and doing that beside an archive would be a write to the
+        # very tree this class exists to leave alone.
+        self.db_path = os.path.abspath(os.path.expanduser(db_path))
+        # Prove the file is there and is a database now, rather than on the
+        # first query, and close again immediately: an open connection is the
+        # one thing that could still take a lock on it.
+        conn = self._connect()
+        try:
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            f"file:{self.db_path}?mode=ro",
+            uri=True,
+            timeout=30.0,
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
