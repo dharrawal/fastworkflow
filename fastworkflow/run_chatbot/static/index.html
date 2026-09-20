@@ -483,6 +483,31 @@ button.newConv:hover { filter: brightness(1.1); }
 .chatMsg .cmdOut { color: var(--muted); font-size: 11.5px; margin-top: 5px;
   border-top: 1px dashed var(--border); padding-top: 4px;
   white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Live interactions: what the agent asked the workflow and what came back,
+   alongside the answer rather than instead of it. Status is carried by text,
+   never by colour alone. */
+.chatMsg .activity { margin-top: 6px; font-size: 12px; }
+.chatMsg .activity > summary { color: var(--muted); cursor: pointer; display: flex;
+  gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.chatMsg .activity .actState { font-weight: 600; }
+.chatMsg .activity .actList { list-style: none; margin: 6px 0 0; padding: 0;
+  border-left: 2px solid var(--border); }
+.chatMsg .actRow { padding: 4px 0 4px 10px; }
+.chatMsg .actRow .actHead { display: flex; gap: 8px; align-items: baseline;
+  flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+.chatMsg .actRow .actWho { font-weight: 600; }
+.chatMsg .actRow .actCmd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.chatMsg .actRow .actText { white-space: pre-wrap; overflow-wrap: anywhere;
+  margin-top: 2px; }
+.chatMsg .actNote { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.chatMsg .artifacts { margin-top: 8px; border-top: 1px dashed var(--border);
+  padding-top: 6px; }
+.chatMsg .artifacts > .aTitle { color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.chatMsg .artifacts .artifact img { max-width: 100%; border-radius: 6px;
+  border: 1px solid var(--border); margin-top: 6px; }
+.chatMsg .artifacts .aActions { display: flex; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px; font-size: 11px; }
 #composer { display: flex; gap: 10px; padding: 12px 18px;
   border-top: 1px solid var(--border); background: var(--panel); }
 #composer input { flex: 1; border-radius: 999px; padding: 8px 16px; }
@@ -5316,6 +5341,20 @@ function tmFetch(path, body, extra) {
   return fetch(tm.baseUrl + path, opts);
 }
 
+/* A reader who scrolled up is reading; live updates must not yank them back
+   to the bottom. Anything within a line or two of the end counts as following
+   the conversation. */
+function tmFollowingLog() {
+  var log = document.getElementById("chatLog");
+  return (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
+}
+function tmScrollIfFollowing(wasFollowing) {
+  var log = document.getElementById("chatLog");
+  if (wasFollowing === undefined ? tmFollowingLog() : wasFollowing) {
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
 function tmBubble(role, text) {
   var log = document.getElementById("chatLog");
   var empty = log.querySelector(".empty");
@@ -5326,6 +5365,8 @@ function tmBubble(role, text) {
   else { bubble.appendChild(document.createTextNode(text)); }
   msg.appendChild(bubble);
   log.appendChild(msg);
+  /* A message the user just sent (or the reply slot for it) always scrolls:
+     they acted, so moving to it is what they asked for. */
   log.scrollTop = log.scrollHeight;
   return msg;
 }
@@ -5526,9 +5567,17 @@ function appendMarkdown(container, text) {
 }
 
 function tmRenderTurn(bubbleMsg, out) {
-  /* out: TurnOutput projection {turn_key,status,success,answer,command_outputs} */
+  /* out: TurnOutput projection {turn_key,status,success,answer,command_outputs}
+     Idempotent: the same turn can be painted twice (the stream delivered the
+     output event AND a recovery poll read the stored record), and the second
+     paint must replace the first rather than stack a second copy of it. The
+     activity panel is deliberately not cleared — it is the record of what
+     happened during the turn. */
   var bubble = bubbleMsg.querySelector(".bubble");
   clear(bubble);
+  Array.prototype.slice.call(
+    bubbleMsg.querySelectorAll(".cmdOut, .meta, .artifacts")
+  ).forEach(function (node) { node.parentNode.removeChild(node); });
   var answer = out.answer || "(no answer)";
   appendMarkdown(bubble, answer);
   if (out.status === "awaiting_user") {
@@ -5543,6 +5592,7 @@ function tmRenderTurn(bubbleMsg, out) {
         ? " — " + resp.response.slice(0, 300) : "");
     bubbleMsg.appendChild(el("div", "cmdOut", line));
   });
+  tmRenderArtifacts(bubbleMsg, out.command_outputs);
   var meta = el("div", "meta");
   var statusTxt = out.status +
     (out.status === "awaiting_user" ? " (awaiting your reply)"
@@ -5554,15 +5604,567 @@ function tmRenderTurn(bubbleMsg, out) {
     meta.appendChild(link);
   }
   bubbleMsg.appendChild(meta);
+  tmScrollIfFollowing();
 }
 
-function tmPollTurn(turnKey, bubbleMsg, deadlineMs) {
-  /* A 202 handed back an in-flight execution: poll GET /turns/{key}. */
+/* -- chat artifacts [fix-9eg.20.3] -------------------------------------- */
+/* Artifacts belong beside the answer, not behind a Debug tab. Rendering
+   reuses the debug renderer's safety rules verbatim [R22]: values print via
+   textContent, HTML-ish content only ever reaches a sandboxed iframe, and no
+   URL outside this chatbot's own artifact route is ever fetched. */
+
+/* Auto-fetching stops here; above it a card offers the content on request so
+   a multi-megabyte artifact never blocks the answer it belongs to. */
+var TM_ARTIFACT_LAZY_BYTES = 262144;
+/* How many restored turns fetch their stored record on sight. Older turns keep
+   a button, so reopening a long conversation is not a hundred round trips. */
+var TM_RESTORED_ARTIFACT_AUTOLOAD = 10;
+
+function tmArtifactPath(ref) {
+  /* The chat's artifacts live in the LIVE workflow's store, which is this
+     route's default source. Deliberately not benchmarkEvidencePath(): that
+     appends whichever recorded experiment the Debug tab last selected, and an
+     offloaded reference must resolve in the store that produced it. */
+  return "/api/artifact/" + encodeURIComponent(ref);
+}
+function tmArtifactFetch(ref) {
+  return fetch(tmArtifactPath(ref), {
+    headers: { "Authorization": "Bearer " + TOKEN }
+  });
+}
+function tmChatApi(path) {
+  /* api() routes through benchmarkEvidencePath(), which scopes /api/turn/ and
+     /api/artifact/ to whichever recorded experiment the Debug tab currently
+     has selected. A chat turn's record and artifacts belong to the store that
+     produced them, so the chat reads are deliberately unscoped rather than
+     trusting a global the other tab owns and mutates. */
+  return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
+    .then(function (r) {
+      if (!r.ok) { throw new Error("API " + path + " -> " + r.status); }
+      return r.json();
+    });
+}
+function tmArtifactHref(ref) {
+  /* <img> and download links cannot carry an Authorization header, so they use
+     the same ?token= the page itself was opened with. Same origin only. */
+  return tmArtifactPath(ref) + "?token=" + encodeURIComponent(TOKEN);
+}
+
+function tmArtifactRef(value) {
+  return (value && typeof value === "object" && value.__fw_artifact_ref__)
+    ? value : null;
+}
+
+function tmArtifactSourceLabel(commandName, index) {
+  /* Two commands in one turn may both return "report". The source keeps them
+     apart; the ordinal keeps two calls of the SAME command apart. */
+  return "from " + (commandName || "(command)") + " #" + (index + 1);
+}
+
+function tmArtifactCard(key, meta) {
+  var box = el("div", "artifact");
+  var head = el("div", "aHead");
+  head.appendChild(el("span", "aKey", key));
+  if (meta) { head.appendChild(el("span", "aMeta", meta)); }
+  box.appendChild(head);
+  return box;
+}
+
+function tmArtifactActions(box, ref) {
+  var actions = el("div", "aActions");
+  var open = el("a", null, "open / download");
+  open.href = tmArtifactHref(ref);
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  actions.appendChild(open);
+  box.appendChild(actions);
+  return actions;
+}
+
+function tmRenderArtifactBody(box, contentType, text) {
+  var ctype = (contentType || "").toLowerCase();
+  var htmlish = ctype.indexOf("text/html") === 0 ||
+                ctype.indexOf("image/svg") === 0 ||
+                ctype.indexOf("application/xhtml") === 0 ||
+                looksHtml(text);
+  if (htmlish) {
+    box.appendChild(sandboxedFrame(text));
+    var src = el("details");
+    src.appendChild(el("summary", null, "View source (as text)"));
+    src.appendChild(el("pre", "json", text));
+    box.appendChild(src);
+    return;
+  }
+  box.appendChild(el("pre", "json", pretty(text)));
+}
+
+function tmLoadOffloadedArtifact(box, placeholder, value) {
+  var ref = value.__fw_artifact_ref__;
+  placeholder.textContent = "loading…";
+  tmArtifactFetch(ref)
+    .then(function (r) {
+      if (r.status === 404) {
+        throw { missing: true };
+      }
+      if (!r.ok) { throw new Error("HTTP " + r.status); }
+      var ctype = (r.headers.get("Content-Type") || "").toLowerCase();
+      return r.text().then(function (text) { return { ctype: ctype, text: text }; });
+    })
+    .then(function (got) {
+      placeholder.parentNode.removeChild(placeholder);
+      tmRenderArtifactBody(box, got.ctype, got.text);
+      tmArtifactActions(box, ref);
+      tmScrollIfFollowing();
+    })
+    .catch(function (e) {
+      if (e && e.missing) {
+        placeholder.textContent =
+          "this artifact is no longer in the store (pruned or never recorded).";
+        return;
+      }
+      placeholder.textContent = "could not load this artifact: " +
+        (e && e.message ? e.message : "unknown error");
+      var retry = el("button", "traceLink", "retry");
+      retry.addEventListener("click", function () {
+        if (retry.parentNode) { retry.parentNode.removeChild(retry); }
+        tmLoadOffloadedArtifact(box, placeholder, value);
+      });
+      placeholder.parentNode.appendChild(retry);
+    });
+}
+
+function tmOffloadedArtifactNode(key, value, source) {
+  var ref = value.__fw_artifact_ref__;
+  var ctype = (value.content_type || "").toLowerCase();
+  var size = typeof value.size === "number" ? value.size : null;
+  var box = tmArtifactCard(key, [
+    "offloaded",
+    value.content_type || "unknown type",
+    size === null ? "size unknown" : fmtCount(size) + " bytes",
+    source
+  ].join(" · "));
+
+  if (ctype.indexOf("image/") === 0 && ctype.indexOf("image/svg") !== 0) {
+    /* A raster image is shown by the browser, not read into the page. */
+    var img = document.createElement("img");
+    img.src = tmArtifactHref(ref);
+    img.alt = key;
+    box.appendChild(img);
+    tmArtifactActions(box, ref);
+    return box;
+  }
+  if (size !== null && size > TM_ARTIFACT_LAZY_BYTES) {
+    var note = el("div", "aMeta",
+      "large artifact — not loaded automatically so the answer stays responsive.");
+    box.appendChild(note);
+    var load = el("button", "traceLink", "load content");
+    load.addEventListener("click", function () {
+      box.removeChild(load);
+      tmLoadOffloadedArtifact(box, note, value);
+    });
+    box.appendChild(load);
+    tmArtifactActions(box, ref);
+    return box;
+  }
+  var placeholder = el("div", "aMeta", "loading…");
+  box.appendChild(placeholder);
+  tmLoadOffloadedArtifact(box, placeholder, value);
+  return box;
+}
+
+function tmArtifactsIn(commandOutputs) {
+  /* [{key, value, source}] for every artifact this turn actually returned. */
+  var found = [];
+  (commandOutputs || []).forEach(function (co, index) {
+    var resp = (co && co.command_response) || {};
+    var artifacts = resp.artifacts || {};
+    Object.keys(artifacts).forEach(function (key) {
+      found.push({
+        key: key,
+        value: artifacts[key],
+        source: tmArtifactSourceLabel(co && co.command_name, index)
+      });
+    });
+  });
+  return found;
+}
+
+function tmRenderArtifacts(bubbleMsg, commandOutputs) {
+  var items = tmArtifactsIn(commandOutputs);
+  if (!items.length) { return null; }
+  var wrap = el("div", "artifacts");
+  wrap.appendChild(el("div", "aTitle", "Artifacts"));
+  items.forEach(function (item) {
+    var ref = tmArtifactRef(item.value);
+    if (ref) {
+      wrap.appendChild(tmOffloadedArtifactNode(item.key, item.value, item.source));
+      return;
+    }
+    var env = captureEnvelope(item.value);
+    if (env) {
+      /* Withheld by the capture policy: say so where the content would be,
+         so a digest never reads as the artifact it stands in for. */
+      var box = tmArtifactCard(item.key, "withheld · " + item.source);
+      appendPoliced(box, item.value);
+      wrap.appendChild(box);
+      return;
+    }
+    wrap.appendChild(artifactNode(item.key, item.value, "inline · " + item.source));
+  });
+  tmAppendBeforeMeta(bubbleMsg, wrap);
+  return wrap;
+}
+
+function tmAppendBeforeMeta(bubbleMsg, node) {
+  /* The status/"view trace" line stays last, so anything added after a turn
+     was painted lands above it rather than below the footer. */
+  var meta = bubbleMsg.querySelector(".meta");
+  if (meta) { bubbleMsg.insertBefore(node, meta); }
+  else { bubbleMsg.appendChild(node); }
+}
+
+/* -- live interactions [fix-9eg.20.2] ----------------------------------- */
+/* The activity panel shows the public exchange between the agent and the
+   workflow — the command it asked for and the response it got back — as the
+   turn runs. It shows nothing the turn endpoints do not already return: the
+   agent's private reasoning is not part of the trace contract and is never
+   requested, fetched or rendered here. */
+
+function tmActivityPanel(bubbleMsg) {
+  var box = el("details", "activity");
+  box.open = true;
+  var summary = el("summary");
+  var label = el("span", null, "Activity");
+  var count = el("span", "actCount", "no steps yet");
+  var state = el("span", "actState", "· running");
+  /* Text, not colour, carries the state, and it is announced politely so a
+     screen-reader user is told without losing their place. */
+  state.setAttribute("role", "status");
+  state.setAttribute("aria-live", "polite");
+  summary.appendChild(label);
+  summary.appendChild(count);
+  summary.appendChild(state);
+  box.appendChild(summary);
+  var list = el("ol", "actList");
+  box.appendChild(list);
+  bubbleMsg.appendChild(box);
+  var steps = 0;
+
+  function note(text) {
+    var following = tmFollowingLog();
+    box.appendChild(el("div", "actNote", text));
+    tmScrollIfFollowing(following);
+  }
+
+  return {
+    node: box,
+    step: function (trace) {
+      var following = tmFollowingLog();
+      steps += 1;
+      var row = el("li", "actRow");
+      var head = el("div", "actHead");
+      var toWorkflow = trace.direction === "agent_to_workflow";
+      head.appendChild(el("span", "actWho",
+        toWorkflow ? "agent → workflow" : "workflow → agent"));
+      if (trace.command_name) {
+        head.appendChild(el("span", "actCmd", trace.command_name));
+      }
+      if (trace.success === true) { head.appendChild(el("span", null, "· ok")); }
+      if (trace.success === false) { head.appendChild(el("span", null, "· FAILED")); }
+      row.appendChild(head);
+      var body = toWorkflow ? trace.raw_command : trace.response_text;
+      if (body === null || body === undefined || body === "") {
+        if (trace.parameters) { body = pretty(trace.parameters); }
+      }
+      if (body !== null && body !== undefined && body !== "") {
+        var text = el("div", "actText");
+        appendPoliced(text, body);
+        row.appendChild(text);
+      }
+      list.appendChild(row);
+      count.textContent = steps === 1 ? "1 step" : steps + " steps";
+      tmScrollIfFollowing(following);
+    },
+    setState: function (text) { state.textContent = "· " + text; },
+    note: note
+  };
+}
+
+/* Frames arrive over a single body in whichever framing the session was
+   initialized with, which the response states in X-FW-Stream-Format. Both
+   framings are read here: a session restored as SSE would otherwise lose its
+   live interactions, and silently re-negotiating a persisted session's format
+   to suit this page is not ours to do.
+
+   Either way a chunk can split a frame in half, so the tail is held back until
+   its delimiter arrives, and a frame whose seq was already rendered is dropped
+   rather than rendered twice — the deduplication rule the endpoint documents.
+
+   NDJSON carries the whole envelope per line. SSE carries `id:` (the seq),
+   `event:` (the type) and `data:` (the payload alone) per block, so the
+   envelope is rebuilt from the block; its turn identity comes from the
+   X-FW-Turn-Key header the caller already read. */
+function tmFrameReader(streamFormat, onFrame, onBadFrame) {
+  var buffer = "";
+  var seen = {};
+  var sse = streamFormat === "sse";
+  var delimiter = sse ? "\n\n" : "\n";
+
+  function deliver(frame) {
+    if (frame.seq !== null && frame.seq !== undefined) {
+      if (seen[frame.seq]) { return; }
+      seen[frame.seq] = true;
+    }
+    onFrame(frame);
+  }
+
+  function takeNdjson(line) {
+    if (!line.trim()) { return; }
+    var frame;
+    try { frame = JSON.parse(line); }
+    catch (e) { if (onBadFrame) { onBadFrame(line); } return; }
+    deliver(frame);
+  }
+
+  function takeSse(block) {
+    if (!block.trim()) { return; }
+    var type = null, id = null, data = [];
+    block.split("\n").forEach(function (line) {
+      if (line.charAt(0) === ":") { return; }        /* SSE comment/heartbeat */
+      var colon = line.indexOf(":");
+      if (colon < 0) { return; }
+      var field = line.slice(0, colon);
+      var value = line.slice(colon + 1);
+      if (value.charAt(0) === " ") { value = value.slice(1); }
+      if (field === "event") { type = value; }
+      else if (field === "id") { id = value; }
+      else if (field === "data") { data.push(value); }
+    });
+    if (type === null && !data.length) { return; }
+    var payload;
+    try { payload = JSON.parse(data.join("\n")); }
+    catch (e) { if (onBadFrame) { onBadFrame(block); } return; }
+    deliver({
+      type: type,
+      seq: id === null || id === "" ? null : Number(id),
+      turn_key: null,
+      logical_turn_key: null,
+      data: payload
+    });
+  }
+
+  var take = sse ? takeSse : takeNdjson;
+  return {
+    push: function (chunk) {
+      buffer += chunk;
+      var parts = buffer.split(delimiter);
+      buffer = parts.pop();
+      parts.forEach(take);
+    },
+    end: function () { take(buffer); buffer = ""; }
+  };
+}
+
+/* One decoded frame, applied to the live turn's UI. Separate from
+   tmStreamTurn so the mapping from the server's event types to what a reader
+   sees can be driven by real recorded frames in a browser test, rather than
+   only through a live socket. */
+function tmApplyStreamFrame(frame, activity, sink) {
+  if (frame.type === "trace") { activity.step(frame.data || {}); return; }
+  if (frame.type === "output") { sink.output(frame.data || {}); return; }
+  if (frame.type === "timeout") {
+    /* Non-terminal: the delivery deadline passed, the turn did not. Say so and
+       keep reading — its output is still coming, and resubmitting would start
+       a second turn. */
+    activity.setState("still working (past the " +
+      ((frame.data && frame.data.timeout_seconds) || "requested") +
+      "s deadline)");
+    activity.note((frame.data && frame.data.detail) ||
+      "The turn passed its delivery deadline and is still running.");
+    return;
+  }
+  if (frame.type === "error") {
+    var detail = (frame.data && frame.data.detail) || "the turn reported an error";
+    activity.note("Server reported: " + detail);
+    sink.error(detail);
+  }
+}
+
+function tmStreamTurn(text, pending) {
+  /* One live turn over /invoke_agent_stream. The execution key arrives on the
+     response head, so a body that dies mid-turn is recovered by polling that
+     key — never by submitting the query again, which would be a second turn
+     and a second bill. */
+  var activity = tmActivityPanel(pending);
+  var turnKey = null;
+  /* The recovery handle that outlives the execution: a chat execution leaves
+     the registry as soon as it retires, so its key stops resolving, while the
+     logical key reads the stored record. NDJSON frames carry it from the
+     first one; an SSE body does not, and recovery there starts from the
+     header key and adopts the logical key from the first poll answer. */
+  var logicalKey = null;
+  var finished = false;
+  var lastError = null;
+
+  function done() { tm.busy = false; tmComposerState(); }
+
+  function finalize(out) {
+    if (out.logical_turn_key) { out.turn_key = out.logical_turn_key; }
+    finished = true;
+    activity.setState(
+      out.status === "awaiting_user" ? "waiting for your reply"
+        : (out.success ? "completed" : "failed"));
+    tmRenderTurn(pending, out);
+    done();
+  }
+
+  function recover(reason) {
+    /* The body is gone but the turn is not: it owns its own lifecycle server
+       side. Reconcile against the stored record rather than inventing the
+       events this client never saw. */
+    if (finished) { return; }
+    var key = logicalKey || turnKey;
+    if (!key) {
+      /* No key at all: the request failed before the server named a turn. It
+         may nonetheless have started one. Do NOT promise that resending is
+         free — a resend only rejoins while that turn is still running, and
+         runs the command again once it has finished. */
+      tmRenderError(pending, reason + " The server may still have started a " +
+        "turn for this message. Reload the conversation to see whether it " +
+        "landed before sending it again.");
+      activity.setState("disconnected");
+      done();
+      return;
+    }
+    activity.setState("disconnected — recovering");
+    activity.note(reason + " Recovering the result from the server's record " +
+      "(the activity above may be incomplete; the stored result is " +
+      "authoritative).");
+    tmPollTurn(key, pending, null, activity);
+  }
+
+  activity.setState("running");
+  tmFetch("/invoke_agent_stream", { user_query: text, timeout_seconds: 300 })
+    .then(function (r) {
+      turnKey = r.headers.get("X-FW-Turn-Key") || null;
+      if (r.status === 202) {
+        /* This exact query is already in flight (a retry or a second tab).
+           No second run was started; attach by polling its key. */
+        return r.json().then(function (data) {
+          turnKey = data.logical_turn_key || data.turn_key || turnKey;
+          activity.setState("already running — attaching");
+          activity.note("This message was already being processed; showing " +
+            "that turn's result rather than running it twice.");
+          tmPollTurn(turnKey, pending, null, activity);
+        });
+      }
+      if (r.status === 409) {
+        return r.json().catch(function () { return {}; }).then(function (data) {
+          activity.setState("refused");
+          tmRenderError(pending, "Another turn is already in progress on this " +
+            "channel (HTTP 409" +
+            (data.turn_key ? ", turn " + data.turn_key : "") +
+            "). Wait for it to finish.");
+          done();
+        });
+      }
+      if (r.status === 401) {
+        activity.setState("refused");
+        tmRenderError(pending, "The server rejected the bearer token (HTTP 401). " +
+          "Reconnect (Advanced panel) to mint new tokens.");
+        done();
+        return null;
+      }
+      if (!r.ok || !r.body || !r.body.getReader) {
+        /* No readable body (an error response, or an environment without
+           streaming): fall back to the same recovery path. */
+        return r.text().then(function (body) {
+          activity.setState("no live stream");
+          recover("The server did not stream this turn (HTTP " + r.status +
+            (body ? ": " + body.slice(0, 200) : "") + ").");
+        });
+      }
+
+      /* Read the framing the server says it sent, not the one we hoped for:
+         the session's format was fixed at /initialize and is not this page's
+         to renegotiate. */
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var frames = tmFrameReader(
+        r.headers.get("X-FW-Stream-Format") || "ndjson",
+        function (frame) {
+          if (frame.turn_key) { turnKey = frame.turn_key; }
+          if (frame.logical_turn_key) { logicalKey = frame.logical_turn_key; }
+          tmApplyStreamFrame(frame, activity, {
+            output: finalize,
+            error: function (detail) { lastError = detail; }
+          });
+        },
+        function () {
+          activity.note("Skipped an unreadable frame from the server.");
+        }
+      );
+
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) {
+            frames.end();
+            if (!finished) {
+              if (turnKey) {
+                activity.setState("stream ended early — recovering");
+                tmPollTurn(turnKey, pending, null, activity);
+              } else {
+                activity.setState("failed");
+                tmRenderError(pending, lastError ||
+                  "The stream ended before the turn produced an answer.");
+                done();
+              }
+            }
+            return;
+          }
+          frames.push(decoder.decode(chunk.value, { stream: true }));
+          return pump();
+        });
+      }
+      return pump();
+    })
+    .catch(function (err) {
+      recover("Lost the connection to the workflow server (" +
+        (err && err.message ? err.message : "unknown error") + ").");
+    });
+}
+
+function tmPollTurn(turnKey, bubbleMsg, deadlineMs, activity) {
+  /* A 202 handed back an in-flight execution, or a stream body died: poll
+     GET /turns/{key}. This never re-submits the command — it reads the
+     execution the server already owns, so a disconnect costs a read, not a
+     second run. */
   var deadline = Date.now() + (deadlineMs || 300000);
+  /* A completed turn moves from the registry to the store, and for a moment
+     neither answers. Tolerate that gap, but not forever: a 404 that persists
+     past this window is a turn the server no longer has. */
+  var missingUntil = null;
+  /* An EXECUTION key only resolves while the registry holds the execution: a
+     chat turn is not a retained kind, so that key 404s the instant the turn
+     retires. Every answer carries `logical_turn_key`, which is what the store
+     is keyed by, so switch to it as soon as the server names it — otherwise a
+     poll that started one second before the turn ended would report a
+     perfectly good answer as lost. */
+  function adoptDurableKey(data) {
+    if (data.logical_turn_key && data.logical_turn_key !== turnKey) {
+      turnKey = data.logical_turn_key;
+    }
+  }
+  function settle() { tm.busy = false; tmComposerState(); }
+  function fail(text, state) {
+    if (activity) { activity.setState(state || "failed"); }
+    tmRenderError(bubbleMsg, text);
+    settle();
+  }
   function poll() {
     if (Date.now() > deadline) {
-      tmRenderError(bubbleMsg, "Timed out waiting for the turn to finish (key " + turnKey + ").");
-      tm.busy = false; tmComposerState();
+      fail("Timed out waiting for the turn to finish (key " + turnKey + ").",
+        "timed out");
       return;
     }
     tmFetch("/turns/" + encodeURIComponent(turnKey), null, { method: "GET" })
@@ -5572,21 +6174,44 @@ function tmPollTurn(turnKey, bubbleMsg, deadlineMs) {
         return r.json();
       })
       .then(function (data) {
-        if (data && data.exec_state === "done") {
+        if (data === null) {
+          if (missingUntil === null) { missingUntil = Date.now() + 20000; }
+          if (Date.now() > missingUntil) {
+            fail("The server no longer has this turn (key " + turnKey +
+              "). It may have been lost in a restart; nothing was re-run.",
+              "lost");
+            return;
+          }
+          setTimeout(poll, 1000);
+          return;
+        }
+        missingUntil = null;
+        adoptDurableKey(data);
+        if (data.exec_state === "done") {
           /* the observability DB is keyed by the LOGICAL turn key */
           if (data.logical_turn_key) { data.turn_key = data.logical_turn_key; }
+          if (data.error && !data.status) {
+            fail("The turn failed on the server: " + data.error);
+            return;
+          }
+          if (activity) {
+            activity.setState(
+              data.status === "awaiting_user" ? "waiting for your reply"
+                : (data.success ? "completed (from the stored record)"
+                                : "failed (from the stored record)"));
+          }
           tmRenderTurn(bubbleMsg, data);
-          tm.busy = false; tmComposerState();
-        } else if (data && data.exec_state === "lost") {
-          tmRenderError(bubbleMsg, "The server restarted and lost this turn (key " + turnKey + ").");
-          tm.busy = false; tmComposerState();
+          settle();
+        } else if (data.exec_state === "lost") {
+          fail("The server restarted and lost this turn (key " + turnKey + ").",
+            "lost");
         } else {
+          if (activity) { activity.setState("running (reading the server's record)"); }
           setTimeout(poll, 1000);
         }
       })
       .catch(function (err) {
-        tmRenderError(bubbleMsg, tmExplainFetchError(err));
-        tm.busy = false; tmComposerState();
+        fail(tmExplainFetchError(err));
       });
   }
   setTimeout(poll, 1000);
@@ -5646,7 +6271,7 @@ function tmSortTurnsChronologically(turns) {
   });
 }
 
-function tmRenderStoredTurn(turn) {
+function tmRenderStoredTurn(turn, autoloadArtifacts) {
   /* Stored turns come back through the policed columns, so a withheld
      message or answer paints as its marker rather than as a hash. */
   if (turn.user_message) {
@@ -5660,6 +6285,57 @@ function tmRenderStoredTurn(turn) {
     answer: policedText(turn.answer),
     command_outputs: []
   });
+  tmAttachStoredArtifacts(agent, turn.turn_key, autoloadArtifacts);
+  return agent;
+}
+
+function tmAttachStoredArtifacts(bubbleMsg, turnKey, autoload) {
+  /* The turn list carries no artifacts — only the stored record does — so a
+     reopened conversation fetches it per turn. Reading a history of hundreds
+     of turns must not be hundreds of round trips, so only the most recent
+     turns load on sight and the rest keep a button. Nothing here can lose the
+     answer: every failure paints beside it. */
+  if (!turnKey) { return; }
+  var slot = el("div", "cmdOut");
+  tmAppendBeforeMeta(bubbleMsg, slot);
+  var loaded = false;
+
+  function load() {
+    if (loaded) { return; }
+    loaded = true;
+    clear(slot);
+    slot.appendChild(document.createTextNode("loading this turn's artifacts…"));
+    tmChatApi("/api/turn/" + encodeURIComponent(turnKey))
+      .then(function (data) {
+        var record = (data.turn && data.turn.record) || {};
+        var outputs = (record.turn_output || {}).command_outputs || [];
+        bubbleMsg.removeChild(slot);
+        var wrap = tmRenderArtifacts(bubbleMsg, outputs);
+        if (wrap) {
+          /* Say where this came from: it is the recorded turn, not a live one. */
+          wrap.insertBefore(
+            el("div", "aMeta", "from the stored record of this turn"),
+            wrap.firstChild.nextSibling);
+        }
+      })
+      .catch(function (err) {
+        clear(slot);
+        slot.appendChild(document.createTextNode(
+          "Could not load this turn's artifacts (" + err.message + ")."));
+        loaded = false;
+        var retry = el("button", "traceLink", "retry");
+        retry.addEventListener("click", load);
+        slot.appendChild(retry);
+      });
+  }
+
+  if (autoload) { load(); return; }
+  var button = el("button", "traceLink", "show artifacts");
+  button.addEventListener("click", function () {
+    slot.removeChild(button);
+    load();
+  });
+  slot.appendChild(button);
 }
 
 function tmActivateConversation(conversationId) {
@@ -5715,7 +6391,10 @@ function tmLoadLatestConversation() {
           ? "Continuing \"" + policedText(latest.topic) + "\""
           : "Continuing conversation #" + latest.conversation_id;
         tmBubble("system", label + ". Use + New conversation to start fresh.");
-        turns.forEach(tmRenderStoredTurn);
+        var autoloadFrom = turns.length - TM_RESTORED_ARTIFACT_AUTOLOAD;
+        turns.forEach(function (turn, index) {
+          tmRenderStoredTurn(turn, index >= autoloadFrom);
+        });
       }
       return turns;
     });
@@ -5838,6 +6517,12 @@ function tmSend() {
   var deterministic = text.charAt(0) === "/";
   var path = deterministic ? "/invoke_assistant" : "/invoke_agent";
   var pending = tmBubble("agent", deterministic ? "running command…" : "thinking…");
+  if (!deterministic) {
+    /* Agent turns stream: the interactions arrive as they happen instead of
+       appearing all at once when the turn is already over. */
+    tmStreamTurn(text, pending);
+    return;
+  }
   tmFetch(path, { user_query: text, timeout_seconds: 60 })
     .then(function (r) {
       return r.json().then(function (data) { return { status: r.status, data: data }; });

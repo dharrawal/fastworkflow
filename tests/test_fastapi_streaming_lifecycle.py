@@ -99,8 +99,13 @@ def test_a_streaming_turn_completes_and_retires_itself(app_module):
         events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
 
     assert events, "stream produced no events"
-    assert {e["type"] for e in events} <= {"trace", "output", "error"}
+    # 'timeout' joined the documented set when the delivery deadline stopped
+    # being reported as a (terminal) 'error': it says the turn passed the
+    # deadline and is STILL running, so it can appear here and cannot be the
+    # last event. The terminal set is unchanged.
+    assert {e["type"] for e in events} <= {"trace", "timeout", "output", "error"}
     assert events[-1]["type"] in ("output", "error")
+    assert sum(e["type"] in ("output", "error") for e in events) == 1
 
     # Registered, ran, and cleared its own active pointer.
     assert not app_module.turn_registry.has_active(channel_id)

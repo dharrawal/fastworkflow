@@ -20,7 +20,10 @@ Response contract for the turn endpoints (/invoke_agent, /invoke_agent_stream,
 of them answers with the public TurnOutput projection
 {turn_key, status, failure_reason, answer, command_outputs, success}. The
 non-streaming endpoints add the transport's `exec_state` and `traces` when
-collected; the stream's terminal 'output' event carries the bare TurnOutput.
+collected; the stream's terminal 'output' event carries the bare TurnOutput in
+its `data`, inside a frame envelope that adds `seq` and the turn identity
+(turns.TurnStreamChannel documents the frame types and the
+order/deduplication/recovery rule).
 As of v3.0 each CommandOutput carries a singular `command_response` (not a
 `command_responses` list), and the legacy top-level `command_responses` key is
 no longer emitted — clients should read `answer` and
@@ -98,7 +101,11 @@ from .turns import (
     AdmissionClosedError,
     ChannelBusyError,
     MAX_RETAINED_STARTUP_TURNS,
+    STREAM_FORMAT_HEADER,
+    STREAM_TURN_KEY_HEADER,
     TURN_RETENTION_SECONDS,
+    TurnStreamChannel,
+    encode_stream_frame,
     run_owned_turn,
     submit_turn,
     render_turn_response,
@@ -754,6 +761,12 @@ app.openapi = custom_openapi
 # --cors_origin pins to exactly one origin — never a wildcard. Without either,
 # the historical wide-open development posture is kept unchanged.
 _LOOPBACK_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$"
+# Response headers a cross-origin reader may actually read. The streaming
+# endpoint puts the execution key on the response head so a browser client
+# holds its recovery handle before the first frame; without this the browser
+# hides that header, and a client whose body dies would have nothing to poll
+# with except the query it already submitted (fix-9eg.20.1).
+_EXPOSED_RESPONSE_HEADERS = [STREAM_TURN_KEY_HEADER, STREAM_FORMAT_HEADER]
 if ARGS.cors_loopback_only:
     app.add_middleware(
         CORSMiddleware,
@@ -761,6 +774,7 @@ if ARGS.cors_loopback_only:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=_EXPOSED_RESPONSE_HEADERS,
     )
 else:
     app.add_middleware(
@@ -769,6 +783,7 @@ else:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=_EXPOSED_RESPONSE_HEADERS,
     )
 
 # Probe logging filter middleware - suppresses logs for successful probe requests
@@ -1199,10 +1214,15 @@ async def get_turn(
 
     Consults the in-memory TurnRegistry FIRST (a still-running or retained
     recently-completed execution), then falls back to the observability store.
-    Accepts either the EXECUTION key from a deferred 202 or the LOGICAL turn
-    key; the store fallback resolves logical keys only (the 202/200 bodies
-    carry `logical_turn_key` so a deferred caller learns it before the
-    registry record retires).
+    Accepts either the EXECUTION key from a deferred 202 or a streaming turn's
+    X-FW-Turn-Key header, or the LOGICAL turn key.
+
+    The store is keyed by the logical key alone, so an execution key that has
+    already retired is translated through the registry's bounded alias of
+    recently retired executions (TURN_RETENTION_SECONDS). Without that step a
+    caller holding only the execution key — which is all a streaming client
+    has until its first frame arrives — would be told an answered turn does
+    not exist.
 
     Authorization: the JWT channel must own the turn ([A39]); anything else is
     a 404 identical to an unknown key.
@@ -1220,8 +1240,11 @@ async def get_turn(
         # the turn's outcome is `status`, and neither maps to an HTTP error.
         return JSONResponse(content=body, status_code=status.HTTP_200_OK)
 
+    store_key = (
+        turn_registry.resolve_retired_logical_key(turn_key, channel_id) or turn_key
+    )
     store = _observability_store()
-    row = await _store_read(store.get_turn, turn_key) if store is not None else None
+    row = await _store_read(store.get_turn, store_key) if store is not None else None
     if row is None or row.get("channel_id") != channel_id:
         raise _turn_not_found(turn_key)
     return JSONResponse(content=_stored_turn_body(row))
@@ -1300,6 +1323,12 @@ async def get_turn_trace(
 
     if store is None:
         raise _turn_not_found(turn_key)
+    # A retired execution key still reaches its spans: the replay buffer is
+    # keyed by the logical key, and the registry keeps that mapping for a
+    # bounded window after the execution itself is gone (see get_turn).
+    turn_key = (
+        turn_registry.resolve_retired_logical_key(turn_key, channel_id) or turn_key
+    )
     row = await _store_read(store.get_turn, turn_key)
     if row is not None:
         if row.get("channel_id") != channel_id:
@@ -1636,20 +1665,35 @@ async def invoke_agent(
     responses={
         200: {
             "description": (
-                "Stream of 'trace' events followed by one terminal 'output' "
-                "event carrying the turn's TurnOutput projection "
+                "Stream of 'trace' events (and a non-terminal 'timeout' event "
+                "if the delivery deadline passes while the turn keeps running) "
+                "followed by exactly one terminal 'output' event carrying the "
+                "turn's TurnOutput projection "
                 "{turn_key, status, failure_reason, answer, command_outputs, "
                 "success}. A failed or awaiting_user turn arrives as an "
-                "'output' event, not an 'error' one."
+                "'output' event, not an 'error' one. Every frame carries 'seq' "
+                "(0-based, gapless, unique per stream) and the execution's "
+                "'turn_key'; the X-FW-Turn-Key response header carries that key "
+                "ahead of the first frame."
             ),
             "content": {
                 "application/x-ndjson": {},
                 "text/event-stream": {}
             }
         },
+        202: {
+            "description": (
+                "This exact query is already running on this channel (a retried "
+                "or duplicated submission). No second run was started and no "
+                "body is served — the frames belong to the caller already "
+                "reading them. Body: {turn_key, exec_state:'running', "
+                "logical_turn_key?, reason:'duplicate_submission'}; poll "
+                "GET /turns/{turn_key} rather than submitting again."
+            )
+        },
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
-        409: {"description": "Concurrent turn already in progress"},
+        409: {"description": "A DIFFERENT turn is already in progress"},
         504: {"description": "Command execution timed out"}
     }
 )
@@ -1660,15 +1704,41 @@ async def invoke_agent_stream(
     """
     Submit a natural language query to the agent and stream responses.
     
-    Streams via NDJSON or SSE based on the session's stream_format preference.
-    - NDJSON: {"type":"trace","data":<trace_json>} for each trace, {"type":"output","data":<TurnOutput_json>} for final result
-    - SSE: event: trace/output with data payloads
+    Streams via NDJSON or SSE based on the session's stream_format preference
+    (set once at /initialize). The X-FW-Stream-Format response header states
+    which one this body uses, so a client reads the framing it was actually
+    sent instead of assuming.
+    - NDJSON: {"type":...,"seq":<n>,"turn_key":...,"logical_turn_key":...,
+      "data":<payload>}, one object per line.
+    - SSE: `id: <seq>` / `event: <type>` / `data: <payload>`; the payload is
+      the same `data` alone, and the turn identity is in the X-FW-Turn-Key
+      header.
 
-    The terminal 'output' event carries the turn's public TurnOutput projection:
-    {turn_key, status, failure_reason, answer, command_outputs, success}. A
-    suspended turn ends with status=="awaiting_user" and the clarification
-    question in answer; it is still a successful stream, not an 'error' event.
-    
+    EVENT TYPES: 'trace' (one public agent↔workflow interaction); 'timeout'
+    (NON-terminal — the request's delivery deadline passed, the turn still owns
+    its executor, and its traces and output still follow: show "still working",
+    do not resubmit); 'output' (TERMINAL — the turn's public TurnOutput
+    projection {turn_key, status, failure_reason, answer, command_outputs,
+    success}; a failed or awaiting_user turn arrives here, with a suspended
+    turn's clarification question in `answer`); 'error' (TERMINAL — the turn
+    produced no output at all).
+
+    ORDER, DEDUPLICATION AND RECOVERY (see turns.TurnStreamChannel): frames are
+    delivered in gapless `seq` order, exactly one terminal frame ends the body
+    and nothing follows it, and a client drops a `seq` it has already rendered.
+    A dropped connection is recovered by polling GET /turns/{turn_key} and,
+    for the interactions a live body missed, the non-destructive
+    GET /turns/{turn_key}/trace — never by resubmitting the query, which would
+    be a second turn. Start from the execution key on the response header, but
+    keep the `logical_turn_key` that the frames and every answer carry: the
+    execution key resolves only while the turn is live (a chat execution is
+    not a retained kind), whereas the store is keyed by the logical one. The
+    stored record is authoritative wherever it and a partially read stream
+    disagree. A retried
+    submission of the identical query rejoins the live execution and is
+    answered 202 with its key rather than a second body, so no two consumers
+    ever read one stream.
+
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     Exposed as 'invoke_agent' tool for MCP clients (who don't need JWT auth).
     """
@@ -1688,18 +1758,29 @@ async def invoke_agent_stream(
 
         # Events are queued by the owning turn and drained by the response body.
         # Separating them is the point: a client that disconnects stops draining,
-        # while the turn runs to completion and retires itself normally.
-        events: asyncio.Queue = asyncio.Queue()
-
-        async def emit(kind: str, data: Any) -> None:
-            await events.put({"type": kind, "data": data})
+        # while the turn runs to completion and retires itself normally. The
+        # channel owns frame order, sequencing and turn identity (see
+        # TurnStreamChannel for the order/deduplication contract).
+        stream = TurnStreamChannel()
 
         async def streaming_work() -> fastworkflow.TurnOutput:
             async def on_trace(trace_json: dict) -> None:
-                await emit("trace", trace_json)
+                await stream.emit("trace", trace_json)
 
             async def on_timeout(detail: str) -> None:
-                await emit("error", {"detail": detail})
+                # NOT an 'error': the deadline governs delivery, not ownership.
+                # run_process_message_with_trace_stream reports it and keeps
+                # going, so the remaining traces and the output still follow —
+                # which an 'error' frame both contradicted (it is terminal) and
+                # misdescribed (the turn had not failed).
+                await stream.emit(
+                    "timeout",
+                    {
+                        "detail": detail,
+                        "timeout_seconds": request.timeout_seconds,
+                        "still_running": True,
+                    },
+                )
 
             turn_output = await run_process_message_with_trace_stream(
                 runtime,
@@ -1710,10 +1791,18 @@ async def invoke_agent_stream(
                 user_id=user_id,
                 on_timeout=on_timeout,
             )
-            await emit("output", turn_output.model_dump(mode="json"))
+            await stream.emit("output", turn_output.model_dump(mode="json"))
             return turn_output
 
         async def owned_turn(execn) -> None:
+            # Bind before the work can emit anything: every frame of this body
+            # then names the execution that produced it, and the logical key as
+            # soon as the workflow mints it mid-turn.
+            stream.bind(
+                execn.turn_key,
+                lambda: resolve_logical_turn_key(execn, runtime, turn_registry),
+            )
+
             async def finish_stream() -> None:
                 """Deliver the terminal event, then end the body.
 
@@ -1722,9 +1811,15 @@ async def invoke_agent_stream(
                 conversation labeling. The error event has to go out ahead of the
                 sentinel: the body's drain loop stops at the sentinel, so anything
                 emitted after it is never read.
+
+                An error recorded AFTER the work returned its output (the
+                post-work trim and window bookkeeping inside run_owned_turn are
+                in the same try) is not a second ending: the channel refuses it,
+                the client keeps the answer it already has, and the failure
+                stays in the log and in the execution's record.
                 """
-                if execn.error is not None:
-                    await emit(
+                if execn.error is not None and not stream.terminated:
+                    await stream.emit(
                         "error",
                         {
                             "detail": (
@@ -1733,7 +1828,7 @@ async def invoke_agent_stream(
                             )
                         },
                     )
-                await events.put(None)
+                stream.close()
 
             try:
                 await run_owned_turn(
@@ -1746,14 +1841,24 @@ async def invoke_agent_stream(
                 )
             finally:
                 # Kept as the guarantee, not the normal path: finish_stream has
-                # already ended the body. A second sentinel is harmless (the drain
-                # loop stopped at the first and never reads it), whereas a missing
-                # one - run_owned_turn raising before its finally, or finish_stream
-                # itself failing - would hang the client forever.
-                await events.put(None)
+                # already ended the body. Closing twice is a no-op, whereas a
+                # missing sentinel - run_owned_turn raising before its finally,
+                # or finish_stream itself failing - would hang the client
+                # forever.
+                stream.close()
+
+        # Which execution this request launched, if any. A submission that
+        # rejoins an identical in-flight turn never reaches the factory, and
+        # must not be served a body: its frames belong to the consumer that is
+        # already reading them.
+        launched: dict[str, Any] = {}
+
+        def launch(execn) -> asyncio.Task:
+            launched["execution"] = execn
+            return asyncio.create_task(owned_turn(execn))
 
         try:
-            await turn_registry.start_or_get_active(
+            execn = await turn_registry.start_or_get_active(
                 channel_id,
                 kind="invoke_agent_stream",
                 idempotency_key=compute_idempotency_key(
@@ -1761,16 +1866,20 @@ async def invoke_agent_stream(
                 ),
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
-                run_turn=lambda execn: asyncio.create_task(owned_turn(execn)),
+                run_turn=launch,
             )
         except ChannelBusyError as busy:
+            resolve_logical_turn_key(busy.execution, runtime, turn_registry)
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
                 content={
                     "detail": (
                         f"A turn is already in progress for user: {channel_id} "
                         f"(active turn {busy.execution.turn_key})"
-                    )
+                    ),
+                    "reason": "channel_busy",
+                    "turn_key": busy.execution.turn_key,
+                    "logical_turn_key": busy.execution.logical_turn_key,
                 },
             )
         except AdmissionClosedError:
@@ -1779,34 +1888,44 @@ async def invoke_agent_stream(
                 content={"detail": "Server is shutting down"},
             )
 
+        if execn is not launched.get("execution"):
+            # Same channel, same query, still running: the registry deduped the
+            # submission onto the live execution (no second run, no duplicate
+            # LLM spend). There is no body to serve — the frames are being read
+            # by the first caller — so answer the deferred shape every other
+            # turn endpoint answers, and let the caller poll the key it just
+            # learned instead of submitting the command again.
+            resolve_logical_turn_key(execn, runtime, turn_registry)
+            code, body = render_turn_response(execn)
+            body["reason"] = "duplicate_submission"
+            return JSONResponse(
+                status_code=code,
+                content=body,
+                headers={STREAM_TURN_KEY_HEADER: execn.turn_key},
+            )
+
         stream_format = runtime.stream_format
 
-    async def drain():
-        while True:
-            item = await events.get()
-            if item is None:
-                break
-            yield item
+    async def body():
+        async for frame in stream.frames():
+            yield encode_stream_frame(frame, stream_format)
 
+    # The execution key rides the response head, ahead of the first frame, so a
+    # client whose body dies has its recovery handle without having to have
+    # read anything.
+    headers = {
+        STREAM_TURN_KEY_HEADER: execn.turn_key,
+        STREAM_FORMAT_HEADER: stream_format,
+    }
     if stream_format == "sse":
-        async def sse_body():
-            async for part in drain():
-                yield (
-                    f"event: {part['type']}\n"
-                    f"data: {json.dumps(part['data'])}\n\n"
-                )
-
+        headers.update({"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         return StreamingResponse(
-            sse_body(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            body(), media_type="text/event-stream", headers=headers
         )
 
-    async def ndjson_body():
-        async for part in drain():
-            yield json.dumps(part) + "\n"
-
-    return StreamingResponse(ndjson_body(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        body(), media_type="application/x-ndjson", headers=headers
+    )
 
 
 @app.post(
