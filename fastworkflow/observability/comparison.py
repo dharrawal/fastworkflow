@@ -30,18 +30,23 @@ together — a `pass_id` with no selector, or a selector with no `pass_id`, is
 refused, because either alone yields a projection whose contents and whose
 `ref_id` disagree about what was shown.
 
-WHAT THIS REPO RECORDS TODAY, stated plainly because the pass machinery above
-reads as if a producer used it: nothing does. `distillation.py` runs the agent
-twice for one user message, but it stamps no pass marker on its spans, records
-no per-pass turn row, and its per-pass answer, plan and action log stay in
-process (`summarize_and_record_turn` appends to in-memory conversation history);
-`ObservabilityStore.list_distillation_runs` is a stub that returns `[]`. So a
-pass-scoped projection carries only the STEPS and the LLM cost that recorded
-spans attribute to the pass. The turn's answer, status and wall time belong to
-the turn and are shared by every pass in it, so they are labelled
-`shared_across_passes` rather than reported as that pass's own. Producer-side
-stamping is filed as `fix-txxy`; until it lands, `discover_pass_selectors`
-returns `[]` on every real turn and every caller compares whole turns.
+WHAT A PASS-SCOPED PROJECTION SHOWS. Membership always comes from recorded
+spans, and so does content -- when a producer recorded any. `distillation.py`
+opens one `fw.distillation.pass` span per pass (`fix-txxy`): it stamps
+`fw.pass`, which everything the pass did inherits through ancestry, and it
+carries that pass's own answer, plan and outcome, which the shared turn row has
+nowhere to put. A projection scoped to such a pass reports those as the PASS's
+and keeps the turn row's answer and status beside them.
+
+A trace with no pass span -- every trace recorded before that producer change,
+and every ordinary single-pass turn -- is unchanged: `discover_pass_selectors`
+returns `[]` and the caller compares whole turns. Where a caller scopes such a
+trace by an explicit span list or subtree, the projection carries only the
+STEPS and the LLM cost the spans attribute to the pass, and the turn's answer,
+status and wall time stay labelled `shared_across_passes` rather than claimed
+by a pass. Nothing is back-filled and nothing is inferred:
+`ObservabilityStore.list_distillation_runs` is still a stub that returns `[]`,
+and a pass that recorded no answer is reported as having recorded none.
 
 Reads go through an injected reader: no filesystem lookup, no cross-store
 search, and a reference naming an unknown store fails rather than being
@@ -69,6 +74,17 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, Sequenc
 # `run_chatbot/server.py` restates it) so that reading a stored trace does not
 # import the HTTP layer.
 SPAN_COMMAND_EXECUTE = "fw.command.execute"
+
+# The span a pass-recording producer opens for a pass, restated for the same
+# reason. Pass MEMBERSHIP is resolved from any span in a step's ancestry, so it
+# needs no span name; pass CONTENT is recorded once, on this span, because a
+# pass's own answer is a fact about the pass rather than about anything it did.
+SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+
+# What that span carries. A restatement can rot, so
+# tests/test_distillation_pass_capture.py asserts these spell the producer's
+# contract (`tracing.SPAN_CONTRACTS`) rather than something adjacent to it.
+PASS_CONTENT_KEYS = ("answer", "plan", "status", "failure_reason", "model")
 
 # How a matched pair was decided. `recorded` means a stored structured
 # alignment said so; the rest are this module's deterministic fallback, named
@@ -735,15 +751,39 @@ class TurnProjection:
 
     `answer`, `status`, `success`, `failure_reason`, `user_message` and the
     timestamps are the TURN ROW's, quoted as recorded. When this projection is
-    scoped to a pass, they are still the turn row's -- the passes share it --
-    so `content_attribution` says `shared_across_passes` and
-    `pass_content_recorded` is False. Nothing in this repo records a per-pass
-    answer or plan (see the module docstring), and a pass-scoped projection that
-    presented the turn's answer as the pass's own would be inventing the one
-    thing a teacher/student comparison is read for.
+    scoped to a pass they are still the turn row's -- the passes share it --
+    UNLESS the producer recorded that pass's own content on its pass span, which
+    is the one place a per-pass answer exists at all. So there are two shapes:
+
+    - nothing recorded for the pass: `content_attribution` says
+      `shared_across_passes` and `pass_content_recorded` is False. Presenting
+      the turn's answer as the pass's own would invent the one thing a
+      teacher/student comparison is read for, so it is shown labelled instead.
+    - the pass recorded its own: `answer`, `status`, `failure_reason` and `plan`
+      are THAT PASS's, `content_attribution` says `pass`, and
+      `pass_content_recorded` is True. `turn_answer` and `turn_status` keep the
+      shared turn row's values beside them, the way `timing` keeps
+      `turn_wall_ms` beside a pass's own wall time.
+
+    `success` is None under a recorded pass. It is a command-success code the
+    turn row carries for the whole turn and no producer records a per-pass
+    equivalent, so absent is what "not recorded" looks like here; the turn's own
+    value is one whole-turn projection away.
+
+    `plan` is the producer's recorded text, quoted rather than re-parsed: a
+    projection that parsed it would have to decide what to show when it no
+    longer parses, and the honest answer -- what was recorded -- is the same
+    either way. An over-limit answer or plan is recorded as a truncation
+    envelope ([R10]); the recorded prefix is quoted here and
+    `pass_content` carries the envelope that says so, with the original length
+    and digest.
 
     `cost` is genuinely pass-scoped when a selector is in play: it rolls up only
     the LLM spans the span tree attributes to that pass.
+
+    `usage` is the same spans' tokens, cache state and per-call anchors
+    (`usage_rollup`), so the money and the tokens on one turn are counted over
+    one set of canonical calls rather than two independent tallies.
     """
 
     turn_index: int
@@ -761,9 +801,20 @@ class TurnProjection:
     attempt: Optional[int] = None
     ledger_summary: Mapping[str, Any] = field(default_factory=dict)
     cost: Mapping[str, Any] = field(default_factory=dict)
+    usage: Mapping[str, Any] = field(default_factory=dict)
     pass_id: Optional[str] = None
     content_attribution: str = ATTRIBUTION_TURN
     pass_content_recorded: bool = False
+    # The pass's own recorded plan, and the turn row's answer/status kept beside
+    # a pass's own. All three are None/absent on a whole-turn projection, where
+    # `answer` and `status` already ARE the turn's.
+    plan: Optional[str] = None
+    turn_answer: Optional[str] = None
+    turn_status: Optional[str] = None
+    # The pass span's content attributes exactly as recorded, truncation
+    # envelopes included, so a reader can see what the quoted fields were
+    # derived from.
+    pass_content: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -782,10 +833,28 @@ class TurnProjection:
             "attempt": self.attempt,
             "ledger_summary": dict(self.ledger_summary),
             "cost": dict(self.cost),
+            "usage": dict(self.usage),
             "pass_id": self.pass_id,
             "content_attribution": self.content_attribution,
             "pass_content_recorded": self.pass_content_recorded,
+            "plan": self.plan,
+            "turn_answer": self.turn_answer,
+            "turn_status": self.turn_status,
+            "pass_content": dict(self.pass_content),
         }
+
+
+# How a projection ordered the turns it read. The reference's turn vector is
+# an IDENTITY, not a chronology: `ref_id` -- and so every feedback anchor and
+# review-pair key ever derived from it -- is a digest over that vector, and
+# reordering it would re-key comments already written. So the vector is left
+# alone and the CONTENT is ordered by what the evidence recorded, which is what
+# "the last turn's answer" and "the steps in order" are questions about.
+TURN_ORDER_CHRONOLOGICAL = "recorded_chronology"
+# The evidence did not say. Nothing is guessed: the reference's order is used
+# and the projection says it is doing that, so a caller can decline to claim
+# which turn ended the run.
+TURN_ORDER_REFERENCE = "reference_vector"
 
 
 @dataclass(frozen=True)
@@ -804,10 +873,20 @@ class ExecutionProjection:
     artifacts: tuple[ArtifactRef, ...]
     timing: Mapping[str, Any]
     cost: Mapping[str, Any]
+    # Tokens, cache state and coverage over the same calls `cost` was summed
+    # over. Per-call anchors stay on the turns that recorded them; see
+    # `merge_usage_rollups`.
+    usage: Mapping[str, Any] = field(default_factory=dict)
     unavailable: tuple[str, ...] = ()
     unassigned_steps: tuple[ExecutionStep, ...] = ()
     unattributed_artifacts: tuple[ArtifactRef, ...] = ()
     pass_selector: Optional[PassSelector] = None
+    # Which of the two rules above put `turns` and `steps` in the order they
+    # are in. Published rather than assumed, because a caller that reads the
+    # last turn as the run's ending needs to know whether the evidence said
+    # so.
+    turn_order: str = TURN_ORDER_CHRONOLOGICAL
+    turn_order_reason: Optional[str] = None
 
     @property
     def readable(self) -> bool:
@@ -816,8 +895,18 @@ class ExecutionProjection:
 
     @property
     def content_attribution(self) -> str:
-        """Whose the turn-level text is: the turn's, or shared between passes."""
-        return ATTRIBUTION_SHARED if self.pass_selector else ATTRIBUTION_TURN
+        """Whose the turn-level text is: the turn's, the pass's, or shared.
+
+        `pass` only when EVERY projected turn recorded that pass's own content.
+        One turn that did not is a view whose text is partly the shared turn's,
+        and one summary word cannot say `pass` for it without overstating what
+        the mixed set shows -- the per-turn labels still say which is which.
+        """
+        if not self.pass_selector:
+            return ATTRIBUTION_TURN
+        if self.turns and all(turn.pass_content_recorded for turn in self.turns):
+            return ATTRIBUTION_PASS
+        return ATTRIBUTION_SHARED
 
     def answers(self) -> list[dict[str, Any]]:
         """The answer of each turn, in order. The default view of a run.
@@ -852,7 +941,10 @@ class ExecutionProjection:
             "artifacts": [artifact.as_dict() for artifact in self.artifacts],
             "timing": dict(self.timing),
             "cost": dict(self.cost),
+            "usage": dict(self.usage),
             "unavailable": list(self.unavailable),
+            "turn_order": self.turn_order,
+            "turn_order_reason": self.turn_order_reason,
             "unassigned_steps": [step.as_dict() for step in self.unassigned_steps],
             "unattributed_artifacts": [
                 artifact.as_dict() for artifact in self.unattributed_artifacts
@@ -1011,6 +1103,88 @@ def _spans_in_pass(
     return selected
 
 
+# The marker `capture_policy.CapturedValue.to_envelope` writes. Restated for the
+# same reason as `SPAN_DISTILLATION_PASS` above -- this module reads stored
+# evidence and stays off the runtime's import path -- and checked against the
+# producer by `tests/test_distillation_pass_capture`.
+CAPTURE_ENVELOPE_MARKER = "__fw_capture__"
+
+
+def _recorded_text(value: Any) -> Optional[str]:
+    """A recorded string attribute, including one an envelope stands in for.
+
+    Three shapes arrive here and they mean three different things.
+
+    A plain string is the value, whole.
+
+    A tracing cap envelope (`{truncated, original_length, sha256, value}`,
+    [R10]) means the emitter cut an over-limit attribute. The prefix in there is
+    still recorded evidence, so it is quoted.
+
+    A capture-policy envelope (`{__fw_capture__: True, ...}`) means the SINK
+    acted on the field: `bounded-text` leaves a `prefix`, which is likewise
+    recorded evidence and is quoted; every other disposition leaves no text at
+    all, and this answers `None` for those.
+
+    `None` here is therefore ambiguous on its own -- withheld and never-recorded
+    look alike -- which is exactly why the envelope stays in
+    `TurnProjection.pass_content`. A reader that needs to tell "this pass said
+    nothing" from "this pass said something nobody may see" reads the envelope;
+    `index.html` does, and badges the second.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping) and value.get("truncated"):
+        text = value.get("value")
+        return text if isinstance(text, str) else None
+    if isinstance(value, Mapping) and value.get(CAPTURE_ENVELOPE_MARKER) is True:
+        prefix = value.get("prefix")
+        return prefix if isinstance(prefix, str) else None
+    return None
+
+
+def _pass_content(
+    selector: Optional[PassSelector],
+    tree: _SpanTree,
+    spans: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], Optional[int]]:
+    """What a producer recorded AS this pass's own, and the pass's wall time.
+
+    Read off the pass span -- the one span of the pass whose name says it
+    describes the pass rather than something the pass did. `({}, None)` when
+    there is none, which is every trace recorded before producers stamped
+    passes: the turn's content is then reported as shared rather than filled in
+    from the turn and relabelled.
+
+    Two such spans for one pass is an ambiguous question, and the answer to an
+    ambiguous question is not one of the candidates: nothing is claimed.
+
+    The wall time is the pass span's own recorded duration, so it is the pass's
+    in the same sense the turn's is the turn's -- measured, not apportioned.
+    """
+    if selector is None:
+        return {}, None
+    found = [
+        span
+        for span in spans
+        if span.get("name") == SPAN_DISTILLATION_PASS
+        and _pass_id_for(selector, tree, _text_or_none(span.get("span_id")))
+        == selector.pass_id
+    ]
+    if len(found) != 1:
+        return {}, None
+    attributes = tree.attributes(found[0])
+    content = {key: attributes[key] for key in PASS_CONTENT_KEYS if key in attributes}
+    start_ns = _exact_int(found[0].get("start_ns"))
+    end_ns = _exact_int(found[0].get("end_ns"))
+    wall_ms = (
+        (end_ns - start_ns) // 1_000_000
+        if start_ns is not None and end_ns is not None and end_ns >= start_ns
+        else None
+    )
+    return content, wall_ms
+
+
 def _root_duration_ns(steps: Sequence[ExecutionStep]) -> tuple[Optional[int], int]:
     """Summed duration of ROOT dispatches only, and how many had none.
 
@@ -1092,15 +1266,29 @@ def project_execution(
     unattributed_artifacts: list[ArtifactRef] = []
     unavailable: list[str] = []
     cost_parts: list[Mapping[str, Any]] = []
+    usage_parts: list[Mapping[str, Any]] = []
     wall_ms_total = 0
     wall_ms_known = 0
+    pass_wall_ms_total = 0
+    pass_wall_ms_known = 0
 
-    for turn_index, turn_key in enumerate(ref.turn_keys):
+    # Read first, in reference order, so `unavailable` still reads in the
+    # order the reference names its turns and a scope contradiction still
+    # raises on the first turn that has one.
+    readable: list[tuple[str, Mapping[str, Any]]] = []
+    for turn_key in ref.turn_keys:
         row = reader.turn(ref.store_id, turn_key)
         if row is None:
             unavailable.append(f"turn {turn_key!r} is not in store {ref.store_id!r}")
             continue
         _check_scope(ref, turn_key, row)
+        readable.append((turn_key, row))
+
+    # Then order the CONTENT by what was recorded. The reference vector is
+    # untouched: `ref` goes into the projection exactly as it arrived.
+    ordered, turn_order, turn_order_reason = _chronological_turns(readable)
+
+    for turn_index, (turn_key, row) in enumerate(ordered):
         spans = list(reader.trace(ref.store_id, turn_key))
         tree = _SpanTree(spans)
         if pass_selector is not None:
@@ -1167,8 +1355,25 @@ def project_execution(
             turn_steps.append(step)
 
         pass_spans = _spans_in_pass(pass_selector, tree, spans)
-        turn_cost = dict(cost_fn(pass_spans))
+        # `cost_fn` is INJECTED, and the default one folds duplicates itself
+        # (`server.cost_rollup` delegates to `usage_rollup`). Folding the input
+        # here too is for the callers that pass their own: handing a raw list to
+        # a naive roll-up charged a re-emitted span (`end_span` reuses the
+        # span_id `start_span` opened) and a nested wrapper twice, while the
+        # token figures beside it counted once -- two numbers on one screen
+        # disagreeing about how many calls a turn made. The fold is idempotent
+        # and leaves every non-LLM span untouched, so the default roll-up is
+        # unaffected by seeing an already-folded list.
+        #
+        # It does NOT fold non-nested calls that merely share a response: those
+        # are two calls and `usage_rollup` is the only layer that decides which
+        # one is credited. An injected roll-up that sums both will disagree with
+        # the projection on that shape; the shipped one does not, because it is
+        # the same accounting.
+        turn_cost = dict(cost_fn(canonical_llm_spans(pass_spans)))
+        turn_usage = usage_rollup(pass_spans, turn_key=turn_key)
         cost_parts.append(turn_cost)
+        usage_parts.append(turn_usage)
 
         started = _text_or_none(row.get("started_at"))
         completed = _text_or_none(row.get("completed_at"))
@@ -1177,14 +1382,38 @@ def project_execution(
             wall_ms_total += wall
             wall_ms_known += 1
 
+        # What the producer recorded as this pass's own, if anything did.
+        pass_content, pass_wall = _pass_content(pass_selector, tree, spans)
+        pass_recorded = bool(pass_content)
+        if pass_wall is not None:
+            pass_wall_ms_total += pass_wall
+            pass_wall_ms_known += 1
+        turn_answer = row.get("answer") if isinstance(row.get("answer"), str) else None
+        turn_status = _text_or_none(row.get("status"))
+
         turns.append(
             TurnProjection(
                 turn_index=turn_index,
                 turn_key=turn_key,
-                status=_text_or_none(row.get("status")),
-                success=_bool_column(row.get("success")),
-                failure_reason=_text_or_none(row.get("failure_reason")),
-                answer=row.get("answer") if isinstance(row.get("answer"), str) else None,
+                status=(
+                    _text_or_none(pass_content.get("status"))
+                    if pass_recorded
+                    else turn_status
+                ),
+                # The turn row's success code describes the whole turn, so under
+                # a recorded pass it is withheld rather than re-labelled: no
+                # producer records a per-pass one, and absent is what that is.
+                success=None if pass_recorded else _bool_column(row.get("success")),
+                failure_reason=(
+                    _text_or_none(pass_content.get("failure_reason"))
+                    if pass_recorded
+                    else _text_or_none(row.get("failure_reason"))
+                ),
+                answer=(
+                    _recorded_text(pass_content.get("answer"))
+                    if pass_recorded
+                    else turn_answer
+                ),
                 user_message=(
                     row.get("user_message")
                     if isinstance(row.get("user_message"), str)
@@ -1207,14 +1436,26 @@ def project_execution(
                     )
                 },
                 cost=turn_cost,
+                usage=turn_usage,
                 pass_id=ref.pass_id,
                 content_attribution=(
-                    ATTRIBUTION_SHARED if pass_selector else ATTRIBUTION_TURN
+                    ATTRIBUTION_PASS
+                    if pass_recorded
+                    else (ATTRIBUTION_SHARED if pass_selector else ATTRIBUTION_TURN)
                 ),
-                # Nothing in this repo records a per-pass answer or plan, so a
-                # pass-scoped turn projection never carries pass-specific
-                # content. Flipping this is the producer-side work in fix-txxy.
-                pass_content_recorded=False,
+                # True only where the producer actually recorded this pass's own
+                # content. A trace with no pass span reads False and its turn
+                # text stays shared -- the pre-`fix-txxy` shape, preserved
+                # rather than repaired.
+                pass_content_recorded=pass_recorded,
+                plan=(
+                    _recorded_text(pass_content.get("plan"))
+                    if pass_recorded
+                    else None
+                ),
+                turn_answer=turn_answer,
+                turn_status=turn_status,
+                pass_content=pass_content,
             )
         )
         steps.extend(turn_steps)
@@ -1235,19 +1476,26 @@ def project_execution(
 
     duration_ns, steps_without_duration = _root_duration_ns(steps)
     turn_wall_ms = wall_ms_total if wall_ms_known else None
+    pass_wall_ms = pass_wall_ms_total if pass_wall_ms_known else None
     timing = {
         "turns": len(turns),
-        # Wall time is recorded per TURN. A pass has none of its own -- two
-        # passes share one turn row's started_at/completed_at -- so a
-        # pass-scoped projection reports None here and the shared turn figure
-        # beside it, rather than presenting the whole turn's duration as the
-        # pass's. `root_step_duration_ns` and `cost` below ARE pass-scoped:
-        # they are summed over the steps and spans attributed to the pass.
-        "wall_ms": None if pass_selector else turn_wall_ms,
+        # Two passes share one turn row's started_at/completed_at, so the turn
+        # figure is never a pass's own. A pass span, where one was recorded, has
+        # its own measured duration and that IS the pass's; where none was, this
+        # stays None and the shared turn figure is reported beside it, labelled,
+        # rather than presented as the pass's. `root_step_duration_ns` and
+        # `cost` below are pass-scoped either way: they are summed over the
+        # steps and spans attributed to the pass.
+        "wall_ms": pass_wall_ms if pass_selector else turn_wall_ms,
         "wall_ms_attribution": (
-            ATTRIBUTION_SHARED if pass_selector else ATTRIBUTION_TURN
+            (ATTRIBUTION_PASS if pass_wall_ms_known else ATTRIBUTION_SHARED)
+            if pass_selector
+            else ATTRIBUTION_TURN
         ),
         "turn_wall_ms": turn_wall_ms,
+        # How many of the projected turns recorded a pass span to measure, so a
+        # partial figure cannot read as a complete one.
+        "pass_wall_ms_turns_recorded": pass_wall_ms_known,
         "wall_ms_turns_recorded": wall_ms_known,
         "wall_ms_turns_unrecorded": len(turns) - wall_ms_known,
         "root_step_duration_ns": duration_ns,
@@ -1261,11 +1509,120 @@ def project_execution(
         artifacts=tuple(artifacts),
         timing=timing,
         cost=_merge_cost(cost_parts),
+        usage=merge_usage_rollups(usage_parts),
         unavailable=tuple(unavailable),
         unassigned_steps=tuple(unassigned),
         unattributed_artifacts=tuple(unattributed_artifacts),
         pass_selector=pass_selector,
+        turn_order=turn_order,
+        turn_order_reason=turn_order_reason,
     )
+
+
+def _chronological_turns(
+    readable: list[tuple[str, Mapping[str, Any]]],
+) -> tuple[list[tuple[str, Mapping[str, Any]]], str, Optional[str]]:
+    """Readable turns in the order the evidence says they happened.
+
+    Two rules, in this order, and an explicit unknown when neither holds.
+
+    **`ordinal`, within ONE conversation.** The store assigns it densely from 1
+    at first insert and never rewrites it, and the store's own turn listings
+    order by it: inside a conversation it IS the recorded sequence number.
+    Its scope is exactly that, though -- `conversation_counters` is keyed by
+    channel and the ids are minted per channel (`mint_conversation_id`), so
+    ordinal 2 of one conversation and ordinal 2 of another say nothing about
+    each other, and two conversations can interleave or resume. So the ordinal
+    rule is applied ONLY when every turn records the same channel and the same
+    conversation and their ordinals are usable and distinct.
+
+    **Parsed `started_at`, across conversations.** Timestamps are compared as
+    instants, not as strings: two recorded with different UTC offsets sort
+    backwards lexicographically. Used only when every turn has one that parses
+    and no two are the same instant.
+
+    Otherwise the reference's order is kept and the projection says the order
+    is unknown. Nothing here tie-breaks on `turn_key`: a key sorts, it does not
+    record when anything happened, and a projection that reordered turns on
+    that would move a run's ending -- which is the one thing this function
+    exists to get right.
+    """
+    if len(readable) < 2:
+        return readable, TURN_ORDER_CHRONOLOGICAL, None
+
+    def _int_or_none(value: Any) -> Optional[int]:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    channels = {_text_or_none(row.get("channel_id")) for _key, row in readable}
+    conversations = {_int_or_none(row.get("conversation_id")) for _key, row in readable}
+    ordinals = [_int_or_none(row.get("ordinal")) for _key, row in readable]
+    one_conversation = (
+        len(channels) == 1
+        and None not in channels
+        and len(conversations) == 1
+        and None not in conversations
+    )
+    if one_conversation and None not in ordinals and len(set(ordinals)) == len(ordinals):
+        return (
+            sorted(readable, key=lambda item: _int_or_none(item[1].get("ordinal")) or 0),
+            TURN_ORDER_CHRONOLOGICAL,
+            None,
+        )
+
+    instants = [_instant(row.get("started_at")) for _key, row in readable]
+    if None not in instants and len(set(instants)) == len(instants):
+        order = {id(row): instant for (_key, row), instant in zip(readable, instants)}
+        return (
+            sorted(readable, key=lambda item: order[id(item[1])]),
+            TURN_ORDER_CHRONOLOGICAL,
+            None,
+        )
+
+    if not one_conversation:
+        why = (
+            "these turns were recorded across more than one conversation or "
+            "channel, where ordinals restart and say nothing about each other, "
+            "and their start times are missing or tied"
+        )
+    else:
+        why = (
+            "these turns record no usable distinct ordinal and no distinct "
+            "start time"
+        )
+    return (
+        readable,
+        TURN_ORDER_REFERENCE,
+        (
+            f"{why}, so the order they happened in is not recoverable from the "
+            "evidence; the reference's order is shown and nothing here claims "
+            "it is the recorded one"
+        ),
+    )
+
+
+def _instant(value: Any) -> Optional[float]:
+    """A recorded timestamp as an instant, or None if it is not one.
+
+    Compared as time rather than as text: `2026-09-19T02:00:00+02:00` is BEFORE
+    `2026-09-19T01:00:00+00:00`, and a string sort puts them the other way
+    round.
+    """
+    text = _text_or_none(value)
+    if text is None:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        # A naive stamp is a recorded local reading with no offset beside it.
+        # Treated as UTC only for ORDERING against other naive stamps; mixing
+        # it with an offset-bearing one is exactly the ambiguity the caller
+        # falls back to "unknown" for, and equal instants trip that anyway.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _bool_column(value: Any) -> Optional[bool]:
@@ -1308,6 +1665,510 @@ def _merge_cost(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "unrecorded": unrecorded,
         "total": total if recorded else None,
     }
+
+
+# ----------------------------------------------------------------------
+# Token, cost and cache completeness over recorded LLM calls
+# (`fix-9eg.5`, `fix-9eg.6`)
+# ----------------------------------------------------------------------
+#
+# `cost_rollup` above already answers "what did the money add up to, and how
+# many calls did not say". Two things a reader also asks it cannot answer, and
+# one thing it can get wrong:
+#
+#   - HOW MANY TOKENS, split into prompt and completion, with zero kept apart
+#     from unknown. `usage` is an attribute on `fw.llm.call` that a provider
+#     may omit entirely, may fill in completely, or may fill in partly; a
+#     total of 0 is a measurement and "no usage attribute" is not.
+#   - WHETHER THE CALL WAS SERVED FROM THE LLM CACHE. `cache_hit` is recorded
+#     when the DSPy history entry carried a response to read it from, and is
+#     simply absent otherwise. A hit is an observation about how the answer
+#     arrived, not a verdict about it, and an absent flag is unknown -- never
+#     "miss" (`fix-9eg.6`).
+#   - ONE LLM CALL CAN BE RECORDED MORE THAN ONCE. `tracing.end_span` re-emits
+#     a span under the span_id `start_span` opened, so a reader that sees both
+#     records (a live trace read of an in-flight turn, or two reads merged)
+#     has two rows for one call; and a wrapper LM that itself invokes an LM
+#     leaves a nested `fw.llm.call` quoting the SAME provider response as the
+#     inner one. Summing per row double-counts both.
+#
+# So the accounting below resolves CANONICAL CALLS first and rolls up from
+# those. The two folds are named separately in the result, because they are
+# different facts about the recording and a reader who sees a difference
+# between this and a naive per-span count deserves to know which one caused it.
+#
+# The same numbers serve the browser and a coding agent: they travel on the
+# projection, beside `cost`, with the span_id of every call that contributed
+# (`calls_detail`), so a human chip and an agent's structured read anchor to
+# the same recorded call rather than to two independent tallies.
+
+SPAN_LLM_CALL = "fw.llm.call"
+
+# What one call's `usage` attribute amounted to.
+USAGE_COMPLETE = "complete"        # prompt, completion and total all recorded
+USAGE_PARTIAL = "partial"          # some of the three, not all
+USAGE_UNRECORDED = "unrecorded"    # no usage attribute at all -- unknown, not 0
+# A call whose provider response another call already accounted for. Its tokens
+# and cost are not added again; it is still a call that was made.
+USAGE_SHARED_RESPONSE = "shared_response"
+
+# What the recorded `cache_hit` flag said. `unknown` is its own answer.
+CACHE_HIT = "hit"
+CACHE_MISS = "miss"
+CACHE_UNKNOWN = "unknown"
+
+# Coverage of the token figures: nothing recorded, some calls recorded, or
+# every counted call recorded the full split.
+COVERAGE_NONE = "none"
+COVERAGE_PARTIAL = "partial"
+COVERAGE_COMPLETE = "complete"
+
+
+@dataclass(frozen=True)
+class LlmCallUsage:
+    """One canonical `fw.llm.call`: what it spent, and how it was answered.
+
+    The span_id is the anchor: it is what the trace view renders a level for
+    and what an agent quotes to point at this exact call, so a chip and a
+    structured read never disagree about which call they mean.
+
+    `response_id` is the recorded `history_uuid` -- DSPy's identifier for the
+    provider response the usage and cost were copied from. It is what makes a
+    duplicate recognisable: two calls quoting one response cannot both have
+    spent those tokens.
+    """
+
+    span_id: str
+    turn_key: Optional[str]
+    parent_span_id: Optional[str]
+    response_id: Optional[str]
+    model: Optional[str]
+    completed: bool
+    status: Optional[str]
+    usage_state: str
+    cache_state: str
+    prompt_tokens: Optional[int]
+    completion_tokens: Optional[int]
+    total_tokens: Optional[int]
+    cost: Optional[float]
+    records_folded: int = 0
+    wrappers_folded: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "span_id": self.span_id,
+            "turn_key": self.turn_key,
+            "parent_span_id": self.parent_span_id,
+            "response_id": self.response_id,
+            "model": self.model,
+            "completed": self.completed,
+            "status": self.status,
+            "usage_state": self.usage_state,
+            "cache_state": self.cache_state,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cost": self.cost,
+            "records_folded": self.records_folded,
+            "wrappers_folded": self.wrappers_folded,
+        }
+
+
+def _usage_attribute(tree: _SpanTree, span: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """The `usage` attribute as a mapping, or None when the call recorded none.
+
+    Persisted as JSON text by `dspy_logger._json_text` and handed back either
+    decoded or raw depending on the reader, exactly as the enclosing attributes
+    are -- so both forms are accepted here for the same reason `_SpanTree`
+    accepts both for the attributes themselves.
+    """
+    raw = tree.attributes(span).get("usage")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    return dict(raw) if isinstance(raw, Mapping) else None
+
+
+def _exact_count(value: Any) -> Optional[int]:
+    """An exact, non-negative integer, or None.
+
+    A token count is a tally of things that happened, so a negative one is not a
+    smaller expenditure -- it is a malformed record, and summing it would make a
+    turn's total smaller than one of its own calls. Kept local to the token
+    parser on purpose: `_exact_int` is what reads attempt numbers, ordinals and
+    durations elsewhere in this module, and narrowing it would change how those
+    are read for a reason that has nothing to do with them.
+    """
+    exact = _exact_int(value)
+    return exact if exact is not None and exact >= 0 else None
+
+
+def _cache_state(attributes: Mapping[str, Any]) -> str:
+    """`hit`, `miss` or `unknown`, from the recorded flag only.
+
+    `dspy_logger` writes a real boolean; anything else on record is a shape
+    this reader does not recognise and is reported as unknown rather than
+    coerced, because a truthy string would otherwise read as a hit.
+    """
+    value = attributes.get("cache_hit")
+    if value is True:
+        return CACHE_HIT
+    if value is False:
+        return CACHE_MISS
+    return CACHE_UNKNOWN
+
+
+def _llm_cost_attribute(attributes: Mapping[str, Any]) -> Optional[float]:
+    """The recorded `cost`, or None. Same rule as `server.llm_call_cost`:
+    finite, non-negative, and never a bool -- `True` is not a cost of 1."""
+    value = attributes.get("cost")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number if number >= 0 else None
+
+
+def _canonical_llm_records(
+    spans: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], int]:
+    """One record per `fw.llm.call` span_id, plus how many were folded away.
+
+    A re-emission of a span carries the same span_id (`[R2][R6]`: a store treats
+    it as an idempotent upsert), and the ENDED record is the complete one, so it
+    wins -- the same precedence `ObservabilityStore.upsert_span_rows` applies in
+    SQL. Among two records that are both ended, or both still open, the later
+    one in the list wins, because a reader that saw both read them in order.
+
+    A span with no span_id cannot be folded or anchored to, so it is kept as
+    its own record and counted as a call; dropping it would lose a call that
+    was made.
+    """
+    canonical: dict[str, Mapping[str, Any]] = {}
+    anonymous: list[Mapping[str, Any]] = []
+    folded = 0
+    for span in spans:
+        if span.get("name") != SPAN_LLM_CALL:
+            continue
+        span_id = _text_or_none(span.get("span_id"))
+        if span_id is None:
+            anonymous.append(span)
+            continue
+        previous = canonical.get(span_id)
+        if previous is None:
+            canonical[span_id] = span
+            continue
+        folded += 1
+        if previous.get("end_ns") is not None and span.get("end_ns") is None:
+            continue  # an open re-read must not overwrite the ended record
+        canonical[span_id] = span
+    return list(canonical.values()) + anonymous, folded
+
+
+def _wrapper_span_ids(
+    tree: _SpanTree, records: Sequence[Mapping[str, Any]]
+) -> set[str]:
+    """The span_ids of `fw.llm.call` records that are a WRAPPER of another.
+
+    A wrapper is an `fw.llm.call` with an `fw.llm.call` descendant quoting the
+    same `history_uuid`: one provider response recorded at two levels, which is
+    one call. The inner record is kept because it is the one closest to the
+    provider, and the outer is folded away -- so a nested LM adapter cannot
+    make a turn look like it made twice as many calls as it did.
+
+    Calls that merely SHARE a response without being nested are left alone
+    here: they are two calls, and which of them really spent the tokens is not
+    something this layer can decide. `_usage_rollup_from` counts that response
+    once and says how many calls quoted it.
+    """
+    by_id = {
+        _text_or_none(record.get("span_id")): record
+        for record in records
+        if _text_or_none(record.get("span_id"))
+    }
+    wrappers: set[str] = set()
+    for span_id, record in by_id.items():
+        response = _text_or_none(tree.attributes(record).get("history_uuid"))
+        if response is None:
+            continue
+        for ancestor in tree.ancestry(_text_or_none(record.get("parent_span_id"))):
+            ancestor_id = _text_or_none(ancestor.get("span_id"))
+            if ancestor_id is None or ancestor_id not in by_id:
+                continue
+            if _text_or_none(tree.attributes(ancestor).get("history_uuid")) == response:
+                wrappers.add(ancestor_id)
+    return wrappers
+
+
+def canonical_llm_spans(
+    spans: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """`spans` with every `fw.llm.call` present exactly once.
+
+    A re-emitted record is merged into the one call it re-records, and a
+    wrapper `fw.llm.call` quoting its own descendant's provider response is
+    dropped. Spans of every other name pass through untouched and in order, so
+    this is safe to hand to any roll-up that filters on the LLM span name --
+    which is how the injected `cost_rollup` gets the same denominator the
+    token figures beside it use, without being reimplemented here.
+    """
+    span_list = list(spans)
+    records, _ = _canonical_llm_records(span_list)
+    tree = _SpanTree(
+        [span for span in span_list if span.get("name") != SPAN_LLM_CALL] + records
+    )
+    wrappers = _wrapper_span_ids(tree, records)
+    kept = {
+        _text_or_none(record.get("span_id")) or id(record): record
+        for record in records
+        if (_text_or_none(record.get("span_id")) or "") not in wrappers
+    }
+    emitted: set[Any] = set()
+    result: list[Mapping[str, Any]] = []
+    for span in span_list:
+        if span.get("name") != SPAN_LLM_CALL:
+            result.append(span)
+            continue
+        key = _text_or_none(span.get("span_id")) or id(span)
+        if key in emitted or key not in kept:
+            continue
+        emitted.add(key)
+        result.append(kept[key])
+    return result
+
+
+def _order_key(record: Mapping[str, Any]) -> tuple[int, int, str]:
+    """Recording order: by start time, then by span_id so ties are stable.
+
+    Which of two calls quoting one response is credited with it has to be
+    decided the same way twice, or the same evidence would project two
+    different answers.
+    """
+    start = _exact_int(record.get("start_ns"))
+    return (0 if start is not None else 1, start or 0, str(record.get("span_id") or ""))
+
+
+def usage_rollup(
+    spans: Iterable[Mapping[str, Any]], *, turn_key: Optional[str] = None
+) -> dict[str, Any]:
+    """Tokens, cost and cache state over the canonical LLM calls in `spans`.
+
+    Read-only and total: every `fw.llm.call` in the input is either counted as
+    a call or named as a fold, and every figure that nothing recorded is None
+    or `unknown` rather than 0.
+
+    `turn_key` is stamped on each anchor so a call can be addressed from a
+    projection that spans several turns.
+    """
+    span_list = list(spans)
+    records, records_folded = _canonical_llm_records(span_list)
+    # The tree is built with the CANONICAL records last, so that they win
+    # `_SpanTree`'s last-one-per-span_id rule. Reading a wrapper's response id
+    # off a superseded open record would find nothing -- `history_uuid` is
+    # written when the span ends -- and the nesting fold would silently stop
+    # working on exactly the traces it exists for.
+    tree = _SpanTree(
+        [span for span in span_list if span.get("name") != SPAN_LLM_CALL] + records
+    )
+    wrappers = _wrapper_span_ids(tree, records)
+    calls: list[LlmCallUsage] = []
+    counted_responses: set[str] = set()
+
+    for record in sorted(records, key=_order_key):
+        span_id = _text_or_none(record.get("span_id"))
+        if span_id is not None and span_id in wrappers:
+            continue
+        attributes = tree.attributes(record)
+        response = _text_or_none(attributes.get("history_uuid"))
+        usage = _usage_attribute(tree, record)
+        shared = response is not None and response in counted_responses
+        if response is not None:
+            counted_responses.add(response)
+
+        prompt = completion = total = None
+        cost = None
+        if shared:
+            state = USAGE_SHARED_RESPONSE
+        elif usage is None:
+            state = USAGE_UNRECORDED
+        else:
+            prompt = _exact_count(usage.get("prompt_tokens"))
+            completion = _exact_count(usage.get("completion_tokens"))
+            total = _exact_count(usage.get("total_tokens"))
+            recorded = [value for value in (prompt, completion, total) if value is not None]
+            if not recorded:
+                state = USAGE_UNRECORDED
+            elif len(recorded) == 3:
+                state = USAGE_COMPLETE
+            else:
+                state = USAGE_PARTIAL
+        if not shared:
+            cost = _llm_cost_attribute(attributes)
+
+        calls.append(
+            LlmCallUsage(
+                span_id=span_id or "",
+                turn_key=turn_key,
+                parent_span_id=_text_or_none(record.get("parent_span_id")),
+                response_id=response,
+                model=_text_or_none(attributes.get("model")),
+                completed=record.get("end_ns") is not None,
+                status=_text_or_none(record.get("status")),
+                usage_state=state,
+                cache_state=_cache_state(attributes),
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                total_tokens=total,
+                cost=cost,
+            )
+        )
+
+    return _usage_rollup_from(
+        calls,
+        records_folded=records_folded,
+        wrappers_folded=len(wrappers),
+    )
+
+
+def _sum_recorded(values: Iterable[Optional[int]]) -> Optional[int]:
+    """Sum of the values that were recorded, or None when none was.
+
+    The distinction this whole section exists for: an execution whose calls
+    recorded no completion count has completion `None`, and one whose single
+    call recorded `completion_tokens: 0` has completion `0`.
+    """
+    recorded = [value for value in values if value is not None]
+    return sum(recorded) if recorded else None
+
+
+def _coverage(complete: int, partial: int, unrecorded: int) -> str:
+    if complete == 0 and partial == 0:
+        return COVERAGE_NONE
+    if partial == 0 and unrecorded == 0:
+        return COVERAGE_COMPLETE
+    return COVERAGE_PARTIAL
+
+
+def _usage_rollup_from(
+    calls: Sequence[LlmCallUsage], *, records_folded: int, wrappers_folded: int
+) -> dict[str, Any]:
+    """The wire shape, from resolved calls. One place, so the merge below and
+    `usage_rollup` above cannot drift on what `coverage` or `total` mean."""
+    complete = sum(1 for call in calls if call.usage_state == USAGE_COMPLETE)
+    partial = sum(1 for call in calls if call.usage_state == USAGE_PARTIAL)
+    unrecorded = sum(1 for call in calls if call.usage_state == USAGE_UNRECORDED)
+    shared = sum(1 for call in calls if call.usage_state == USAGE_SHARED_RESPONSE)
+    with_cost = [call.cost for call in calls if call.cost is not None]
+    totals = _sum_recorded(call.total_tokens for call in calls)
+    return {
+        "calls": len(calls),
+        "completed": sum(1 for call in calls if call.completed),
+        "open": sum(1 for call in calls if not call.completed),
+        "records_folded": records_folded,
+        "wrappers_folded": wrappers_folded,
+        "shared_responses": shared,
+        "tokens": {
+            "prompt": _sum_recorded(call.prompt_tokens for call in calls),
+            "completion": _sum_recorded(call.completion_tokens for call in calls),
+            "total": totals,
+            "complete": complete,
+            "partial": partial,
+            "unrecorded": unrecorded,
+            "shared": shared,
+            # A recorded zero is a measurement; it is reported as one so that a
+            # reader can tell "this call spent nothing" from "nobody counted".
+            "zero": sum(1 for call in calls if call.total_tokens == 0),
+            "coverage": _coverage(complete, partial, unrecorded + shared),
+        },
+        "cost": {
+            "calls": len(calls),
+            "recorded": len(with_cost),
+            "unrecorded": len(calls) - len(with_cost),
+            "total": sum(with_cost) if with_cost else None,
+        },
+        "cache": {
+            CACHE_HIT: sum(1 for call in calls if call.cache_state == CACHE_HIT),
+            CACHE_MISS: sum(1 for call in calls if call.cache_state == CACHE_MISS),
+            CACHE_UNKNOWN: sum(
+                1 for call in calls if call.cache_state == CACHE_UNKNOWN
+            ),
+        },
+        "calls_detail": [call.as_dict() for call in calls],
+    }
+
+
+def merge_usage_rollups(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Sum per-turn roll-ups into one, keeping None for "nothing recorded".
+
+    Per-turn parts are summed rather than re-derived from a concatenated span
+    list because a trace is read per turn; a provider response cannot appear in
+    two turns' traces without one of them being a copy, so the per-turn
+    deduplication is the whole of it.
+
+    `calls_detail` is NOT carried up. The anchors belong to the turn that
+    recorded them and are published there, once; repeating them at execution
+    scope would put the same span_id on the wire twice and invite a reader to
+    tally it twice.
+    """
+    merged: dict[str, Any] = {
+        "calls": 0,
+        "completed": 0,
+        "open": 0,
+        "records_folded": 0,
+        "wrappers_folded": 0,
+        "shared_responses": 0,
+    }
+    tokens = {
+        "complete": 0, "partial": 0, "unrecorded": 0, "shared": 0, "zero": 0,
+    }
+    sums: dict[str, Optional[int]] = {"prompt": None, "completion": None, "total": None}
+    cost_calls = cost_recorded = cost_unrecorded = 0
+    cost_total: Optional[float] = None
+    cache = {CACHE_HIT: 0, CACHE_MISS: 0, CACHE_UNKNOWN: 0}
+
+    for part in parts:
+        for key in merged:
+            merged[key] += int(part.get(key) or 0)
+        part_tokens = part.get("tokens") or {}
+        for key in tokens:
+            tokens[key] += int(part_tokens.get(key) or 0)
+        for key in sums:
+            value = _exact_count(part_tokens.get(key))
+            if value is not None:
+                sums[key] = value if sums[key] is None else sums[key] + value
+        part_cost = part.get("cost") or {}
+        cost_calls += int(part_cost.get("calls") or 0)
+        cost_recorded += int(part_cost.get("recorded") or 0)
+        cost_unrecorded += int(part_cost.get("unrecorded") or 0)
+        amount = part_cost.get("total")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            cost_total = float(amount) if cost_total is None else cost_total + float(amount)
+        part_cache = part.get("cache") or {}
+        for key in cache:
+            cache[key] += int(part_cache.get(key) or 0)
+
+    merged["tokens"] = {
+        "prompt": sums["prompt"],
+        "completion": sums["completion"],
+        "total": sums["total"],
+        "coverage": _coverage(
+            tokens["complete"],
+            tokens["partial"],
+            tokens["unrecorded"] + tokens["shared"],
+        ),
+        **tokens,
+    }
+    merged["cost"] = {
+        "calls": cost_calls,
+        "recorded": cost_recorded,
+        "unrecorded": cost_unrecorded,
+        "total": cost_total if cost_recorded else None,
+    }
+    merged["cache"] = cache
+    return merged
 
 
 # ----------------------------------------------------------------------
@@ -1956,6 +2817,11 @@ def comparison_digest(comparison: ExecutionComparison) -> dict[str, Any]:
             ),
             "timing": dict(projection.timing),
             "cost": dict(projection.cost),
+            # Counts and coverage only: the per-call anchors are span ids,
+            # which this digest may carry, but they live on the turns and
+            # repeating them here would make a log of a corpus much larger
+            # without saying anything the counts do not.
+            "usage": dict(projection.usage),
         }
 
     return {
@@ -1974,6 +2840,12 @@ __all__ = [
     "ATTRIBUTION_SHARED",
     "ATTRIBUTION_TURN",
     "ATTRIBUTION_UNATTRIBUTED",
+    "CACHE_HIT",
+    "CACHE_MISS",
+    "CACHE_UNKNOWN",
+    "COVERAGE_COMPLETE",
+    "COVERAGE_NONE",
+    "COVERAGE_PARTIAL",
     "BASIS_COMMAND",
     "BASIS_COMMAND_CONTEXT",
     "BASIS_COMMAND_CONTEXT_PARAMETERS",
@@ -1983,6 +2855,12 @@ __all__ = [
     "PAIR_LEFT_ONLY",
     "PAIR_MATCHED",
     "PAIR_RIGHT_ONLY",
+    "SPAN_DISTILLATION_PASS",
+    "SPAN_LLM_CALL",
+    "USAGE_COMPLETE",
+    "USAGE_PARTIAL",
+    "USAGE_SHARED_RESPONSE",
+    "USAGE_UNRECORDED",
     "AlignedPair",
     "Alignment",
     "ArtifactRef",
@@ -1996,6 +2874,7 @@ __all__ = [
     "ExecutionStep",
     "InvalidExecutionRef",
     "InvalidRecordedAlignment",
+    "LlmCallUsage",
     "PassSelector",
     "StoreExecutionReader",
     "TurnProjection",
@@ -2005,11 +2884,14 @@ __all__ = [
     "anchor_for_step",
     "anchor_for_turn",
     "anchors_for_pair",
+    "canonical_llm_spans",
     "compare_executions",
     "comparison_digest",
     "default_cost_rollup",
     "default_ledger_projection",
     "discover_pass_selectors",
+    "merge_usage_rollups",
     "project_execution",
     "review_pair_key",
+    "usage_rollup",
 ]

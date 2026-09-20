@@ -58,12 +58,17 @@ from fastworkflow.benchmark.catalog import (
     write_analysis,
     write_version,
 )
-from fastworkflow.observability import feedback, feedback_sidecar
+from fastworkflow.observability import (
+    feedback,
+    feedback_sidecar,
+    training_history,
+)
 from fastworkflow.observability.comparison import (
     ExecutionRef,
     InvalidExecutionRef,
     PassSelector,
     project_execution,
+    usage_rollup,
 )
 from fastworkflow.observability.diagnosis import (
     InvalidTurnQuery,
@@ -455,6 +460,13 @@ LOW_CONFIDENCE_DEFAULT_MARGIN = 0.2
 
 PROVENANCE_NOT_RECORDED = "not recorded"
 
+# How many `train_runs` rows one training-history request reads. The table has
+# one row per published training run, so a workflow accumulates them slowly;
+# the default is `ObservabilityStore.list_train_runs`' own and the ceiling is
+# what stops a caller asking for every metrics blob in the store at once.
+TRAINING_RUN_DEFAULT_LIMIT = 50
+TRAINING_RUN_MAX_LIMIT = 200
+
 # The experiment row's own provenance-bearing columns.
 _EXPERIMENT_PROVENANCE_COLUMNS = (
     "capture_profile",
@@ -716,10 +728,11 @@ def turn_decision_signals(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             intent_decisions += 1
             found = False
             signals = uncertainty.get("signals")
-            for signal in signals if isinstance(signals, list) else []:
-                if not isinstance(signal, dict) or signal.get("kind") != SIGNAL_TOPK_MARGIN:
+            for uncertainty_signal in signals if isinstance(signals, list) else []:
+                if (not isinstance(uncertainty_signal, dict)
+                        or uncertainty_signal.get("kind") != SIGNAL_TOPK_MARGIN):
                     continue
-                value = _finite_number(signal.get("value"))
+                value = _finite_number(uncertainty_signal.get("value"))
                 if value is not None:
                     margins.append(value)
                     found = True
@@ -766,24 +779,34 @@ def llm_call_cost(span: Mapping[str, Any]) -> Optional[float]:
 
 
 def cost_rollup(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """Sum of recorded costs over the LLM calls, with the unrecorded count
-    beside it. `total` is None -- never 0 -- when no call recorded a cost."""
-    calls = recorded = 0
-    total = 0.0
-    for span in spans:
-        if span.get("name") != SPAN_LLM_CALL:
-            continue
-        calls += 1
-        cost = llm_call_cost(span)
-        if cost is not None:
-            recorded += 1
-            total += cost
-    return {
-        "calls": calls,
-        "recorded": recorded,
-        "unrecorded": calls - recorded,
-        "total": total if recorded else None,
-    }
+    """Sum of recorded costs over the CANONICAL LLM calls, with the unrecorded
+    count beside it. `total` is None -- never 0 -- when no call recorded a cost.
+
+    Canonical because one provider call can appear in a span list more than
+    once, and charging each appearance bills money that was never spent
+    (fix-9eg.5). Two things duplicate: `end_span` re-emits a span under the same
+    `span_id`, and a wrapper `fw.llm.call` nests around the inner call that
+    produced the same `history_uuid`. An outer+inner pair that each recorded
+    $0.25 for one response was summed to $0.50 here while the comparison
+    projection said $0.25 -- so a turn row and the same turn's comparison
+    disagreed about what it cost, and every per-turn, per-attempt and
+    navigation figure that reads this function was inflated.
+
+    DELEGATED rather than reimplemented. Folding duplicates needs three rules --
+    one record per `span_id`, the innermost record of a nested pair, and the
+    first of several siblings quoting one `history_uuid` -- and a second copy of
+    those rules is a second chance to get them apart. It already happened: a
+    partial fold here agreed with `usage_rollup` on nested calls and still
+    reported $0.50 against its $0.25 for two NON-nested spans naming the same
+    response. `usage_rollup` is the one accounting, and it never calls back into
+    this module, so there is no cycle.
+
+    The returned shape is unchanged: `calls` still counts every call the trace
+    holds, a duplicate that is not charged still shows up in `unrecorded` rather
+    than vanishing, and `total` is still None -- never 0 -- when no call
+    recorded a cost.
+    """
+    return usage_rollup(spans)["cost"]
 
 
 def merge_cost_rollups(rollups: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2717,6 +2740,17 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 "/api/workspace/turns?store_id=<id>",
             )
         elif self.chatbot.workspace is not None and (
+            path == "/api/training-runs" or path.startswith("/api/training-run/")
+        ):
+            # Same rule as turns: a workspace holds several stores and two of
+            # them may hold the same run_id, so an unscoped read would have to
+            # pick one. It names the scoped route instead of guessing.
+            self._error(
+                400,
+                "workspace training-history reads must name their store; list "
+                "one store with /api/workspace/training-runs?store_id=<id>",
+            )
+        elif self.chatbot.workspace is not None and (
             path.startswith("/api/turn/")
             or path.startswith("/api/spans/")
             or path.startswith("/api/experiment/")
@@ -2751,6 +2785,10 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 # has no experiments, which is a fact about the DB rather than
                 # an error the operator can act on.
                 self._send_json({"experiments": []})
+            elif path == "/api/training-runs":
+                # The same argument for the same reason: a workflow nobody has
+                # trained through this store recorded no training runs.
+                self._send_json({"training_runs": []})
             else:
                 self._error(404, "observability DB not found")
         elif path == "/api/channels":
@@ -2818,6 +2856,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             self._handle_experiments(store, path, q)
         elif path.startswith("/api/artifact/"):
             self._serve_artifact(store, path[len("/api/artifact/") :])
+        elif path == "/api/training-runs" or path.startswith("/api/training-run/"):
+            self._handle_training_history(store, path, q)
         elif path == "/api/health":
             self._send_json(
                 {
@@ -2828,6 +2868,54 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             )
         else:
             self._error(404, "not found")
+
+    @staticmethod
+    def _training_limit(q: Any) -> int:
+        """How many `train_runs` rows one read will look at.
+
+        Bounded on both ends rather than passed through: `list_train_runs` has
+        no keyset cursor, so a caller-chosen limit is the only bound this table
+        has, and an unbounded one would let a single request pull every
+        training run's metrics blob into memory at once.
+        """
+        try:
+            requested = int(q("limit"))
+        except (TypeError, ValueError):
+            return TRAINING_RUN_DEFAULT_LIMIT
+        return max(1, min(requested, TRAINING_RUN_MAX_LIMIT))
+
+    def _handle_training_history(self, store: Any, path: str, q: Any) -> None:
+        """`GET /api/training-runs` and `/api/training-run/<run_id>`.
+
+        Read-only and store-scoped: whichever store the request already
+        resolved (the live one, or a registered experiment's evidence store via
+        `benchmark_experiment`) is the one read. No training is started, no
+        artifact directory is opened and nothing is downloaded -- every field
+        comes from rows `train.metrics_persistence` already wrote.
+
+        `limit` bounds the LIST only. The detail route resolves its run by
+        primary key, so a run that has fallen out of the newest-first window
+        is still readable -- a 404 here means the store holds no such run,
+        never that the caller asked for too few rows.
+        """
+        if path == "/api/training-runs":
+            self._send_json(
+                {
+                    "training_runs": training_history.list_training_runs(
+                        store, limit=self._training_limit(q)
+                    )
+                }
+            )
+            return
+        run_id = unquote(path[len("/api/training-run/"):]).rstrip("/")
+        if not run_id:
+            self._error(404, "not found")
+            return
+        detail = training_history.training_run_detail(store, run_id)
+        if detail is None:
+            self._error(404, "training run not found")
+            return
+        self._send_json({"training_run": detail})
 
     def _handle_review_assignment(self, path: str) -> None:
         """Return a workspace-scoped assignment or its answer export."""
@@ -3016,6 +3104,47 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     return
                 with workspace.registry.open(store_id) as scoped:
                     self._search_turns_response(scoped, q, store_id=store_id)
+                return
+            if path == "/api/workspace/training-runs":
+                store_id = q("store_id") or ""
+                if not store_id:
+                    self._error(
+                        400,
+                        "workspace training-history reads require store_id; "
+                        "training runs are never listed across stores",
+                    )
+                    return
+                with workspace.registry.open(store_id) as scoped:
+                    self._send_json(
+                        {
+                            "store_id": store_id,
+                            "training_runs": training_history.list_training_runs(
+                                scoped, limit=self._training_limit(q)
+                            ),
+                        }
+                    )
+                return
+            training_prefix = "/api/workspace/training-run/"
+            if path.startswith(training_prefix):
+                rest = path[len(training_prefix):]
+                encoded_store, separator, encoded_run = rest.partition("/")
+                if not separator or not encoded_store or not encoded_run:
+                    self._error(
+                        400,
+                        "training-run reads require both store_id and run_id",
+                    )
+                    return
+                store_id = unquote(encoded_store)
+                run_id = unquote(encoded_run)
+                with workspace.registry.open(store_id) as scoped:
+                    # A primary-key read: an old run stays readable no matter
+                    # how many have been recorded since.
+                    detail = training_history.training_run_detail(scoped, run_id)
+                if detail is None:
+                    self._error(404, "training run not found in the named store")
+                    return
+                detail["store_id"] = store_id
+                self._send_json({"training_run": detail})
                 return
             if path == "/api/workspace/task-feedback":
                 self._handle_workspace_task_feedback(workspace, q)

@@ -49,6 +49,7 @@ from HTTP, so no client can forge a decision as the machine's own.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import unquote
 
@@ -56,6 +57,7 @@ from fastworkflow import state_paths
 from fastworkflow.benchmark import setup as benchmark_setup
 from fastworkflow.observability import best_run as best_run_module
 from fastworkflow.observability import comparison as comparison_module
+from fastworkflow.observability import consistency as consistency_module
 from fastworkflow.observability import pair_review as pair_review_module
 from fastworkflow.observability import selection
 from fastworkflow.observability import workspace as workspace_module
@@ -81,12 +83,17 @@ _MAX_PAGE = 500
 _DEFAULT_PAGE = 100
 _MAX_TEXT = 4000
 
-# The span attribute a pass-stamping producer is expected to record. Nothing in
-# this repo stamps it today (`fix-txxy`), so `discover_pass_selectors` returns
-# `[]` on every real turn and every comparison below is whole-turn. The routes
-# still resolve passes ONLY from recorded spans, so the day a producer starts
-# stamping them the surface already works and -- more importantly -- until then
-# a client asking for a pass gets a refusal rather than a fabricated split.
+# Where derived consistency vectors live: under the workflow's own state
+# directory, beside its other derived caches and deliberately NOT inside any
+# evidence database. Deleting it costs a recomputation and nothing else.
+_CONSISTENCY_CACHE_DIRNAME = "consistency-vectors"
+
+# The span attribute a pass-stamping producer records. `distillation.py` stamps
+# it once per teacher/student pass (`fix-txxy`), so `discover_pass_selectors`
+# now names both passes of a distilled turn; a turn that ran one pass, and every
+# turn recorded before that, still answers `[]` and is compared whole. The
+# routes resolve passes ONLY from recorded spans either way, so a client asking
+# for a pass nothing recorded gets a refusal rather than a fabricated split.
 DEFAULT_PASS_ATTRIBUTE = "fw.pass"
 
 
@@ -643,8 +650,9 @@ def _get_task(
         return 200, {
             "run": _run_header(run),
             "pass_attribute": attribute,
-            # `[]` is the honest and, today, universal answer: no producer
-            # stamps a pass, so every recorded turn is compared whole.
+            # `[]` for a turn nothing stamped, which is every turn that did not
+            # run distillation and every turn recorded before `fix-txxy`: those
+            # are compared whole rather than split on a guess.
             "passes": [
                 {"pass_id": pass_id, "turn_keys": turns, "turn_count": len(turns)}
                 for pass_id, turns in sorted(recorded.items())
@@ -679,6 +687,11 @@ def _get_task(
 
     if rest == ["comparison"]:
         return 200, _comparison_payload(workflow_path, control, experiment_id, task_id, query)
+
+    if rest == ["consistency"]:
+        return 200, _consistency_payload(
+            workflow_path, control, experiment_id, task_id, query
+        )
 
     if rest == ["review-pairs"]:
         return 200, _review_pairs_payload(
@@ -972,6 +985,139 @@ def _review_pairs_payload(
                      ("reviewer", "pairs", "reviewed", "remaining", "next_pair_key")},
         "control_exists": sidecar is not None,
     }
+
+
+# ----------------------------------------------------------------------
+# Consistency between the repeated runs of one task (`fix-9eg.17.5`)
+# ----------------------------------------------------------------------
+#
+# A read of the SAME evidence the Runs and Compare views already show, summed
+# up differently. It opens no control it would not otherwise open, writes
+# nothing to any evidence store, and elects nobody: the payload is descriptive
+# and says so in its own words.
+#
+# Derived vectors are cached under the workflow's state directory, never inside
+# an evidence database, so this route cannot modify what it measures.
+
+
+def _consistency_cache(workflow_path: str) -> consistency_module.VectorCache:
+    return consistency_module.VectorCache(
+        os.path.join(
+            state_paths.workflow_state_dir(str(workflow_path)),
+            _CONSISTENCY_CACHE_DIRNAME,
+        )
+    )
+
+
+def _consistency_bounds(scalars: Mapping[str, Any]) -> tuple[int, int]:
+    """`(max_runs, max_pairs)`, clamped. Unbounded work is a denial of service."""
+    raw_runs = scalars.get("max_runs")
+    raw_pairs = scalars.get("max_pairs")
+    max_runs = (
+        consistency_module.DEFAULT_MAX_RUNS
+        if raw_runs is None
+        else _exact_int(raw_runs, "max_runs")
+    )
+    max_pairs = (
+        consistency_module.DEFAULT_MAX_PAIRS
+        if raw_pairs is None
+        else _exact_int(raw_pairs, "max_pairs")
+    )
+    if max_runs < 2 or max_pairs < 1:
+        raise ApiError(
+            400, "max_runs must be at least 2 and max_pairs must be at least 1"
+        )
+    return (
+        min(max_runs, consistency_module.DEFAULT_MAX_RUNS),
+        min(max_pairs, consistency_module.DEFAULT_MAX_PAIRS),
+    )
+
+
+def _consistency_report(
+    workflow_path: str,
+    control: selection.SelectionControlStore,
+    experiment_id: str,
+    task_id: str,
+    *,
+    reader: Any,
+    embedder: Any,
+    unavailable: Optional[Mapping[str, Any]],
+    max_runs: int,
+    max_pairs: int,
+) -> dict[str, Any]:
+    summary = _task_summary(control, experiment_id, task_id)
+    runs, capped = consistency_module.collect_task_evidence(
+        summary["attempts"], reader, max_runs=max_runs
+    )
+    best = summary.get("best_run") or {}
+    return consistency_module.task_consistency(
+        experiment_id=experiment_id,
+        task_id=task_id,
+        runs=runs,
+        best_attempt=best.get("attempt"),
+        embedder=embedder,
+        embedding_unavailable=unavailable,
+        cache=_consistency_cache(workflow_path),
+        max_pairs=max_pairs,
+        runs_capped=capped,
+    )
+
+
+def _consistency_payload(
+    workflow_path: str,
+    control: selection.SelectionControlStore,
+    experiment_id: str,
+    task_id: str,
+    query: dict[str, list[str]],
+) -> dict[str, Any]:
+    """This task's consistency, and optionally another experiment's beside it.
+
+    `compare_experiment` is the across-experiments case: the SAME task under
+    another member of the same contest. Both sides are measured by the same
+    code in the same process here, so their metric identities agree -- and the
+    comparison still checks, because a stored or a future cross-process report
+    is the case where they will not.
+    """
+    scalars = _scalars(query)
+    max_runs, max_pairs = _consistency_bounds(scalars)
+    # One process-wide load. A page view must not re-read the weights, and a
+    # machine without the model must not re-fail the lookup per request.
+    embedder, unavailable = consistency_module.shared_embedder()
+    reader = _AuthorizedReader(control)
+    payload = _consistency_report(
+        workflow_path,
+        control,
+        experiment_id,
+        task_id,
+        reader=reader,
+        embedder=embedder,
+        unavailable=unavailable,
+        max_runs=max_runs,
+        max_pairs=max_pairs,
+    )
+
+    compare_experiment = scalars.get("compare_experiment")
+    if compare_experiment and compare_experiment != experiment_id:
+        _require_member(workflow_path, control, compare_experiment)
+        other = _consistency_report(
+            workflow_path,
+            control,
+            compare_experiment,
+            task_id,
+            reader=reader,
+            embedder=embedder,
+            unavailable=unavailable,
+            max_runs=max_runs,
+            max_pairs=max_pairs,
+        )
+        # Baseline is the OTHER experiment and candidate is this one, so the
+        # delta reads "what changed when we moved to the experiment being
+        # looked at" rather than depending on which id is in the path.
+        payload["comparison"] = consistency_module.compare_task_consistency(
+            other, payload
+        )
+        payload["compare_experiment_id"] = compare_experiment
+    return payload
 
 
 # ----------------------------------------------------------------------
@@ -1349,6 +1495,102 @@ def _workspace_attempts(
     return rows
 
 
+def _workspace_consistency(
+    workspace: Any,
+    names: _WorkspaceNames,
+    reader: Any,
+    experiment_id: str,
+    task_id: str,
+    scalars: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The same consistency metrics, read out of a sealed archive.
+
+    A human opening an archive and a coding agent reading this route get the
+    figures the live route gives, computed by the same module from the same
+    projections, so a number quoted from a comparison does not change meaning
+    when the evidence is sealed. What an archive does not carry is the
+    workflow's selection control, so there is no best run and therefore no
+    reference rows -- which is stated rather than shown empty.
+
+    Nothing is written. The derived vector cache is deliberately NOT used
+    here: it is keyed to a live workflow's state directory, an archive has no
+    such place of its own, and a read of sealed evidence that creates files is
+    not a read. The cost is recomputing vectors per request, which is the
+    right trade for a surface that must not touch what it measures.
+    """
+    max_runs, max_pairs = _consistency_bounds(scalars)
+    rows = _workspace_attempts(workspace, experiment_id, task_id, names)
+    _refuse_ambiguous_attempts(rows, experiment_id)
+    embedder, unavailable = consistency_module.shared_embedder()
+
+    def report(rows: list[dict[str, Any]], for_experiment: str) -> dict[str, Any]:
+        runs, capped = consistency_module.collect_task_evidence(
+            rows, reader, max_runs=max_runs
+        )
+        payload = consistency_module.task_consistency(
+            experiment_id=for_experiment,
+            task_id=task_id,
+            runs=runs,
+            best_attempt=None,
+            embedder=embedder,
+            embedding_unavailable=unavailable,
+            cache=None,
+            max_pairs=max_pairs,
+            runs_capped=capped,
+        )
+        payload["sealed"] = True
+        payload["reference"] = {
+            "kind": "none",
+            "usable": False,
+            "reason": (
+                "a sealed archive carries evidence, not the workflow's "
+                "selection control, so it records no best run"
+            ),
+        }
+        return payload
+
+    payload = report(rows, experiment_id)
+    compare_experiment = scalars.get("compare_experiment")
+    if compare_experiment and compare_experiment != experiment_id:
+        other_rows = _workspace_attempts(
+            workspace, str(compare_experiment), task_id, names
+        )
+        _refuse_ambiguous_attempts(other_rows, str(compare_experiment))
+        payload["comparison"] = consistency_module.compare_task_consistency(
+            report(other_rows, str(compare_experiment)), payload
+        )
+        payload["compare_experiment_id"] = compare_experiment
+    return payload
+
+
+def _refuse_ambiguous_attempts(
+    rows: list[dict[str, Any]], experiment_id: str
+) -> None:
+    """Refuse a distribution over an attempt number that means two runs.
+
+    A logical experiment stitched from several archive segments can record
+    attempt 1 twice. Every figure here is keyed by attempt, so pooling them
+    would silently average two different runs into one row -- and quietly
+    dropping one would be worse. `/comparison` already refuses the same
+    ambiguity by asking for a `segment_id`; there is no segment to ask for
+    when the question is about the whole population.
+    """
+    seen: dict[int, str] = {}
+    for row in rows:
+        attempt = int(row["attempt"])
+        segment = str(row.get("segment_id") or "")
+        if attempt in seen:
+            raise ApiError(
+                409,
+                f"attempt {attempt} of task is recorded in more than one "
+                f"segment of this archive for {experiment_id!r}, so a "
+                "consistency distribution over its attempts would pool two "
+                "different runs under one number",
+                segment_ids=sorted({seen[attempt], segment}),
+            )
+        seen[attempt] = segment
+
+
 def _workspace_side(
     rows: list[dict[str, Any]],
     attempt: Optional[int],
@@ -1466,6 +1708,11 @@ def _workspace_get(
             "view": view,
             "sealed": True,
         }
+
+    if tail == ["consistency"]:
+        return 200, _workspace_consistency(
+            workspace, names, reader, experiment_id, task_id, scalars
+        )
 
     if tail == ["comparison"]:
         left_rows = _workspace_attempts(workspace, experiment_id, task_id, names)
@@ -1674,6 +1921,12 @@ def _guard(fn: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str,
         # some turn -- the evidence does not contain what was named.
         return 404, {"error": str(exc)}
     except comparison_module.ComparisonError as exc:
+        return 400, {"error": str(exc)}
+    except consistency_module.ConsistencyError as exc:
+        # A consistency request that cannot be answered as asked -- two
+        # different tasks, a metric asked of nothing. The unavailable-model
+        # case is NOT here: that is a reported state of a 200 payload, because
+        # the step-count metrics beside it are still real.
         return 400, {"error": str(exc)}
     except benchmark_setup.ExperimentDeleted as exc:
         return 404, {"error": str(exc)}

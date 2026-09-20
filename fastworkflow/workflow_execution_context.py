@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import time
 import sqlite3
 import uuid
@@ -40,7 +39,7 @@ from fastworkflow.observability.execution_recorder import ExecutionRecorder, rec
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
-from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
+from fastworkflow.utils.react import NoSuspendedAgentStateError
 
 
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
@@ -1145,15 +1144,21 @@ class WorkflowExecutionContext:
         self,
         conversation_summary: str,
         conversation_traces: Optional[str] = None,
-        feedback: Optional[str] = None,
     ) -> None:
-        """Append one turn to conversation history in the canonical 3-key shape."""
+        """Append one turn to conversation history in the canonical 2-key shape.
+
+        Two keys, the shape `conversation_history_io` restores. The third was
+        `feedback`, and fix-9eg.16 removed the agent-memory table that was its
+        only source, so it could only ever be None here -- while
+        `_refine_user_query` renders every key of every remembered turn into the
+        refiner's prompt, which put a literal `feedback: None` line in front of
+        the model on in-session turns and nowhere on restored ones (fix-24da).
+        """
 
         self._conversation_history.messages.append(
             {
                 "conversation summary": conversation_summary,
                 "conversation_traces": conversation_traces,
-                "feedback": feedback,
             }
         )
 

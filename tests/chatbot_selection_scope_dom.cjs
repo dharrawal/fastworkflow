@@ -89,7 +89,19 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
      change repaints asynchronously and the previous pair stays on screen until
      the new one arrives. */
   async function pickBothSides() {
-    await until(() => select('Left run') && select('Right run'), 'the pair picker');
+    /* Waited on the picker being USABLE, not merely present. The selects are
+       rendered before the attempt list they are filled from arrives, so a wait
+       that stops at "the element exists" can set a value the element has no
+       option for -- the assignment is dropped, nothing repaints, and the
+       failure surfaces further down as a timeout on the header. */
+    await until(() => {
+      const left = select('Left run');
+      const right = select('Right run');
+      if (!left || !right) { return null; }
+      const offered = side => [...side.options].map(option => option.value);
+      return offered(left).includes('1') && offered(right).includes('2')
+        ? left : null;
+    }, 'the pair picker, with both attempts offered');
     await changeUntil('Left run', '1',
       () => detail().includes('Left: attempt 1'), 'the left side');
     await changeUntil('Right run', '2',
@@ -294,11 +306,14 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.equal(w.taskCompare.right, null, 'along with the attempt it named');
 
   assert.deepEqual(errors, [], 'no page errors');
-  /* Reads started by the last navigation are allowed to land before the window
-     goes away: tearing down mid-flight makes the page fail in its own callback,
-     which is a harness artefact and not a finding. */
-  await new Promise(r => setTimeout(r, 750));
-  w.close();
+  process.stdout.write('selection scope DOM checks passed\n');
+  /* Exited rather than slept-then-closed. The sleep was a guess at how long
+     the last navigation's reads take, and when one landed later than that the
+     page called `document.createElement` on a closed window and failed inside
+     its own callback -- an intermittent failure of the harness, reported as a
+     failure of the product. Every assertion above has already run at this
+     point, so there is nothing left for a late response to tell us. */
+  process.exit(0);
 })().catch(error => {
   process.stderr.write(String((error && error.stack) || error) + '\n');
   process.exit(1);

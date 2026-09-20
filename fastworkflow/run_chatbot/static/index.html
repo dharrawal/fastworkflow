@@ -760,6 +760,19 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
 .compareRow .side { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
 .compareRow .side.absent { color: var(--muted); font-style: italic; }
 .compareRow.rowAmbiguous { border-left: 3px solid var(--warn-border); padding-left: 7px; }
+/* Consistency between repeated runs: a compact band under the runs, not a
+   dashboard. Every figure here is descriptive, so nothing is coloured as good
+   or bad and no number is given a badge. */
+.consistencyPanel { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.consistencyPanel h3 { margin: 0 0 4px; font-size: 13px; }
+.consistencyStats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 10px 0; }
+.consistencyStat { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.consistencyStat strong { display: block; font-size: 12px; }
+.consistencyStat .figures { font-variant-numeric: tabular-nums; margin-top: 3px; }
+.consistencyPairs { margin-top: 8px; }
+.consistencyPairs > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+#detail button.consistencyPair { display: block; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 9px; margin: 6px 0; padding: 9px 11px; font-variant-numeric: tabular-nums; }
+#detail button.consistencyPair.pairFocused { border-color: var(--accent); background: var(--accent-soft); }
 /* A refusal, an unreadable half, or a decision that lost a race: all three are
    answers the reader has to see, so they share one band rather than becoming a
    disabled control with no explanation. */
@@ -797,6 +810,21 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
 .noticeText strong { display: block; font-size: 13px; }
 .noticeText span { color: var(--muted); font-size: 12px; }
 .notice button { padding: 0; width: 28px; min-height: 28px; background: transparent; border: none; }
+#trainingDialog { width: min(1040px, calc(100vw - 32px)); max-height: calc(100vh - 64px); border: 1px solid var(--border); border-radius: 18px; padding: 0; color: var(--text); background: var(--panel); box-shadow: 0 24px 80px #0004; }
+#trainingDialog::backdrop { background: #0b201b66; backdrop-filter: blur(3px); }
+#trainingDialog header { display: flex; gap: 12px; align-items: center; padding: 18px 24px; border-bottom: 1px solid var(--border); background: transparent; }
+#trainingDialog h2 { font-size: 20px; letter-spacing: -.03em; margin: 0; }
+#trainingDialog .trainingBody { display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); gap: 0; max-height: calc(100vh - 150px); }
+#trainingRunList { border-right: 1px solid var(--border); overflow: auto; padding: 12px; }
+#trainingRunDetail { overflow: auto; padding: 18px 24px; }
+#trainingRunList .listItem { cursor: pointer; }
+#trainingRunList .listItem.selected { background: var(--panel); border-color: var(--border); }
+.trainingCaption { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+.trainingUnavailable { color: var(--muted); font-style: italic; }
+@media (max-width: 760px) {
+  #trainingDialog .trainingBody { grid-template-columns: minmax(0, 1fr); }
+  #trainingRunList { border-right: none; border-bottom: 1px solid var(--border); max-height: 200px; }
+}
 #confirmDialog { width: min(440px, calc(100vw - 32px)); border: 1px solid var(--border); border-radius: 18px; padding: 28px; color: var(--text); background: var(--panel); box-shadow: 0 24px 80px #0004; }
 #confirmDialog::backdrop { background: #0b201b66; backdrop-filter: blur(3px); }
 #confirmDialog h2 { font-size: 22px; letter-spacing: -.03em; margin: 0 0 12px; }
@@ -937,6 +965,7 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
       <div class="toolMenu">
         <button id="refreshBtn" style="display:none">Refresh</button>
         <button id="clearConvsBtn" style="display:none">Clear conversations</button>
+        <button id="trainingHistoryBtn">Training history</button>
         <label for="themeSelect">Appearance</label>
         <select id="themeSelect"><option value="auto">System theme</option><option value="light">Light</option><option value="dark">Dark</option></select>
       </div>
@@ -1049,6 +1078,18 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
   </div>
 </section>
 <div id="noticeStack" aria-label="Notifications"></div>
+<dialog id="trainingDialog" aria-labelledby="trainingTitle">
+  <header>
+    <h2 id="trainingTitle">Training history</h2>
+    <select id="trainingStore" aria-label="Evidence store" style="display:none"></select>
+    <span class="spacer"></span>
+    <button id="trainingClose" type="button">Close</button>
+  </header>
+  <div class="trainingBody">
+    <div id="trainingRunList" role="navigation" aria-label="Recorded training runs"></div>
+    <div id="trainingRunDetail" role="region" aria-label="Selected training run"></div>
+  </div>
+</dialog>
 <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmDescription">
   <h2 id="confirmTitle">Delete this empty experiment?</h2>
   <p id="confirmDescription">This removes the unused experiment. Its benchmark and tasks will stay in place. Create a new experiment if you need it again.</p>
@@ -1394,10 +1435,31 @@ function fmtTokens(tokens) {
   /* Split in/out, because they are not interchangeable: input scales with the
      context you resend every step, output with what the model actually wrote,
      and only the split tells you which one a slow turn is paying for. Falls
-     back to the total when a provider reports no breakdown. */
-  if (!tokens || !tokens.total) { return ""; }
-  if (!tokens.in && !tokens.out) { return fmtCount(tokens.total) + " tok"; }
-  return "tok - " + fmtCount(tokens.in) + " in, " + fmtCount(tokens.out) + " out";
+     back to the total when a provider reports no breakdown.
+
+     A level that made LLM calls always says something (fix-9eg.5). It used to
+     fall silent whenever the total was falsy, which put a call that recorded
+     `total_tokens: 0` and a call that recorded no usage at all in the same
+     blank space; the counts on the token object now tell those apart, and the
+     one that nothing counted says so. */
+  if (!tokens || typeof tokens !== "object") { return ""; }
+  if (!tokens.calls) { return tokens.total ? fmtCount(tokens.total) + " tok" : ""; }
+  if (!tokens.counted && !tokens.partial) { return "tokens not recorded"; }
+  var text = (!tokens.in && !tokens.out)
+    ? fmtCount(tokens.total) + " tok"
+    : "tok - " + fmtCount(tokens.in) + " in, " + fmtCount(tokens.out) + " out";
+  var incomplete = tokens.partial + tokens.unrecorded;
+  if (incomplete) {
+    text += " (" + incomplete + " of " + tokens.calls
+      + (tokens.calls === 1 ? " call" : " calls") + " incompletely counted)";
+  }
+  /* Named separately from `incomplete`: a shared call's tokens are not missing,
+     they are counted once under the call that is credited with the response. */
+  if (countOf(tokens.shared)) {
+    text += " (" + tokens.shared + " counted under another call quoting the "
+      + "same provider response)";
+  }
+  return text;
 }
 function fmtCost(duration, tokens, cost) {
   /* Latency, tokens and money are the costs of a level; a level that spent no
@@ -1777,6 +1839,129 @@ function appendCostChip(parent, cost) {
   var text = fmtCostAmount(cost);
   if (!text) { return; }
   parent.appendChild(el("span", "chipCost" + (cost.recorded ? "" : " unrecorded"), text));
+}
+
+/* -- LLM cache state [fix-9eg.6] ------------------------------------------ */
+/* `cache_hit` is a boolean dspy_logger writes when the DSPy history entry
+   carried a response to read it from, and does not write at all otherwise. So
+   there are three answers here, not two, and the absent one is `unknown` — a
+   call served from the cache is an observation about HOW the answer arrived,
+   never a claim that it is stale, replayed or wrong. Nothing here changes any
+   cache behaviour; it only reports what was recorded. */
+function noCache() { return { hit: 0, miss: 0, unknown: 0 }; }
+function cacheStateOf(span) {
+  if (!span || span.name !== "fw.llm.call") { return ""; }
+  var value = (span.attributes || {}).cache_hit;
+  if (value === true) { return "hit"; }
+  if (value === false) { return "miss"; }
+  return "unknown";
+}
+function spanCache(span) {
+  var state = cacheStateOf(span);
+  if (!state) { return noCache(); }
+  var counts = noCache();
+  counts[state] = 1;
+  return counts;
+}
+function addCache(a, b) {
+  return { hit: a.hit + b.hit, miss: a.miss + b.miss, unknown: a.unknown + b.unknown };
+}
+function sumCache(nodes) {
+  return nodes.reduce(function (total, node) {
+    return addCache(total, node.cache || noCache());
+  }, noCache());
+}
+function fmtCacheCounts(cache) {
+  /* "" for a level with no LLM call. Otherwise the states that were recorded,
+     with unknown named rather than folded into "miss". */
+  if (!cache || typeof cache !== "object") { return ""; }
+  var calls = cache.hit + cache.miss + cache.unknown;
+  if (!calls) { return ""; }
+  if (cache.unknown === calls) { return "cache state not recorded"; }
+  var parts = [];
+  if (cache.hit) { parts.push(cache.hit + " from cache"); }
+  if (cache.miss) { parts.push(cache.miss + " from the provider"); }
+  if (cache.unknown) { parts.push(cache.unknown + " not recorded"); }
+  return "cache - " + parts.join(", ");
+}
+function appendCacheChip(parent, cache) {
+  var text = fmtCacheCounts(cache);
+  if (!text) { return; }
+  parent.appendChild(el("span",
+    "chipCost" + (cache.hit ? "" : " unrecorded"), text));
+}
+
+/* -- recorded usage, as the server projected it [fix-9eg.5] --------------- */
+/* The comparison panes read their tokens, money and cache state off the
+   projection's `usage` (comparison.usage_rollup) instead of re-deriving them
+   from spans the pane never loads. Same numbers, same canonical calls, one
+   accounting — which is the point: a chip a person reads and a field an agent
+   reads must not be two independent tallies of the same evidence.
+
+   Every absence keeps its own name. `coverage: "none"` means nothing counted
+   tokens, which is not the same as a recorded zero, and a shared provider
+   response is reported rather than added twice. */
+function fmtUsageTokens(usage) {
+  if (!usage || typeof usage !== "object" || !usage.calls) { return ""; }
+  var tokens = usage.tokens || {};
+  if (tokens.coverage === "none") { return "tokens not recorded"; }
+  /* Each half is printed only if something recorded it, so a provider that
+     reported a total and no split does not appear to have sent 0 prompt
+     tokens. A recorded 0 does print, because it is a measurement. */
+  var split = [];
+  if (exactInt(tokens.prompt) !== null) {
+    split.push(fmtCount(tokens.prompt) + " in");
+  }
+  if (exactInt(tokens.completion) !== null) {
+    split.push(fmtCount(tokens.completion) + " out");
+  }
+  var text = split.length
+    ? "tok - " + split.join(", ")
+    : fmtCount(tokens.total) + " tok";
+  var uncounted = (tokens.unrecorded || 0) + (tokens.partial || 0)
+    + (tokens.shared || 0);
+  if (uncounted) {
+    text += " (" + uncounted + " of " + usage.calls
+      + (usage.calls === 1 ? " call" : " calls") + " incompletely counted)";
+  }
+  return text;
+}
+function fmtUsageCalls(usage) {
+  if (!usage || typeof usage !== "object") { return ""; }
+  if (!usage.calls) { return "no LLM call recorded"; }
+  var text = fmtCount(usage.calls) + (usage.calls === 1 ? " LLM call" : " LLM calls");
+  if (usage.open) { text += ", " + usage.open + " still open"; }
+  /* Why this number can be lower than the span count on screen. Both folds
+     are named because they are different facts about the recording. */
+  var folded = [];
+  if (usage.records_folded) {
+    folded.push(usage.records_folded + " repeated record(s)");
+  }
+  if (usage.wrappers_folded) {
+    folded.push(usage.wrappers_folded + " nested wrapper(s)");
+  }
+  if (folded.length) { text += " — counted once despite " + folded.join(" and "); }
+  if (usage.shared_responses) {
+    text += " — " + usage.shared_responses
+      + " quote a provider response another call already accounts for, so "
+      + "their tokens are counted once";
+  }
+  return text;
+}
+function appendUsageChips(parent, usage) {
+  /* The compact renderer: calls, then tokens, then cache, each omitted when
+     there is nothing recorded to say. */
+  if (!usage || typeof usage !== "object") { return; }
+  var calls = fmtUsageCalls(usage);
+  if (calls) { parent.appendChild(el("span", "chipCost", calls)); }
+  var tokens = fmtUsageTokens(usage);
+  if (tokens) {
+    parent.appendChild(el("span",
+      "chipCost" + (tokens === "tokens not recorded" ? " unrecorded" : ""),
+      tokens));
+  }
+  appendCostChip(parent, usage.cost);
+  appendCacheChip(parent, usage.cache);
 }
 
 /* -- execution ledger [fix-aou (a)] --------------------------------------- */
@@ -3888,6 +4073,12 @@ function renderTaskRuns(container, experimentId, taskId, label, crumbs, nav) {
       "rate stored at write time cannot say which."));
     container.appendChild(card);
     renderTaskRunList(card, experimentId, taskId, label, evidence, runs, nav);
+    /* Consistency reads the same recorded attempts this list just printed, so
+       it belongs under them rather than on a page of its own. Its own
+       container: it loads separately and must not blank the list if it fails. */
+    var consistency = el("div");
+    card.appendChild(consistency);
+    renderConsistency(consistency, experimentId, taskId, label, nav, null);
   }).catch(function (e) {
     if (expNavStale(nav)) { return; }
     clear(container);
@@ -4496,6 +4687,7 @@ function resetTaskCompare(experimentId, taskId) {
 function onSourceSwitch() {
   taskCompare = { key: null, left: null, right: null, rightExperiment: null,
                   view: "answers", leftPass: null, rightPass: null };
+  trainingHistoryReset();
 }
 
 var COMPARE_VIEWS = [
@@ -4527,6 +4719,274 @@ function compareKindLabel(kind) {
   return kind || "unpaired";
 }
 
+/* -- Consistency between the repeated runs of one task (fix-9eg.17.5) -------
+
+   One compact band, on the Runs view and again under the Compare view, fed by
+   GET .../tasks/<id>/consistency. Everything it prints is a value the route
+   computed: the page performs no similarity, no averaging and no rounding of
+   its own beyond display precision, so a coding agent reading the same JSON
+   and a person reading this panel are looking at the same numbers with the
+   same definitions and the same coverage.
+
+   It never renders a verdict. There is no target line, no pass/fail colour and
+   no "good"/"poor" wording, because agreement between runs is consistency and
+   this product does not claim consistency is correctness. Clicking a pair
+   opens the EXISTING comparison for those two attempts, which is where the
+   existing feedback taxonomy already lets somebody say what they made of it. */
+function renderConsistency(container, experimentId, taskId, label, nav, focus) {
+  clear(container);
+  container.appendChild(el("div", "sub", "measuring consistency…"));
+  selectionRead(taskSelectionPath(experimentId, taskId, "/consistency"))
+    .then(function (report) {
+      if (expNavStale(nav)) { return; }
+      clear(container);
+      if (report.unavailable) {
+        /* The route's own sentence. "this experiment joined no contest" is an
+           answer; "Could not load" is not. */
+        selectionNote(container,
+          "Consistency cannot be measured for this task.", report.error);
+        return;
+      }
+      paintConsistency(container, experimentId, taskId, label, report, focus);
+    }).catch(function (e) {
+      if (expNavStale(nav)) { return; }
+      clear(container);
+      container.appendChild(
+        el("div", "sub", "Could not measure consistency: " + e.message));
+    });
+}
+
+function fmtCosine(value) {
+  return (value === null || value === undefined) ? "—" : value.toFixed(3);
+}
+function fmtStat(value, places) {
+  return (value === null || value === undefined) ? "—" : value.toFixed(places);
+}
+
+function paintConsistency(container, experimentId, taskId, label, report, focus) {
+  var box = el("div", "consistencyPanel");
+  box.setAttribute("data-consistency", "1");
+  box.appendChild(el("h3", null, "Consistency across repeated runs"));
+  box.appendChild(el("div", "sub", report.interpretation));
+
+  var identity = report.metric_identity || {};
+  var embedding = identity.embedding || {};
+  if (embedding.available === false) {
+    /* Not an error and not a silent gap: the similarity metrics need a local
+       model this machine does not have, the step metrics beside them do not,
+       and the remedy is the route's own words rather than this page's guess. */
+    selectionNote(box, "Text similarity is unavailable on this machine.",
+      (embedding.reason || "") + (embedding.remedy ? " " + embedding.remedy : ""));
+  }
+  if (report.insufficient_repeats) {
+    selectionNote(box, "Not enough repeats to compare.",
+      report.insufficient_repeats_note);
+  }
+
+  var summary = report.summary || {};
+  var stats = el("div", "consistencyStats");
+  stats.appendChild(similarityStat("Planning similarity",
+    summary.planning_similarity,
+    "cosine between the recorded plan sequences, turn boundaries kept"));
+  stats.appendChild(similarityStat("Final-answer similarity",
+    summary.final_answer_similarity,
+    "cosine between the last recorded turn's answers; similar wording is not "
+    + "proof of equal facts or artifacts"));
+  stats.appendChild(stepCountStat(summary.step_counts));
+  box.appendChild(stats);
+  box.appendChild(el("div", "sub", summary.independence_note || ""));
+
+  var coverage = report.coverage || {};
+  if (coverage.pairs_capped || coverage.runs_capped) {
+    selectionNote(box, "This is a bounded calculation, not all of them.",
+      "Reported " + fmtCount(coverage.pairs_reported) + " of "
+      + fmtCount(coverage.pairs_possible) + " possible pairs"
+      + ((coverage.runs_cap_detail && coverage.runs_cap_detail.attempts_omitted)
+          ? ", over " + fmtCount(coverage.runs_cap_detail.attempts_reported)
+            + " of " + fmtCount(coverage.runs_cap_detail.attempts_recorded)
+            + " recorded attempts"
+          : "")
+      + ".");
+  }
+
+  var reference = report.reference || {};
+  if (reference.usable && (report.reference_rows || []).length) {
+    box.appendChild(el("div", "sub",
+      "Best run (attempt " + reference.attempt + ") against each other run. "
+      + "These rows follow the choice; the figures above do not."));
+    report.reference_rows.forEach(function (pair) {
+      box.appendChild(consistencyPairButton(
+        experimentId, taskId, label, pair, focus));
+    });
+  } else if (reference.reason) {
+    box.appendChild(el("div", "sub", reference.reason));
+  }
+
+  if ((report.pairs || []).length) {
+    var all = el("details", "consistencyPairs");
+    all.appendChild(el("summary", null,
+      "Every pair (" + fmtCount(report.pairs.length) + ")"));
+    report.pairs.forEach(function (pair) {
+      all.appendChild(consistencyPairButton(
+        experimentId, taskId, label, pair, focus));
+    });
+    box.appendChild(all);
+  }
+
+  if (report.comparison) { renderConsistencyComparison(box, report.comparison); }
+  box.appendChild(el("div", "sub",
+    "Measured as " + (identity.metrics_version || "?") + " / "
+    + (identity.text_projection_version || "?")
+    + (embedding.model_id ? " / " + embedding.model_id : "")
+    + (embedding.revision ? "@" + String(embedding.revision).slice(0, 12) : "")
+    + ". Steps counted by " + (identity.step_count_rule || "?") + "."
+    + (embedding.long_text_rule ? " " + embedding.long_text_rule : "")));
+  container.appendChild(box);
+}
+
+/* One similarity figure, with its denominator beside it.
+
+   The denominator is not decoration: a mean of 0.95 over two eligible pairs
+   out of fifteen is a different fact from the same mean over all fifteen, and
+   printing only the mean is how the second gets read as the first. */
+function similarityStat(title, stat, definition) {
+  var node = el("div", "consistencyStat");
+  node.appendChild(el("strong", null, title));
+  node.appendChild(el("div", "sub", definition));
+  if (!stat || !stat.pairs_computed) {
+    node.appendChild(el("div", "figures", "no pair could be compared"));
+    var reasons = (stat && stat.unknown_reasons) || {};
+    Object.keys(reasons).forEach(function (reason) {
+      node.appendChild(el("div", "sub", reasons[reason] + " × " + reason));
+    });
+    return node;
+  }
+  node.appendChild(el("div", "figures",
+    "mean " + fmtCosine(stat.mean) + " · min " + fmtCosine(stat.min)
+    + " · max " + fmtCosine(stat.max) + " · spread " + fmtCosine(stat.spread)));
+  node.appendChild(el("div", "sub", stat.spread_formula));
+  node.appendChild(el("div", "sub",
+    fmtCount(stat.pairs_computed) + " of " + fmtCount(stat.pairs_considered)
+    + " pairs compared"
+    + (stat.pairs_unknown ? ", " + fmtCount(stat.pairs_unknown)
+       + " had no text on one side" : "")
+    + (stat.pairs_unavailable ? ", " + fmtCount(stat.pairs_unavailable)
+       + " need the local model" : "")));
+  if (stat.pairs_partial_coverage) {
+    node.appendChild(el("div", "sub",
+      fmtCount(stat.pairs_partial_coverage) + " computed over a shortened "
+      + "projection, so they are not similarities of the full text"));
+  }
+  return node;
+}
+
+function stepCountStat(stat) {
+  var node = el("div", "consistencyStat");
+  node.appendChild(el("strong", null, "Executed steps"));
+  node.appendChild(el("div", "sub",
+    "distinct dispatches in the execution ledger, including failures, retries "
+    + "and navigation; wrappers and repeated span updates count once"));
+  if (!stat || !stat.runs_with_known_count) {
+    node.appendChild(el("div", "figures", "no run has a known step count"));
+    return node;
+  }
+  node.appendChild(el("div", "figures",
+    "mean " + fmtStat(stat.mean, 2) + " · min " + stat.min + " · max "
+    + stat.max + " · population SD " + fmtStat(stat.population_sd, 2)));
+  node.appendChild(el("div", "sub", stat.sd_formula));
+  /* Unknown is not zero, and the attempts are named so the reader can open
+     the ones that have no count rather than wonder which they were. */
+  if ((stat.attempts_unknown || []).length) {
+    node.appendChild(el("div", "sub",
+      "no count recorded for attempt(s) " + stat.attempts_unknown.join(", ")
+      + " — unknown, not zero"));
+  }
+  if ((stat.attempts_partial || []).length) {
+    node.appendChild(el("div", "sub",
+      "attempt(s) " + stat.attempts_partial.join(", ")
+      + " could only be read in part, so their counts are excluded here"));
+  }
+  return node;
+}
+
+/* One pair, and a way into the comparison it describes.
+
+   The click sets exactly what the Compare view's own controls set, so the pair
+   opens in the existing component with the existing pair composer — the same
+   Observations / Analysis, Conclusions and Recommendations taxonomy, against
+   the same review pair key this row was counted under. */
+function consistencyPairButton(experimentId, taskId, label, pair, focus) {
+  var button = el("button", "consistencyPair");
+  button.type = "button";
+  button.setAttribute("data-pair",
+    String(pair.left_attempt) + ":" + String(pair.right_attempt));
+  if (focus && String(focus.left) === String(pair.left_attempt)
+      && String(focus.right) === String(pair.right_attempt)) {
+    button.className = "consistencyPair pairFocused";
+  }
+  button.appendChild(el("div", null,
+    "attempt " + pair.left_attempt + " vs attempt " + pair.right_attempt));
+  button.appendChild(el("div", "sub",
+    "plan " + pairMetricText(pair.planning)
+    + " · answer " + pairMetricText(pair.final_answer)
+    + " · " + pairStepText(pair.steps)));
+  button.addEventListener("click", function () {
+    taskCompare.left = String(pair.left_attempt);
+    taskCompare.right = String(pair.right_attempt);
+    taskCompare.rightExperiment = pair.right_experiment_id || experimentId;
+    taskView = "compare";
+    showExperimentTask(experimentId, taskId, label);
+  });
+  return button;
+}
+
+function pairMetricText(metric) {
+  if (!metric) { return "—"; }
+  if (metric.state === "computed") {
+    return fmtCosine(metric.cosine)
+      + (metric.coverage === "partial" ? " (partial)" : "");
+  }
+  if (metric.state === "unavailable") { return "needs the local model"; }
+  /* Which side was missing, not just that something was. */
+  return metric.reason || "unknown";
+}
+
+function pairStepText(steps) {
+  if (!steps || steps.state !== "computed") {
+    return "steps " + ((steps && steps.reason) || "unknown");
+  }
+  var delta = steps.delta > 0 ? "+" + steps.delta : String(steps.delta);
+  return "steps " + steps.left + " vs " + steps.right + " (" + delta + ", "
+    + steps.normalized_difference_pct.toFixed(1) + "%)";
+}
+
+/* The same task under two experiments. Refused deltas are printed as refusals
+   with the mismatch that caused them, because a number nobody may subtract is
+   more dangerous than a blank. */
+function renderConsistencyComparison(box, comparison) {
+  var node = el("div", "consistencyStat");
+  node.appendChild(el("strong", null, "Against "
+    + String((comparison.baseline || {}).experiment_id || "").slice(-8)));
+  node.appendChild(el("div", "sub", comparison.note));
+  node.appendChild(el("div", "sub",
+    "repeats: " + fmtCount((comparison.baseline || {}).runs || 0) + " vs "
+    + fmtCount((comparison.candidate || {}).runs || 0)));
+  if (!comparison.metric_identity_matches) {
+    selectionNote(node, "These two cannot be subtracted.",
+      "They were not measured the same way: "
+      + (comparison.mismatches || []).join("; "));
+  }
+  var deltas = comparison.deltas || {};
+  Object.keys(deltas).forEach(function (name) {
+    var delta = deltas[name];
+    node.appendChild(el("div", delta.state === "computed" ? "figures" : "sub",
+      name + ": " + (delta.state === "computed"
+        ? (delta.delta >= 0 ? "+" : "") + delta.delta.toFixed(3)
+        : (delta.reason || "not comparable"))));
+  });
+  box.appendChild(node);
+}
+
 function renderTaskCompare(container, experimentId, taskId, nav) {
   var card = el("div", "card");
   card.appendChild(el("h2", null, "Compare two recorded runs"));
@@ -4535,8 +4995,13 @@ function renderTaskCompare(container, experimentId, taskId, nav) {
     + "artifacts, then how they got there."));
   var controls = el("div", "selectionBar");
   var body = el("div");
+  /* The consistency band sits below the pair, in its own container, and is
+     repainted with the pair so the row for the two runs on screen is the
+     highlighted one. Kept out of `body` because `paint()` clears that. */
+  var consistency = el("div");
   card.appendChild(controls);
   card.appendChild(body);
+  card.appendChild(consistency);
   container.appendChild(card);
   body.appendChild(el("div", "empty", "loading runs…"));
 
@@ -4603,12 +5068,20 @@ function renderTaskCompare(container, experimentId, taskId, nav) {
           /* The route's own words. "attempt 4 recorded no turns" is the
              answer; an empty two-pane layout is not. */
           selectionNote(body, "These two cannot be compared.", cmp.error);
+          clear(consistency);
           return;
         }
         renderRunComparison(body, cmp, context);
+        /* The band annotates the pair, so it is fetched once the pair is on
+           screen rather than beside it. Issued together, the two requests
+           compete and the slower one (this: it embeds text) delays the
+           comparison the reader actually asked for. */
+        renderConsistency(consistency, experimentId, taskId, null, nav,
+          { left: taskCompare.left, right: taskCompare.right });
       }).catch(function (e) {
         if (expNavStale(nav)) { return; }
         clear(body);
+        clear(consistency);
         body.appendChild(el("div", "empty", "Could not compare: " + e.message));
       });
   }
@@ -4797,9 +5270,10 @@ function renderCaptureLabels(container, cmp) {
 
 /* A pass selector only where the EVIDENCE stamped a pass.
 
-   Nothing in fastWorkflow stamps one today, so this asks once per side and
-   renders nothing at all in the ordinary case. It never offers a pass a client
-   would then have to assert membership for. */
+   A distilled turn stamps two (`fix-txxy`, teacher and student); an ordinary
+   turn stamps none, so this asks once per side and renders nothing at all in
+   that case. It never offers a pass a client would then have to assert
+   membership for. */
 function renderPassControls(container, cmp, ctx) {
   var sides = [
     ["Left", cmp.left_run, "leftPass", ctx.experimentId],
@@ -4832,12 +5306,119 @@ function renderPassControls(container, cmp, ctx) {
   });
 }
 
+/* What a pass recorded about itself, beside the answer it produced.
+
+   All three of these are absent unless a producer recorded pass content, and
+   all three stay absent rather than being filled in from the turn: a pass that
+   recorded nothing reads as shared, which is what it is. */
+
+function appendRecordedEnvelope(block, turn) {
+  /* BOTH recorded fields, and both ways a value can be less than whole.
+
+     `answer` and `plan` are the two the sink classifies as user-text, so
+     either can come back withheld under the evidence profile or cut by a
+     declared bounded-text policy; either can also be capped by the tracing
+     attribute limit before the policy ever sees it. Showing a prefix with no
+     badge presents part of an answer as the whole of one, and showing nothing
+     for a withheld value is indistinguishable from a pass that said nothing. */
+  var content = turn.pass_content || {};
+  [["answer", "answer"], ["plan", "plan"]].forEach(function (field) {
+    var recorded = content[field[0]];
+    var env = captureEnvelope(recorded);
+    if (env) {
+      /* The page's own wording for a policed value, quoted from the envelope:
+         "cut by policy: ..." when a prefix survived, "withheld by policy: ..."
+         when none did.
+
+         `truncated_before_capture` means the emitter had already cut the value
+         when the policy saw it, so the size and digest in that wording are the
+         PREFIX's. Said here, because a badge reading "29 bytes" about a 4 KiB
+         answer is worse than no badge. */
+      block.appendChild(el("div", "chipMarker unknown",
+        "this pass's " + field[1] + " — " + envelopeText(env)
+        + (env.truncated_before_capture
+            ? "; already truncated on recording, so that size and digest are of "
+              + "the kept prefix only"
+              + (env.original_length === undefined || env.original_length === null
+                  ? ""
+                  : " of " + fmtCount(env.original_length) + " bytes")
+            : "")));
+      return;
+    }
+    if (recorded && typeof recorded === "object" && recorded.truncated) {
+      /* BYTES: `tracing.cap_attr_value` encodes to UTF-8 and measures the
+         encoding, so calling these characters overstates the value by however
+         much of it was not ASCII. */
+      block.appendChild(el("div", "chipMarker unknown",
+        "this pass's " + field[1] + " was truncated on recording — "
+        + (recorded.original_length === undefined || recorded.original_length === null
+            ? "original size not recorded"
+            : fmtCount(recorded.original_length) + " bytes were produced")));
+    }
+  });
+}
+
+function appendPassPlan(block, turn) {
+  var recordedPlan = (turn.pass_content || {}).plan;
+  var planEnvelope = captureEnvelope(recordedPlan);
+  if (!turn.plan && !planEnvelope) { return; }
+  var box = el("details", "artifactPreview");
+  box.appendChild(el("summary", null, "Plan this pass generated"));
+  if (planEnvelope) {
+    /* Withheld or cut by the capture policy. The envelope IS the content here:
+       parsing a policy prefix as a plan would render half a JSON document as
+       though it were the sequence the pass produced. */
+    appendPoliced(box, recordedPlan);
+    block.appendChild(box);
+    return;
+  }
+  var steps = null;
+  try { steps = JSON.parse(turn.plan); } catch (err) { steps = null; }
+  if (!Array.isArray(steps)) {
+    /* Recorded text that is not the shape this reader expects is shown
+       verbatim rather than guessed at or dropped. */
+    appendPoliced(box, turn.plan);
+  } else if (!steps.length) {
+    box.appendChild(el("div", "sub", "This pass recorded no planning step."));
+  } else {
+    steps.forEach(function (step) {
+      var lines = (step && step.generated_plan) || [];
+      box.appendChild(el("div", "sub",
+        "planning step " + ((step && step.step_number) === undefined
+          ? "(unnumbered)" : step.step_number)));
+      appendPoliced(box, Array.isArray(lines) ? lines.join("\n") : String(lines));
+    });
+  }
+  block.appendChild(box);
+}
+
+function appendSharedTurnAnswer(block, turn, answer) {
+  if (!turn.turn_answer || turn.turn_answer === answer.answer) { return; }
+  /* Both passes share one turn row, and it says something different from what
+     this pass said. Kept beside the pass's own answer, never in place of it. */
+  var box = el("details", "artifactPreview");
+  box.appendChild(el("summary", null,
+    "The turn recorded a different answer"
+    + (turn.turn_status ? " (" + turn.turn_status + ")" : "")));
+  appendPoliced(box, turn.turn_answer);
+  block.appendChild(box);
+}
+
 function renderAnswerPane(which, projection, run, ctx) {
   var side = pairSide(ctx.comparison, which);
   var pane = el("div", "comparePane");
   pane.appendChild(el("h3", null,
     which === "left" ? "Left" : "Right"));
   var rows = (projection && projection.answers) || [];
+  /* The turn rows carry what the answer rows cannot: the plan this pass
+     generated, the shared turn answer its own answer is being distinguished
+     from, and the recorded envelope that says whether what is shown is the
+     whole thing. Joined by turn index, the one identity both halves of the
+     payload state. */
+  var turnsByIndex = {};
+  ((projection && projection.turns) || []).forEach(function (turn) {
+    turnsByIndex[turn.turn_index] = turn;
+  });
   if (!rows.length) {
     pane.appendChild(el("div", "sub", "No recorded turn on this side."));
     return pane;
@@ -4850,11 +5431,35 @@ function renderAnswerPane(which, projection, run, ctx) {
       meta.appendChild(el("span", "chipMarker bad", answer.failure_reason));
     }
     block.appendChild(meta);
+    var turn = turnsByIndex[answer.turn_index] || {};
     /* Verbatim, through textContent. The recorded answer is the author's and is
-       never re-wrapped, summarised or parsed on its way to the screen. */
-    appendPoliced(block, answer.answer === null || answer.answer === undefined
-      ? "(no answer recorded)" : answer.answer);
-    if (answer.attribution && answer.attribution !== "turn") {
+       never re-wrapped, summarised or parsed on its way to the screen.
+
+       A policed pass answer is rendered from the ENVELOPE rather than from the
+       projected text: the projection quotes the surviving prefix and answers
+       null for a withheld value, and "(no answer recorded)" is a claim about
+       the pass that a withheld value does not support. */
+    var recordedAnswer = (turn.pass_content || {}).answer;
+    if (answer.attribution === "pass" && captureEnvelope(recordedAnswer)) {
+      appendPoliced(block, recordedAnswer);
+    } else {
+      appendPoliced(block, answer.answer === null || answer.answer === undefined
+        ? "(no answer recorded)" : answer.answer);
+    }
+    if (answer.attribution === "pass") {
+      /* Recorded AS this pass's own (`fix-txxy`). Every non-turn attribution
+         used to be labelled "shared", which denied exactly the divergence a
+         teacher/student comparison is opened to look at. */
+      block.appendChild(el("div", "chipMarker",
+        "recorded for this pass"
+        + (answer.pass_id ? " — " + answer.pass_id : "")));
+      appendRecordedEnvelope(block, turn);
+      appendPassPlan(block, turn);
+      appendSharedTurnAnswer(block, turn, answer);
+    } else if (answer.attribution && answer.attribution !== "turn") {
+      /* Still the honest label for every trace recorded before a producer
+         stamped its passes, and for a pass that recorded no content of its
+         own: the text above is the turn's and both passes share it. */
       block.appendChild(el("div", "chipMarker unknown",
         "shared across passes — this text is the turn's, not this pass's"));
     }
@@ -5288,6 +5893,39 @@ function renderComparisonSummary(container, cmp) {
     "Rows are matched from recorded command identity, context and parameters — "
     + "never from list position, so an inserted or repeated call shows up as a "
     + "gap instead of being paired up to make the two lists the same length."));
+  renderComparisonUsage(container, cmp);
+}
+
+/* What each side spent, from the projection's own roll-up (fix-9eg.5/.6).
+
+   Read off `usage`, not re-derived: the comparison pane never loads the spans,
+   and a second tally here is exactly how a chip and an agent's structured read
+   come to disagree about one recorded execution. A side with no recorded LLM
+   call says so; a difference in cache hits is reported and nothing is
+   concluded from it, because being answered from the cache is not a reason to
+   prefer or reject a run. */
+function renderComparisonUsage(container, cmp) {
+  var sides = [["Left", cmp.left], ["Right", cmp.right]].filter(function (side) {
+    return side[1] && side[1].usage;
+  });
+  if (!sides.length) { return; }
+  container.appendChild(el("h2", null, "Tokens, cost and cache"));
+  sides.forEach(function (side) {
+    var box = el("div", "sub");
+    box.appendChild(el("strong", null, side[0] + ": "));
+    appendUsageChips(box, side[1].usage);
+    container.appendChild(box);
+  });
+  var hits = sides.map(function (side) {
+    return (side[1].usage.cache || {}).hit || 0;
+  });
+  if (sides.length === 2 && hits[0] !== hits[1]) {
+    container.appendChild(el("div", "sub",
+      "The two sides were served from the LLM cache a different number of "
+      + "times (" + hits[0] + " versus " + hits[1] + "). That is an "
+      + "observation about how each answer arrived; it is not a difference in "
+      + "what either run did, and it does not decide between them."));
+  }
 }
 
 function renderAlignment(container, cmp, ctx) {
@@ -5956,6 +6594,374 @@ function openBenchmarkSetup() {
 document.getElementById("benchmarkSetupBtn").addEventListener("click", openBenchmarkSetup);
 
 
+/* -- training history [fix-9eg.2] --------------------------------------
+   A read of the `train_runs` rows the trainer already wrote at publication
+   time. Nothing here starts a training run, opens ___command_info or fetches
+   anything from a network.
+
+   Two things this section must not do, because both would be the page making
+   a claim the evidence does not:
+
+   * rename what was measured. `in_distribution_f1`, `routing` and
+     `escalation` are the intent classifier's held-out numbers on the
+     trainer's synthetic evaluation set. They keep those names here and are
+     captioned with that dataset; a "score" column would be read as a
+     task-success rate, which none of them is.
+   * guess which recorded run used which trained model set. The only link
+     drawn is an exact match between the training run's published version id
+     and the version id a server STAMPED on an attempt. A workflow's source
+     fingerprint does not move when only its trained artifacts do, and "the
+     newest training run" is a guess, so neither is ever used: a run with no
+     recorded version id reads as unavailable, not as unmatched. */
+var trainingHistory = {storeId: null, runs: [], runId: null, seq: 0};
+
+/* Every read this section makes is scoped to ONE source and ONE store inside
+   it, and both can change while a read is in flight. Two independent guards,
+   because they fail differently:
+
+   * the SEQUENCE moves whenever a list or a detail starts, so a slower
+     earlier read finds itself disowned. Without it, a list issued against the
+     store the user just left could land last and overwrite `runs` -- after
+     which a click resolved a run id belonging to the old store against the
+     new one, which in a workspace is a different training run under the same
+     id rather than an error.
+   * the SOURCE is captured at the moment the read is issued and re-checked
+     when it lands. It covers what a counter cannot: a switch away and back
+     while one read is outstanding leaves the sequence looking current again.
+
+   This is the same rule `expNavToken` / `workspaceNav` / `turnFind.seq`
+   already state for the panes they own; `resetSourceScopedState` reaches this
+   one through `onSourceSwitch`. */
+function trainingSource() {
+  /* In a workspace the manifest is the source and the archives are stores, so
+     the store belongs in the identity: `run-000` names a different training
+     run in each archive. */
+  return sourceIdentity(session) + "|" + (trainingHistory.storeId || "");
+}
+
+function trainingToken() { return ++trainingHistory.seq; }
+
+function trainingStale(token, source) {
+  return token !== trainingHistory.seq || source !== trainingSource();
+}
+
+function trainingHistoryReset() {
+  /* Called from the page's source boundary. In-flight reads are invalidated
+     rather than awaited, the remembered store goes with the source it named,
+     and the section is closed: what it is showing belongs to evidence that is
+     no longer selected. */
+  trainingHistory.seq++;
+  trainingHistory.storeId = null;
+  trainingHistory.runs = [];
+  trainingHistory.runId = null;
+  var dialog = document.getElementById("trainingDialog");
+  if (!dialog) { return; }
+  if (dialog.open) {
+    if (dialog.close) { dialog.close(); } else { dialog.removeAttribute("open"); }
+  }
+  clear(document.getElementById("trainingRunList"));
+  clear(document.getElementById("trainingRunDetail"));
+  clear(document.getElementById("trainingStore"));
+}
+
+var TRAINING_METRICS_NOTE = {
+  withheld: "Metrics withheld by this deployment's capture policy. The run is on record; its numbers are not.",
+  unreadable: "This run's recorded metrics could not be read back.",
+  absent: "This run recorded no metrics."
+};
+
+var TRAINING_HELDOUT_CAPTION =
+  "Held-out intent-classification metrics, under the names the trainer recorded "
+  + "them with, measured on its own generated evaluation set. They are not a "
+  + "task-success rate and say nothing about whether a benchmark task passed.";
+
+function trainingListPath() {
+  if (session && session.workspace_mode) {
+    return "/api/workspace/training-runs?store_id="
+      + encodeURIComponent(trainingHistory.storeId || "");
+  }
+  return "/api/training-runs";
+}
+
+function trainingDetailPath(runId) {
+  if (session && session.workspace_mode) {
+    return "/api/workspace/training-run/"
+      + encodeURIComponent(trainingHistory.storeId || "")
+      + "/" + encodeURIComponent(runId);
+  }
+  return "/api/training-run/" + encodeURIComponent(runId);
+}
+
+function trainingRunTitle(run) {
+  /* The published version id IS the trained set's identity, so it is the
+     name. A run that recorded none is named by its run id and says so in the
+     sub-line rather than borrowing a version it never published. */
+  return run.version_id || ("Run " + String(run.run_id || ""));
+}
+
+function trainingField(parent, label, value) {
+  var row = el("div", "sub");
+  row.appendChild(el("strong", null, label + ": "));
+  appendPoliced(row, value === null || value === undefined || value === "" ? "not recorded" : value);
+  parent.appendChild(row);
+  return row;
+}
+
+function trainingRuntimeLink(parent, link) {
+  var card = el("div", "card");
+  card.appendChild(el("h3", null, "Runs on this trained model set"));
+  if (!link || link.status === "unavailable") {
+    card.appendChild(el("p", "trainingUnavailable",
+      (link && link.reason) || "No recorded model identity, so no association is available."));
+    parent.appendChild(card);
+    return card;
+  }
+  if (link.status === "no_match") {
+    card.appendChild(el("p", "sub",
+      "No recorded attempt stamped version " + link.version_id + "."
+      + (link.scan_bounded
+        ? " Only the " + link.experiments_scanned + " most recent experiments were searched."
+        : "")));
+    parent.appendChild(card);
+    return card;
+  }
+  card.appendChild(el("p", "sub",
+    link.attempts.length + (link.attempts.length === 1 ? " attempt" : " attempts")
+    + " recorded the published version " + link.version_id
+    + " as the model set they ran on."));
+  var list = el("div", "convTurns");
+  link.attempts.forEach(function (row) {
+    var item = el("div", "listItem");
+    item.appendChild(el("div", "title", row.task_id + " · attempt " + row.attempt));
+    item.appendChild(el("div", "sub",
+      "experiment " + row.experiment_id
+      + (row.outcome ? " · " + row.outcome : " · no outcome recorded")
+      + " · " + fmtTs(row.started_at)));
+    list.appendChild(item);
+  });
+  card.appendChild(list);
+  parent.appendChild(card);
+  return card;
+}
+
+function trainingContextCard(parent, entry) {
+  var card = el("details", "card");
+  card.appendChild(el("summary", null, entry.context_folder));
+  var thresholds = entry.thresholds || {};
+  var names = Object.keys(thresholds);
+  if (names.length) {
+    names.sort().forEach(function (name) {
+      trainingField(card, name, thresholds[name]);
+    });
+  } else {
+    card.appendChild(el("p", "trainingUnavailable", "No thresholds recorded for this context."));
+  }
+  if (entry.heldout) {
+    var heldout = entry.heldout;
+    if (heldout.context !== undefined) {
+      trainingField(card, "evaluated as context", heldout.context);
+    }
+    if (heldout.in_distribution_f1 !== undefined) {
+      trainingField(card, "in_distribution_f1", heldout.in_distribution_f1);
+    }
+    ["routing", "escalation"].forEach(function (key) {
+      if (heldout[key] === undefined) { return; }
+      var box = el("div", "sub");
+      box.appendChild(el("strong", null, key + ": "));
+      box.appendChild(el("pre", null, pretty(heldout[key])));
+      card.appendChild(box);
+    });
+  } else {
+    /* A carried-forward context of a selective run publishes thresholds and
+       no held-out report. Printing zeros here would invent a measurement. */
+    card.appendChild(el("p", "trainingUnavailable",
+      "No held-out evaluation recorded for this context in this run."));
+  }
+  parent.appendChild(card);
+  return card;
+}
+
+function renderTrainingRun(run) {
+  var pane = document.getElementById("trainingRunDetail");
+  clear(pane);
+  if (!run) {
+    emptyState(pane, "Select a training run",
+      "Each row is one published training run, newest first.");
+    return;
+  }
+  pane.appendChild(el("h3", null, trainingRunTitle(run)));
+  if (!run.model_identity_recorded) {
+    pane.appendChild(el("p", "trainingUnavailable",
+      "This run published no version id. A workflow trained on the "
+      + "pre-versioning artifact layout records none while being fully "
+      + "trained, so its model identity is unavailable rather than absent."));
+  }
+  var note = TRAINING_METRICS_NOTE[run.metrics_status];
+  if (note) { pane.appendChild(el("p", "trainingUnavailable", note)); }
+
+  var identity = el("div", "card");
+  identity.appendChild(el("h3", null, "What was recorded"));
+  trainingField(identity, "run id", run.run_id);
+  trainingField(identity, "version id", run.version_id);
+  trainingField(identity, "previous version", run.previous_version);
+  trainingField(identity, "workflow fingerprint", run.workflow_fingerprint);
+  trainingField(identity, "started", fmtTs(run.started_at));
+  trainingField(identity, "completed", fmtTs(run.completed_at));
+  trainingField(identity, "seed", run.seed);
+  trainingField(identity, "training duration (s)", run.train_duration_seconds);
+  trainingField(identity, "contexts retrained",
+    (run.contexts_retrained || []).join(", "));
+  trainingField(identity, "contexts carried forward",
+    (run.contexts_carried_forward || []).join(", "));
+  Object.keys(run.base_models || {}).sort().forEach(function (role) {
+    /* The base checkpoint that was fine-tuned, NOT the trained set's
+       identity: two different trained sets share these strings. */
+    trainingField(identity, "base model (" + role + ")", run.base_models[role]);
+  });
+  pane.appendChild(identity);
+
+  trainingRuntimeLink(pane, run.runtime_link);
+
+  var metrics = el("div", "card");
+  metrics.appendChild(el("h3", null, "Thresholds and held-out metrics"));
+  metrics.appendChild(el("p", "trainingCaption", TRAINING_HELDOUT_CAPTION));
+  if ((run.contexts || []).length) {
+    run.contexts.forEach(function (entry) { trainingContextCard(metrics, entry); });
+  } else {
+    metrics.appendChild(el("p", "trainingUnavailable",
+      "No per-context metrics are available for this run."));
+  }
+  if (Object.keys(run.totals || {}).length) {
+    var totals = el("details", "card");
+    totals.appendChild(el("summary", null, "totals (as recorded)"));
+    totals.appendChild(el("pre", null, pretty(run.totals)));
+    metrics.appendChild(totals);
+  }
+  if (Object.keys(run.commands || {}).length) {
+    var commands = el("details", "card");
+    commands.appendChild(el("summary", null,
+      "utterance counts per command (" + Object.keys(run.commands).length + ")"));
+    commands.appendChild(el("pre", null, pretty(run.commands)));
+    metrics.appendChild(commands);
+  }
+  pane.appendChild(metrics);
+}
+
+function selectTrainingRun(runId) {
+  trainingHistory.runId = runId;
+  renderTrainingRunList();
+  var token = trainingToken();
+  var source = trainingSource();
+  /* The URL is built HERE, from the store this run was listed under, and not
+     again when the response lands: resolving it later would read the id
+     against whatever store is selected by then. */
+  var path = trainingDetailPath(runId);
+  var pane = document.getElementById("trainingRunDetail");
+  clear(pane);
+  pane.appendChild(el("div", "empty", "Loading training run…"));
+  return api(path).then(function (data) {
+    if (trainingStale(token, source)) { return; }
+    renderTrainingRun(data.training_run);
+  }).catch(function (error) {
+    if (trainingStale(token, source)) { return; }
+    clear(pane);
+    pane.appendChild(el("div", "empty", "Could not load this training run: " + error.message));
+  });
+}
+
+function renderTrainingRunList() {
+  var list = document.getElementById("trainingRunList");
+  clear(list);
+  if (!trainingHistory.runs.length) {
+    list.appendChild(el("div", "empty", "No training runs recorded in this store."));
+    return;
+  }
+  trainingHistory.runs.forEach(function (run) {
+    var item = el("div", "listItem");
+    if (run.run_id === trainingHistory.runId) { item.classList.add("selected"); }
+    item.appendChild(el("div", "title", trainingRunTitle(run)));
+    item.appendChild(el("div", "sub",
+      fmtTs(run.completed_at || run.started_at)
+      + " · " + run.context_count
+      + (run.context_count === 1 ? " context" : " contexts")
+      + (run.metrics_status === "recorded" ? "" : " · " + run.metrics_status)));
+    item.addEventListener("click", function () { selectTrainingRun(run.run_id); });
+    list.appendChild(item);
+  });
+}
+
+function loadTrainingRuns() {
+  var list = document.getElementById("trainingRunList");
+  clear(list);
+  list.appendChild(el("div", "empty", "Loading training runs…"));
+  /* The token moves when the LIST starts, not only when a run is selected, so
+     a detail still in flight from the previous store is disowned here rather
+     than surviving until the next list happens to finish. */
+  var token = trainingToken();
+  var source = trainingSource();
+  var path = trainingListPath();
+  trainingHistory.runs = [];
+  trainingHistory.runId = null;
+  renderTrainingRun(null);
+  return api(path).then(function (data) {
+    if (trainingStale(token, source)) { return; }
+    trainingHistory.runs = data.training_runs || [];
+    renderTrainingRunList();
+    if (trainingHistory.runs.length) {
+      return selectTrainingRun(trainingHistory.runs[0].run_id);
+    }
+  }).catch(function (error) {
+    if (trainingStale(token, source)) { return; }
+    clear(list);
+    list.appendChild(el("div", "empty", "Could not load training runs: " + error.message));
+  });
+}
+
+function loadTrainingStores() {
+  /* A workspace read names its store or it is refused: two archives may hold
+     the same run_id, and nothing makes it unique across the manifest. */
+  var picker = document.getElementById("trainingStore");
+  if (!(session && session.workspace_mode)) {
+    picker.style.display = "none";
+    return Promise.resolve();
+  }
+  picker.style.display = "";
+  var token = trainingHistory.seq;
+  var source = sourceIdentity(session);
+  return api("/api/workspace/stores").then(function (data) {
+    if (token !== trainingHistory.seq || source !== sourceIdentity(session)) { return; }
+    clear(picker);
+    (data.stores || []).forEach(function (store) {
+      var option = el("option", null, store.label || store.store_id);
+      option.value = store.store_id;
+      picker.appendChild(option);
+    });
+    if (!trainingHistory.storeId && (data.stores || []).length) {
+      trainingHistory.storeId = data.stores[0].store_id;
+    }
+    picker.value = trainingHistory.storeId || "";
+  });
+}
+
+function openTrainingHistory() {
+  var dialog = document.getElementById("trainingDialog");
+  loadTrainingStores().then(loadTrainingRuns);
+  if (dialog.showModal) { dialog.showModal(); } else { dialog.setAttribute("open", ""); }
+}
+
+document.getElementById("trainingHistoryBtn").addEventListener("click", openTrainingHistory);
+document.getElementById("trainingClose").addEventListener("click", function () {
+  var dialog = document.getElementById("trainingDialog");
+  if (dialog.close) { dialog.close(); } else { dialog.removeAttribute("open"); }
+});
+document.getElementById("trainingStore").addEventListener("change", function (event) {
+  /* The store is part of the source, so setting it before the load is what
+     makes every read still in flight against the previous one stale. */
+  trainingHistory.storeId = event.target.value;
+  loadTrainingRuns();
+});
+
+
 /* -- capability-gated formal review ----------------------------------- */
 function reviewAnswerMap(progress) {
   var answers = {};
@@ -6530,7 +7536,15 @@ function mergeExtents(list) {
   return { start: t0, end: t1, open: open };
 }
 
-function noTokens() { return { in: 0, out: 0, total: 0 }; }
+function noTokens() {
+  return {
+    in: 0, out: 0, total: 0, calls: 0, counted: 0, partial: 0, unrecorded: 0,
+    /* Calls that quote a provider response an earlier call is already charged
+       for. They are real calls, so they stay in `calls`, but their tokens and
+       money are not added a second time. */
+    shared: 0
+  };
+}
 
 function countOf(value) {
   return typeof value === "number" && isFinite(value) ? value : 0;
@@ -6539,24 +7553,147 @@ function countOf(value) {
 function spanTokens(span) {
   /* Only fw.llm.call carries usage, and only when the server kept a DSPy
      history entry to read it from (see server_memory inspect mode). Turns
-     recorded without one contribute nothing rather than a wrong zero. */
+     recorded without one contribute nothing rather than a wrong zero.
+
+     The three counts beside the sums are what let a reader tell a level whose
+     calls all reported their usage from one where some did not: a call with no
+     usage attribute is `unrecorded`, one that reported part of the split is
+     `partial`, and the sums only ever add what was actually recorded. */
+  if (!span || span.name !== "fw.llm.call") { return noTokens(); }
   var usage = parsedAttr((span.attributes || {}).usage);
-  if (!usage || typeof usage !== "object") { return noTokens(); }
-  return {
-    in: countOf(usage.prompt_tokens),
-    out: countOf(usage.completion_tokens),
-    total: countOf(usage.total_tokens)
-  };
+  var counts = noTokens();
+  counts.calls = 1;
+  if (!usage || typeof usage !== "object") {
+    counts.unrecorded = 1;
+    return counts;
+  }
+  var recorded = ["prompt_tokens", "completion_tokens", "total_tokens"]
+    .filter(function (key) { return exactInt(usage[key]) !== null; });
+  if (!recorded.length) {
+    counts.unrecorded = 1;
+    return counts;
+  }
+  counts.in = countOf(usage.prompt_tokens);
+  counts.out = countOf(usage.completion_tokens);
+  counts.total = countOf(usage.total_tokens);
+  if (recorded.length === 3) { counts.counted = 1; } else { counts.partial = 1; }
+  return counts;
 }
 
 function addTokens(a, b) {
-  return { in: a.in + b.in, out: a.out + b.out, total: a.total + b.total };
+  return {
+    in: a.in + b.in,
+    out: a.out + b.out,
+    total: a.total + b.total,
+    calls: a.calls + b.calls,
+    counted: a.counted + b.counted,
+    partial: a.partial + b.partial,
+    unrecorded: a.unrecorded + b.unrecorded,
+    shared: countOf(a.shared) + countOf(b.shared)
+  };
 }
 
 function sumTokens(nodes) {
   return nodes.reduce(function (total, node) {
     return addTokens(total, node.tokens);
   }, noTokens());
+}
+
+function spanResponseId(span) {
+  /* DSPy's id for the provider response a call's usage and cost were copied
+     from. Empty when the span is not an LLM call or recorded no history entry,
+     in which case nothing can be recognised as a duplicate of it. */
+  if (!span || span.name !== "fw.llm.call") { return ""; }
+  var value = (span.attributes || {}).history_uuid;
+  return typeof value === "string" ? value : "";
+}
+
+function sumResponses(nodes) {
+  return nodes.reduce(function (all, node) {
+    return all.concat(node.responses || []);
+  }, []);
+}
+
+function sharedTokens() {
+  /* A call that quoted a response already charged: still a call, charged
+     nothing. Counting its tokens again would report twice what was spent. */
+  var counts = noTokens();
+  counts.calls = 1;
+  counts.shared = 1;
+  return counts;
+}
+
+function sharedCost() {
+  return { calls: 1, recorded: 0, unrecorded: 1, total: null };
+}
+
+function spanOrderKey(span) {
+  /* The same tie-break the server's `_order_key` uses, so the call credited
+     with a shared response is the same one on both sides. */
+  var start = exactInt((span || {}).start_ns);
+  return [start === null ? 1 : 0, start === null ? 0 : start,
+          String((span || {}).span_id || "")];
+}
+
+function compareOrderKeys(a, b) {
+  for (var i = 0; i < a.length; i += 1) {
+    if (a[i] < b[i]) { return -1; }
+    if (a[i] > b[i]) { return 1; }
+  }
+  return 0;
+}
+
+var _chargeFoldCache = null;
+var _chargeFoldSource = null;
+function chargeFolds(byId) {
+  /* Which spans must NOT charge their own tokens, money or cache, and why.
+
+     Decided from the whole span set rather than from a node's position in the
+     tree, because the duplicate is not always an ancestor. Two shapes occur and
+     the server distinguishes them, so this does too:
+
+       "wrapper" — an fw.llm.call with a DESCENDANT quoting the same
+       history_uuid. One provider response recorded at two levels is one call,
+       and the inner record is the one closest to the provider, so the outer
+       stops being a call at all.
+
+       "shared" — two calls quoting one response WITHOUT being nested. Which of
+       them really spent the tokens is not something this layer can decide, so
+       both stay visible as calls and the earlier one is credited. Folding these
+       only when they happened to be nested was the gap: sibling records charged
+       twice on screen while the server charged once (shared-response-cost).
+
+     Memoised on the span map identity because a trace is walked many times per
+     render and the answer cannot change between walks of the same map. */
+  if (_chargeFoldSource === byId && _chargeFoldCache) { return _chargeFoldCache; }
+  var spans = Object.keys(byId || {}).map(function (id) { return byId[id]; });
+  var folds = {};
+  var groups = {};
+  spans.forEach(function (span) {
+    var response = spanResponseId(span);
+    if (response === "") { return; }
+    (groups[response] = groups[response] || []).push(span);
+    /* Mark every ancestor of this call that quotes the same response. */
+    var seen = {}, parent = byId[span.parent_span_id];
+    while (parent && !seen[parent.span_id]) {
+      seen[parent.span_id] = true;
+      if (spanResponseId(parent) === response) { folds[parent.span_id] = "wrapper"; }
+      parent = byId[parent.parent_span_id];
+    }
+  });
+  Object.keys(groups).forEach(function (response) {
+    var quoting = groups[response].filter(function (span) {
+      return folds[span.span_id] !== "wrapper";
+    });
+    if (quoting.length < 2) { return; }
+    quoting.sort(function (a, b) {
+      return compareOrderKeys(spanOrderKey(a), spanOrderKey(b));
+    });
+    quoting.slice(1).forEach(function (span) { folds[span.span_id] = "shared"; });
+  });
+  _chargeFoldSource = byId;
+  _chargeFoldCache = folds;
+  return folds;
 }
 
 var _nodeSeq = 0;
@@ -6576,6 +7713,13 @@ function makeNode(kind, title, opts) {
     extent: opts.extent || { start: 0, end: 1, open: false },
     tokens: opts.tokens || noTokens(),
     cost: opts.cost || noCost(),
+    cache: opts.cache || sumCache(opts.children || []),
+    /* The provider responses (fw.llm.call history_uuid) already charged inside
+       this level. A wrapper LM that invokes another LM records a second
+       fw.llm.call for the SAME response, and charging both would report twice
+       the calls, tokens and money that were spent — the same fold the server's
+       usage_rollup applies, kept in step with it here. */
+    responses: opts.responses || sumResponses(opts.children || []),
     /* calls cut at the token limit inside this level, own span included */
     cut: opts.cut !== undefined ? opts.cut : sumCut(opts.children || []),
     render: opts.render || function () {}
@@ -6613,7 +7757,7 @@ function orderedAttrKeys(attrs) {
 }
 
 /* -- per-span level content -------------------------------------------- */
-function renderSpanLevel(container, span, role) {
+function renderSpanLevel(container, span, role, fold) {
   var kv = el("dl", "kv");
   function row(k, v) {
     if (v === null || v === undefined || v === "") { return; }
@@ -6631,6 +7775,34 @@ function renderSpanLevel(container, span, role) {
     var cutAt = parsedAttr((span.attributes || {}).call_kwargs).max_tokens;
     row("token limit", "cut at limit: completion_tokens = max_tokens = "
       + fmtCount(cutAt) + " — the output stopped at the cap, not at an end");
+  }
+  /* The recorded cache state of THIS call, said plainly (fix-9eg.6). A hit
+     explains where the answer came from; it is not a fault, and it does not
+     make the answer stale. An unrecorded flag stays unrecorded: the DSPy
+     history entry the flag is read from is absent in some processes, and
+     calling that a miss would invent a provider round trip. */
+  var cacheState = cacheStateOf(span);
+  if (cacheState === "hit") {
+    row("LLM cache", "cache hit — this answer was served from the LLM cache "
+      + "rather than by calling the provider. That is how it arrived, not a "
+      + "judgement about it.");
+  } else if (cacheState === "miss") {
+    row("LLM cache", "cache miss — the provider was called for this answer.");
+  } else if (cacheState === "unknown") {
+    row("LLM cache", "not recorded — this call recorded no cache flag, so "
+      + "whether it was served from the cache is unknown.");
+  }
+  /* Why a call on screen may contribute nothing to the totals above it. Said
+     here rather than only in the roll-up, so the reader looking at the call
+     itself is not left to wonder where its tokens went. */
+  if (fold === "wrapper") {
+    row("counted once", "this call wraps an inner call that recorded the same "
+      + "provider response, so the inner record is the one counted. This level "
+      + "adds no tokens, money or cache state of its own.");
+  } else if (fold === "shared") {
+    row("counted once", "another call already accounts for this provider "
+      + "response, so its tokens and cost are counted there rather than twice. "
+      + "This is still a real call and is still counted as one.");
   }
   container.appendChild(kv);
 
@@ -6682,6 +7854,25 @@ function spanNode(span, kids, byId) {
   var role = span.name === "fw.llm.call" ? llmCallLabel(span, byId) : "";
   var childSpans = (kids[span.span_id] || []).slice().sort(byStartNs);
   var children = childSpans.map(function (c) { return spanNode(c, kids, byId); });
+  /* Whether this span charges its own usage, money and cache, and if not, why.
+     `chargeFolds` reads the whole span set, so a duplicate is caught whether it
+     nests (wrapper) or sits beside its twin (shared) — the sibling case used to
+     charge twice here while the server charged once.
+
+     A WRAPPER stops being a call: the inner record is the one closest to the
+     provider. A SHARED call stays a call and is charged nothing, because which
+     of two calls quoting one response actually spent the tokens is not decidable
+     from the trace. Either way the level still renders, so the duplication stays
+     visible to a reader who opens it. */
+  var fold = chargeFolds(byId)[span.span_id] || "";
+  var charged = sumResponses(children);
+  var response = spanResponseId(span);
+  var own = { tokens: spanTokens(span), cost: spanCost(span), cache: spanCache(span) };
+  if (fold === "wrapper") {
+    own = { tokens: noTokens(), cost: noCost(), cache: noCache() };
+  } else if (fold === "shared") {
+    own = { tokens: sharedTokens(), cost: sharedCost(), cache: spanCache(span) };
+  }
   return makeNode("span", spanTitle(span, role), {
     crumb: spanTitle(span, role),
     detail: span.status === "error" ? "error" : "",
@@ -6690,10 +7881,14 @@ function spanNode(span, kids, byId) {
     span: span,
     children: children,
     extent: spanExtent([span]),
-    tokens: addTokens(spanTokens(span), sumTokens(children)),
-    cost: addCost(spanCost(span), sumCost(children)),
+    tokens: addTokens(own.tokens, sumTokens(children)),
+    cost: addCost(own.cost, sumCost(children)),
+    cache: addCache(own.cache, sumCache(children)),
+    responses: fold === "wrapper" || response === ""
+      ? charged
+      : charged.concat([response]),
     cut: (llmCallCutAtLimit(span) ? 1 : 0) + sumCut(children),
-    render: function (container) { renderSpanLevel(container, span, role); }
+    render: function (container) { renderSpanLevel(container, span, role, fold); }
   });
 }
 
@@ -7473,9 +8668,13 @@ function renderLevel() {
   if (!node.extent.open && node.extent.end > node.extent.start) {
     head.appendChild(el("span", "levelDur", fmtCost(
       fmtNs(node.extent.end - node.extent.start), node.tokens, node.cost)));
-  } else if (node.tokens.total || node.cost.calls) {
+  } else if (node.tokens.calls || node.cost.calls) {
     head.appendChild(el("span", "levelDur", fmtCost("", node.tokens, node.cost)));
   }
+  /* How the LLM calls under this level were answered, beside what they cost
+     (fix-9eg.6). Separate from fmtCost so the cache state can be absent
+     without shifting the latency and money it sits next to. */
+  appendCacheChip(head, node.cache);
   info.appendChild(head);
   node.render(info);
   d.appendChild(info);

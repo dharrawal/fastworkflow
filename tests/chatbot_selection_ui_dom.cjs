@@ -190,13 +190,20 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
    * The comparison
    * ================================================================ */
   buttonIn(itemFor(1), 'Compare with the best run').click();
+  /* Waited for on the RENDERED comparison, not on the text 'Answers': the
+     pair picker's View option is called "Answers and artifacts" and is on
+     screen the moment the controls paint, seconds before the comparison the
+     assertions below are about. */
+  const headingsIn = () =>
+    [...d.querySelectorAll('#detail h2')].map(node => node.textContent);
   await until(() => detail().includes('Compare two recorded runs')
-    && detail().includes('Answers'), 'the compare view');
+    && headingsIn().includes('Answers')
+    && headingsIn().includes('Plan and execution'), 'the compare view');
   assert.ok(select('Left run') && select('Right run'), 'a pair picker for both sides');
   assert.ok(select('View'), 'and the view selector');
 
   // Answers and artifacts come FIRST, before any step alignment.
-  const headings = [...d.querySelectorAll('#detail h2')].map(node => node.textContent);
+  const headings = headingsIn();
   assert.ok(headings.indexOf('Answers') < headings.indexOf('Plan and execution'),
     'the answer is above the plan: ' + headings.join(' | '));
   assert.ok(headings.includes('Artifacts'), 'artifacts too: ' + headings.join(' | '));

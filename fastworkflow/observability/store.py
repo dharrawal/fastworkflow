@@ -618,6 +618,35 @@ POLICY_PATH_SPAN_CONTEXT = "span.context"
 POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
 POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
+POLICY_PATH_PASS_ANSWER = "span.pass.answer"
+POLICY_PATH_PASS_PLAN = "span.pass.plan"
+
+# The span name is restated rather than imported: this module is the sink and
+# does not import the runtime's `tracing`. `tests/test_distillation_pass_capture`
+# asserts the two spellings agree, because a drift here does not fail — it
+# silently stops policing the fields.
+_SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+
+# The ONLY span attributes this store classifies. Span attributes are otherwise
+# credential-scrubbed wholesale (`upsert_span_rows`) and carry no per-key
+# policy, which is a general gap and NOT repaired here.
+#
+# These two are different in kind from everything else in an attribute bag:
+# `answer` is the text a pass showed the user and `plan` is the next-step
+# sequence it generated, both free text, and both already withheld under the
+# evidence profile everywhere else they are persisted — `turns.answer` through
+# `_POLICED_TURN_COLUMNS`, `span.context` through `_protected_text`. Recording
+# them here unclassified would make `fw.distillation.pass` the one route by
+# which user text reaches an evidence bundle, which is the definition of a
+# bypass. `user-text` is therefore the classification, and under `evidence` the
+# profile default withholds both with a badge (§12.0 delta 3) rather than
+# dropping them silently.
+_POLICED_SPAN_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
+    _SPAN_DISTILLATION_PASS: {
+        "answer": (POLICY_PATH_PASS_ANSWER, "user-text"),
+        "plan": (POLICY_PATH_PASS_PLAN, "user-text"),
+    },
+}
 
 
 def _protected_text(
@@ -657,6 +686,110 @@ def _protected_text(
     if capture_policy_module.is_capture_envelope(captured):
         return json.dumps(captured, ensure_ascii=False)
     return captured
+
+
+def _policed_span_attributes(
+    span_name: Any,
+    attributes: Any,
+    *,
+    redactor: Redactor,
+    policy: "capture_policy_module.CapturePolicy",
+) -> Any:
+    """A span's attribute bag with its classified fields policed.
+
+    Returns the bag unchanged for every span that declares none, which is every
+    span but one — so this costs a dict lookup on the hot path and changes
+    nothing else.
+
+    Scrub first, policy second, for the reasons `_protected_text` gives: the
+    digest in the badge must describe what was persisted, not the credential a
+    guesser is testing. Unlike `_protected_text` the envelope is left as a
+    MAPPING, because this value is nested inside the attributes JSON rather
+    than bound to a TEXT column; serializing it here would give a reader a
+    string that happens to parse.
+    """
+    declared = _POLICED_SPAN_ATTRIBUTES.get(span_name)
+    if not declared or not isinstance(attributes, Mapping):
+        return attributes
+    policed = dict(attributes)
+    for key, (field_path, classification) in declared.items():
+        value = policed.get(key)
+        if isinstance(value, str) and value:
+            policed[key] = policy.apply(
+                field_path, redactor.redact(value), classification=classification
+            )
+            continue
+        capped = _capped_prefix(value)
+        if capped is None:
+            continue
+        policed[key] = _police_capped(
+            value,
+            capped,
+            redactor=redactor,
+            policy=policy,
+            field_path=field_path,
+            classification=classification,
+        )
+    return policed
+
+
+def _capped_prefix(value: Any) -> Optional[str]:
+    """The surviving text of a `tracing.cap_attr_value` envelope, if that is what
+    this is.
+
+    An over-limit attribute never reaches the sink as a string: the emitter has
+    already replaced it with `{truncated, original_length, sha256, value}`,
+    where `value` is a RAW prefix of the text. Treating that mapping as "not a
+    string, nothing to police" is how a long answer walked past the evidence
+    profile while a short one was withheld — the longer the secret, the less
+    protected it was.
+    """
+    if not isinstance(value, Mapping) or value.get("truncated") is not True:
+        return None
+    prefix = value.get("value")
+    return prefix if isinstance(prefix, str) and prefix else None
+
+
+def _police_capped(
+    envelope: Mapping[str, Any],
+    prefix: str,
+    *,
+    redactor: Redactor,
+    policy: "capture_policy_module.CapturePolicy",
+    field_path: str,
+    classification: str,
+) -> Any:
+    """Apply the policy to text the emitter had already cut.
+
+    The policy sees the prefix, because the prefix is all that survived — there
+    is nothing else here to withhold, and pretending otherwise would put a
+    digest of text this process never held into the record.
+
+    When the policy acts, the cap envelope does NOT survive beside the result:
+
+    * its `value` is the raw prefix, which is the thing being withheld;
+    * its `sha256` digests the ORIGINAL, unscrubbed text. Keeping that next to a
+      withheld value turns the record into a confirmation oracle for a guessed
+      secret, which is the same reason `_protected_text` scrubs before it
+      digests.
+
+    What is kept is `original_length` and a `truncated_before_capture` flag, so
+    the badge stays truthful in the other direction too: the policy's own
+    `original_bytes` and `digest` describe the PREFIX, and without these two a
+    reader would take them for measurements of the whole value.
+    """
+    captured = policy.apply(
+        field_path, redactor.redact(prefix), classification=classification
+    )
+    if capture_policy_module.is_capture_envelope(captured):
+        return {
+            **captured,
+            "truncated_before_capture": True,
+            "original_length": envelope.get("original_length"),
+        }
+    # The debug profile, whose contract is that nothing changes: the cap
+    # envelope is returned as it came, carrying the scrubbed prefix.
+    return {**envelope, "value": captured}
 
 
 class IncompatibleObservabilityDB(RuntimeError):
@@ -2026,7 +2159,17 @@ class ObservabilityStore:
             ):
                 continue
             attributes = redactor.redact(
-                json.dumps(_sanitize_json_value(span.attributes), ensure_ascii=False)
+                json.dumps(
+                    _sanitize_json_value(
+                        _policed_span_attributes(
+                            span.name,
+                            span.attributes,
+                            redactor=redactor,
+                            policy=policy,
+                        )
+                    ),
+                    ensure_ascii=False,
+                )
             )
             span_name = _protected_text(
                 span.name,
@@ -3004,6 +3147,22 @@ class ObservabilityStore:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_train_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        """One training run by its primary key, however old it is.
+
+        Separate from `list_train_runs` rather than derived from it, because
+        the list is a bounded newest-first window and a run older than that
+        window is still a run that exists. Reading a detail out of the list
+        would make "was this training run recorded?" depend on how many have
+        been recorded since, which is a 404 about the reader's paging rather
+        than about the evidence (`fix-9eg.2`).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM train_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     def writer_health(self) -> Optional[dict[str, Any]]:
         with self._connect() as conn:

@@ -88,39 +88,127 @@ class ValidationReport:
         return "\n".join(lines)
 
 
-def _jsdom_functions(tree: ast.Module, source: str) -> set[str]:
-    """Names in one module that reach jsdom, directly or through a helper.
-
-    Two of the DOM tests call the harness through a module-local helper, so
-    naming or direct-reference matching would miss them; the closure below
-    keeps discovery honest as more helpers appear.
-    """
-    functions = {
+def _function_defs(body: Iterable[ast.stmt]) -> dict[str, ast.stmt]:
+    return {
         node.name: node
-        for node in tree.body
+        for node in body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+
+
+def _called_names(node: ast.stmt, receivers: frozenset[str]) -> set[str]:
+    """Names this function calls, within the scopes discovery can resolve.
+
+    Plain calls are the enclosing module's or the function's own scope.
+    Attribute calls count only when the receiver is one this scope can be sure
+    about -- ``self``, ``cls``, or the class itself -- so that a method calling
+    a sibling helper is followed while ``something_else.run()`` is not mistaken
+    for a local one.
+    """
+    names: set[str] = set()
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        function = call.func
+        if isinstance(function, ast.Name):
+            names.add(function.id)
+        elif (
+            isinstance(function, ast.Attribute)
+            and isinstance(function.value, ast.Name)
+            and function.value.id in receivers
+        ):
+            names.add(function.attr)
+    return names
+
+
+def _reaching(
+    defs: dict[str, ast.stmt],
+    source: str,
+    inherited: frozenset[str],
+    receivers: frozenset[str],
+) -> set[str]:
+    """Which functions in one scope reach jsdom, directly or via a helper.
+
+    Several DOM tests call the harness through a helper rather than naming the
+    variable themselves, so direct matching would report coverage of a smaller
+    suite than exists -- which is the failure this whole module is about. The
+    fixpoint keeps discovery honest as more helpers appear.
+    """
     reaching = {
         name
-        for name, node in functions.items()
+        for name, node in defs.items()
         if JSDOM_ROOT_VAR in (ast.get_source_segment(source, node) or "")
     }
     growing = True
     while growing:
         growing = False
-        for name, node in functions.items():
+        for name, node in defs.items():
             if name in reaching:
                 continue
-            for call in ast.walk(node):
-                if (
-                    isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name)
-                    and call.func.id in reaching
-                ):
-                    reaching.add(name)
-                    growing = True
-                    break
+            if _called_names(node, receivers) & (reaching | inherited):
+                reaching.add(name)
+                growing = True
     return reaching
+
+
+def _collected_class(node: ast.stmt) -> bool:
+    """Whether pytest would collect this class at all.
+
+    Discovery must not require a node id pytest will never run: that would
+    read as "never reported" and fail the gate for a check that does not
+    exist. The two rules that matter here are pytest's default
+    ``python_classes = Test*`` and its refusal to collect a class with an
+    ``__init__``.
+    """
+    return (
+        isinstance(node, ast.ClassDef)
+        and node.name.startswith("Test")
+        and "__init__" not in _function_defs(node.body)
+    )
+
+
+def _class_tails(
+    body: Iterable[ast.stmt],
+    source: str,
+    module_reaching: frozenset[str],
+    prefix: str,
+) -> list[str]:
+    """Node-id tails for browser checks written as methods of a test class.
+
+    A DOM test nested in a class used to be invisible here, and invisible is
+    the one thing this gate cannot afford: the test would skip itself on a
+    machine without jsdom and the run would report nothing missing (fix-17mu).
+    Classes nest, so this recurses, and each level addresses its own methods.
+    """
+    tails: list[str] = []
+    for node in body:
+        if not _collected_class(node):
+            continue
+        scope = f"{prefix}{node.name}::"
+        defs = _function_defs(node.body)
+        reaching = _reaching(
+            defs,
+            source,
+            module_reaching,
+            frozenset({"self", "cls", node.name}),
+        )
+        tails.extend(
+            f"{scope}{name}" for name in sorted(reaching) if name.startswith("test_")
+        )
+        # A nested class's methods see the module's helpers, not the outer
+        # class's: an inner class is not an instance of the outer one.
+        tails.extend(_class_tails(node.body, source, module_reaching, scope))
+    return tails
+
+
+def _browser_check_tails(tree: ast.Module, source: str) -> list[str]:
+    """Every node-id tail in one module that drives a real DOM."""
+    module_reaching = _reaching(
+        _function_defs(tree.body), source, frozenset(), frozenset()
+    )
+    tails = [name for name in module_reaching if name.startswith("test_")]
+    tails.extend(_class_tails(tree.body, source, frozenset(module_reaching), ""))
+    return sorted(tails)
 
 
 def discover_required_dom_tests(
@@ -141,15 +229,12 @@ def discover_required_dom_tests(
         if JSDOM_ROOT_VAR not in source:
             continue
         tree = ast.parse(source)
-        reaching = _jsdom_functions(tree, source)
         try:
             relative = candidate.resolve().relative_to(REPO_ROOT)
         except ValueError:
             relative = candidate
         node_ids.extend(
-            f"{relative}::{name}"
-            for name in sorted(reaching)
-            if name.startswith("test_")
+            f"{relative}::{tail}" for tail in _browser_check_tails(tree, source)
         )
     return node_ids
 
@@ -187,6 +272,31 @@ def check_prerequisites(jsdom_root: Optional[str] = None) -> str:
     return str(Path(root).expanduser())
 
 
+def _split_junit_classname(dotted: str) -> tuple[Optional[Path], tuple[str, ...]]:
+    """A JUnit ``classname`` back into its module path and enclosing classes.
+
+    JUnit has one dotted field for both, so ``tests.test_x.TestThing`` has to
+    be cut in the right place; cutting it wrong turns a class-nested check into
+    a node id naming a file that does not exist, which reads as "never
+    reported". The cut is made by finding the module on disk, and when the
+    report came from a run rooted elsewhere, by falling back on the naming
+    pytest itself relies on: modules are ``test_*.py``, collected classes are
+    ``Test*``.
+    """
+    parts = [part for part in dotted.split(".") if part]
+    for cut in range(len(parts), 0, -1):
+        candidate = Path(*parts[:cut]).with_suffix(".py")
+        if (REPO_ROOT / candidate).is_file():
+            return candidate, tuple(parts[cut:])
+    cut = next(
+        (index for index, part in enumerate(parts) if part[:1].isupper()),
+        len(parts),
+    )
+    if cut == 0:
+        return None, ()
+    return Path(*parts[:cut]).with_suffix(".py"), tuple(parts[cut:])
+
+
 def read_junit_outcomes(report_path: Path) -> dict[str, str]:
     """Outcome per node id from a pytest JUnit report.
 
@@ -196,11 +306,11 @@ def read_junit_outcomes(report_path: Path) -> dict[str, str]:
     """
     outcomes: dict[str, str] = {}
     for case in ElementTree.parse(report_path).getroot().iter("testcase"):
-        module = (case.get("classname") or "").split(".")
+        path, classes = _split_junit_classname(case.get("classname") or "")
         name = (case.get("name") or "").split("[", 1)[0]
-        if not module or not name:
+        if path is None or not name:
             continue
-        node = f"{Path(*module).with_suffix('.py')}::{name}"
+        node = f"{path}::{'::'.join((*classes, name))}"
         if any(child.tag == "skipped" for child in case):
             outcome = "skipped"
         elif any(child.tag in {"failure", "error"} for child in case):
@@ -220,7 +330,8 @@ def outcome_for(node_id: str, outcomes: dict[str, str]) -> Optional[str]:
     A JUnit `classname` is relative to whatever pytest chose as its rootdir,
     which is not always this repository, so the recorded key can be a shorter
     path than the node id that asked for it. Test file names are unique within
-    `tests/`, so matching on the file name and the function is exact here.
+    `tests/`, so matching on the file name and the rest of the node id is exact
+    here -- the rest being the function, or the class path and the method.
     """
     path, _, name = node_id.partition("::")
     for key, outcome in outcomes.items():

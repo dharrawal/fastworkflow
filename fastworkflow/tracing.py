@@ -207,7 +207,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # fw.agent.tool_call gained the §12.1.1 capture keys at its third emission site
 # (workflow_agent.py, previously the only unmigrated one); and fw.nlu.intent's
 # `classifier` attribute gained `topk_scores`.
-SPAN_CONTRACT_VERSION = 3
+#
+# v4 (fix-txxy): `fw.distillation.pass` joins the taxonomy. A turn that ran a
+# teacher pass and a student pass used to record both under one flat trace with
+# nothing saying which activity was whose, so a run recorded before this and a
+# run recorded after it are not comparable on that question: the older one is
+# "no pass identity recorded", not "one pass".
+SPAN_CONTRACT_VERSION = 4
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -255,6 +261,43 @@ SPAN_TRAIN_PREFIX = "fw.train."
 RESERVED_V2_SPAN_NAMES = frozenset(
     {SPAN_NLU_INTENT, SPAN_NLU_PARAM_EXTRACTION, SPAN_LLM_CALL, SPAN_TRAIN_PREFIX}
 )
+
+# ----------------------------------------------------------------------
+# Recorded passes within one turn (fix-txxy)
+# ----------------------------------------------------------------------
+#
+# Distillation runs the agent twice for ONE user message — a teacher pass and a
+# student pass — inside one turn, so both passes' dispatches, planner calls and
+# LLM calls share one trace id. Nothing recorded which was whose: a reader
+# holding the trace could only guess from ordering and model names, and
+# `comparison.PassSelector` (which resolves pass membership ONLY from recorded
+# spans) had nothing to resolve against.
+#
+# One span per pass answers both halves of that. The stamp is on the span, so a
+# selector keyed on `fw.pass` is evidence rather than an assertion; and because
+# the pass span is on the parenting stack for the duration of the pass,
+# everything the pass did is in its subtree and inherits the stamp through
+# ancestry — no emitter downstream has to learn about passes.
+#
+# Activity that belongs to NEITHER pass stays outside the span by construction:
+# insight extraction runs after both passes have closed, so its LLM calls parent
+# to the turn root and no pass's cost roll-up can claim them.
+SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+
+# The attribute a pass-stamping producer records, and the one
+# `comparison.discover_pass_selectors` / `selection_api.DEFAULT_PASS_ATTRIBUTE`
+# already look for. Dotted like a span name rather than named `pass` because it
+# is a cross-emitter label, not one emitter's field.
+ATTR_PASS = "fw.pass"
+
+PASS_TEACHER = "teacher"
+PASS_STUDENT = "student"
+
+# A pass whose outcome the producer did not record. Deliberately NOT a
+# `TurnStatus` member: "completed" is a claim, and a pass that ended in a way
+# the producer could not classify has not made it. Defaulting an unclassified
+# outcome to completed is how a failure becomes invisible in a roll-up.
+PASS_STATUS_UNKNOWN = "unknown"
 
 
 # ----------------------------------------------------------------------
@@ -398,6 +441,22 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     SPAN_PLANNER_REPLAN: SpanContract(
         version=1,
         attributes=frozenset({"model", "replan_trigger", "plan"}),
+    ),
+    # One distillation pass. `fw.pass` is the membership stamp every descendant
+    # inherits through ancestry; the rest is the pass's OWN content, recorded
+    # here because the turn row cannot hold it -- two passes share one turn row,
+    # so its answer and status are the turn's and belong to neither pass.
+    #
+    # `answer` is the pass's final answer as the user would have seen it, and it
+    # is recorded by the producer that generated it rather than copied from the
+    # turn: the whole point of a teacher/student view is that the two answers
+    # differ, and reporting the turn's answer under both headings would hide
+    # exactly the difference the view is read for.
+    SPAN_DISTILLATION_PASS: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {ATTR_PASS, "model", "answer", "plan", "status", "failure_reason"}
+        ),
     ),
     SPAN_NLU_INTENT: SpanContract(
         version=1,
