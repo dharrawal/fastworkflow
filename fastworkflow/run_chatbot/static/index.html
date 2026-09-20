@@ -326,6 +326,31 @@ main { flex: 1; display: flex; min-height: 0; }
 .chipSignal.asked { color: var(--bar-human); border-color: var(--bar-human); }
 .chipSignal.consequence { color: var(--bar-command); border-color: var(--bar-command); }
 .chipCost.unrecorded { font-style: italic; }
+/* fix-9eg.18.2/.18.3: diagnostic markers. Every marker carries its own word
+   and glyph, so the severity classes below only reinforce a distinction the
+   text already makes -- colour is never the only thing that says a step
+   failed, and the three severities stay apart in greyscale too. */
+.chipMarker {
+  display: inline-block; font-size: 10px; font-weight: 600; border-radius: 999px;
+  padding: 0 7px; margin: 0 6px 4px 0; border: 1px solid var(--border);
+  color: var(--muted); vertical-align: 1px; white-space: nowrap;
+}
+.chipMarker .glyph { margin-right: 4px; font-weight: 700; }
+.chipMarker.bad { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
+.chipMarker.warn { color: var(--bar-command); border-color: var(--bar-command); }
+.chipMarker.unknown { color: var(--muted); border-style: dashed; font-style: italic; }
+button.chipMarker { cursor: pointer; background: transparent; }
+button.chipMarker[aria-pressed="true"] { outline: 2px solid var(--accent-ink); outline-offset: 1px; }
+button.chipMarker:disabled { cursor: default; opacity: .65; }
+tr.markedStep > td { background: var(--fail-soft); }
+tr.markedStep td:first-child::before { content: "!"; font-weight: 700; margin-right: 4px; color: var(--fail); }
+.diagNote { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.diagJump { margin-left: 6px; font-size: 10px; }
+#turnFind { padding: 0 12px 10px; border-bottom: 1px solid var(--border); }
+.turnFindRow { display: flex; gap: 6px; padding-top: 10px; }
+#turnFindText { flex: 1; min-width: 0; }
+#turnFindStatus { font-size: 11px; color: var(--muted); margin-top: 6px; }
+#turnFindMarkers { margin-top: 8px; }
 /* fix-aou (a): the turn's execution ledger, one row per dispatch */
 .ledgerWrap { overflow-x: auto; }
 table.ledger { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
@@ -346,6 +371,10 @@ table.ledger td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospa
   margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msgBlock .lbl { color: var(--muted); font-size: 10px; text-transform: uppercase;
   letter-spacing: .05em; display: block; margin-bottom: 2px; }
+.msgBlock .reuseAction { display: flex; gap: 8px; align-items: baseline;
+  flex-wrap: wrap; margin-top: 8px; white-space: normal; }
+.msgBlock .reuseAction button { font-size: 11px; padding: 3px 10px; }
+.msgBlock .reuseAction .muted { color: var(--muted); font-size: 11px; }
 .expInvalid { border-left: 4px solid var(--fail); background: var(--fail-soft);
   padding: 8px 10px; border-radius: 6px; margin-top: 8px; }
 .expReadonly { color: var(--muted); font-size: 11px; margin-top: 4px; }
@@ -508,10 +537,20 @@ button.newConv:hover { filter: brightness(1.1); }
   border: 1px solid var(--border); margin-top: 6px; }
 .chatMsg .artifacts .aActions { display: flex; gap: 8px; flex-wrap: wrap;
   margin-top: 6px; font-size: 11px; }
-#composer { display: flex; gap: 10px; padding: 12px 18px;
+#composer { display: flex; gap: 10px; padding: 12px 18px; align-items: flex-end;
   border-top: 1px solid var(--border); background: var(--panel); }
-#composer input { flex: 1; border-radius: 999px; padding: 8px 16px; }
+/* A textarea, not a text input: a recorded message reused into the composer
+   keeps its line breaks, which an input silently strips. */
+#composer textarea { flex: 1; border-radius: 18px; padding: 8px 16px;
+  resize: none; font: inherit; line-height: 1.4; min-height: 36px;
+  max-height: 160px; overflow-y: auto; }
 #composer button { border-radius: 999px; padding: 7px 18px; }
+#reuseNotice { display: none; gap: 10px; align-items: baseline; font-size: 12px;
+  padding: 8px 18px 0; background: var(--panel); color: var(--muted); }
+#reuseNotice.visible { display: flex; }
+#reuseNotice .reuseWhat { color: var(--text); }
+#reuseNotice button { font-size: 11px; padding: 2px 10px; }
+.chatMsg .reuseNote { color: var(--muted); font-size: 11px; margin-top: 4px; }
 #composerHint { color: var(--muted); font-size: 11px; padding: 0 20px 10px;
   background: var(--panel); }
 @media (prefers-reduced-motion: no-preference) {
@@ -696,6 +735,42 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
 .feedbackHistoryItem .sub { margin-bottom: 8px; }
 .feedbackHistoryItem .feedbackTabs { margin: 0 0 8px; }
 .feedbackHistoryItem pre { margin: 0; }
+/* Evidence deep links sit inside a muted sub line and must not look like the
+   page's action buttons: a comparison comment carries two of them. */
+.evidenceLink { padding: 0 2px; min-height: 0; font-size: inherit; color: var(--accent-ink); background: transparent; border: none; text-decoration: underline; }
+.evidenceLink:hover:not(:disabled) { background: transparent; box-shadow: none; }
+.feedbackFilters { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 0 0 14px; }
+.feedbackFilters label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.feedbackUnclassified { color: var(--muted); font-style: italic; }
+/* -- run selection and the shared comparison (fix-9eg.17.2/.3/.4) -------
+   The two panes are a grid rather than a flex row so a long answer on one
+   side cannot push the other off screen, and both collapse to one column on
+   a narrow viewport (see the 700px block) instead of scrolling sideways. */
+.selectionBar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 12px 0; }
+.selectionBar label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.selectionBar select { max-width: 320px; }
+.runDecision { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.comparePanes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 10px; }
+.comparePane { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 11px; background: var(--panel); }
+.comparePane h3 { margin: 0 0 4px; font-size: 13px; }
+.comparePane pre { margin: 6px 0 0; }
+.compareRow { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.compareRow:hover { background: var(--accent-soft); }
+.compareRow .rowMeta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.compareRow .side { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.compareRow .side.absent { color: var(--muted); font-style: italic; }
+.compareRow.rowAmbiguous { border-left: 3px solid var(--warn-border); padding-left: 7px; }
+/* A refusal, an unreadable half, or a decision that lost a race: all three are
+   answers the reader has to see, so they share one band rather than becoming a
+   disabled control with no explanation. */
+.selectionNote { border-left: 4px solid var(--warn-border); background: var(--warn-bg); padding: 11px 13px; border-radius: 0 9px 9px 0; margin: 10px 0; }
+.selectionNote strong { display: block; }
+/* An artifact inspected beside the answers it explains, rather than through a
+   navigation away that loses the other side of the pair. */
+.artifactPreview { margin-top: 8px; }
+.artifactPreview > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.artifactPreview iframe { width: 100%; min-height: 220px; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
+.artifactPreview pre { max-height: 340px; overflow: auto; }
 #pickerMain { background: radial-gradient(ellipse at top, var(--accent-soft), transparent 65%); padding: 52px 24px; }
 #pickerCard { max-width: 980px; border-radius: 20px; padding: 36px; }
 #pickerCard h2 { font-size: 29px; letter-spacing: -.04em; margin-bottom: 12px; }
@@ -704,7 +779,7 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
 #chatLog { padding: 30px max(24px, calc((100% - 1000px) / 2)); }
 .chatMsg .bubble { padding: 15px 19px; font-size: 14px; line-height: 1.7; border-radius: 16px; }
 #composer { padding: 18px max(24px, calc((100% - 1000px) / 2)); }
-#composer input { min-width: 0; border-radius: 12px; padding: 13px 18px; }
+#composer textarea { min-width: 0; border-radius: 12px; padding: 13px 18px; }
 #composer button { border-radius: 12px; }
 #composerHint { text-align: center; padding-bottom: 16px; }
 /* Centered under the header band. --notice-top is the band's measured bottom
@@ -764,6 +839,8 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
   .levelHead { display: block; }
   .levelDur { display: inline-block; margin: 10px 0 0; }
   .kv, .provenance .kv, .provDiff .kv, .serverConfig .kv { grid-template-columns: 1fr; }
+  .comparePanes, .compareRow { grid-template-columns: 1fr; }
+  .selectionBar select { max-width: none; }
   #reviewPane { width: 100%; min-width: 0; border-left: none; }
   .summaryStrip { gap: 24px; }
   #noticeStack { top: calc(var(--notice-top, 60px) + 8px); }
@@ -912,6 +989,14 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
       <button id="navConversations" class="active" role="tab" aria-selected="true" aria-controls="convList">Conversations</button>
       <button id="navBenchmarks" role="tab" aria-selected="false" aria-controls="convList" tabindex="-1">Benchmarks</button>
     </div>
+    <form id="turnFind" role="search" aria-label="Find turns by what was recorded">
+      <div class="turnFindRow">
+        <input id="turnFindText" type="search" autocomplete="off" placeholder="Find turns…" aria-label="Search recorded turn text">
+        <button id="turnFindGo" type="submit">Find</button>
+      </div>
+      <div id="turnFindMarkers" role="group" aria-label="Filter by what the trace recorded"></div>
+      <div id="turnFindStatus" role="status" aria-live="polite"></div>
+    </form>
     <div id="convList"></div>
   </div>
   <div id="detail" role="region" aria-label="Selected record"><div class="emptyState"><strong>Explore a conversation</strong><p>Select a conversation on the left to revisit its turns and inspect what happened.</p></div></div>
@@ -950,12 +1035,17 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
       </div>
     </details>
     <div id="chatLog"><div class="empty">Waiting for the workflow server…</div></div>
+    <div id="reuseNotice" role="status" aria-live="polite">
+      <span class="reuseWhat" id="reuseNoticeText"></span>
+      <button id="reuseClear" type="button">Clear</button>
+    </div>
     <div id="composer">
-      <input type="text" id="chatInput" placeholder="Message the agent…" disabled>
+      <textarea id="chatInput" rows="1" placeholder="Message the agent…" disabled></textarea>
       <button id="chatSend" class="primary" disabled>Send</button>
     </div>
     <div id="composerHint">Messages go to the agent. Start a message with "/" to run a
-      command deterministically (no agent). Every turn is inspectable in the Debug tab.</div>
+      command deterministically (no agent). Enter sends, Shift+Enter adds a line.
+      Every turn is inspectable in the Debug tab.</div>
   </div>
 </section>
 <div id="noticeStack" aria-label="Notifications"></div>
@@ -1060,19 +1150,6 @@ function analysisText(value) {
   return JSON.stringify(value, null, 2);
 }
 
-function apiAllowing409(path) {
-  path = benchmarkEvidencePath(path);
-  return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
-    .then(function (r) {
-      return r.json().then(function (data) {
-        if (!r.ok && r.status !== 409) {
-          throw new Error(data && data.error ? data.error : ("API " + path + " -> " + r.status));
-        }
-        return data;
-      });
-    });
-}
-
 /* -- tiny DOM helpers (text always via textContent) -------------------- */
 function el(tag, cls, text) {
   var node = document.createElement(tag);
@@ -1164,7 +1241,7 @@ function showNotice(message, kind, detail) {
 }
 function actionSuccess(path, method) {
   if (method === "DELETE") { return "Empty experiment deleted"; }
-  if (path.indexOf("/human-feedback") >= 0) { return "Feedback saved"; }
+  if (path.indexOf("/post_feedback") >= 0) { return "Feedback saved"; }
   if (path.indexOf("/analysis") >= 0) { return "Analysis saved"; }
   if (path === "/api/benchmark-setup") { return "Benchmark version saved"; }
   if (/\/benchmarks\/.*\/experiments$/.test(path)) { return "Experiment created"; }
@@ -1595,6 +1672,67 @@ function appendSignalChips(parent, signals) {
   signalChips(signals).forEach(function (chip) { parent.appendChild(chip); });
 }
 
+/* -- diagnostic markers [fix-9eg.18.2/.18.3] ------------------------------
+   The server's `diagnosis` projection, rendered verbatim. Each marker names
+   something the trace or the turn record RECORDED; none of them is inferred
+   from a count. Two pairs are deliberately kept apart here because conflating
+   them is the failure mode the beads name:
+
+   - "repeated a command" is an observation, "suspected loop" is a judgement
+     the server made under a stated policy, and they are different chips.
+   - an unknown is never rendered as a negative: a context whose handles are
+     type-only says "context unknown", not "context unchanged".
+
+   Order follows the server's MARKER_ORDER, which arrives as the key order of
+   `facets`, so the vocabulary is not duplicated as a client-side list. */
+var MARKER_LABEL = {
+  context_navigation: {text: "navigated context", glyph: "\u2192", tone: "warn",
+    help: "A dispatch's recorded context handles differ, or a producer flagged the move."},
+  step_unsuccessful: {text: "command returned failure", glyph: "\u2715", tone: "bad",
+    help: "A dispatch recorded success=false."},
+  step_error: {text: "dispatch errored", glyph: "\u2715", tone: "bad",
+    help: "A dispatch span's own status is error or failed."},
+  intent_ambiguous: {text: "ambiguous intent", glyph: "?", tone: "warn",
+    help: "Intent detection recorded ambiguous=true."},
+  intent_error: {text: "intent detection errored", glyph: "\u2715", tone: "bad",
+    help: "An fw.nlu.intent span's status is error."},
+  parameter_extraction_invalid: {text: "parameters invalid", glyph: "\u2715", tone: "bad",
+    help: "Extraction recorded invalid or missing fields."},
+  parameter_extraction_error: {text: "extraction errored", glyph: "\u2715", tone: "bad",
+    help: "An fw.nlu.param_extraction span's status is error."},
+  parameter_extraction_retry: {text: "extraction retried", glyph: "\u21ba", tone: "warn",
+    help: "Extraction recorded a retry round."},
+  awaiting_user: {text: "asked the user", glyph: "\u270b", tone: "warn",
+    help: "The turn suspended on a question. A suspension is not a failure."},
+  repeated_command: {text: "repeated a command", glyph: "\u21bb", tone: "warn",
+    help: "The same command ran more than once. On its own this is an observation, not a fault."},
+  suspected_loop: {text: "suspected loop", glyph: "\u21bb", tone: "bad",
+    help: "Repeats that themselves recorded trouble, under the policy shown below."},
+  low_confidence: {text: "low confidence", glyph: "\u2248", tone: "warn",
+    help: "The least confident recorded intent margin is under the threshold you set."},
+  partial_evidence: {text: "partial evidence", glyph: "\u25CC", tone: "unknown",
+    help: "Something this turn did was not fully recorded; treat the summary as incomplete."}
+};
+function markerMeta(name) {
+  return MARKER_LABEL[name]
+    || {text: name, glyph: "\u25CC", tone: "unknown",
+        help: "This build has no description for this marker."};
+}
+function markerChip(name, count) {
+  var meta = markerMeta(name);
+  var chip = el("span", "chipMarker " + meta.tone);
+  chip.appendChild(el("span", "glyph", meta.glyph));
+  chip.appendChild(document.createTextNode(
+    meta.text + (count > 1 ? " \u00d7" + count : "")));
+  chip.title = meta.help;
+  return chip;
+}
+function appendMarkerChips(parent, markers, counts) {
+  (markers || []).forEach(function (name) {
+    parent.appendChild(markerChip(name, (counts || {})[name] || 0));
+  });
+}
+
 /* -- cost roll-ups [fix-aou (d)] ------------------------------------------ */
 /* An fw.llm.call's `cost` attribute is what dspy_logger copied from the DSPy
    history entry (the provider cost as litellm reported it, in USD). A call
@@ -1673,13 +1811,22 @@ function renderExecutionLedger(container, turn, openSpan) {
     container.appendChild(el("div", "empty", "This turn dispatched no command."));
     return;
   }
+  /* The diagnosis indexes its steps by the same command_call_id the ledger
+     rows carry, so a marked step is the marked ROW rather than a second list
+     beside it. Absent (a reader that did not ask for a diagnosis) the ledger
+     renders exactly as it did before. */
+  var diagnosis = turn.diagnosis;
+  var stepByCall = {};
+  ((diagnosis && diagnosis.steps) || []).forEach(function (step) {
+    if (step.command_call_id) { stepByCall[step.command_call_id] = step; }
+  });
   var wrap = el("div", "ledgerWrap");
   var table = el("table", "ledger");
   var head = el("tr");
-  ["#", "command_call_id", "parent", "command", "context", "status", "duration",
-   "asked user", "recorded in"].forEach(function (h) {
-    head.appendChild(el("th", null, h));
-  });
+  var columns = ["#", "command_call_id", "parent", "command", "context", "status",
+    "duration", "asked user", "recorded in"];
+  if (diagnosis) { columns.push("what was recorded"); }
+  columns.forEach(function (h) { head.appendChild(el("th", null, h)); });
   table.appendChild(head);
   rows.forEach(function (row) {
     var tr = el("tr", row.parent_call_id ? "child" : null);
@@ -1703,6 +1850,23 @@ function renderExecutionLedger(container, turn, openSpan) {
     if (row.span_recorded) { where.push("span"); }
     if (row.child_call) { where.push("parent's child_calls"); }
     tr.appendChild(el("td", null, where.join(" + ") || "—"));
+    if (diagnosis) {
+      var step = stepByCall[row.command_call_id];
+      var cell = el("td");
+      if (step && step.markers && step.markers.length) {
+        tr.classList.add("markedStep");
+        appendMarkerChips(cell, step.markers, null);
+      }
+      if (step) { cell.appendChild(navigationNote(step.navigation)); }
+      /* A dispatch the record knows and the trace does not stays listed and
+         says so, rather than being dropped for having nothing to point at. */
+      if (step && !row.span_id) {
+        cell.appendChild(el("div", "diagNote",
+          "recorded only in the turn record \u2014 no span to open"));
+      }
+      if (!cell.childNodes.length) { cell.textContent = "\u2014"; }
+      tr.appendChild(cell);
+    }
     if (row.span_id && openSpan) {
       tr.classList.add("openable");
       tr.title = "open this dispatch's span";
@@ -1717,6 +1881,112 @@ function renderExecutionLedger(container, turn, openSpan) {
   wrap.appendChild(table);
   container.appendChild(wrap);
 }
+/* Navigation is a three-state answer and is rendered as one. `unknown` is the
+   common case in current traces -- every context handle this build writes is
+   type-only, so two handles of the same type prove nothing about whether the
+   context moved -- and printing "unchanged" there would be a claim the
+   evidence does not support. The basis is shown so the reason is legible. */
+var NAVIGATION_BASIS_NOTE = {
+  context_type_change: "the recorded context types differ",
+  recorded_flag: "the producer flagged the move",
+  instance_fingerprint_change: "same type, different recorded instance",
+  instance_fingerprint_match: "same type, same recorded instance",
+  type_only_handles: "handles name a type but no instance, so a move cannot be ruled out",
+  no_handles: "this dispatch recorded no context handles"
+};
+function navigationNote(navigation) {
+  if (!navigation || !navigation.state) { return el("span"); }
+  var note = el("div", "diagNote");
+  var where = navigation.from || navigation.to
+    ? " (" + (navigation.from || "?") + " \u2192 " + (navigation.to || "?") + ")" : "";
+  if (navigation.state === "changed") {
+    note.textContent = "context changed" + where;
+  } else if (navigation.state === "unchanged") {
+    note.textContent = "context unchanged" + where;
+  } else {
+    note.textContent = "context unknown" + where;
+  }
+  var why = NAVIGATION_BASIS_NOTE[navigation.basis];
+  if (why) { note.textContent += " \u2014 " + why; }
+  return note;
+}
+
+/* The turn-level summary: what the whole turn recorded, what it could not,
+   and a way into the exact spans behind each claim. Rendered from the
+   server's projection; nothing here re-derives a marker. */
+function renderTurnDiagnosis(container, turn, openSpan) {
+  var diagnosis = turn.diagnosis;
+  if (!diagnosis) {
+    container.appendChild(el("div", "empty", "No diagnosis in this view."));
+    return;
+  }
+  var markers = diagnosis.markers || [];
+  if (!markers.length) {
+    container.appendChild(el("div", "sub",
+      "Nothing this build diagnoses was recorded in this turn."));
+  } else {
+    var chips = el("div");
+    appendMarkerChips(chips, markers, diagnosis.counts);
+    container.appendChild(chips);
+  }
+  var spanMarkers = (diagnosis.span_markers || {});
+  (diagnosis.markers_only_in_record || []).forEach(function (name) {
+    container.appendChild(el("div", "diagNote",
+      markerMeta(name).text + " is known only from the turn record; "
+      + "no span recorded it."));
+  });
+  /* Every marker's supporting spans, as a jump. The anchors come from the
+     server so the span opened here is the span the marker was computed from,
+     not a second guess at which one it meant. */
+  var evidence = spanMarkers.evidence || {};
+  markers.forEach(function (name) {
+    var support = evidence[name];
+    var ids = (support && support.span_ids) || [];
+    if (!ids.length || !openSpan) { return; }
+    var line = el("div", "diagNote");
+    line.appendChild(document.createTextNode(markerMeta(name).text + ": "));
+    ids.forEach(function (spanId, index) {
+      var jump = el("button", "traceLink diagJump", "span " + (index + 1));
+      jump.type = "button";
+      jump.title = "open " + spanId;
+      jump.addEventListener("click", function () { openSpan(spanId); });
+      line.appendChild(jump);
+    });
+    if (support.truncated) {
+      line.appendChild(document.createTextNode(
+        " and " + (support.count - ids.length) + " more"));
+    }
+    container.appendChild(line);
+  });
+  (diagnosis.repeats || []).forEach(function (group) {
+    var line = el("div", "diagNote");
+    line.textContent = (group.command_name || "(unnamed command)")
+      + " ran " + group.count + "\u00d7"
+      + (group.suspected_loop
+        ? " and those runs recorded " + (group.trouble || []).join(", ")
+          + " \u2014 suspected loop"
+        : " \u2014 repetition only; nothing in those runs recorded trouble");
+    container.appendChild(line);
+  });
+  var policy = diagnosis.loop_policy;
+  if (policy) {
+    container.appendChild(el("div", "diagNote",
+      "Loop policy " + policy.name + ": at least " + policy.min_repeats
+      + " runs within " + policy.window_steps + " steps"
+      + (policy.require_recorded_trouble
+        ? ", and the runs themselves must have recorded trouble." : ".")));
+  }
+  var coverage = diagnosis.coverage || {};
+  var gaps = Object.keys(coverage).filter(function (key) { return coverage[key]; });
+  if (gaps.length) {
+    var note = el("div", "diagNote");
+    note.textContent = "Not fully recorded: " + gaps.map(function (key) {
+      return key.replace(/_/g, " ") + " (" + coverage[key] + ")";
+    }).join(", ") + ".";
+    container.appendChild(note);
+  }
+}
+
 function findSpanPath(node, spanId) {
   if (node.span && node.span.span_id === spanId) { return [node]; }
   for (var i = 0; i < node.children.length; i++) {
@@ -2015,6 +2285,12 @@ function tabNodes(tab) {
 }
 
 function showNavigationTabEmpty() {
+  /* The rail's periodic refresh lands here whenever no record is selected,
+     which is the normal state during a search -- the operator is looking at
+     results, not at a conversation. Repainting the placeholder over them would
+     erase a walk that takes several round trips, so the finder keeps the pane
+     until a navigation gesture releases it (turnFindRelease). */
+  if (turnFind.active) { return; }
   expNavToken();
   state.turnKey = null;
   state.turn = null;
@@ -2451,7 +2727,21 @@ function refreshConvs(reportFailure) {
     attachTraceHierarchy();
     syncTraceHierarchy();
     renderHierarchy();
-    if (!hierarchyPath.length) { showNavigationTabEmpty(); }
+    /* A record that is SELECTED keeps the pane, even if the rail has no path
+       to it. `attachTraceHierarchy` above can only align a turn whose trace
+       has finished loading (`state.turn`), but a turn is selected the moment
+       somebody clicks it or opens a deep link — so a navigation read landing
+       inside that window used to find `hierarchyPath` empty and repaint "No
+       conversations yet" over a trace that was still arriving. In workspace
+       mode the rail may have no path to a scoped turn at all, which made
+       every periodic refresh do it, not just the first.
+
+       This is the same rule the finder guard above states: a background
+       refresh does not get to take the pane. A navigation GESTURE still
+       does, because `setNavigationTab` calls the placeholder directly, and
+       clearing conversations nulls `state.turnKey` before refreshing so the
+       "all cleared" state still appears. */
+    if (!hierarchyPath.length && !state.turnKey) { showNavigationTabEmpty(); }
   }).catch(function (error) {
     if (refresh !== conversationRefresh) { return; }
     var list = document.getElementById("convList"); clear(list);
@@ -2489,6 +2779,295 @@ function renderNestedTurns(turns) {
   });
   return list;
 }
+/* -- finding turns across the whole store [fix-9eg.18.1] -----------------
+   The rail's filters used to be applied to a page the server had already cut,
+   so a turn matching further down the store was reported as no match. The
+   server now filters the whole authorized dataset; this is the control for it.
+
+   Cost is bounded the way the API intends: each request scans at most
+   TURN_FIND_SCAN turns and returns at most TURN_FIND_PAGE matches, and the
+   walk continues by handing `next_scan_cursor` back as `resume_after`. Because
+   the page limit is smaller than the scan limit, this is exactly the case that
+   used to lose matches, and every segment's rows are accumulated rather than
+   replacing the last.
+
+   Three things this must never do: rescan the store on every keystroke (hence
+   the debounce and the stale-response guard), say "no matches" while the walk
+   is unfinished (hence the auto-continue below, which only stops when
+   something was found, the walk completed, or the operator stopped it), and
+   DROP a row it has already fetched. There used to be a 200-row ceiling here
+   that silently discarded later matches while still advancing the cursor past
+   them, which put a match beyond the 200th permanently out of reach -- the
+   same class of false negative on the page that fix-9eg.18.1 removed from the
+   API. Nothing is discarded now. Growth is bounded by the operator instead:
+   the walk auto-continues only while the list is still empty, so every row
+   after the first segment arrives on a deliberate "keep searching" click. */
+var TURN_FIND_PAGE = 25;
+var TURN_FIND_SCAN = 200;
+var TURN_FIND_DEBOUNCE_MS = 250;
+var turnFind = {
+  seq: 0, timer: null, rows: [], cursor: null, scanned: 0, matched: 0,
+  complete: true, facets: null, markers: {}, text: "", running: false,
+  stopped: false, active: false, error: null, basis: "", nav: 0
+};
+
+function turnFindSelected() {
+  return Object.keys(turnFind.markers).filter(function (k) { return turnFind.markers[k]; });
+}
+
+function turnFindPath(cursor) {
+  var path = "/api/turns";
+  var params = ["limit=" + TURN_FIND_PAGE, "scan_limit=" + TURN_FIND_SCAN];
+  if (session && session.workspace_mode) {
+    /* A workspace read is store-scoped or it is refused; the unscoped route
+       says so rather than searching across archives. */
+    path = "/api/workspace/turns";
+    params.push("store_id=" + encodeURIComponent(state.storeId || ""));
+  }
+  if (turnFind.text) { params.push("text=" + encodeURIComponent(turnFind.text)); }
+  var markers = turnFindSelected();
+  if (markers.length) { params.push("markers_any=" + encodeURIComponent(markers.join(","))); }
+  if (markers.indexOf("low_confidence") >= 0) {
+    params.push("low_confidence_below=" + lowConfidenceThreshold());
+  }
+  if (cursor) { params.push("resume_after=" + encodeURIComponent(cursor)); }
+  return path + "?" + params.join("&");
+}
+
+function turnFindReset() {
+  turnFind.seq += 1;
+  turnFind.rows = []; turnFind.cursor = null; turnFind.scanned = 0;
+  turnFind.matched = 0; turnFind.complete = true; turnFind.facets = null;
+  turnFind.stopped = false; turnFind.error = null; turnFind.basis = "";
+  return turnFind.seq;
+}
+
+function turnFindRun(seq, cursor) {
+  turnFind.running = true;
+  turnFindRender();
+  api(turnFindPath(cursor)).then(function (page) {
+    if (seq !== turnFind.seq) { return; }   /* a later search owns the view */
+    turnFind.running = false;
+    /* Every fetched row is kept. The cursor moves past these rows whether or
+       not they are rendered, so a row dropped here could never be asked for
+       again. */
+    (page.turns || []).forEach(function (row) { turnFind.rows.push(row); });
+    /* Segment counts sum; they are not a dataset total until the walk ends. */
+    turnFind.matched += page.total_matched || 0;
+    turnFind.scanned += page.total_scanned || 0;
+    turnFind.complete = !page.scan_truncated;
+    turnFind.cursor = page.next_scan_cursor || null;
+    turnFind.basis = page.basis || "";
+    /* Facets accumulate with the walk for the same reason the totals do: each
+       segment counts its own stretch, and a segment's count presented as the
+       store's answer would say "0 turns repeated a command" about a store
+       whose repeats are simply further down. A null facet stays null -- the
+       query could not answer it, and summing would invent a zero. */
+    if (page.facets) {
+      if (!turnFind.facets) {
+        turnFind.facets = page.facets;
+      } else {
+        Object.keys(page.facets).forEach(function (name) {
+          var seen = turnFind.facets[name], now = page.facets[name];
+          turnFind.facets[name] =
+            (typeof seen === "number" && typeof now === "number") ? seen + now : now;
+        });
+      }
+    }
+    turnFindRenderMarkers();
+    /* Keep walking only while the answer would otherwise be a premature
+       "no matches"; once something is on screen the operator decides. */
+    if (!turnFind.complete && !turnFind.stopped && !turnFind.rows.length
+        && turnFind.cursor) {
+      turnFindRun(seq, turnFind.cursor);
+      return;
+    }
+    turnFindRender();
+  }).catch(function (error) {
+    if (seq !== turnFind.seq) { return; }
+    turnFind.running = false;
+    turnFind.error = error.message || String(error);
+    turnFindRender();
+  });
+}
+
+/* Who owns #detail. A search walks the store over several round trips, and
+   the rail's periodic refresh repaints the pane between them, so claiming the
+   navigation token once at the start is not enough -- the finder would be
+   declared stale by a refresh it has nothing to do with. Instead it holds the
+   pane until the operator navigates away, which is exactly the two gestures
+   below: opening a record from the rail, or opening one of its own results. */
+function turnFindRelease() { turnFind.active = false; }
+document.getElementById("convList")
+  .addEventListener("click", turnFindRelease, true);
+document.getElementById("recordNav")
+  .addEventListener("click", turnFindRelease, true);
+
+function turnFindStart() {
+  turnFind.active = true;
+  turnFindRun(turnFindReset(), null);
+}
+
+function turnFindSchedule() {
+  if (turnFind.timer) { clearTimeout(turnFind.timer); }
+  turnFind.timer = setTimeout(function () {
+    turnFind.timer = null;
+    turnFindStart();
+  }, TURN_FIND_DEBOUNCE_MS);
+}
+
+function turnFindStatusText() {
+  if (turnFind.error) { return "Search failed: " + turnFind.error; }
+  if (!turnFind.active) { return ""; }
+  var scanned = turnFind.scanned + " turn" + (turnFind.scanned === 1 ? "" : "s") + " scanned";
+  if (turnFind.running) {
+    return "Searching \u2014 " + scanned + " so far"
+      + (turnFind.rows.length ? ", " + turnFind.matched + " matching" : "") + "\u2026";
+  }
+  if (!turnFind.complete) {
+    /* The count is a floor and is written as one: the rest of the store has
+       not been looked at, so neither "12 matches" nor "no matches" is true. */
+    return (turnFind.matched ? "At least " + turnFind.matched + " matching" : "No match yet")
+      + " \u2014 " + scanned + ", not the whole store"
+      + (turnFind.stopped ? " (stopped)" : "");
+  }
+  return (turnFind.matched
+    ? turnFind.matched + " matching turn" + (turnFind.matched === 1 ? "" : "s")
+    : "No matching turns") + " \u2014 " + scanned + ", the whole store";
+}
+
+function turnFindRenderMarkers() {
+  var box = document.getElementById("turnFindMarkers");
+  if (!box) { return; }
+  clear(box);
+  /* The order and the vocabulary are the server's: `facets` arrives keyed in
+     MARKER_ORDER once a search has run. Before that, the local labels stand in
+     and a test pins them to the server's list so they cannot drift apart. */
+  var names = turnFind.facets ? Object.keys(turnFind.facets) : Object.keys(MARKER_LABEL);
+  names.forEach(function (name) {
+    var meta = markerMeta(name);
+    var count = turnFind.facets ? turnFind.facets[name] : undefined;
+    var chip = el("button", "chipMarker " + meta.tone);
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", turnFind.markers[name] ? "true" : "false");
+    chip.appendChild(el("span", "glyph", meta.glyph));
+    var suffix = "";
+    if (count === null) {
+      /* Null is "this query could not answer that", which a zero would
+         misreport as "nobody matched". */
+      suffix = " (not counted)";
+      chip.classList.add("unknown");
+    } else if (typeof count === "number") {
+      /* While the walk is unfinished the count is a floor, and is written as
+         one. A bare "0" from a partial scan is the same false negative as a
+         bare "no matches" from one. */
+      suffix = " " + count + (turnFind.complete ? "" : "+");
+    }
+    chip.appendChild(document.createTextNode(meta.text + suffix));
+    chip.title = meta.help
+      + (count === null ? " Not counted for this search."
+        : (turnFind.complete ? "" : " Counted so far; the store is not fully searched."));
+    chip.addEventListener("click", function () {
+      turnFind.markers[name] = !turnFind.markers[name];
+      /* Repaint the chips before the search runs: the pressed state is the
+         operator's own click and must not wait on a round trip to appear. */
+      turnFindRenderMarkers();
+      turnFindStart();
+    });
+    box.appendChild(chip);
+  });
+}
+
+function turnFindRender() {
+  var status = document.getElementById("turnFindStatus");
+  if (status) { status.textContent = turnFindStatusText(); }
+  if (!turnFind.active) { return; }
+  turnFind.nav = expNavToken();
+  var d = document.getElementById("detail");
+  clear(d);
+  var card = el("div", "card");
+  var heading = turnFind.text || turnFindSelected().length
+    ? "Turns matching this search" : "All recorded turns";
+  card.appendChild(el("h2", null, heading));
+  card.appendChild(el("div", "sub", turnFindStatusText()));
+  if (turnFind.basis === "spans") {
+    card.appendChild(el("div", "diagNote",
+      "Searched recorded traces. A dispatch whose span was dropped is found "
+      + "only when a failure filter is on, which reads the turn record too."));
+  }
+  turnFind.rows.forEach(function (row) {
+    var item = el("div", "listItem");
+    item.appendChild(el("div", "title",
+      (row.ordinal ? "#" + row.ordinal + " " : "")
+      + (policedText(row.user_message) || "(no message)")));
+    var sub = el("div", "sub", row.status + " \u00b7 " + fmtTs(row.started_at));
+    item.appendChild(sub);
+    var chips = el("div");
+    appendMarkerChips(chips, row.markers, (row.diagnosis || {}).counts);
+    item.appendChild(chips);
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.title = "open this turn";
+    var open = function () { turnFindRelease(); selectTurn(row.turn_key); };
+    item.addEventListener("click", open);
+    item.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+    card.appendChild(item);
+  });
+  if (!turnFind.rows.length && turnFind.complete && !turnFind.running) {
+    card.appendChild(el("div", "empty",
+      "No turn in this store matches. The whole store was searched."));
+  }
+  if (turnFind.rows.length && turnFind.complete && !turnFind.running) {
+    /* Says the list is all of them, which is only true once the walk ended.
+       Before that the continuation control below is what the operator needs. */
+    card.appendChild(el("div", "diagNote",
+      "Showing all " + turnFind.rows.length + " matching turn"
+      + (turnFind.rows.length === 1 ? "" : "s") + "."));
+  }
+  if (turnFind.running) {
+    var stop = el("button", "traceLink", "Stop searching");
+    stop.type = "button";
+    stop.id = "turnFindStop";
+    stop.addEventListener("click", function () {
+      turnFind.stopped = true;
+      turnFind.seq += 1;          /* the in-flight answer is no longer ours */
+      turnFind.running = false;
+      turnFindRender();
+    });
+    card.appendChild(stop);
+  } else if (!turnFind.complete && turnFind.cursor) {
+    /* One click is one bounded request, not "the rest of the store" -- saying
+       the latter would promise a finished walk the click does not deliver. */
+    var more = el("button", "traceLink",
+      "Keep searching \u2014 next " + TURN_FIND_SCAN + " turns");
+    more.type = "button";
+    more.id = "turnFindMore";
+    more.addEventListener("click", function () {
+      turnFind.stopped = false;
+      turnFindRun(turnFind.seq, turnFind.cursor);
+    });
+    card.appendChild(more);
+  }
+  d.appendChild(card);
+}
+
+document.getElementById("turnFind").addEventListener("submit", function (event) {
+  event.preventDefault();
+  if (turnFind.timer) { clearTimeout(turnFind.timer); turnFind.timer = null; }
+  turnFind.text = document.getElementById("turnFindText").value.trim();
+  turnFindStart();
+});
+document.getElementById("turnFindText").addEventListener("input", function (event) {
+  turnFind.text = event.target.value.trim();
+  turnFindSchedule();
+});
+turnFindRenderMarkers();
+
 /* -- the experiment browser (fix-bn1.6) --------------------------------
    experiment -> task -> attempt is the same three-level grouping the rail
    already builds over channel -> conversation -> turn, so this drills down
@@ -2754,6 +3333,13 @@ function showExperiment(experimentId) {
       renderEvidenceVerdict(card, exp.evidence);
     }
 
+    /* The contest, before the tasks: "is this the workflow's current answer"
+       is a fact about the whole experiment, and each task's best run below is
+       a different decision that never moves it. */
+    renderWinnerPanel(card, experimentId, function () {
+      showExperiment(experimentId);
+    });
+
     card.appendChild(el("h2", null, "Tasks"));
     if (!tasks.length) {
       card.appendChild(el("div", "empty", "no attempts recorded yet"));
@@ -2813,6 +3399,38 @@ function renderComparison(container, cmp) {
   renderProvenanceDifferences(container, cmp.provenance_differences);
 }
 
+/* The task page's views, in the order the owner named them.
+   showExperimentTask renders the strip from this list and calls the view's
+   render(container, experimentId, taskId, nav). The three share one task, one
+   crumb trail and one feedback vocabulary: a comment written from a Compare
+   row is an ordinary comment and shows up under Feedback. */
+var TASK_VIEWS = [
+  { key: "runs", label: "Runs" },
+  { key: "compare", label: "Compare", render: renderTaskCompare },
+  { key: "feedback", label: "Feedback", render: renderTaskFeedback }
+];
+var taskView = "runs";
+
+function taskViewStrip(container, experimentId, taskId, label) {
+  var strip = el("div", "feedbackTabs");
+  strip.setAttribute("role", "tablist");
+  strip.setAttribute("aria-label", "Task views");
+  TASK_VIEWS.forEach(function (view) {
+    var button = el("button", view.key === taskView ? "active" : null, view.label);
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("data-task-view", view.key);
+    button.setAttribute("aria-selected", view.key === taskView ? "true" : "false");
+    button.tabIndex = view.key === taskView ? 0 : -1;
+    button.addEventListener("click", function () {
+      taskView = view.key;
+      showExperimentTask(experimentId, taskId, label);
+    });
+    strip.appendChild(button);
+  });
+  container.appendChild(strip);
+}
+
 function showExperimentTask(experimentId, taskId, label) {
   var conversationPath = findHierarchy(function (n) { return n.kind === "conversation" &&
     n.info.task_id === taskId && n.source && n.source.benchmark_experiment === experimentId; });
@@ -2826,57 +3444,183 @@ function showExperimentTask(experimentId, taskId, label) {
   state.experimentTask = taskId;
   var d = document.getElementById("detail");
   clear(d);
-  d.appendChild(el("div", "empty", "loading attempts…"));
-  api("/api/experiment/" + encodeURIComponent(experimentId)
-      + "/attempts?task=" + encodeURIComponent(taskId)).then(function (data) {
-    if (expNavStale(nav)) { return; }
-    clear(d);
-    var card = el("div", "card");
-    expCrumbs(card, [
-      { label: "Experiments", onClick: showExperiments },
-      /* the experiment's NAME, matching the parent view; a deep link that has
-         no name in hand builds the same one out of the id */
-      { label: label || ("Experiment · " + experimentId.slice(-8)),
-        onClick: function () { showExperiment(experimentId); } },
-      { label: taskId }
-    ]);
-    card.appendChild(el("h2", null, "Attempts"));
-    card.appendChild(el("div", "sub",
-      "Per-attempt outcomes are retained rather than collapsed to a per-task " +
-      "rate: an agent that passes a task often can still fail pass^k, and a " +
-      "rate stored at write time cannot say which."));
-    (data.attempts || []).forEach(function (row) {
-      var item = el("div", "listItem");
-      var title = el("div", "title");
-      title.appendChild(el("span", null, "attempt " + row.attempt + "  "));
-      title.appendChild(el("span", null, row.outcome || "unfinished"));
-      item.appendChild(title);
-      var sub = "source: " + (row.outcome_source || "—")
-        + (row.reward === null || row.reward === undefined ? "" : "  reward " + row.reward)
-        + (row.restarts ? "  restarts " + row.restarts : "")
-        + "  · " + row.channel_id;
-      var subLine = el("div", "sub", sub);
-      appendTokenLimitChip(subLine, row.llm_calls_cut_at_limit);
-      appendCostChip(subLine, row.llm_cost);
-      item.appendChild(subLine);
-      /* The attempt row carries the evidence verdict with its stored reasons
-         and the collapsed server configuration; the per-segment deltas stay
-         on the experiment page above, once. */
-      var verdictBox = el("div", "sub");
-      renderEvidenceVerdict(verdictBox, row.evidence, { segments: false });
-      item.appendChild(verdictBox);
-      renderServerConfiguration(item, row);
-      item.addEventListener("click", function () {
-        openExperimentAttempt(experimentId, taskId, row.attempt);
-      });
-      card.appendChild(item);
-    });
-    d.appendChild(card);
-  }).catch(function (e) {
-    if (expNavStale(nav)) { return; }
-    clear(d);
-    d.appendChild(el("div", "empty", "Could not load attempts: " + e.message));
+  var crumbs = [
+    { label: "Experiments", onClick: showExperiments },
+    /* the experiment's NAME, matching the parent view; a deep link that has
+       no name in hand builds the same one out of the id */
+    { label: label || ("Experiment · " + experimentId.slice(-8)),
+      onClick: function () { showExperiment(experimentId); } },
+    { label: taskId }
+  ];
+  /* Compare state belongs to one task. Arriving at a different task resets it
+     rather than carrying "attempt 3" into a task that has two. */
+  resetTaskCompare(experimentId, taskId);
+  if (taskView !== "runs") {
+    var view = TASK_VIEWS.filter(function (v) { return v.key === taskView; })[0];
+    var viewCard = el("div", "card");
+    expCrumbs(viewCard, crumbs);
+    taskViewStrip(viewCard, experimentId, taskId, label);
+    d.appendChild(viewCard);
+    view.render(d, experimentId, taskId, nav);
+    return;
+  }
+  renderTaskRuns(d, experimentId, taskId, label, crumbs, nav);
+}
+
+/* -- the task Feedback view (fix-9eg.19.1) ----------------------------
+   Every authorized comment on one task, across attempts, turns and
+   components, comparison comments included. The default has NO filter: a
+   hidden one would quietly answer a narrower question than the reader asked,
+   and "everything recorded about this task" is the whole point of the view.
+   Paging is server-side and bounded, over a deterministic order. */
+var taskFeedbackFilters = {};
+var TASK_FEEDBACK_PAGE = 50;
+
+function taskFeedbackFilterSelect(row, name, labelText, options) {
+  var wrap = el("label", null);
+  wrap.appendChild(el("div", null, labelText));
+  var select = el("select");
+  select.setAttribute("aria-label", labelText);
+  var all = el("option", null, "All");
+  all.value = "";
+  select.appendChild(all);
+  options.forEach(function (option) {
+    var node = el("option", null, option.label);
+    node.value = option.value;
+    select.appendChild(node);
   });
+  select.value = taskFeedbackFilters[name] || "";
+  select.addEventListener("change", function () {
+    taskFeedbackFilters[name] = select.value;
+    /* A narrowed view starts at its own first page: keeping the old offset
+       would land the reader past the end of a shorter result. */
+    taskFeedbackFilters.offset = 0;
+    if (taskFeedbackFilters.reload) { taskFeedbackFilters.reload(); }
+  });
+  wrap.appendChild(select);
+  row.appendChild(wrap);
+  return select;
+}
+
+function taskFeedbackSubcategoryOptions() {
+  var options = [];
+  FEEDBACK_TAXONOMY.forEach(function (category) {
+    category.subcategories.forEach(function (sub) {
+      options.push({ value: sub.value, label: category.label + " · " + sub.label });
+    });
+  });
+  return options;
+}
+
+function renderTaskFeedbackRow(row) {
+  var item = el("div", "listItem");
+  var title = el("div", "title");
+  var classification = feedbackClassification(row);
+  title.appendChild(el("span",
+    row.classified ? null : "feedbackUnclassified", classification));
+  item.appendChild(title);
+  var where = "attempt " + (row.attempt === null || row.attempt === undefined ? "—" : row.attempt)
+    + " · " + row.target_kind + " · " + row.target_label;
+  item.appendChild(el("div", "sub", where));
+  item.appendChild(el("div", "sub",
+    row.created_at + " · " + feedbackProvenanceLabel(row.provenance)
+    + " · store " + (row.store_id || "—")));
+  item.appendChild(el("pre", "json", row.comment || ""));
+  var links = el("div", "sub");
+  var open = el("button", "evidenceLink", "Open the trace");
+  open.type = "button";
+  open.addEventListener("click", function () { selectTurn(row.turn_key); });
+  links.appendChild(open);
+  item.appendChild(links);
+  renderFeedbackPair(item, row);
+  return item;
+}
+
+function renderTaskFeedback(container, experimentId, taskId) {
+  var card = el("div", "card");
+  card.appendChild(el("h2", null, "Feedback"));
+  card.appendChild(el("div", "sub",
+    "Every recorded comment on this task, across attempts, turns and "
+    + "components, including comparison comments anchored on the other side "
+    + "of a pair and task-level summaries. Filters are optional."));
+  var filters = el("div", "feedbackFilters");
+  card.appendChild(filters);
+  var list = el("div");
+  var note = el("p", "sub", "Loading feedback…");
+  var pager = el("div", "sub");
+  card.appendChild(list); card.appendChild(pager); card.appendChild(note);
+  container.appendChild(card);
+
+  function load() {
+    /* A workspace reads through its manifest: the store-aware route scopes
+       the task to the segments the manifest declares for the experiment, so
+       a comparison comment recorded beside one archive shows in the other
+       archive's task view too. The live route takes no store_id at all. */
+    var base = (session && session.workspace_mode)
+      ? "/api/workspace/task-feedback?experiment="
+      : "/api/task-feedback?experiment=";
+    var path = base + encodeURIComponent(experimentId)
+      + "&task=" + encodeURIComponent(taskId)
+      + "&limit=" + TASK_FEEDBACK_PAGE
+      + "&offset=" + (taskFeedbackFilters.offset || 0);
+    ["category", "subcategory", "provenance", "target_kind", "component"].forEach(function (name) {
+      if (taskFeedbackFilters[name]) {
+        path += "&" + name + "=" + encodeURIComponent(taskFeedbackFilters[name]);
+      }
+    });
+    if (benchmarkExperimentSource) {
+      path += "&benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource);
+    }
+    api(path).then(function (data) {
+      clear(list); clear(pager);
+      var rows = data.feedback || [];
+      if (!rows.length) {
+        list.appendChild(el("div", "empty",
+          data.total ? "No comment on this page." : "No feedback recorded for this task yet."));
+      }
+      rows.forEach(function (row) { list.appendChild(renderTaskFeedbackRow(row)); });
+      note.textContent = "Showing " + rows.length + " of " + data.total
+        + " comment(s) across " + (data.stores || []).length + " store(s).";
+      if ((data.offset || 0) > 0) {
+        var back = el("button", null, "Previous");
+        back.type = "button";
+        back.addEventListener("click", function () {
+          taskFeedbackFilters.offset = Math.max(0, (data.offset || 0) - TASK_FEEDBACK_PAGE);
+          load();
+        });
+        pager.appendChild(back);
+      }
+      if (data.has_more) {
+        var next = el("button", null, "Next");
+        next.type = "button";
+        next.addEventListener("click", function () {
+          taskFeedbackFilters.offset = (data.offset || 0) + TASK_FEEDBACK_PAGE;
+          load();
+        });
+        pager.appendChild(next);
+      }
+    }).catch(function (e) {
+      clear(list); note.textContent = e.message;
+    });
+  }
+  taskFeedbackFilters.reload = load;
+  taskFeedbackFilterSelect(filters, "category", "Category",
+    FEEDBACK_TAXONOMY.map(function (c) { return { value: c.value, label: c.label }; }));
+  taskFeedbackFilterSelect(filters, "subcategory", "Subcategory",
+    taskFeedbackSubcategoryOptions());
+  taskFeedbackFilterSelect(filters, "provenance", "Author", [
+    { value: "human", label: "Human" },
+    { value: "coding_agent", label: "Coding Agent" },
+    { value: "distillation_agent", label: "Distillation Agent" }
+  ]);
+  taskFeedbackFilterSelect(filters, "target_kind", "Component", [
+    { value: "task", label: "Task summary" },
+    { value: "turn", label: "Turn" },
+    { value: "phase", label: "Phase" },
+    { value: "step", label: "Step" },
+    { value: "span", label: "Span" }
+  ]);
+  load();
 }
 
 function openExperimentAttempt(experimentId, taskId, attempt) {
@@ -2932,6 +3676,2000 @@ function openExperimentAttempt(experimentId, taskId, attempt) {
 }
 
 
+/* -- run selection, the winner, and one shared comparison ---------------
+   (fix-9eg.17.2 / .17.3 / .17.4 and the browser half of fix-9eg.4)
+
+   Every route here is run_chatbot/selection_api.py's, and nothing below
+   derives a turn key, a store path or a step alignment of its own: a client
+   names an experiment, a task and an attempt NUMBER, and the references, the
+   evidence anchors and the pair identity come back from the recorded
+   evidence. That is why a comment written from a Compare row and the pair's
+   review progress agree about which two executions they are about.
+
+   Three product rules this section exists to keep visible:
+
+   - The WINNER of a contest and a task's BEST RUN are different decisions.
+     Choosing a best run never moves a winner, and the winner badge carries the
+     winning experiment's own recorded status instead of implying one.
+   - "Reference" is a viewing default (the first completed attempt). Only a
+     recorded decision is "Best run", and a failed attempt chosen as best stays
+     visibly failed.
+   - A recorded pair is frozen. Re-picking a best run produces a different pair
+     and leaves every earlier comment naming the runs it was written about. */
+
+/* Who the browser says it is. selection_api refuses actor_kind "system" --
+   that kind marks the winner nobody chose -- so a person's decision is filed
+   as a person's. */
+var SELECTION_ACTOR = { actor: "observability UI", actor_kind: "human" };
+
+/* One decision body: who is deciding, plus whatever this decision says. Keys
+   whose value is undefined are dropped, so "no reason given" is an absent
+   field rather than an empty string the store would have to interpret. */
+function decisionBody(fields) {
+  var body = {
+    actor: SELECTION_ACTOR.actor, actor_kind: SELECTION_ACTOR.actor_kind
+  };
+  Object.keys(fields || {}).forEach(function (key) {
+    if (fields[key] !== undefined) { body[key] = fields[key]; }
+  });
+  return body;
+}
+
+function selectionPath(experimentId, suffix) {
+  return "/api/experiments/" + encodeURIComponent(experimentId) + (suffix || "");
+}
+function taskSelectionPath(experimentId, taskId, suffix) {
+  return selectionPath(experimentId,
+    "/tasks/" + encodeURIComponent(taskId) + (suffix || ""));
+}
+
+/* A GET whose refusal IS the answer.
+
+   403 sealed, 404 not recorded and 409 (no control yet, this experiment joined
+   no contest, the evidence is unreadable) are all states the page has to
+   render as themselves. Throwing would replace an explanation with "Could not
+   load", and a workflow whose experiments predate the selection control would
+   lose its attempt list along with its absent decisions. */
+function selectionRead(path) {
+  return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
+    .then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (r.ok) { return data; }
+        if (r.status === 403 || r.status === 404 || r.status === 409) {
+          return {
+            unavailable: true, status: r.status, sealed: !!data.sealed,
+            error: data.error || ("API " + path + " -> " + r.status)
+          };
+        }
+        throw new Error(data.error || ("API " + path + " -> " + r.status));
+      });
+    });
+}
+
+/* A selection write. Its refusals carry the contract: a 409 answers with the
+   pointer that replaced the one this page read, which is what makes "read it
+   again and decide again" a mechanical retry. The shared mutation helper
+   flattens a body into an Error message, so this one returns the body. */
+function selectionWrite(path, method, body) {
+  return fetch(path, {
+    method: method,
+    headers: {
+      "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (data) {
+      return { ok: r.ok, status: r.status, data: data };
+    });
+  });
+}
+
+/* A read scoped to ONE named source, never to the page's current global one.
+
+   The two sides of a comparison routinely live in different evidence
+   databases, so a link or a preview on the right-hand side must not be served
+   by whatever store the page happens to be pointed at — that is how a turn key
+   that exists in both databases opens the wrong side's trace. These two take
+   the source explicitly and add nothing implicitly.
+
+   `benchmark_experiment` is the only handle the server resolves: it refuses to
+   find a store by searching the disk, so a database is addressed by the
+   experiment registered against it. When that registration does not exist the
+   refusal is the answer, and the caller says so rather than guessing. */
+function scopedRead(path, experimentId) {
+  var scoped = path;
+  if (experimentId) {
+    scoped += (path.indexOf("?") < 0 ? "?" : "&")
+      + "benchmark_experiment=" + encodeURIComponent(experimentId);
+  }
+  return selectionRead(scoped);
+}
+function scopedRaw(path, experimentId) {
+  var scoped = path;
+  if (experimentId) {
+    scoped += (path.indexOf("?") < 0 ? "?" : "&")
+      + "benchmark_experiment=" + encodeURIComponent(experimentId);
+  }
+  return fetch(scoped, { headers: { "Authorization": "Bearer " + TOKEN } });
+}
+
+function selectionNote(container, title, detail) {
+  var box = el("div", "selectionNote");
+  box.appendChild(el("strong", null, title));
+  if (detail) { box.appendChild(el("div", null, detail)); }
+  container.appendChild(box);
+  return box;
+}
+
+function labelledSelect(row, labelText, options, value, onChange) {
+  var wrap = el("label", null);
+  wrap.appendChild(el("div", null, labelText));
+  var select = el("select");
+  select.setAttribute("aria-label", labelText);
+  options.forEach(function (option) {
+    var node = el("option", null, option.label);
+    node.value = String(option.value);
+    if (option.disabled) { node.disabled = true; }
+    select.appendChild(node);
+  });
+  select.value = value === null || value === undefined ? "" : String(value);
+  select.addEventListener("change", function () { onChange(select.value); });
+  wrap.appendChild(select);
+  row.appendChild(wrap);
+  return select;
+}
+
+/* An optional reason, offered for every decision and required by none. The
+   owner's rule: no rubric, no target, no mandatory justification. */
+function reasonField(container, labelText) {
+  var wrap = el("label", "formField");
+  wrap.appendChild(el("div", "sub", labelText));
+  var input = el("input", "expNotes");
+  input.type = "text";
+  input.maxLength = 4000;
+  input.setAttribute("aria-label", labelText);
+  input.placeholder = "Optional";
+  wrap.appendChild(input);
+  container.appendChild(wrap);
+  return input;
+}
+
+function executionPill(status) {
+  return status === "completed" ? "pill ok"
+    : (status === "failed" ? "pill err" : "pill wait");
+}
+
+/* An attempt's own recorded state, unlaundered. A failed attempt may be the
+   best run of its task and must keep saying "failed". */
+function attemptTitle(row) {
+  var title = el("div", "title");
+  title.appendChild(el("span", null, "attempt " + row.attempt + "  "));
+  title.appendChild(el("span", null, row.outcome || "unfinished"));
+  if (row.is_best) { title.appendChild(el("span", "pill ok", "Best run")); }
+  if (row.is_reference) { title.appendChild(el("span", "pill", "Reference")); }
+  if (row.execution_status) {
+    title.appendChild(el("span", executionPill(row.execution_status),
+                         row.execution_status));
+  }
+  return title;
+}
+
+function attemptOptionLabel(row) {
+  var label = "attempt " + row.attempt
+    + " · " + (row.outcome || row.execution_status || "unfinished");
+  if (row.is_best) { label += " · Best run"; }
+  else if (row.is_reference) { label += " · Reference"; }
+  if (!row.comparable) {
+    label += " · " + (row.evidence_label || "nothing recorded to compare");
+  }
+  return label;
+}
+
+/* -- the task's Runs view --------------------------------------------- */
+
+function renderTaskRuns(container, experimentId, taskId, label, crumbs, nav) {
+  container.appendChild(el("div", "empty", "loading attempts…"));
+  Promise.all([
+    api("/api/experiment/" + encodeURIComponent(experimentId)
+        + "/attempts?task=" + encodeURIComponent(taskId)),
+    selectionRead(taskSelectionPath(experimentId, taskId, "/runs"))
+  ]).then(function (results) {
+    if (expNavStale(nav)) { return; }
+    clear(container);
+    var evidence = results[0].attempts || [];
+    var runs = results[1];
+    var card = el("div", "card");
+    expCrumbs(card, crumbs);
+    taskViewStrip(card, experimentId, taskId, label);
+    card.appendChild(el("h2", null, "Attempts"));
+    card.appendChild(el("div", "sub",
+      "Per-attempt outcomes are retained rather than collapsed to a per-task " +
+      "rate: an agent that passes a task often can still fail pass^k, and a " +
+      "rate stored at write time cannot say which."));
+    container.appendChild(card);
+    renderTaskRunList(card, experimentId, taskId, label, evidence, runs, nav);
+  }).catch(function (e) {
+    if (expNavStale(nav)) { return; }
+    clear(container);
+    container.appendChild(el("div", "empty", "Could not load attempts: " + e.message));
+  });
+}
+
+/* Every attempt this task recorded, failed and unfinished included, with the
+   selection state beside each one.
+
+   The two reads are kept apart on purpose. `/api/experiment/<id>/attempts` is
+   the EVIDENCE view and carries the writer-health verdict, the server
+   configuration and the token/cost chips; `.../tasks/<id>/runs` is the
+   DECISION view and carries Best run, Reference, comparability and the CAS
+   token. A workflow whose experiments predate the selection control answers
+   the second with a refusal, and then this list is exactly what it was before
+   plus a line saying decisions are not available here. */
+function renderTaskRunList(card, experimentId, taskId, label, evidence, runs, nav) {
+  var decisions = !runs.unavailable && runs.decisions_available !== false;
+  if (runs.unavailable) {
+    selectionNote(card,
+      runs.sealed
+        ? "This is sealed evidence, so it records no decisions."
+        : "No best run can be recorded for this task yet.",
+      runs.error);
+  } else if (!decisions) {
+    selectionNote(card,
+      "This archive carries the evidence, not the decisions.",
+      "Best run and Reference are the live workflow's judgements. An archive "
+      + "does not hold them, so none is shown rather than an empty badge that "
+      + "would read as 'nobody has chosen yet'.");
+  }
+  var byAttempt = {};
+  evidence.forEach(function (row) { byAttempt[row.attempt] = row; });
+  var selected = {};
+  (runs.attempts || []).forEach(function (row) { selected[row.attempt] = row; });
+  /* The decision view is authoritative about WHICH attempts exist when it can
+     answer, because it projects the recorded attempt rows; the evidence view
+     is the fallback and the source of the extra chrome either way. */
+  var rows = (runs.attempts && runs.attempts.length)
+    ? runs.attempts
+    : evidence.map(function (row) { return row; });
+  if (!rows.length) {
+    card.appendChild(el("div", "empty", "no attempts recorded for this task"));
+    return;
+  }
+  /* Existence of the DECISION, not readability of the row it names: a best run
+     whose attempt row cannot be read right now is still a recorded choice, and
+     reporting it as "nobody has chosen" would erase somebody's decision. */
+  var pinned = runs.best_run || null;
+  if (!runs.unavailable && decisions) {
+    var head = el("div", "sub");
+    head.textContent = pinned
+      ? ("Best run: attempt " + pinned.attempt + ". " + bestRunProvenance(pinned))
+      : (runs.reference
+          ? ("No best run has been chosen. Attempt " + runs.reference.attempt
+             + " is the Reference, which is a viewing default and not a decision.")
+          : "No best run has been chosen and no completed attempt is available "
+            + "as a Reference.");
+    card.appendChild(head);
+    if (pinned && pinned.attempt_resolved === false) {
+      card.appendChild(el("div", "sub",
+        "That attempt's own record cannot be read from here, so what it did is "
+        + "unknown — the decision to prefer it stands regardless."));
+    }
+  }
+  rows.forEach(function (row) {
+    var extra = byAttempt[row.attempt] || {};
+    var item = el("div", "listItem");
+    item.setAttribute("data-attempt", String(row.attempt));
+    item.appendChild(attemptTitle(row));
+    var sub = "source: " + (row.outcome_source || extra.outcome_source || "—")
+      + (row.reward === null || row.reward === undefined
+          ? "" : "  reward " + row.reward)
+      + (row.restarts ? "  restarts " + row.restarts : "")
+      + (extra.channel_id ? "  · " + extra.channel_id : "")
+      + (row.turn_count === undefined
+          ? "" : "  · " + fmtCount(row.turn_count) + " recorded turn(s)");
+    var subLine = el("div", "sub", sub);
+    appendTokenLimitChip(subLine, extra.llm_calls_cut_at_limit);
+    appendCostChip(subLine, extra.llm_cost);
+    item.appendChild(subLine);
+    /* The attempt row carries the evidence verdict with its stored reasons
+       and the collapsed server configuration; the per-segment deltas stay
+       on the experiment page above, once. */
+    var verdictBox = el("div", "sub");
+    renderEvidenceVerdict(verdictBox, extra.evidence, { segments: false });
+    item.appendChild(verdictBox);
+    renderServerConfiguration(item, extra);
+    var open = el("button", "evidenceLink", "Open the recorded turns");
+    open.type = "button";
+    open.addEventListener("click", function () {
+      openExperimentAttempt(experimentId, taskId, row.attempt);
+    });
+    var actions = el("div", "runDecision");
+    actions.appendChild(open);
+    renderAttemptActions(actions, experimentId, taskId, label, row, runs, decisions);
+    item.appendChild(actions);
+    card.appendChild(item);
+  });
+  if (!runs.unavailable && decisions) {
+    renderBestRunHistory(card, experimentId, taskId, nav);
+  }
+}
+
+/* The pointer says WHAT was decided and WHEN; who decided it and why is in
+   the append-only decision log, which the panel below opens on request. */
+function bestRunProvenance(pointer) {
+  return "Recorded by a " + (pointer.decision || "decision")
+    + (pointer.decided_at ? " at " + pointer.decided_at : "")
+    + ". Who decided it and any reason are in the decisions below.";
+}
+
+/* What can be done with one attempt, and what visibly cannot.
+
+   Only a FINISHED attempt is selectable: a run still going has no outcome to
+   prefer. An attempt that finished with no recorded turns stays selectable --
+   it really did finish and a reviewer may mean it -- but its comparison is
+   disabled with the evidence's own words for why. */
+function renderAttemptActions(actions, experimentId, taskId, label, row, runs,
+                              decisions) {
+  if (row.comparable) {
+    var compare = el("button", null, row.is_best
+      ? "Compare with another attempt" : "Compare with the best run");
+    compare.type = "button";
+    compare.addEventListener("click", function () {
+      taskCompare.left = row.is_best ? String(row.attempt) : null;
+      taskCompare.right = row.is_best ? null : String(row.attempt);
+      taskCompare.rightExperiment = experimentId;
+      taskView = "compare";
+      showExperimentTask(experimentId, taskId, label);
+    });
+    actions.appendChild(compare);
+  } else if (row.comparable === false) {
+    var refused = el("button", null, "Compare");
+    refused.type = "button";
+    refused.disabled = true;
+    refused.title = row.evidence_label || "This attempt recorded no turns.";
+    actions.appendChild(refused);
+    actions.appendChild(el("span", "sub",
+      row.evidence_label || "No recorded turns, so there is nothing to open."));
+  }
+  if (!decisions) { return; }
+  var reload = function () { showExperimentTask(experimentId, taskId, label); };
+  if (row.selectable && !row.is_best) {
+    var choose = el("button", "primary", "Use as best run");
+    choose.type = "button";
+    choose.addEventListener("click", function () {
+      openBestRunDecision(actions, experimentId, taskId, row, runs, reload);
+    });
+    actions.appendChild(choose);
+  } else if (row.selectable === false) {
+    actions.appendChild(el("span", "sub",
+      "Not finished, so it cannot be the best run yet."));
+  }
+  if (row.is_best) {
+    var clear_ = el("button", null, "Clear the best run");
+    clear_.type = "button";
+    clear_.addEventListener("click", function () {
+      openBestRunDecision(actions, experimentId, taskId, row, runs, reload,
+                          "clear");
+    });
+    actions.appendChild(clear_);
+  }
+}
+
+/* One prompt for all three best-run decisions. Each carries the CAS token the
+   list was rendered from, so a best run somebody else moved meanwhile is
+   reported rather than overwritten. */
+function openBestRunDecision(actions, experimentId, taskId, row, runs, reload,
+                             kind) {
+  var box = el("div", "card");
+  var heading = kind === "clear"
+    ? "Clear the best run of this task"
+    : "Use attempt " + row.attempt + " as the best run";
+  box.appendChild(el("h2", null, heading));
+  box.appendChild(el("div", "sub",
+    "This is a decision about this task only. It does not touch the "
+    + "experiment winner, and it does not change any comment already written: "
+    + "a comparison comment names the runs it was written about."));
+  var reason = reasonField(box, "Reason");
+  var status = el("div", "sub", "");
+  var send = el("button", "primary",
+    kind === "clear" ? "Clear it" : "Record this best run");
+  send.type = "button";
+  send.addEventListener("click", function () {
+    send.disabled = true;
+    status.textContent = "recording…";
+    var path = taskSelectionPath(experimentId, taskId, "/best-run");
+    var request = kind === "clear"
+      ? selectionWrite(path, "DELETE", decisionBody({
+          expected_selection_id: runs.expected_selection_id || undefined,
+          reason: reason.value.trim() || undefined
+        }))
+      : selectionWrite(path, "POST", decisionBody({
+          attempt: row.attempt,
+          expected_selection_id: runs.expected_selection_id || undefined,
+          reason: reason.value.trim() || undefined
+        }));
+    request.then(function (result) {
+      if (result.ok) { showNotice(heading + ": recorded"); reload(); return; }
+      send.disabled = false;
+      status.textContent = "";
+      renderSelectionRefusal(box, result, reload);
+    }).catch(function (e) {
+      send.disabled = false;
+      status.textContent = e.message;
+    });
+  });
+  var undecided = el("button", null, "Record that I looked and did not choose");
+  undecided.type = "button";
+  undecided.addEventListener("click", function () {
+    undecided.disabled = true;
+    status.textContent = "recording…";
+    selectionWrite(
+      taskSelectionPath(experimentId, taskId, "/best-run/undecided"), "POST",
+      decisionBody({
+        expected_selection_id: runs.expected_selection_id || undefined,
+        candidate_attempt: row.attempt,
+        reason: reason.value.trim() || undefined
+      })
+    ).then(function (result) {
+      if (result.ok) { showNotice("Recorded as undecided"); reload(); return; }
+      undecided.disabled = false;
+      status.textContent = "";
+      renderSelectionRefusal(box, result, reload);
+    });
+  });
+  var row_ = el("div", "runDecision");
+  row_.appendChild(send);
+  row_.appendChild(undecided);
+  row_.appendChild(status);
+  box.appendChild(row_);
+  actions.appendChild(box);
+  send.focus();
+}
+
+/* A refused decision, in the words of whatever refused it.
+
+   A 409 carrying `stale` is the one a reader has to act on: the pointer moved
+   while this page was open, so nothing was overwritten and the reply names
+   what is current. The explanation and the re-read are together because
+   "somebody else chose meanwhile" is only useful next to the new state. */
+function renderSelectionRefusal(container, result, reload) {
+  var data = result.data || {};
+  if (data.stale) {
+    var box = selectionNote(container,
+      "Nobody's decision was overwritten.",
+      "This selection moved while the page was open, so the write was "
+      + "refused instead of being applied on top of it.");
+    if (data.current_experiment_id) {
+      box.appendChild(el("div", null,
+        "It now names experiment " + data.current_experiment_id + "."));
+    }
+    box.appendChild(el("div", "sub",
+      "read as " + (data.expected_selection_id || "—")
+      + ", now " + (data.current_selection_id || "nothing")));
+    var again = el("button", "primary", "Re-read and decide again");
+    again.type = "button";
+    again.addEventListener("click", function () { reload(); });
+    box.appendChild(again);
+    return;
+  }
+  selectionNote(container, "That was refused.",
+    data.error || ("Request failed (" + result.status + ")."));
+}
+
+function renderBestRunHistory(card, experimentId, taskId, nav) {
+  var box = el("details", "card");
+  box.appendChild(el("summary", null, "Best-run decisions"));
+  card.appendChild(box);
+  box.addEventListener("toggle", function () {
+    if (!box.open || box.dataset.loaded) { return; }
+    box.dataset.loaded = "1";
+    selectionRead(taskSelectionPath(experimentId, taskId, "/runs/history?limit=50"))
+      .then(function (data) {
+        if (expNavStale(nav)) { return; }
+        if (data.unavailable) {
+          box.appendChild(el("div", "sub", data.error));
+          return;
+        }
+        renderDecisionHistory(box, data.history || [],
+                              "No best-run decision has been recorded.");
+      }).catch(function (e) {
+        box.dataset.loaded = "";
+        box.appendChild(el("div", "sub", e.message));
+      });
+  });
+}
+
+/* Decisions, oldest facts intact.
+
+   The append-only log is the stale-decision record too. A refused write is
+   reported to the person who attempted it and never lands here; what DOES land
+   is what each decision was taken against — the pointer it replaced and the
+   pointer it produced — so "kept the winner" can be read as a judgement about
+   a specific experiment rather than about whatever holds the contest now. */
+function renderDecisionHistory(container, history, emptyText) {
+  if (!history.length) {
+    container.appendChild(el("div", "sub", emptyText));
+    return;
+  }
+  history.forEach(function (row) {
+    var item = el("div", "feedbackHistoryItem");
+    var title = el("div", "title");
+    title.appendChild(el("span", null, row.decision || "recorded"));
+    /* "initial" is the automatic first-experiment election: nobody judged it,
+       and the row must not read as though somebody did. */
+    if (row.automatic || row.decision === "initial") {
+      title.appendChild(el("span", "pill", "automatic"));
+    }
+    item.appendChild(title);
+    var who = (row.created_at || row.decided_at || "")
+      + " · " + (row.actor || "—")
+      + (row.actor_kind ? " (" + feedbackProvenanceLabel(row.actor_kind) + ")" : "");
+    item.appendChild(el("div", "sub", who));
+    if (row.candidate_experiment_id) {
+      item.appendChild(el("div", "sub",
+        "candidate " + row.candidate_experiment_id
+        + (row.candidate_attempt === null || row.candidate_attempt === undefined
+            ? "" : " attempt " + row.candidate_attempt)));
+    }
+    var was = decisionPointerText(row, "previous");
+    var now = decisionPointerText(row, "new");
+    item.appendChild(el("div", "sub",
+      "decided against " + (was || "nothing recorded")
+      + " → " + (now || "nothing recorded")));
+    var said = row.rationale || row.reason;
+    if (said) { item.appendChild(el("pre", "json", said)); }
+    container.appendChild(item);
+  });
+}
+
+/* One side of a decision's before/after, in whichever scope it was taken: a
+   winner decision names an experiment, a best-run decision an attempt. */
+function decisionPointerText(row, side) {
+  var experiment = row[side + "_experiment_id"];
+  var task = row[side + "_task_id"];
+  var attempt = row[side + "_attempt"];
+  if (!experiment && (attempt === null || attempt === undefined)) { return ""; }
+  var text = experiment || "this experiment";
+  if (task) { text += " · " + task; }
+  if (attempt !== null && attempt !== undefined) { text += " · attempt " + attempt; }
+  return text;
+}
+
+/* -- the experiment winner ------------------------------------------- */
+
+/* The contest this experiment is in, and the decision controls for it.
+
+   Rendered on both the recorded-experiment page and the registration page,
+   because "which experiment is this workflow's current answer" is the same
+   question whether or not the run has finished -- the first experiment of a
+   contest wins at creation, before it has run anything.
+
+   The badge and the STATUS are deliberately two things. Being the winner is a
+   pointer somebody (or the automatic first-experiment rule) set; whether the
+   experiment completed, is still running or is invalid is its own recorded
+   fact, and collapsing them would let a pointer read as a pass. */
+function renderWinnerPanel(container, experimentId, reload) {
+  var card = el("div", "card");
+  sectionHeader(card, "Winner of this contest");
+  var body = el("div");
+  card.appendChild(body);
+  container.appendChild(card);
+  body.appendChild(el("div", "sub", "reading the contest…"));
+  selectionRead(selectionPath(experimentId, "/winner")).then(function (data) {
+    clear(body);
+    if (data.unavailable) {
+      selectionNote(body,
+        data.sealed
+          ? "Sealed evidence records no winner."
+          : "This experiment is not in a contest this workflow can decide.",
+        data.error);
+      return;
+    }
+    var winner = data.winner;
+    var badges = el("div", "diffToolbar");
+    badges.appendChild(el("span", data.is_winner ? "pill ok" : "pill",
+                          data.is_winner ? "Winner" : "Not the winner"));
+    if (data.automatic && data.is_winner) {
+      badges.appendChild(el("span", "pill", "automatic — first experiment"));
+    }
+    if (winner && winner.experiment && winner.experiment.status) {
+      badges.appendChild(expStatusPill(winner.experiment.status));
+    }
+    body.appendChild(badges);
+    /* The one distinction a reader cannot recover from the badge: this is a
+       pointer, and it is not the per-task best run. */
+    body.appendChild(el("div", "sub",
+      "This workflow's current answer for the benchmark — a pointer, not a "
+      + "score. Task best runs are chosen separately and never move it."));
+    if (data.automatic && data.is_winner) {
+      body.appendChild(el("div", "sub",
+        "Held since it was created, before anything ran."));
+    }
+    var kv = el("dl", "kv");
+    function pair(k, v) {
+      kv.appendChild(el("dt", null, k));
+      kv.appendChild(el("dd", null,
+        v === null || v === undefined || v === "" ? "—" : String(v)));
+    }
+    pair("current winner", winner ? winner.experiment_id : "nobody");
+    pair("recorded status", winner && winner.experiment
+      ? winner.experiment.status : "not recorded");
+    pair("how it was decided", winner
+      ? (winner.decision || "—")
+        + (winner.decided_at ? " at " + winner.decided_at : "")
+      : "—");
+    pair("experiments in this contest", (data.members || []).length);
+    pair("runs per task", data.runs_per_task);
+    body.appendChild(kv);
+    /* The pointer is a fact even when the run behind it cannot be read. Saying
+       so beats an empty status that would read as "no status was recorded". */
+    if (winner && winner.experiment_resolved === false) {
+      body.appendChild(el("div", "sub",
+        "The winner is recorded, but the evidence store holding experiment "
+        + winner.experiment_id + " was not supplied, so its current state is "
+        + "unknown rather than absent."));
+    }
+    if (winner && winner.experiment_id !== experimentId) {
+      var goto_ = el("button", "evidenceLink",
+                     "Open the winning experiment's records");
+      goto_.type = "button";
+      goto_.addEventListener("click", function () {
+        openBenchmarkExecution(winner.experiment_id);
+      });
+      body.appendChild(goto_);
+    }
+    renderWinnerDecision(body, experimentId, data, reload);
+    renderWinnerHistory(body, experimentId);
+  }).catch(function (e) {
+    clear(body);
+    body.appendChild(el("div", "sub", "Could not read the contest: " + e.message));
+  });
+}
+
+/* Promote, keep or stay undecided, with an optional reason and no rubric.
+
+   All three carry the selection id this panel was rendered from, which is what
+   the contest requires: a "keep" recorded against a winner that was replaced
+   while somebody was reading is a judgement about a different experiment than
+   the one it would be filed under. */
+function renderWinnerDecision(body, experimentId, data, reload) {
+  if (session && session.workspace_mode) { return; }
+  if (!data.expected_selection_id) {
+    selectionNote(body,
+      "This contest has no winner to decide against yet.",
+      "Every decision -- including promoting this experiment -- is recorded "
+      + "against the pointer it was read from, and there is no pointer here. "
+      + "This happens when an evidence store a registration names cannot be "
+      + "opened, so nothing is elected automatically. Restore the store and "
+      + "the contest elects its oldest registration.");
+    return;
+  }
+  var box = el("div");
+  box.appendChild(el("h2", null, "Decide"));
+  var reason = reasonField(box, "Reason (optional)");
+  var status = el("div", "sub", "");
+  var row = el("div", "runDecision");
+  [["promote", "Promote this experiment", "primary"],
+   ["keep", "Keep the current winner", null],
+   ["undecided", "Leave it undecided", null]].forEach(function (choice) {
+    var button = el("button", choice[2], choice[1]);
+    button.type = "button";
+    if (choice[0] === "promote" && data.is_winner) {
+      button.disabled = true;
+      button.title = "This experiment already holds the contest.";
+    }
+    button.addEventListener("click", function () {
+      status.textContent = "recording…";
+      selectionWrite(selectionPath(experimentId, "/winner/decisions"), "POST",
+        decisionBody({
+          decision: choice[0],
+          expected_selection_id: data.expected_selection_id,
+          /* Named on every decision, not only on a promotion: without it the
+             history can say a winner was kept but not which challenger was
+             turned down. */
+          candidate_experiment_id: experimentId,
+          rationale: reason.value.trim() || undefined
+        })
+      ).then(function (result) {
+        if (result.ok) {
+          showNotice("Decision recorded: " + choice[0]);
+          if (reload) { reload(); }
+          return;
+        }
+        status.textContent = "";
+        renderSelectionRefusal(box, result, reload || function () {});
+      }).catch(function (e) { status.textContent = e.message; });
+    });
+    row.appendChild(button);
+  });
+  row.appendChild(status);
+  box.appendChild(row);
+  body.appendChild(box);
+}
+
+function renderWinnerHistory(body, experimentId) {
+  var box = el("details", "card");
+  box.appendChild(el("summary", null, "Decisions in this contest"));
+  body.appendChild(box);
+  box.addEventListener("toggle", function () {
+    if (!box.open || box.dataset.loaded) { return; }
+    box.dataset.loaded = "1";
+    selectionRead(selectionPath(experimentId, "/winner/history?limit=50"))
+      .then(function (data) {
+        if (data.unavailable) {
+          box.appendChild(el("div", "sub", data.error));
+          return;
+        }
+        renderDecisionHistory(box, data.history || [],
+                              "No decision has been recorded in this contest.");
+      }).catch(function (e) {
+        box.dataset.loaded = "";
+        box.appendChild(el("div", "sub", e.message));
+      });
+  });
+}
+
+/* -- running the same setup again (fix-9eg.17.2) ------------------------ */
+
+/* Reuse this setup, optionally more than once per task.
+
+   Duplication is REGISTRATION only: it copies the experiment record, gives it
+   a new id and hands it back for a runner. Nothing paid starts here, and no
+   target, rubric, hypothesis or review gate is required to ask for n attempts
+   — the repeat count is the declared attempt count and nothing else. */
+function renderRepeatSetup(container, row, nav) {
+  if (session && session.workspace_mode) { return; }
+  var card = el("div", "card");
+  sectionHeader(card, "Run this setup again");
+  card.appendChild(el("div", "sub",
+    "Copies this experiment's setup into a new registration you can hand to a "
+    + "runner. Repeating a task is how a flaky result is told from a real one, "
+    + "so the only thing it asks for is how many attempts per task. Creating "
+    + "or duplicating an experiment never executes anything."));
+  var current = row.runs_per_task === null || row.runs_per_task === undefined
+    ? 1 : row.runs_per_task;
+  card.appendChild(el("div", "sub",
+    "This experiment declares " + current + " attempt(s) per task."));
+  var field = el("label", "formField");
+  field.appendChild(el("div", "sub", "Attempts per task for the copy"));
+  var count = el("input", "expNotes");
+  count.type = "number";
+  count.min = "1";
+  count.max = "100";
+  count.step = "1";
+  count.value = String(current);
+  count.setAttribute("aria-label", "Attempts per task for the copy");
+  field.appendChild(count);
+  card.appendChild(field);
+  var description = benchmarkText(card, "Description for the copy (optional)",
+                                  row.description || "", true);
+  var note = el("div", "sub", "");
+  var go = el("button", "primary", "Duplicate this setup");
+  go.type = "button";
+  go.addEventListener("click", function () {
+    note.textContent = "duplicating…";
+    lastActionButton = go;
+    apiPost("/api/benchmark-experiments/"
+            + encodeURIComponent(row.experiment_id) + "/duplicate",
+            { runs_per_task: count.value.trim(),
+              description: description.value })
+      .then(function (result) {
+        if (benchNavStale(nav)) { return; }
+        note.textContent = "";
+        var changed = (result.changed_fields || []).join(", ");
+        showNotice("Setup duplicated",
+                   null, changed ? "changed: " + changed : undefined);
+        refreshConvs().then(function () {
+          if (benchNavStale(nav)) { return; }
+          showBenchmarkExperiment(result.experiment.experiment_id);
+        });
+      }).catch(function (e) { note.textContent = e.message; });
+  });
+  card.appendChild(go);
+  card.appendChild(note);
+  container.appendChild(card);
+}
+
+/* -- the task's Compare view, and the one comparison component --------- */
+
+/* Which pair is on screen. Scoped to one task: arriving at another task with
+   "attempt 3" selected would name an attempt that task may not have. */
+var taskCompare = { key: null, left: null, right: null, rightExperiment: null,
+                    view: "answers", leftPass: null, rightPass: null };
+
+function resetTaskCompare(experimentId, taskId) {
+  var key = experimentId + "\u001f" + taskId;
+  if (taskCompare.key === key) { return; }
+  taskCompare = { key: key, left: null, right: null,
+                  rightExperiment: experimentId, view: "answers",
+                  leftPass: null, rightPass: null };
+}
+
+/* Called by the source switcher when the page changes which evidence database
+   it is reading (see `resetSourceScopedState`).
+
+   The identity above is experiment-and-task, and both recur across archives: a
+   workspace and a live store can hold "todo-list-v1" / "add an item" and mean
+   different runs. Keeping the selected pair across a source change would show
+   attempt numbers from the old database under the new one's label, which is the
+   one way this view can lie. Dropping the key makes the next visit re-derive
+   the pair from the new source's own runs list. */
+function onSourceSwitch() {
+  taskCompare = { key: null, left: null, right: null, rightExperiment: null,
+                  view: "answers", leftPass: null, rightPass: null };
+}
+
+var COMPARE_VIEWS = [
+  { value: "answers", label: "Answers and artifacts" },
+  { value: "steps", label: "Every aligned step" },
+  { value: "differences", label: "Differences only" }
+];
+
+/* How two steps were matched, in words. `recorded` is the only basis that came
+   from the producer; the rest are this comparison's own key tiers, and saying
+   which one matched is how a reader knows how much the row is claiming. */
+var COMPARE_BASIS = {
+  recorded: "matched by a recorded alignment",
+  "command+context+parameters": "same command, context and parameters",
+  "command+context": "same command and context",
+  command: "same command only",
+  unmatched: "no counterpart",
+  unknown: "the evidence does not say what this step was"
+};
+
+function compareBasisLabel(basis) {
+  return COMPARE_BASIS[basis] || basis || "unknown basis";
+}
+
+function compareKindLabel(kind) {
+  if (kind === "matched") { return "both runs"; }
+  if (kind === "left_only") { return "left only"; }
+  if (kind === "right_only") { return "right only"; }
+  return kind || "unpaired";
+}
+
+function renderTaskCompare(container, experimentId, taskId, nav) {
+  var card = el("div", "card");
+  card.appendChild(el("h2", null, "Compare two recorded runs"));
+  card.appendChild(el("div", "sub",
+    "Two runs of this task side by side: what each answered, then the "
+    + "artifacts, then how they got there."));
+  var controls = el("div", "selectionBar");
+  var body = el("div");
+  card.appendChild(controls);
+  card.appendChild(body);
+  container.appendChild(card);
+  body.appendChild(el("div", "empty", "loading runs…"));
+
+  /* `storeId` is THIS page's database, read off the task's own runs. A link on
+     either side compares against it to decide whether opening a trace changes
+     the store scope at all — and an ad-hoc experiment with no authoring
+     registration keeps working because nothing is scoped that need not be. */
+  var context = { experimentId: experimentId, taskId: taskId, winnerId: null,
+                  storeId: null, comparison: null,
+                  reload: function () { paint(); } };
+
+  Promise.all([
+    selectionRead(taskSelectionPath(experimentId, taskId, "/runs")),
+    selectionRead(selectionPath(experimentId, "/winner"))
+  ]).then(function (results) {
+    if (expNavStale(nav)) { return; }
+    var runs = results[0], contest = results[1];
+    if (runs.unavailable) {
+      clear(body);
+      selectionNote(body,
+        runs.sealed
+          ? "Sealed evidence can be compared, but not from this route."
+          : "This task's runs cannot be listed, so there is nothing to compare.",
+        runs.error);
+      return;
+    }
+    context.storeId = runs.store_id || null;
+    context.winnerId = (!contest.unavailable && contest.winner)
+      ? contest.winner.experiment_id : null;
+    var members = (!contest.unavailable && contest.members) ? contest.members : [];
+    if (taskCompare.rightExperiment === null) {
+      taskCompare.rightExperiment = experimentId;
+    }
+    renderCompareControls(controls, experimentId, taskId, runs, members, paint);
+    paint();
+  }).catch(function (e) {
+    if (expNavStale(nav)) { return; }
+    clear(body);
+    body.appendChild(el("div", "empty", "Could not load runs: " + e.message));
+  });
+
+  function paint() {
+    clear(body);
+    body.appendChild(el("div", "empty", "comparing…"));
+    var query = "?view=" + encodeURIComponent(taskCompare.view);
+    if (taskCompare.left !== null) { query += "&left_attempt=" + taskCompare.left; }
+    if (taskCompare.right !== null) { query += "&right_attempt=" + taskCompare.right; }
+    if (taskCompare.rightExperiment
+        && taskCompare.rightExperiment !== experimentId) {
+      query += "&right_experiment="
+        + encodeURIComponent(taskCompare.rightExperiment);
+    }
+    if (taskCompare.leftPass) {
+      query += "&left_pass=" + encodeURIComponent(taskCompare.leftPass);
+    }
+    if (taskCompare.rightPass) {
+      query += "&right_pass=" + encodeURIComponent(taskCompare.rightPass);
+    }
+    selectionRead(taskSelectionPath(experimentId, taskId, "/comparison" + query))
+      .then(function (cmp) {
+        if (expNavStale(nav)) { return; }
+        clear(body);
+        if (cmp.unavailable) {
+          /* The route's own words. "attempt 4 recorded no turns" is the
+             answer; an empty two-pane layout is not. */
+          selectionNote(body, "These two cannot be compared.", cmp.error);
+          return;
+        }
+        renderRunComparison(body, cmp, context);
+      }).catch(function (e) {
+        if (expNavStale(nav)) { return; }
+        clear(body);
+        body.appendChild(el("div", "empty", "Could not compare: " + e.message));
+      });
+  }
+}
+
+/* The pair picker. Both sides list EVERY recorded attempt; the ones with no
+   recorded turns are present and disabled, carrying the evidence's own reason,
+   because an attempt silently missing from this list is indistinguishable from
+   one that never ran. */
+function renderCompareControls(controls, experimentId, taskId, runs, members,
+                               paint) {
+  clear(controls);
+  function attemptOptions(rows) {
+    var options = [{ value: "", label: "the best run, or the Reference" }];
+    (rows || []).forEach(function (row) {
+      options.push({
+        value: row.attempt, label: attemptOptionLabel(row),
+        disabled: row.comparable === false
+      });
+    });
+    return options;
+  }
+  labelledSelect(controls, "Left run", attemptOptions(runs.attempts),
+    taskCompare.left === null ? "" : taskCompare.left,
+    function (value) {
+      /* Kept as the exact decimal text the option carried. The route parses
+         only that form, so there is no client-side int()/float() to truncate
+         "2.9" into a reference to somebody else's run. */
+      taskCompare.left = value === "" ? null : value;
+      taskCompare.leftPass = null;
+      paint();
+    });
+  if (members.length > 1) {
+    var experimentOptions = members.map(function (row) {
+      return {
+        value: row.experiment_id,
+        label: "Experiment · " + String(row.experiment_id).slice(-8)
+          + (row.experiment_id === experimentId ? " (this one)" : "")
+      };
+    });
+    labelledSelect(controls, "Right experiment", experimentOptions,
+      taskCompare.rightExperiment || experimentId,
+      function (value) {
+        taskCompare.rightExperiment = value;
+        taskCompare.right = null;
+        taskCompare.rightPass = null;
+        reloadRight();
+      });
+  }
+  var rightRow = el("span");
+  controls.appendChild(rightRow);
+  labelledSelect(controls, "View", COMPARE_VIEWS, taskCompare.view,
+    function (value) { taskCompare.view = value; paint(); });
+  reloadRight();
+
+  function reloadRight() {
+    clear(rightRow);
+    var target = taskCompare.rightExperiment || experimentId;
+    if (target === experimentId) {
+      rightAttemptSelect(runs.attempts);
+      paint();
+      return;
+    }
+    rightRow.appendChild(el("span", "sub", "loading the other experiment…"));
+    selectionRead(taskSelectionPath(target, taskId, "/runs")).then(function (other) {
+      clear(rightRow);
+      if (other.unavailable) {
+        rightRow.appendChild(el("span", "sub", other.error));
+        return;
+      }
+      rightAttemptSelect(other.attempts);
+      paint();
+    }).catch(function (e) {
+      clear(rightRow);
+      rightRow.appendChild(el("span", "sub", e.message));
+    });
+  }
+
+  function rightAttemptSelect(rows) {
+    labelledSelect(rightRow, "Right run", attemptOptions(rows),
+      taskCompare.right === null ? "" : taskCompare.right,
+      function (value) {
+        taskCompare.right = value === "" ? null : value;
+        taskCompare.rightPass = null;
+        paint();
+      });
+  }
+}
+
+/* ONE comparison component for every pair this product compares: the contest
+   winner against a candidate, a task's best run against another attempt, and a
+   recorded teacher pass against a student pass. They share it because the
+   question is the same one in every case — what did each produce, and how did
+   it get there — and because a second implementation would be a second place
+   for the answer and the alignment to disagree.
+
+   The order is the owner's: the ANSWER first, then the artifacts, then the plan
+   and execution as aligned rows a reader can drill into. */
+function renderRunComparison(container, cmp, ctx) {
+  clear(container);
+  /* Every side lookup below reads its store and experiment off this payload's
+     references, so a pane never inherits the other side's source. */
+  ctx.comparison = cmp;
+  var head = el("div", "diffToolbar");
+  head.appendChild(runSideBadges("Left", cmp.left_run, cmp.left, ctx));
+  head.appendChild(el("span", null, "versus"));
+  head.appendChild(runSideBadges("Right", cmp.right_run, cmp.right, ctx));
+  container.appendChild(head);
+  renderCaptureLabels(container, cmp);
+  renderPassControls(container, cmp, ctx);
+
+  container.appendChild(el("h2", null, "Answers"));
+  var answers = el("div", "comparePanes");
+  [["left", cmp.left, cmp.left_run], ["right", cmp.right, cmp.right_run]]
+    .forEach(function (side) {
+      answers.appendChild(renderAnswerPane(side[0], side[1], side[2], ctx));
+    });
+  container.appendChild(answers);
+
+  container.appendChild(el("h2", null, "Artifacts"));
+  var artifacts = el("div", "comparePanes");
+  [["left", cmp.left, cmp.left_run], ["right", cmp.right, cmp.right_run]]
+    .forEach(function (side) {
+      artifacts.appendChild(renderArtifactPane(side[0], side[1], side[2], ctx));
+    });
+  container.appendChild(artifacts);
+
+  renderPairReview(container, cmp, ctx);
+  renderComparisonSummary(container, cmp);
+  renderAlignment(container, cmp, ctx);
+}
+
+/* One side's chrome. The recorded state travels with the label, so a pane
+   pinned as "the best run" still says it failed if it failed, and a pane is
+   never called "teacher" unless a recorded pass id says so. */
+function runSideBadges(which, run, projection, ctx) {
+  var box = el("span", "diffToolbar");
+  var name = which + ": attempt " + (run.attempt === undefined ? "—" : run.attempt);
+  box.appendChild(el("strong", null, name));
+  if (run.experiment_id && run.experiment_id !== ctx.experimentId) {
+    box.appendChild(el("span", "pill",
+      "Experiment · " + String(run.experiment_id).slice(-8)));
+  }
+  if (ctx.winnerId && run.experiment_id === ctx.winnerId) {
+    box.appendChild(el("span", "pill ok", "Winner"));
+  }
+  if (run.is_best) { box.appendChild(el("span", "pill ok", "Best run")); }
+  if (run.is_reference) { box.appendChild(el("span", "pill", "Reference")); }
+  if (run.execution_status) {
+    box.appendChild(el("span", executionPill(run.execution_status),
+                       run.execution_status));
+  }
+  if (run.outcome) { box.appendChild(el("span", "sub", run.outcome)); }
+  var pass = projection && projection.ref && projection.ref.pass_id;
+  if (pass) { box.appendChild(el("span", "pill", "pass " + pass)); }
+  return box;
+}
+
+/* What was captured, and what was not. A half-readable side is still worth
+   looking at, so it renders — with the count of turns that could not be read
+   beside it, because the alternative is a shorter list that reads as a
+   shorter run. */
+function renderCaptureLabels(container, cmp) {
+  [["Left", cmp.left], ["Right", cmp.right]].forEach(function (side) {
+    var projection = side[1] || {};
+    var missing = (projection.unavailable || []).length;
+    if (missing) {
+      selectionNote(container,
+        side[0] + " side: partial capture.",
+        missing + " turn(s) this run's reference names could not be read, so "
+        + "this side is what survived rather than the whole run.");
+    }
+    if (projection.readable === false) {
+      selectionNote(container, side[0] + " side: nothing readable.",
+        "None of the turns this reference names is in its evidence store.");
+    }
+  });
+  var summary = cmp.summary || {};
+  if (summary.degraded) {
+    selectionNote(container, "The step alignment was degraded.",
+      summary.degraded_reason
+      || "This run was long enough that the exact alignment was abandoned for "
+         + "a cheaper one; rows may pair differently than a full pass would.");
+  }
+}
+
+/* A pass selector only where the EVIDENCE stamped a pass.
+
+   Nothing in fastWorkflow stamps one today, so this asks once per side and
+   renders nothing at all in the ordinary case. It never offers a pass a client
+   would then have to assert membership for. */
+function renderPassControls(container, cmp, ctx) {
+  var sides = [
+    ["Left", cmp.left_run, "leftPass", ctx.experimentId],
+    ["Right", cmp.right_run, "rightPass",
+     (cmp.right_run && cmp.right_run.experiment_id) || ctx.experimentId]
+  ];
+  var row = el("div", "selectionBar");
+  container.appendChild(row);
+  sides.forEach(function (side) {
+    var run = side[1] || {};
+    if (run.attempt === undefined || run.attempt === null) { return; }
+    selectionRead(taskSelectionPath(side[3], ctx.taskId,
+      "/runs/" + encodeURIComponent(run.attempt) + "/passes"))
+      .then(function (data) {
+        if (data.unavailable || !(data.passes || []).length) { return; }
+        var options = [{ value: "", label: "the whole turn" }];
+        data.passes.forEach(function (pass) {
+          options.push({
+            value: pass.pass_id,
+            label: pass.pass_id + " (" + fmtCount(pass.turn_count) + " turn(s))"
+          });
+        });
+        labelledSelect(row, side[0] + " recorded pass", options,
+          taskCompare[side[2]] || "",
+          function (value) {
+            taskCompare[side[2]] = value || null;
+            ctx.reload();
+          });
+      }).catch(function () { /* a pass selector is an extra, never a blocker */ });
+  });
+}
+
+function renderAnswerPane(which, projection, run, ctx) {
+  var side = pairSide(ctx.comparison, which);
+  var pane = el("div", "comparePane");
+  pane.appendChild(el("h3", null,
+    which === "left" ? "Left" : "Right"));
+  var rows = (projection && projection.answers) || [];
+  if (!rows.length) {
+    pane.appendChild(el("div", "sub", "No recorded turn on this side."));
+    return pane;
+  }
+  rows.forEach(function (answer) {
+    var block = el("div");
+    var meta = el("div", "sub",
+      "turn " + answer.turn_index + " · " + (answer.status || "no status"));
+    if (answer.failure_reason) {
+      meta.appendChild(el("span", "chipMarker bad", answer.failure_reason));
+    }
+    block.appendChild(meta);
+    /* Verbatim, through textContent. The recorded answer is the author's and is
+       never re-wrapped, summarised or parsed on its way to the screen. */
+    appendPoliced(block, answer.answer === null || answer.answer === undefined
+      ? "(no answer recorded)" : answer.answer);
+    if (answer.attribution && answer.attribution !== "turn") {
+      block.appendChild(el("div", "chipMarker unknown",
+        "shared across passes — this text is the turn's, not this pass's"));
+    }
+    var open = el("button", "evidenceLink", "Open this turn");
+    open.type = "button";
+    var linkNote = el("div", "sub", "");
+    open.addEventListener("click", function () {
+      openPairTurn(ctx, side, answer.turn_key, linkNote);
+    });
+    block.appendChild(open);
+    block.appendChild(linkNote);
+    pane.appendChild(block);
+  });
+  return pane;
+}
+
+/* Artifacts, inspectable where they are being compared.
+
+   The answer is often a pointer at the artifact, so sending a reader away to a
+   trace view to see it loses the other side. Each row expands in place, through
+   the SAME safe renderer the turn view uses — `artifactNode`, which puts
+   anything HTML-ish in a sandboxed srcdoc iframe with its own
+   `default-src 'none'` and prints everything else as text. No markup from a
+   record reaches this page any other way, and the sandbox is not relaxed.
+
+   Loading is explicitly scoped to the side's own database and explicitly
+   bounded: a large value is named and left unloaded until somebody asks for it,
+   and a value that is gone says whether it was pruned, withheld or simply not
+   readable rather than rendering as empty. */
+var ARTIFACT_PREVIEW_MAX_BYTES = 262144;
+
+function renderArtifactPane(which, projection, run, ctx) {
+  var side = pairSide(ctx.comparison, which);
+  var pane = el("div", "comparePane");
+  pane.appendChild(el("h3", null, which === "left" ? "Left" : "Right"));
+  var rows = (projection && projection.artifacts) || [];
+  var orphans = (projection && projection.unattributed_artifacts) || [];
+  if (!rows.length && !orphans.length) {
+    pane.appendChild(el("div", "sub", "No artifact recorded on this side."));
+    return pane;
+  }
+  function artifactRow(artifact, note) {
+    var box = el("div", "artifact");
+    var head = el("div", "aHead");
+    head.appendChild(el("span", "aKey", artifact.key));
+    head.appendChild(el("span", "aMeta",
+      (artifact.inline ? "inline" : "offloaded")
+      + (artifact.content_type ? " · " + artifact.content_type : "")
+      + (artifact.size_bytes === null || artifact.size_bytes === undefined
+          ? "" : " · " + artifact.size_bytes + " bytes")));
+    box.appendChild(head);
+    box.appendChild(el("div", "aMeta",
+      (artifact.command_name || "no command recorded")
+      + " · " + (artifact.attribution || "turn")));
+    if (artifact.error) {
+      /* The record's own words about why the value is not here. */
+      box.appendChild(el("div", "err", artifact.error));
+    }
+    if (note) { box.appendChild(el("div", "aMeta", note)); }
+    var preview = el("details", "artifactPreview");
+    preview.appendChild(el("summary", null, "Show this artifact here"));
+    var host = el("div");
+    preview.appendChild(host);
+    preview.addEventListener("toggle", function () {
+      if (!preview.open || preview.dataset.loaded) { return; }
+      preview.dataset.loaded = "1";
+      loadArtifactPreview(host, artifact, side, ctx, false);
+    });
+    box.appendChild(preview);
+    var open = el("button", "evidenceLink", "Open the turn that recorded it");
+    open.type = "button";
+    var linkNote = el("div", "sub", "");
+    open.addEventListener("click", function () {
+      openPairTurn(ctx, side, artifact.turn_key, linkNote);
+    });
+    box.appendChild(open);
+    box.appendChild(linkNote);
+    pane.appendChild(box);
+  }
+  rows.forEach(function (artifact) { artifactRow(artifact, null); });
+  orphans.forEach(function (artifact) {
+    artifactRow(artifact,
+      "recorded no command call, so it belongs to neither pass — it is not "
+      + "claimed as this one's");
+  });
+  return pane;
+}
+
+/* One artifact's value, from the side's own store.
+
+   Read through `pairReadScope`, the same rule the deep links use: a sealed
+   archive is read by store id through the workspace turn route, a side in the
+   current database needs no scope named, and a side in another live database is
+   scoped by its registered experiment. An inline value is lifted out of the
+   turn record, so BOTH modes can show it; only offloaded bytes need the live
+   artifact endpoint, and a sealed archive exposes no route for them, which is
+   said rather than shown as empty. */
+function loadArtifactPreview(host, artifact, side, ctx, forced) {
+  clear(host);
+  var size = artifact.size_bytes;
+  if (!forced && typeof size === "number" && size > ARTIFACT_PREVIEW_MAX_BYTES) {
+    host.appendChild(el("div", "aMeta",
+      "This artifact is " + fmtCount(size) + " bytes, larger than the "
+      + fmtCount(ARTIFACT_PREVIEW_MAX_BYTES) + " this pane loads without being "
+      + "asked. It is recorded; it is simply not fetched yet."));
+    var anyway = el("button", "evidenceLink", "Load it anyway");
+    anyway.type = "button";
+    anyway.addEventListener("click", function () {
+      loadArtifactPreview(host, artifact, side, ctx, true);
+    });
+    host.appendChild(anyway);
+    return;
+  }
+  var scope = pairReadScope(ctx, side);
+  if (scope.kind === "unaddressable") {
+    host.appendChild(el("div", "aMeta", scope.why));
+    return;
+  }
+  host.appendChild(el("div", "aMeta", "loading…"));
+  /* Offloaded bytes: only the live artifact endpoint serves them. */
+  if (artifact.artifact_id && scope.kind !== "workspace") {
+    scopedRaw("/api/artifact/" + encodeURIComponent(artifact.artifact_id),
+              scope.kind === "other" ? scope.experimentId : null)
+      .then(function (r) {
+        if (r.status === 404) {
+          clear(host);
+          host.appendChild(el("div", "aMeta",
+            "The record names this artifact, but its value is no longer in the "
+            + "store — pruned by retention or never offloaded."));
+          return null;
+        }
+        if (!r.ok) { throw new Error("HTTP " + r.status); }
+        var ctype = (r.headers.get("Content-Type") || "").toLowerCase();
+        return r.text().then(function (text) {
+          clear(host);
+          /* The same renderer the turn view uses: it decides HTML-ish from the
+             text itself and sandboxes it, so a content type claiming
+             text/plain cannot smuggle markup into this page. */
+          host.appendChild(artifactNode(artifact.key, text,
+            "offloaded · " + (ctype || "no content type")));
+          return null;
+        });
+      }).catch(function (e) {
+        clear(host);
+        host.appendChild(el("div", "err", "Could not read it: " + e.message));
+      });
+    return;
+  }
+  var read = scope.kind === "workspace"
+    ? api("/api/workspace/turn/" + encodeURIComponent(scope.storeId)
+          + "/" + encodeURIComponent(artifact.turn_key))
+        .then(function (data) { return data; },
+              function (e) { return { unavailable: true, error: e.message }; })
+    : scopedRead("/api/turn/" + encodeURIComponent(artifact.turn_key),
+                 scope.kind === "other" ? scope.experimentId : null);
+  read.then(function (data) {
+      clear(host);
+      if (data.unavailable) {
+        host.appendChild(el("div", "aMeta",
+          "The turn holding this value could not be read from here: "
+          + data.error));
+        return;
+      }
+      var value = inlineArtifactValue(data.turn, artifact);
+      if (value === undefined) {
+        host.appendChild(el("div", "aMeta", artifact.artifact_id
+          ? "This value was offloaded out of the turn record, and a sealed "
+            + "archive publishes no route that serves offloaded bytes. It is "
+            + "recorded; it is not readable from this page."
+          : "The turn was read, but it no longer records a value under this "
+            + "key — the capture policy withheld it, or it was not retained."));
+        return;
+      }
+      host.appendChild(artifactNode(artifact.key, value, "inline"));
+    }).catch(function (e) {
+      clear(host);
+      host.appendChild(el("div", "err", "Could not read it: " + e.message));
+    });
+}
+
+/* The recorded value of one key, found the way the record files it: under the
+   command output whose call id the artifact reference names. The call id is
+   matched first so two commands that wrote the same key are not confused. */
+function inlineArtifactValue(turn, artifact) {
+  var record = (turn && turn.record) || {};
+  var outputs = ((record.turn_output || {}).command_outputs) || [];
+  var fallback;
+  for (var i = 0; i < outputs.length; i += 1) {
+    var artifacts = ((outputs[i].command_response || {}).artifacts) || {};
+    if (!Object.prototype.hasOwnProperty.call(artifacts, artifact.key)) { continue; }
+    if (artifact.command_call_id
+        && outputs[i].command_call_id === artifact.command_call_id) {
+      return artifacts[artifact.key];
+    }
+    if (fallback === undefined) { fallback = artifacts[artifact.key]; }
+  }
+  return fallback;
+}
+
+/* One side of the pair, named by the evidence rather than by the screen.
+
+   `store_id` comes from the projection's own reference, so "which database is
+   this side in" is a recorded fact and not a guess from the experiment id or
+   from whichever source the page is currently pointed at.
+
+   Sealed evidence has TWO names for one archive and they are not
+   interchangeable: `storeId` is the identity the database reports about itself,
+   which is what a reference carries and what a cross-archive write is resolved
+   through, while `manifestStoreId` is the name the manifest gave it, which is
+   what every workspace route is addressed by. Both are read from the field that
+   carries them; neither is derived from the other. Live evidence has one name
+   and both come out the same. */
+function pairSide(cmp, which) {
+  var projection = which === "left" ? cmp.left : cmp.right;
+  var run = which === "left" ? cmp.left_run : cmp.right_run;
+  var ref = (projection && projection.ref) || {};
+  return {
+    which: which, run: run || {}, projection: projection || {},
+    storeId: ref.store_id || null,
+    manifestStoreId: (projection && projection.manifest_store_id)
+      || (run && run.manifest_store_id) || null,
+    experimentId: ref.experiment_id || (run && run.experiment_id) || null
+  };
+}
+
+/* WHERE one side of a pair is read from — decided once, for every link and
+   every inline preview, from the recorded reference rather than from the
+   experiment id or from whichever source the page happens to be pointed at.
+
+   Four answers, and the difference between them is the whole point:
+
+   - `workspace`: a sealed archive addresses evidence by store id, and its
+     routes refuse an unscoped read. Two archives in one manifest can hold the
+     same logical turn key, so the store travels with the read.
+   - `current`: the side is in the database this page is already reading, so no
+     change of scope. Naming one would break an ad-hoc experiment that has no
+     authoring registration to resolve — a perfectly readable run in the
+     default store, whose evidence is right here.
+   - `other`: the side is in ANOTHER live database, reachable only through the
+     experiment registered against it, which is the only handle the server
+     resolves.
+   - `unaddressable`: the reference names no way in. Said out loud, because a
+     silent no-op reads as a broken link. */
+function pairReadScope(ctx, side) {
+  if (session && session.workspace_mode) {
+    /* Addressed by the MANIFEST's name for the archive, which is the only one
+       these routes answer to — not by the evidence identity the reference
+       carries, which is what the write side resolves. */
+    var storeId = side.manifestStoreId || side.storeId;
+    if (storeId) { return { kind: "workspace", storeId: storeId }; }
+    return { kind: "unaddressable",
+             why: "This side records no store id, and a sealed archive is only "
+                  + "readable through one." };
+  }
+  if (!side.storeId || !ctx.storeId || side.storeId === ctx.storeId) {
+    return { kind: "current" };
+  }
+  if (!side.experimentId) {
+    return { kind: "unaddressable",
+             why: "This side's evidence is in another database that names no "
+                  + "experiment to open it by." };
+  }
+  return { kind: "other", experimentId: side.experimentId };
+}
+
+/* Open the turn a row points at, in the database that RECORDED it.
+
+   The cross-store case is probed before the page's scope moves, so a
+   registration that cannot be resolved reports itself instead of leaving the
+   page pointed at a store it cannot read. */
+function openPairTurn(ctx, side, turnKey, note) {
+  var scope = pairReadScope(ctx, side);
+  if (scope.kind === "unaddressable") {
+    if (note) { note.textContent = scope.why; }
+    return;
+  }
+  if (scope.kind === "workspace") {
+    selectWorkspaceTurn(scope.storeId, turnKey);
+    return;
+  }
+  if (scope.kind === "current") {
+    selectTurn(turnKey);
+    return;
+  }
+  if (note) { note.textContent = "opening the other experiment's records…"; }
+  scopedRead("/api/turn/" + encodeURIComponent(turnKey), scope.experimentId)
+    .then(function (data) {
+      if (data.unavailable) {
+        if (note) {
+          note.textContent = "That trace is recorded in another evidence "
+            + "database this workflow cannot open from here: " + data.error;
+        }
+        return;
+      }
+      if (note) { note.textContent = ""; }
+      benchmarkExperimentSource = scope.experimentId;
+      selectTurn(turnKey);
+    }).catch(function (e) {
+      if (note) { note.textContent = e.message; }
+    });
+}
+
+/* Review progress and comment count, kept apart on purpose.
+
+   "Nobody has marked this reviewed" and "nobody has commented on it" are
+   different facts: a reviewer can look and have nothing to say, and a comment
+   can be written by somebody who never marked anything. Showing one as the
+   other is how a pair gets counted as unseen. */
+function renderPairReview(container, cmp, ctx) {
+  var card = el("div", "card");
+  card.appendChild(el("h2", null, "This pair"));
+  card.appendChild(el("div", "sub", "pair " + cmp.review_pair_key));
+  var state = el("div", "sub", "reading review progress…");
+  var counted = el("div", "sub", "counting recorded comments…");
+  card.appendChild(state);
+  card.appendChild(counted);
+  container.appendChild(card);
+  if (cmp.sealed || (session && session.workspace_mode)) {
+    state.textContent = "A sealed archive records no review progress of its own.";
+  } else {
+    var query = "?reviewer=" + encodeURIComponent(SELECTION_ACTOR.actor);
+    if (cmp.left_run && cmp.left_run.attempt !== undefined
+        && cmp.left_run.attempt !== null) {
+      query += "&left_attempt=" + cmp.left_run.attempt;
+    }
+    if (cmp.right_run && cmp.right_run.experiment_id
+        && cmp.right_run.experiment_id !== ctx.experimentId) {
+      query += "&right_experiment="
+        + encodeURIComponent(cmp.right_run.experiment_id);
+    }
+    selectionRead(taskSelectionPath(ctx.experimentId, ctx.taskId,
+                                    "/review-pairs" + query))
+      .then(function (data) {
+        if (data.unavailable) { state.textContent = data.error; return; }
+        var mine = (data.pairs || []).filter(function (row) {
+          return row.pair_key === cmp.review_pair_key;
+        })[0];
+        var reviewed = mine && mine.state && mine.state.state === "reviewed";
+        clear(state);
+        state.appendChild(el("span", reviewed ? "pill ok" : "pill",
+                             reviewed ? "you marked this reviewed"
+                                      : "you have not marked this reviewed"));
+        state.appendChild(el("span", null,
+          "  " + (data.progress ? data.progress.reviewed : 0) + " of "
+          + (data.progress ? data.progress.pairs : 0)
+          + " pairs of this task marked reviewed by you."));
+        var mark = el("button", null,
+          reviewed ? "Un-mark this pair" : "Mark this pair reviewed");
+        mark.type = "button";
+        mark.addEventListener("click", function () {
+          mark.disabled = true;
+          selectionWrite(
+            taskSelectionPath(ctx.experimentId, ctx.taskId, "/review-pairs"),
+            "POST",
+            {
+              reviewer: SELECTION_ACTOR.actor, reviewer_kind: "human",
+              state: reviewed ? "not_reviewed" : "reviewed",
+              left_attempt: cmp.left_run ? cmp.left_run.attempt : undefined,
+              right_attempt: cmp.right_run ? cmp.right_run.attempt : undefined,
+              right_experiment:
+                (cmp.right_run && cmp.right_run.experiment_id
+                 !== ctx.experimentId)
+                  ? cmp.right_run.experiment_id : undefined,
+              left_pass: taskCompare.leftPass || undefined,
+              right_pass: taskCompare.rightPass || undefined
+            }
+          ).then(function (result) {
+            mark.disabled = false;
+            if (result.ok) { showNotice("Review progress recorded"); ctx.reload(); }
+            else { renderSelectionRefusal(card, result, ctx.reload); }
+          });
+        });
+        state.appendChild(mark);
+      }).catch(function (e) { state.textContent = e.message; });
+  }
+  countPairComments(counted, cmp, ctx);
+  renderPairComposer(card, cmp, ctx, null, "the whole pair");
+}
+
+/* How many recorded comments name THIS pair. Counted over the same
+   consolidated task read the Feedback view uses, so the two cannot disagree,
+   and reported as "at least" when the page is full rather than as a total the
+   count does not support. */
+function countPairComments(node, cmp, ctx) {
+  var path = ((session && session.workspace_mode)
+      ? "/api/workspace/task-feedback?experiment="
+      : "/api/task-feedback?experiment=")
+    + encodeURIComponent(ctx.experimentId)
+    + "&task=" + encodeURIComponent(ctx.taskId) + "&limit=200";
+  if (!(session && session.workspace_mode)) {
+    /* Named by experiment id, which is what resolves to a store. The LEFT
+       side's store is the base because that is where a paired comment is
+       recorded; the right side is added as a second source so a comment
+       written from the other experiment's own screen is counted too, rather
+       than the count depending on which page somebody happened to open. */
+    path += "&benchmark_experiment=" + encodeURIComponent(ctx.experimentId);
+    var right = cmp.right_run && cmp.right_run.experiment_id;
+    if (right && right !== ctx.experimentId) {
+      path += "&store=" + encodeURIComponent(right);
+    }
+  }
+  api(path).then(function (data) {
+    var mine = (data.feedback || []).filter(function (row) {
+      return row.pair_key === cmp.review_pair_key;
+    });
+    node.textContent = (data.has_more ? "At least " : "")
+      + mine.length + " recorded comment(s) name this exact pair. "
+      + "A comment is not a review mark and a review mark is not a comment.";
+  }).catch(function (e) { node.textContent = e.message; });
+}
+
+function renderComparisonSummary(container, cmp) {
+  var summary = cmp.summary || {};
+  var kv = el("dl", "kv");
+  function pair(k, v) {
+    kv.appendChild(el("dt", null, k));
+    kv.appendChild(el("dd", null,
+      v === null || v === undefined ? "—" : String(v)));
+  }
+  pair("aligned rows", summary.pairs);
+  pair("matched", summary.matched);
+  pair("ambiguous", summary.ambiguous);
+  pair("left only", summary.left_only);
+  pair("right only", summary.right_only);
+  pair("steps the evidence does not identify", summary.unknown);
+  pair("matched by a recorded alignment", summary.recorded_matches);
+  pair("differences", cmp.difference_count);
+  container.appendChild(el("h2", null, "Plan and execution"));
+  container.appendChild(kv);
+  container.appendChild(el("div", "sub",
+    "Rows are matched from recorded command identity, context and parameters — "
+    + "never from list position, so an inserted or repeated call shows up as a "
+    + "gap instead of being paired up to make the two lists the same length."));
+}
+
+function renderAlignment(container, cmp, ctx) {
+  if (!cmp.alignment) {
+    var ask = el("button", null, "Show the aligned steps");
+    ask.type = "button";
+    ask.addEventListener("click", function () {
+      taskCompare.view = "steps";
+      ctx.reload();
+    });
+    container.appendChild(el("div", "sub",
+      "The step alignment of a long run is large, so it is not loaded until "
+      + "somebody opens it."));
+    container.appendChild(ask);
+    return;
+  }
+  var rows = cmp.alignment.rows || [];
+  if (!rows.length) {
+    container.appendChild(el("div", "empty", taskCompare.view === "differences"
+      ? "These two runs differ in no recorded step."
+      : "No step is recorded on either side."));
+    return;
+  }
+  var list = el("div");
+  container.appendChild(list);
+  rows.forEach(function (row, index) {
+    list.appendChild(renderAlignmentRow(row, index, cmp, ctx));
+  });
+}
+
+/* One aligned row, saying exactly how much it claims.
+
+   A one-sided row says which side it is on rather than pairing it with
+   something. An ambiguous row is not a soft match: the recorded evidence
+   admits more than one correspondence, so both sides are shown WITHOUT
+   asserting they are the same call. A step the trace has no span for can only
+   be commented on at turn scope, and the row says so instead of offering a
+   finer anchor the store would refuse. */
+function renderAlignmentRow(row, index, cmp, ctx) {
+  var item = el("div", "compareRow" + (row.ambiguous ? " rowAmbiguous" : ""));
+  var meta = el("div", "rowMeta");
+  meta.appendChild(el("span", "pill", compareKindLabel(row.kind)));
+  meta.appendChild(el("span", "sub", compareBasisLabel(row.basis)));
+  if (row.ambiguous) {
+    meta.appendChild(el("span", "chipMarker warn",
+      "ambiguous — the evidence admits more than one match"));
+    if (row.ambiguity_reason) {
+      meta.appendChild(el("span", "sub", row.ambiguity_reason));
+    }
+  }
+  var anchors = row.anchors || {};
+  ["left", "right"].forEach(function (side) {
+    var anchor = anchors[side];
+    if (anchor && anchor.anchorable === false) {
+      meta.appendChild(el("span", "chipMarker unknown",
+        side + ": no recorded span for this hop, so a comment here is "
+        + "anchored to the whole turn"));
+    }
+  });
+  item.appendChild(meta);
+  [["left", row.left, cmp.left_run], ["right", row.right, cmp.right_run]]
+    .forEach(function (side) {
+      item.appendChild(renderAlignmentSide(side[0], side[1], side[2], ctx));
+    });
+  var actions = el("div", "rowMeta");
+  var comment = el("button", "evidenceLink", "Comment on this step");
+  comment.type = "button";
+  comment.setAttribute("data-compare-comment", String(index));
+  comment.addEventListener("click", function () {
+    if (comment.dataset.open) { return; }
+    comment.dataset.open = "1";
+    var named = (row.left && row.left.command_name)
+      || (row.right && row.right.command_name);
+    renderPairComposer(item, cmp, ctx, row,
+      named ? "step " + named : "an unnamed step of this pair");
+  });
+  actions.appendChild(comment);
+  item.appendChild(actions);
+  return item;
+}
+
+function renderAlignmentSide(which, step, run, ctx) {
+  var side = pairSide(ctx.comparison, which);
+  var box = el("div", "side" + (step ? "" : " absent"));
+  if (!step) {
+    box.textContent = which === "left"
+      ? "not recorded on the left run" : "not recorded on the right run";
+    return box;
+  }
+  box.appendChild(el("div", "title", step.command_name || "(no command name)"));
+  var sub = "turn " + step.turn_index + " · step " + step.position
+    + (step.context ? " · " + step.context : "")
+    + (step.status ? " · " + step.status : "")
+    + (step.child_call ? " · inner call" : "");
+  box.appendChild(el("div", "sub", sub));
+  if (step.pass_id) { box.appendChild(el("span", "pill", "pass " + step.pass_id)); }
+  /* The span drilldown: the recorded identity of this dispatch, plus its
+     parameters exactly as one of the two recording sources holds them. */
+  var detail = el("details");
+  detail.appendChild(el("summary", null, "Recorded detail"));
+  var kv = el("dl", "kv");
+  function pair(k, v) {
+    kv.appendChild(el("dt", null, k));
+    kv.appendChild(el("dd", null,
+      v === null || v === undefined ? "not recorded" : String(v)));
+  }
+  pair("command call", step.command_call_id);
+  pair("parent call", step.parent_call_id);
+  pair("span", step.span_id);
+  pair("recorded in the turn record", step.in_record);
+  pair("recorded as a span", step.span_recorded);
+  pair("asked the user", step.asked_user);
+  pair("duration", step.duration_ns === null || step.duration_ns === undefined
+    ? null : fmtNs(step.duration_ns));
+  pair("parameters source", step.parameters_source);
+  detail.appendChild(kv);
+  if (step.parameters !== null && step.parameters !== undefined) {
+    detail.appendChild(el("pre", "json", pretty(step.parameters)));
+  }
+  var open = el("button", "evidenceLink", "Open the recorded turn");
+  open.type = "button";
+  var linkNote = el("div", "sub", "");
+  open.addEventListener("click", function () {
+    openPairTurn(ctx, side, step.turn_key, linkNote);
+  });
+  detail.appendChild(open);
+  detail.appendChild(linkNote);
+  box.appendChild(detail);
+  return box;
+}
+
+/* -- a comment written from a comparison ------------------------------- */
+
+/* The taxonomy picker, exactly the vocabulary observability/feedback.py
+   defines. One category and one of its subcategories at a time, with a roving
+   tabindex and the subcategory's own watermark in the box — because the six
+   confirmed meanings live at the subcategory level. */
+function taxonomyPicker(container, area, selected, labelFor) {
+  var tabs = el("div", "feedbackTabs");
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Feedback category");
+  var subTabs = el("div", "feedbackTabs");
+  subTabs.setAttribute("role", "tablist");
+  subTabs.setAttribute("aria-label", "Feedback subcategory");
+  var categoryButtons = {};
+  function selectSubcategory(value) {
+    selected.subcategory = value;
+    var sub = feedbackSubcategory(selected.category, value);
+    area.placeholder = sub ? sub.watermark : "";
+    area.setAttribute("aria-label",
+      (sub ? sub.label : "Comment") + " for " + labelFor);
+    Array.prototype.forEach.call(subTabs.childNodes, function (button) {
+      var on = button.getAttribute("data-value") === value;
+      button.className = on ? "active" : "";
+      button.setAttribute("aria-selected", on ? "true" : "false");
+      button.tabIndex = on ? 0 : -1;
+    });
+  }
+  function selectCategory(value) {
+    selected.category = value;
+    var category = feedbackCategory(value);
+    Object.keys(categoryButtons).forEach(function (key) {
+      var on = key === value;
+      categoryButtons[key].className = on ? "active" : "";
+      categoryButtons[key].setAttribute("aria-selected", on ? "true" : "false");
+      categoryButtons[key].tabIndex = on ? 0 : -1;
+    });
+    clear(subTabs);
+    category.subcategories.forEach(function (sub) {
+      var button = el("button", null, sub.label);
+      button.type = "button";
+      button.setAttribute("data-value", sub.value);
+      button.setAttribute("role", "tab");
+      button.addEventListener("click", function () {
+        selectSubcategory(sub.value);
+        area.focus();
+      });
+      subTabs.appendChild(button);
+    });
+    selectSubcategory(category.subcategories[0].value);
+  }
+  FEEDBACK_TAXONOMY.forEach(function (category) {
+    var button = el("button", null, category.label);
+    button.type = "button";
+    button.setAttribute("data-value", category.value);
+    button.setAttribute("role", "tab");
+    categoryButtons[category.value] = button;
+    button.addEventListener("click", function () {
+      selectCategory(category.value);
+    });
+    tabs.appendChild(button);
+  });
+  container.appendChild(tabs);
+  container.appendChild(subTabs);
+  selectCategory(FEEDBACK_TAXONOMY[0].value);
+}
+
+/* A comment about a comparison, in the ordinary vocabulary.
+
+   There is no comparison schema and no verdict workflow: this posts the SAME
+   row the turn composer posts, to the same route, with the same six
+   subcategories and the same free-form text. The only thing it adds is the
+   pair — and it adds it by handing back the anchors the API returned,
+   including each side's whole reference, so the comment is filed against the
+   exact pair that was on screen rather than a reference rebuilt here.
+
+   `row` is an alignment row for a step comment, or null for a comment about
+   the pair as a whole, which anchors at turn scope on both sides. */
+function renderPairComposer(container, cmp, ctx, row, labelFor) {
+  var anchors = row ? (row.anchors || {}) : pairTurnAnchors(cmp);
+  var card = el("div", "card feedbackCard");
+  card.appendChild(el("h2", null, "Comment on " + labelFor));
+  if (!anchors.left && !anchors.right) {
+    card.appendChild(el("div", "sub",
+      "Neither side of this row names a recorded turn, so there is nothing to "
+      + "anchor a comment to."));
+    container.appendChild(card);
+    return;
+  }
+  var sides = describePairSides(cmp, anchors);
+  card.appendChild(el("div", "sub", sides.text));
+  if (sides.fallback) {
+    card.appendChild(el("div", "chipMarker unknown",
+      "no recorded span for one side of this hop, so that side is anchored to "
+      + "its whole turn"));
+  }
+  var area = el("textarea", "expNotes");
+  area.maxLength = 100000;
+  area.setAttribute("data-compare-comment-box", "1");
+  var selected = { category: FEEDBACK_TAXONOMY[0].value,
+                   subcategory: FEEDBACK_TAXONOMY[0].subcategories[0].value };
+  taxonomyPicker(card, area, selected, labelFor);
+  card.appendChild(area);
+  var save = el("button", "primary", "Save this comment");
+  save.type = "button";
+  var note = el("div", "sub", "");
+  card.appendChild(save);
+  card.appendChild(note);
+  var history = el("div");
+  card.appendChild(history);
+  container.appendChild(card);
+  /* Which side the comment is anchored to decides where it is filed, so the
+     scope is worked out once, here, from the same authorized source the reads
+     use — not from whichever database the page is pointed at. */
+  var primary = anchors.left || anchors.right;
+  var paired = (anchors.left && anchors.right) ? anchors.right : null;
+  var primarySide = pairSide(cmp, anchors.left ? "left" : "right");
+  var scope = pairWriteScope(ctx, primarySide, primary);
+  if (scope.refusal) {
+    save.disabled = true;
+    note.textContent = scope.refusal;
+    return;
+  }
+  if (scope.annotated) {
+    /* Sealed evidence is never appended to, and that is not a reason to refuse
+       the comment: it is filed beside the archive and read back with it. */
+    note.textContent = "The evidence is read-only, so this comment is recorded "
+      + "alongside it without changing it.";
+  }
+  save.addEventListener("click", function () {
+    if (!area.value.trim()) {
+      note.textContent = "Enter a comment before saving.";
+      return;
+    }
+    save.disabled = true;
+    note.textContent = "saving…";
+    var path = "/post_feedback?turn_key="
+      + encodeURIComponent(primary.turn_key) + scope.query;
+    var body = {
+      /* The anchor the API returned, verbatim: the whole reference plus the
+         turn the comment is anchored to. Narrowing it here would give the
+         comment a different pair identity from the comparison it was written
+         in, and the earlier comments on that pair would stop matching. */
+      ref: primary.ref,
+      target_kind: primary.anchorable === false ? "turn" : primary.target_kind,
+      span_ids: primary.anchorable === false ? [] : (primary.span_ids || []),
+      target_label: labelFor,
+      provenance: "human",
+      category: selected.category,
+      subcategory: selected.subcategory,
+      comment: area.value
+    };
+    if (paired) {
+      body.paired = {
+        ref: paired.ref,
+        turn_key: paired.turn_key,
+        target_kind: paired.anchorable === false ? "turn" : paired.target_kind,
+        span_ids: paired.anchorable === false ? [] : (paired.span_ids || []),
+        target_label: labelFor + " (other side)"
+      };
+    }
+    apiPost(path, body).then(function (data) {
+      area.value = "";
+      save.disabled = false;
+      note.textContent = data.annotated
+        ? "Saved alongside the read-only evidence"
+        : "Saved";
+      clear(history);
+      (data.feedback || []).forEach(function (recorded) {
+        if (recorded.pair_key && recorded.pair_key !== cmp.review_pair_key) {
+          return;
+        }
+        history.appendChild(renderFeedbackHistoryRow(recorded));
+      });
+    }).catch(function (e) {
+      save.disabled = false;
+      note.textContent = e.message;
+    });
+  });
+}
+
+/* Turn-scope anchors for the pair as a whole, built from the two references
+   the API returned. The anchored turn is each side's FIRST recorded turn and
+   the reference stays whole, so this comment carries the same pair identity a
+   comment on any row of the same comparison does. */
+function pairTurnAnchors(cmp) {
+  function anchor(projection) {
+    var ref = projection && projection.ref;
+    if (!ref || !(ref.turn_keys || []).length) { return null; }
+    return { ref: ref, turn_key: ref.turn_keys[0], target_kind: "turn",
+             span_ids: [], anchorable: true, store_id: ref.store_id,
+             manifest_store_id: projection.manifest_store_id || null };
+  }
+  return { left: anchor(cmp.left), right: anchor(cmp.right) };
+}
+
+/* WHERE a pair comment is recorded — the authorized source of the side the
+   comment is anchored to, decided by the same rule the reads use.
+
+   The two scopes the write route accepts are not two spellings of one thing. A
+   sealed archive is named by the MANIFEST's store id, which is how every
+   workspace route addresses it. A live experiment is named by its registration,
+   which is the only handle the server resolves a working database by. And in
+   neither case is it the evidence identity the references inside the body
+   carry: the server resolves the paired side through that separately, and
+   handing it the identity as a scope is refused.
+
+   A side whose source is not named by either is refused here rather than
+   posted somewhere adjacent and plausible. */
+function pairWriteScope(ctx, side, anchor) {
+  if (session && session.workspace_mode) {
+    var storeId = side.manifestStoreId
+      || (anchor && anchor.manifest_store_id) || null;
+    if (!storeId) {
+      return { refusal: "This archive's manifest does not name the store this "
+        + "side was recorded in, so a comment has nowhere to be filed." };
+    }
+    return { query: "&store_id=" + encodeURIComponent(storeId),
+             annotated: true };
+  }
+  var experimentId = (anchor && anchor.ref && anchor.ref.experiment_id)
+    || side.experimentId || ctx.experimentId;
+  if (!experimentId) {
+    return { refusal: "This side names no experiment, so there is no recorded "
+      + "database to file a comment against." };
+  }
+  return { query: "&benchmark_experiment=" + encodeURIComponent(experimentId) };
+}
+
+function describePairSides(cmp, anchors) {
+  var parts = [];
+  var fallback = false;
+  [["Left", anchors.left, cmp.left_run], ["Right", anchors.right, cmp.right_run]]
+    .forEach(function (side) {
+      if (!side[1]) {
+        parts.push(side[0] + ": nothing recorded");
+        return;
+      }
+      if (side[1].anchorable === false) { fallback = true; }
+      var run = side[2] || {};
+      parts.push(side[0] + ": attempt " + run.attempt
+        + (run.experiment_id ? " of " + String(run.experiment_id).slice(-8) : "")
+        + " · " + headSnippet(side[1].turn_key, 24));
+    });
+  return {
+    text: "This comment names " + parts.join("  ↔  ")
+      + ". The pair is frozen at the moment you save: choosing a different "
+      + "best run later leaves this comment naming the runs it was written "
+      + "about.",
+    fallback: fallback
+  };
+}
 
 /* Benchmark setup: title, optional description, optional task prompts. */
 var benchNav = 0;
@@ -3189,6 +5927,11 @@ function showBenchmarkExperiment(id) {
       note.appendChild(saveNote); note.appendChild(noteMsg);
     }
     d.appendChild(note);
+    /* The contest this registration is in, on the page that exists before the
+       run does: the first experiment of a contest holds it from creation, so
+       this page has a winner to show even though nothing has executed. */
+    renderWinnerPanel(d, id, function () { showBenchmarkExperiment(id); });
+    renderRepeatSetup(d, row, nav);
     var identity = el("div", "card"), idActions = sectionHeader(identity, "Runner handoff");
     var identifier = benchmarkText(identity, "Experiment ID", id, false); identifier.readOnly = true;
     var copy = el("button", null, "Copy experiment ID");
@@ -4370,6 +7113,7 @@ function renderTurnLevel(container, turn) {
   var um = el("div", "msgBlock");
   um.appendChild(el("span", "lbl", "user message"));
   appendPoliced(um, turn.user_message || "");
+  appendReuseAction(um, turn);
   container.appendChild(um);
   if (turn.answer) {
     var ans = el("div", "msgBlock");
@@ -4379,6 +7123,30 @@ function renderTurnLevel(container, turn) {
   }
   var metadata = el("details", "turnMetadata"); metadata.appendChild(el("summary", null, "Turn details & timing"));
   metadata.appendChild(kv); container.appendChild(metadata);
+}
+
+function appendReuseAction(block, turn) {
+  /* Hands the recorded message to the live composer [fix-9eg.7.4]. It reads
+     the record and writes a text box: no request goes out, the recorded turn
+     is untouched, and nothing runs until the person presses Send. */
+  var actions = el("div", "reuseAction");
+  if (captureEnvelope(turn.user_message)) {
+    actions.appendChild(el("span", "muted",
+      "The recorded message is not available in full, so there is nothing to reuse."));
+    block.appendChild(actions);
+    return;
+  }
+  if (!turn.user_message) { return; }
+  var button = el("button", null, "Reuse this message in chat");
+  button.title = "Copies the text into the live chat composer. Nothing is sent "
+    + "until you press Send, and the recorded turn is unchanged.";
+  button.addEventListener("click", function () {
+    tmReuseRecordedMessage(String(turn.user_message), { turnKey: turn.turn_key });
+  });
+  actions.appendChild(button);
+  actions.appendChild(el("span", "muted",
+    "Copies it into the live chat for editing — a new turn under current settings, not a replay."));
+  block.appendChild(actions);
 }
 
 /* -- navigation --------------------------------------------------------- */
@@ -4423,102 +7191,110 @@ function feedbackProvenanceLabel(provenance) {
   }[provenance] || provenance;
 }
 
-var FEEDBACK_TABS = [
-  { key: "went_wrong", label: "What went wrong",
-    watermark: "Describe what was missing or incorrect. Attach it to the first point where behavior went wrong." },
-  { key: "worked", label: "What worked",
-    watermark: "Note good behavior worth preserving, including justified questions and honest reporting of incomplete work." },
-  { key: "should_change", label: "What should change",
-    watermark: "State what you expected instead. You don't need to diagnose the implementation." }
+/* The owner-confirmed taxonomy, mirrored from observability/feedback.py. The
+   selectors and watermarks below help a person choose; a coding agent posts
+   the same two enum values to the same route. A test pins this constant
+   against GET /api/feedback-taxonomy so the two cannot drift.
+
+   This replaced a three-heading composer that wrote "What went wrong:" into
+   the comment text and parsed it back out on read. That parser is gone: the
+   category is metadata now, and re-deriving it from a heading would record a
+   guess as the author's choice. */
+var FEEDBACK_TAXONOMY = [
+  { value: "observations_analysis", label: "Observations / Analysis", subcategories: [
+    { value: "observation", label: "Observation",
+      watermark: "What did you see? Quote or point at the evidence \u2014 the request, the answer, the step \u2014 without judging it yet." },
+    { value: "analysis", label: "Analysis",
+      watermark: "What do you think the observation means? You do not need to diagnose the implementation to say what it points at." }
+  ] },
+  { value: "conclusions", label: "Conclusions", subcategories: [
+    { value: "what_went_right", label: "What went right",
+      watermark: "What is worth preserving? Justified clarifying questions and honest reporting of incomplete work count." },
+    { value: "what_went_wrong", label: "What went wrong",
+      watermark: "What was missing or incorrect? Anchor it to the first point where behavior went wrong, not only to the answer." }
+  ] },
+  { value: "recommendations", label: "Recommendations", subcategories: [
+    { value: "what_to_do", label: "What to do",
+      watermark: "What should happen instead, next time? State the expected behavior rather than the code change." },
+    { value: "what_not_to_do", label: "What not to do",
+      watermark: "What should be avoided? Name the tempting fix that would make things worse, and why." }
+  ] }
 ];
 var FEEDBACK_HINTS = [
   "Read the request and final answer first. Describe what was useful, missing, or incorrect.",
   "Attach feedback to the relevant turn or component, especially the first point where behavior went wrong.",
-  "State what you expected instead. You don't need to diagnose the implementation.",
-  "Note good behavior worth preserving, including justified questions and honest reporting of incomplete work.",
+  "Observations quote the evidence; analysis says what it means; conclusions judge it; recommendations say what to do next time.",
+  "One comment, one category. Save again to record a second one \u2014 nothing is overwritten.",
   "For example: \"The request names three people, but this plan covers only two. It should retain all three and track completion separately.\"",
   "For clarification stops, distinguish whether the question was appropriate from whether the harness answered it."
 ];
 
-function parseHumanFeedbackComment(comment) {
-  var sections = { went_wrong: "", worked: "", should_change: "" };
-  var text = comment == null ? "" : String(comment);
-  var header = /^[ \t]*(What went wrong|What did not work|What worked|What should change)[ \t]*:[ \t]*/i;
-  var alias = {
-    "what went wrong": "went_wrong",
-    "what did not work": "went_wrong",
-    "what worked": "worked",
-    "what should change": "should_change"
-  };
-  var lines = text.split(/\n/);
-  var current = null;
-  var buffers = { went_wrong: [], worked: [], should_change: [] };
-  var labelled = false;
-  lines.forEach(function (line) {
-    var match = line.match(header);
-    if (match) {
-      labelled = true;
-      current = alias[match[1].toLowerCase()];
-      var rest = line.slice(match[0].length);
-      if (rest) { buffers[current].push(rest); }
-      return;
-    }
-    if (current) { buffers[current].push(line); }
-  });
-  if (!labelled) { return sections; }
-  Object.keys(buffers).forEach(function (key) {
-    sections[key] = buffers[key].join("\n").trim();
-  });
-  return sections;
+function feedbackCategory(value) {
+  for (var i = 0; i < FEEDBACK_TAXONOMY.length; i++) {
+    if (FEEDBACK_TAXONOMY[i].value === value) { return FEEDBACK_TAXONOMY[i]; }
+  }
+  return null;
 }
 
-function composeHumanFeedbackComment(fields) {
-  return FEEDBACK_TABS.map(function (tab) {
-    var value = ((fields && fields[tab.key]) || "").trim();
-    return value ? tab.label + ": " + value : "";
-  }).filter(Boolean).join("\n\n");
+function feedbackSubcategory(category, value) {
+  var found = feedbackCategory(category);
+  if (!found) { return null; }
+  for (var i = 0; i < found.subcategories.length; i++) {
+    if (found.subcategories[i].value === value) { return found.subcategories[i]; }
+  }
+  return null;
+}
+
+/* What a recorded row is filed under, in words. A row written before the
+   taxonomy has neither, and says so rather than borrowing a category. */
+function feedbackClassification(row) {
+  var category = feedbackCategory(row.category);
+  var sub = feedbackSubcategory(row.category, row.subcategory);
+  if (!category || !sub) { return "Unclassified (recorded before categories)"; }
+  return category.label + " \u00b7 " + sub.label;
+}
+
+function feedbackRefLabel(ref) {
+  if (!ref) { return ""; }
+  var parts = [];
+  if (ref.task_id) { parts.push(ref.task_id); }
+  if (ref.attempt !== null && ref.attempt !== undefined) { parts.push("attempt " + ref.attempt); }
+  if (ref.pass_id) { parts.push("pass " + ref.pass_id); }
+  (ref.turn_keys || []).forEach(function (key) { parts.push(headSnippet(key, 28)); });
+  return parts.join(" \u00b7 ");
+}
+
+/* Both sides of a comparison comment, each a link to its own evidence. The
+   pair is frozen: re-picking a winner does not move these. */
+function renderFeedbackPair(item, row) {
+  if (!row.paired) { return; }
+  var pair = el("div", "sub");
+  pair.appendChild(el("span", null, "Compared with: "));
+  var primaryRef = (row.anchors && row.anchors.primary && row.anchors.primary.ref) || null;
+  [[primaryRef, row.target_label, "this side"],
+   [row.paired.ref, row.paired.target_label, "other side"]].forEach(function (side, index) {
+    var ref = side[0];
+    if (!ref) { return; }
+    if (index) { pair.appendChild(el("span", null, "  \u2194  ")); }
+    var key = (ref.turn_keys || [])[0];
+    var link = el("button", "evidenceLink", (side[1] || side[2]) + " (" + feedbackRefLabel(ref) + ")");
+    link.type = "button";
+    link.setAttribute("aria-label", "Open the evidence for " + (side[1] || side[2]));
+    link.addEventListener("click", function () { if (key) { selectTurn(key); } });
+    pair.appendChild(link);
+  });
+  item.appendChild(pair);
 }
 
 function renderFeedbackHistoryRow(row) {
   var item = el("div", "feedbackHistoryItem");
   item.appendChild(el("div", "sub",
-    row.created_at + " · " + feedbackProvenanceLabel(row.provenance)));
-  /* Only the categories this comment actually filled get a tab: an empty tab
-     would invite the reader to look for something that was never written. */
-  var filled = FEEDBACK_TABS.filter(function (tab) { return (row[tab.key] || "").trim(); });
-  if (!filled.length) {
-    item.appendChild(el("pre", "json", row.comment || ""));
-    return item;
-  }
-  var tabs = el("div", "feedbackTabs");
-  tabs.setAttribute("role", "tablist");
-  tabs.setAttribute("aria-label", "Recorded feedback category");
-  var buttons = [], panels = [];
-  function select(index) {
-    filled.forEach(function (tab, i) {
-      var on = i === index;
-      buttons[i].className = on ? "active" : "";
-      buttons[i].setAttribute("aria-selected", on ? "true" : "false");
-      buttons[i].tabIndex = on ? 0 : -1;
-      panels[i].hidden = !on;
-    });
-  }
-  filled.forEach(function (tab, index) {
-    var button = el("button", null, tab.label);
-    button.type = "button";
-    button.setAttribute("role", "tab");
-    /* Labelled rather than aria-labelledby: a turn carries many of these rows
-       and ids would collide across them. */
-    var panel = el("pre", "json", row[tab.key]);
-    panel.setAttribute("role", "tabpanel");
-    panel.setAttribute("aria-label", tab.label);
-    buttons.push(button); panels.push(panel);
-    button.addEventListener("click", function () { select(index); });
-    tabs.appendChild(button);
-  });
-  item.appendChild(tabs);
-  panels.forEach(function (panel) { item.appendChild(panel); });
-  select(0);
+    row.created_at + " \u00b7 " + feedbackProvenanceLabel(row.provenance)
+    + " \u00b7 " + feedbackClassification(row)));
+  /* Verbatim. The stored comment is the author's text and is never re-split,
+     re-headed or summarised on the way to the screen. */
+  item.appendChild(el("pre", "json", row.comment || ""));
+  renderFeedbackPair(item, row);
   return item;
 }
 
@@ -4536,53 +7312,82 @@ function renderFeedback(parent, node) {
     card.appendChild(el("p", "sub", "No recorded span identifies this component. Record feedback on the turn."));
     return;
   }
-  var path = "/api/human-feedback?turn_key=" + encodeURIComponent(state.turn.turn_key);
-  if (session && session.workspace_mode) { path += "&store_id=" + encodeURIComponent(state.storeId); }
-  else if (benchmarkExperimentSource) { path += "&benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource); }
-  var history = el("div"), note = el("p", "sub", "Loading feedback…");
+  /* Distinct read and write surfaces (fix-9eg.16): listing notes is a GET on
+     its own path, and /post_feedback only ever appends one. */
+  var scope = "turn_key=" + encodeURIComponent(state.turn.turn_key);
+  if (session && session.workspace_mode) { scope += "&store_id=" + encodeURIComponent(state.storeId); }
+  else if (benchmarkExperimentSource) { scope += "&benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource); }
+  var readPath = "/api/feedback-notes?" + scope;
+  var writePath = "/post_feedback?" + scope;
+  var history = el("div"), note = el("p", "sub", "Loading feedback\u2026");
+  var selected = { category: FEEDBACK_TAXONOMY[0].value,
+                   subcategory: FEEDBACK_TAXONOMY[0].subcategories[0].value };
   var tabs = el("div", "feedbackTabs");
   tabs.setAttribute("role", "tablist");
   tabs.setAttribute("aria-label", "Feedback category");
+  var subTabs = el("div", "feedbackTabs");
+  subTabs.setAttribute("role", "tablist");
+  subTabs.setAttribute("aria-label", "Feedback subcategory");
   var composer = el("div");
-  var areas = {}, panels = {}, buttons = {};
+  var area = el("textarea", "expNotes");
+  area.id = "feedback-comment";
+  area.maxLength = 100000;
+  composer.appendChild(subTabs);
+  composer.appendChild(area);
   var save = el("button", null, "Save feedback"); save.disabled = true;
-  /* One panel visible with a roving tabindex, the same switch the rail's
-     Conversations/Benchmarks tabs make in setNavigationTabButtons. */
-  function selectFeedbackTab(key) {
-    FEEDBACK_TABS.forEach(function (tab) {
-      var on = tab.key === key;
-      buttons[tab.key].className = on ? "active" : "";
-      buttons[tab.key].setAttribute("aria-selected", on ? "true" : "false");
-      buttons[tab.key].tabIndex = on ? 0 : -1;
-      panels[tab.key].hidden = !on;
+  var categoryButtons = {};
+  /* One category and one of its subcategories at a time, with a roving
+     tabindex -- the same switch setNavigationTabButtons makes on the rail.
+     The watermark follows the subcategory, because that is the level the six
+     confirmed meanings live at. */
+  function selectSubcategory(value) {
+    selected.subcategory = value;
+    var sub = feedbackSubcategory(selected.category, value);
+    area.placeholder = sub ? sub.watermark : "";
+    area.setAttribute("aria-label",
+      (sub ? sub.label : "Comment") + " for " + node.title);
+    Array.prototype.forEach.call(subTabs.childNodes, function (button) {
+      var on = button.getAttribute("data-value") === value;
+      button.className = on ? "active" : "";
+      button.setAttribute("aria-selected", on ? "true" : "false");
+      button.tabIndex = on ? 0 : -1;
     });
   }
-  FEEDBACK_TABS.forEach(function (tab) {
-    var button = el("button", null, tab.label);
-    button.type = "button";
-    button.id = "feedback-tab-" + tab.key;
-    button.setAttribute("role", "tab");
-    /* The textarea keeps its own textbox role, so the tab panel is the wrapper
-       around it rather than the field itself. */
-    var panel = el("div");
-    panel.id = "feedback-panel-" + tab.key;
-    panel.setAttribute("role", "tabpanel");
-    panel.setAttribute("aria-labelledby", button.id);
-    button.setAttribute("aria-controls", panel.id);
-    var area = el("textarea", "expNotes");
-    area.placeholder = tab.watermark;
-    area.setAttribute("aria-label", tab.label + " for " + node.title);
-    area.maxLength = 100000;
-    panel.appendChild(area);
-    buttons[tab.key] = button; panels[tab.key] = panel; areas[tab.key] = area;
-    button.addEventListener("click", function () {
-      selectFeedbackTab(tab.key);
-      area.focus();
+  function selectCategory(value) {
+    selected.category = value;
+    var category = feedbackCategory(value);
+    Object.keys(categoryButtons).forEach(function (key) {
+      var on = key === value;
+      categoryButtons[key].className = on ? "active" : "";
+      categoryButtons[key].setAttribute("aria-selected", on ? "true" : "false");
+      categoryButtons[key].tabIndex = on ? 0 : -1;
     });
+    clear(subTabs);
+    category.subcategories.forEach(function (sub) {
+      var button = el("button", null, sub.label);
+      button.type = "button";
+      button.setAttribute("data-value", sub.value);
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-controls", area.id);
+      button.addEventListener("click", function () {
+        selectSubcategory(sub.value);
+        area.focus();
+      });
+      subTabs.appendChild(button);
+    });
+    selectSubcategory(category.subcategories[0].value);
+  }
+  FEEDBACK_TAXONOMY.forEach(function (category) {
+    var button = el("button", null, category.label);
+    button.type = "button";
+    button.id = "feedback-tab-" + category.value;
+    button.setAttribute("data-value", category.value);
+    button.setAttribute("role", "tab");
+    categoryButtons[category.value] = button;
+    button.addEventListener("click", function () { selectCategory(category.value); });
     tabs.appendChild(button);
-    composer.appendChild(panel);
   });
-  selectFeedbackTab(FEEDBACK_TABS[0].key);
+  selectCategory(FEEDBACK_TAXONOMY[0].value);
   var head = el("div", "feedbackComposerHead");
   var hints = el("button", "feedbackHints", "Hints");
   hints.type = "button";
@@ -4602,29 +7407,33 @@ function renderFeedback(parent, node) {
     (data.feedback || []).filter(function (row) {
       return row.target_kind === node.kind && JSON.stringify(row.span_ids) === JSON.stringify(ids);
     }).forEach(function (row) {
-      var parsed = parseHumanFeedbackComment(row.comment);
-      FEEDBACK_TABS.forEach(function (tab) {
-        if (!row[tab.key]) { row[tab.key] = parsed[tab.key]; }
-      });
       history.appendChild(renderFeedbackHistoryRow(row));
     });
-    composer.hidden = save.hidden = head.hidden = !!data.read_only;
-    save.disabled = !!data.read_only;
-    note.textContent = data.read_only ? "Read-only snapshot. Add feedback in the working experiment database." : "Each save adds a timestamped comment.";
+    /* Read-only evidence is not read-only feedback. When the server answers
+       `annotated`, the comment is recorded in the annotation sidecar beside
+       the archive (fix-9eg.19.1) and the evidence file is not touched, so the
+       composer stays open on a sealed or older store. */
+    var recordable = !data.read_only || !!data.annotated;
+    composer.hidden = save.hidden = head.hidden = !recordable;
+    save.disabled = !recordable;
+    note.textContent = !recordable
+      ? "Read-only snapshot. Add feedback in the working experiment database."
+      : (data.read_only
+        ? "This evidence is read-only. Your comment is recorded beside it and never changes it."
+        : "Each save adds a timestamped comment.");
   }
-  api(path).then(show).catch(function (e) { note.textContent = e.message; });
+  api(readPath).then(show).catch(function (e) { note.textContent = e.message; });
   save.addEventListener("click", function () {
-    var body = {target_kind: node.kind, span_ids: ids, target_label: node.title, provenance: "human"};
-    var any = false;
-    FEEDBACK_TABS.forEach(function (tab) {
-      body[tab.key] = areas[tab.key].value;
-      if (areas[tab.key].value.trim()) { any = true; }
-    });
-    if (!any) { note.textContent = "Enter feedback before saving."; return; }
-    save.disabled = true; note.textContent = "Saving…";
-    apiPost(path, body)
+    if (!area.value.trim()) { note.textContent = "Enter feedback before saving."; return; }
+    var body = {
+      target_kind: node.kind, span_ids: ids, target_label: node.title,
+      provenance: "human", category: selected.category,
+      subcategory: selected.subcategory, comment: area.value
+    };
+    save.disabled = true; note.textContent = "Saving\u2026";
+    apiPost(writePath, body)
       .then(function (data) {
-        FEEDBACK_TABS.forEach(function (tab) { areas[tab.key].value = ""; });
+        area.value = "";
         show(data); note.textContent = "Saved";
       })
       .catch(function (e) { save.disabled = false; note.textContent = e.message; });
@@ -4682,6 +7491,13 @@ function renderLevel() {
   if (node.kind === "turn") {
     /* Turn level only: the whole recorded turn, expanded, per the design —
        lower levels are about their own slice and should not repeat it. */
+    if (state.turn.diagnosis) {
+      var diagCard = el("div", "card");
+      diagCard.appendChild(el("h2", null, "What was recorded"));
+      renderTurnDiagnosis(diagCard, state.turn, openSpanInTree);
+      d.appendChild(diagCard);
+    }
+
     var ledgerCard = el("div", "card");
     ledgerCard.appendChild(el("h2", null, "Execution ledger"));
     renderExecutionLedger(ledgerCard, state.turn, openSpanInTree);
@@ -5290,7 +8106,9 @@ var tm = {
   connected: false,
   busy: false,
   managed: false,     // true = talking to the chatbot-spawned server
-  activeConversationId: null
+  activeConversationId: null,
+  reuse: null,        // recorded message copied into the composer, if any
+  epoch: 0            // bumped when the evidence source changes [fix-9eg.7.2]
 };
 
 /* Track the spawned server honestly: /api/session reflects the live child
@@ -5332,6 +8150,13 @@ function tmExplainFetchError(err) {
 }
 
 function tmFetch(path, body, extra) {
+  /* No workflow server bound (a source switch dropped it, or none was ever
+     spawned): refusing here is what keeps a message from going to the server
+     the previous source was using — and stops a bare path resolving against
+     the chatbot's own origin. */
+  if (!tm.baseUrl) {
+    return Promise.reject(new Error("no workflow server is connected"));
+  }
   var headers = { "Content-Type": "application/json" };
   if (tm.token && !(extra && extra.noAuth)) {
     headers["Authorization"] = "Bearer " + tm.token;
@@ -6005,10 +8830,16 @@ function tmStreamTurn(text, pending) {
   var logicalKey = null;
   var finished = false;
   var lastError = null;
+  /* The source this turn belongs to; see tmPollTurn. */
+  var epoch = tm.epoch;
 
-  function done() { tm.busy = false; tmComposerState(); }
+  function done() {
+    if (tm.epoch !== epoch) { return; }
+    tm.busy = false; tmComposerState();
+  }
 
   function finalize(out) {
+    if (tm.epoch !== epoch) { return; }
     if (out.logical_turn_key) { out.turn_key = out.logical_turn_key; }
     finished = true;
     activity.setState(
@@ -6022,7 +8853,7 @@ function tmStreamTurn(text, pending) {
     /* The body is gone but the turn is not: it owns its own lifecycle server
        side. Reconcile against the stored record rather than inventing the
        events this client never saw. */
-    if (finished) { return; }
+    if (finished || tm.epoch !== epoch) { return; }
     var key = logicalKey || turnKey;
     if (!key) {
       /* No key at all: the request failed before the server named a turn. It
@@ -6107,6 +8938,12 @@ function tmStreamTurn(text, pending) {
 
       function pump() {
         return reader.read().then(function (chunk) {
+          if (tm.epoch !== epoch) {
+            /* The source changed under this turn: stop reading its body
+               rather than painting it into somebody else's chat. */
+            if (reader.cancel) { reader.cancel().catch(function () {}); }
+            return;
+          }
           if (chunk.done) {
             frames.end();
             if (!finished) {
@@ -6140,6 +8977,10 @@ function tmPollTurn(turnKey, bubbleMsg, deadlineMs, activity) {
      execution the server already owns, so a disconnect costs a read, not a
      second run. */
   var deadline = Date.now() + (deadlineMs || 300000);
+  /* A turn belongs to the source it was started under: if that source is gone
+     the poll stops, rather than reading (or reporting) into a page that has
+     moved on. */
+  var epoch = tm.epoch;
   /* A completed turn moves from the registry to the store, and for a moment
      neither answers. Tolerate that gap, but not forever: a 404 that persists
      past this window is a turn the server no longer has. */
@@ -6155,13 +8996,18 @@ function tmPollTurn(turnKey, bubbleMsg, deadlineMs, activity) {
       turnKey = data.logical_turn_key;
     }
   }
-  function settle() { tm.busy = false; tmComposerState(); }
+  function settle() {
+    if (tm.epoch !== epoch) { return; }
+    tm.busy = false; tmComposerState();
+  }
   function fail(text, state) {
+    if (tm.epoch !== epoch) { return; }
     if (activity) { activity.setState(state || "failed"); }
     tmRenderError(bubbleMsg, text);
     settle();
   }
   function poll() {
+    if (tm.epoch !== epoch) { return; }
     if (Date.now() > deadline) {
       fail("Timed out waiting for the turn to finish (key " + turnKey + ").",
         "timed out");
@@ -6174,6 +9020,7 @@ function tmPollTurn(turnKey, bubbleMsg, deadlineMs, activity) {
         return r.json();
       })
       .then(function (data) {
+        if (tm.epoch !== epoch) { return; }
         if (data === null) {
           if (missingUntil === null) { missingUntil = Date.now() + 20000; }
           if (Date.now() > missingUntil) {
@@ -6222,6 +9069,65 @@ function tmRenderError(bubbleMsg, text) {
   var bubble = bubbleMsg.querySelector(".bubble");
   clear(bubble);
   bubble.appendChild(document.createTextNode(text));
+}
+
+/* -- reusing a recorded message [fix-9eg.7.4] --------------------------- */
+/* Copying a recorded message into the composer is a convenience, not a
+   replay: the text lands in the live chat session as ordinary input, under
+   whatever workflow and settings are current, and nothing runs until the
+   person presses Send. tm.reuse only remembers where the text came from so
+   the turn it eventually produces can say so. */
+function tmSizeComposer() {
+  var input = document.getElementById("chatInput");
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 160) + "px";
+}
+
+function tmShowReuseNotice(text) {
+  var bar = document.getElementById("reuseNotice");
+  document.getElementById("reuseNoticeText").textContent = text;
+  bar.className = "visible";
+}
+
+function tmClearReuse() {
+  tm.reuse = null;
+  document.getElementById("reuseNotice").className = "";
+  document.getElementById("reuseNoticeText").textContent = "";
+}
+
+function tmReuseRecordedMessage(text, source) {
+  if (session && session.workspace_mode) {
+    showNotice("This is a read-only workspace", "error",
+      "There is no live chat session here to send a message through.");
+    return;
+  }
+  setTopMode("test");
+  var input = document.getElementById("chatInput");
+  input.value = text;                       /* verbatim, line breaks and all */
+  tm.reuse = { text: text, turnKey: source && source.turnKey };
+  tmSizeComposer();
+  if (!input.disabled) {
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  var from = source && source.turnKey ? "turn " + source.turnKey : "a recorded turn";
+  tmShowReuseNotice("Copied from " + from + ". Edit it if you like — sending "
+    + "starts a new turn in this chat session, under the current workflow and "
+    + "settings. It does not re-run the recorded one.");
+  if (!tm.connected) {
+    showNotice("Message copied to the composer",
+      "info", "Connect to the workflow server to send it.");
+  }
+}
+
+function tmReuseLabel(text) {
+  /* Called as the message goes out: says what the new turn is, without
+     claiming it reproduces the old one. */
+  if (!tm.reuse) { return null; }
+  var edited = tm.reuse.text !== text;
+  var from = tm.reuse.turnKey ? "turn " + tm.reuse.turnKey : "a recorded turn";
+  return "New turn, under the current settings · "
+    + (edited ? "edited copy of " : "message copied from ") + from;
 }
 
 function tmComposerState() {
@@ -6407,6 +9313,7 @@ function tmConnect() {
      decisions (run_fastapi_mcp flags) or programmatic /initialize fields. */
   var pasted = document.getElementById("tToken").value.trim();
   var body = { channel_id: tm.channelId, user_id: tm.userId };
+  var epoch = tm.epoch;   /* the source this connection is being made for */
   connText("Connecting to " + tm.baseUrl + " …");
   tm.token = pasted;  /* a pasted token also authorizes the turn calls */
   tmFetch("/initialize", body, { noAuth: !pasted })
@@ -6414,6 +9321,7 @@ function tmConnect() {
       return r.json().then(function (data) { return { status: r.status, data: data }; });
     })
     .then(function (got) {
+      if (tm.epoch !== epoch) { return; }   /* switched away mid-connect */
       if (got.status !== 200 && got.status !== 202) {
         var detail = got.data && got.data.detail ? String(got.data.detail) : ("HTTP " + got.status);
         throw { handled: true, message: "/initialize failed: " + detail };
@@ -6465,6 +9373,7 @@ function tmConnect() {
         });
     })
     .catch(function (err) {
+      if (tm.epoch !== epoch) { return; }
       tm.connected = false;
       tmComposerState();
       setPill("err", "not connected");
@@ -6477,9 +9386,14 @@ function tmConnect() {
    while on first start, so be patient and say what is happening. */
 function tmAutoConnect(deadlineMs) {
   var deadline = Date.now() + (deadlineMs || 180000);
+  /* A probe loop outlives the source that started it unless it says so: a
+     switch away must not end in a connection to (or a pill about) a server
+     this page is no longer looking at. */
+  var epoch = tm.epoch;
   setPill("wait", "server starting…");
   connText("Starting the workflow server (first start loads models — this can take a minute)…");
   function probe() {
+    if (tm.epoch !== epoch || !tm.baseUrl) { return; }
     if (Date.now() > deadline) {
       setPill("err", "server not ready");
       connText("The workflow server did not become ready. Check the chatbot's " +
@@ -6509,10 +9423,14 @@ function tmSend() {
   var input = document.getElementById("chatInput");
   var text = input.value.trim();
   if (!text || !tm.connected || tm.busy) { return; }
+  var reuseLabel = tmReuseLabel(text);
   input.value = "";
+  tmSizeComposer();
+  tmClearReuse();
   tm.busy = true;
   tmComposerState();
-  tmBubble("user", text);
+  var sent = tmBubble("user", text);
+  if (reuseLabel) { sent.appendChild(el("div", "reuseNote", reuseLabel)); }
   /* "/"-prefixed → deterministic execution via /invoke_assistant */
   var deterministic = text.charAt(0) === "/";
   var path = deterministic ? "/invoke_assistant" : "/invoke_agent";
@@ -6555,7 +9473,17 @@ function tmSend() {
 }
 document.getElementById("chatSend").addEventListener("click", tmSend);
 document.getElementById("chatInput").addEventListener("keydown", function (e) {
-  if (e.key === "Enter") { tmSend(); }
+  /* Shift+Enter writes a line instead of sending: a multi-line message (a
+     reused one, or one typed here) has to be possible to compose. */
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); tmSend(); }
+});
+document.getElementById("chatInput").addEventListener("input", tmSizeComposer);
+document.getElementById("reuseClear").addEventListener("click", function () {
+  var input = document.getElementById("chatInput");
+  input.value = "";
+  tmSizeComposer();
+  tmClearReuse();
+  if (!input.disabled) { input.focus(); }
 });
 
 document.getElementById("newConvBtn").addEventListener("click", function () {
@@ -6640,9 +9568,100 @@ document.getElementById("clearConvsBtn").addEventListener("click", function () {
   });
 });
 
+/* -- the source boundary [fix-9eg.7.2] ----------------------------------
+   Switching evidence sources without relaunching the page is navigation, not
+   federation: nothing from the source being left may appear under, or be sent
+   to, the one being opened. Everything scoped to a source is dropped here,
+   once, and only when the source actually changes — a routine re-apply of the
+   SAME session (a restarted server, a configured env, a poll) must not throw
+   away a live chat or the turn someone is reading. */
+var activeSourceIdentity = null;
+
+function sourceIdentity(sess) {
+  if (!sess) { return "none"; }
+  if (sess.workspace_mode) {
+    /* A workspace is identified by the manifest, not by the workflow it was
+       collected from: two workspaces over one workflow are two sources. */
+    var workspace = sess.workspace || {};
+    return "workspace:" + (workspace.manifest_path || workspace.workspace_id || "");
+  }
+  return "workflow:" + (sess.db_path || sess.workflow_path || "");
+}
+
+function resetSourceScopedState() {
+  /* In-flight reads of the old source are invalidated rather than awaited:
+     both view-load tokens move, so a response that arrives after the switch
+     finds itself stale and paints nothing. */
+  expNavToken();
+  workspaceNav++;
+
+  /* The turn finder owns #detail while it is active and walks the store over
+     several round trips, so it has to be stood down explicitly: its sequence
+     moves (pages already in flight are disowned), its debounce never fires,
+     and its query and rows go with the source they were found in. */
+  if (turnFind.timer) { clearTimeout(turnFind.timer); turnFind.timer = null; }
+  turnFindReset();
+  turnFind.active = false;
+  turnFind.running = false;
+  turnFind.text = "";
+  turnFind.markers = {};
+  var findText = document.getElementById("turnFindText");
+  if (findText) { findText.value = ""; }
+  turnFindRenderMarkers();
+  turnFindRender();
+
+  benchmarkExperimentSource = null;
+  state.channel = "";
+  state.storeId = null;
+  state.turnKey = null;
+  state.turn = null;
+  state.path = [];
+  state.experimentId = null;
+  state.experimentTask = null;
+  state.benchmarkId = null;
+  state.benchmarkVersion = null;
+  workspaceStores = {};
+  hierarchyRoot = null;
+  hierarchyScope = null;
+  hierarchyPath = [];
+  hierarchyExpanded = {};
+  navigationSelection = {conversations: null, benchmarks: null};
+  archivedExperimentsShown = {};
+  var detail = document.getElementById("detail");
+  clear(detail);
+  detail.appendChild(el("div", "empty", "Select a turn in this source."));
+
+  /* The live chat belonged to the previous workflow's server. Dropping the
+     binding is what stops a message going to it: tmFetch has nowhere to send
+     until applySession binds the new server (or leaves this a viewer). The
+     epoch stops a turn that is still in flight from repainting or polling. */
+  tm.epoch++;
+  tm.connected = false;
+  tm.managed = false;
+  tm.busy = false;
+  tm.baseUrl = "";
+  tm.token = "";
+  tm.channelId = "";
+  tm.activeConversationId = null;
+  tmClearReuse();
+  tmClearLog("Switched evidence source. Connect to its workflow server to chat.");
+  tmComposerState();
+
+  /* Views owned elsewhere (comparison, task pages) clean up here if they say
+     they need to; the boundary does not reach into them. */
+  if (typeof onSourceSwitch === "function") { onSourceSwitch(); }
+}
+
 function applySession() {
   /* session: {workflow_path, workflow_name, server_url, server_running,
                channel_id, user_id, jwt_mode, spawn_error} */
+  var identity = sourceIdentity(session);
+  if (activeSourceIdentity !== null && identity !== activeSourceIdentity) {
+    activeSourceIdentity = identity;
+    resetSourceScopedState();
+  } else {
+    activeSourceIdentity = identity;
+  }
   if (session && session.workspace_mode) {
     setPill("ok", "sealed/read-only");
     document.getElementById("modeTest").style.display = "none";

@@ -1,7 +1,16 @@
 """What the durable turn's "conversation summary" holds (bead fix-dzs.5).
 
-Every durable turn is the 3-key shape ``{"conversation summary",
-"conversation_traces", "feedback"}`` (see fastworkflow/conversation_history_io.py).
+Every durable turn carries ``"conversation summary"`` and
+``"conversation_traces"`` (see fastworkflow/conversation_history_io.py).
+
+The ``feedback`` key asserted below is a THIRD key that only the in-session
+path still appends, in ``WorkflowExecutionContext.append_conversation_turn``.
+fix-9eg.16 removed the table that once filled it and the store join that read
+it, so it can now only ever be None, and the restored-from-checkpoint shape
+`conversation_history_io` produces has two keys. The assertions are kept as
+they are because they describe what the live path really does today; making
+the two paths agree means editing `workflow_execution_context.py`, which is
+reported as a cross-file integration rather than done here.
 The deterministic and direct-action paths used to hardcode that field to the
 constants ``"assistant_mode_command"`` and ``"process_action command"``, which
 made it useless to the three consumers that read it and only it:

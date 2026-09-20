@@ -428,11 +428,18 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         ),
     ),
     SPAN_NLU_PARAM_EXTRACTION: SpanContract(
-        version=1,
+        # v2 (fix-8ko2): `retry_round_ordinal` joins the boolean `retry_round`.
+        # The flag says an extraction resumed from stored parameters; the
+        # ordinal says which attempt it was, which a consumer previously had to
+        # guess by counting spans. A span carrying v1 has the flag only, and a
+        # reader must keep treating its round as unrecorded rather than
+        # inferring one.
+        version=2,
         attributes=frozenset(
             {
                 "command_name",
                 "retry_round",
+                "retry_round_ordinal",
                 "extraction_method",
                 "missing_fields",
                 "invalid_fields",

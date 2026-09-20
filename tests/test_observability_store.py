@@ -137,12 +137,16 @@ class TestSchema:
         assert {
             "conversations",
             "turns",
-            "feedback",
             "spans",
             "artifacts",
             "train_runs",
             "diagnostics",
+            "human_feedback",
         } <= tables
+        # `feedback` was the agent-memory table: one mutable row per turn,
+        # read only by `get_memory_window` and replayed into the agent's
+        # prompt. fix-9eg.16 removed it, so a fresh store must not create it.
+        assert "feedback" not in tables
         assert store.db_size_bytes() > 0
 
     def test_file_posture(self, db_path):
@@ -241,23 +245,45 @@ class TestSchema:
         assert "PRAGMA table_info" not in source
         assert "schema_features" in source
 
-    def test_read_only_store_refuses_an_older_schema_the_same_way(self, db_path):
-        """The read-only view applies the same rule as the writable store
-        (fix-49m.3 adjustment b): an older store is refused up front with the
-        reason, instead of failing later on a column the reader assumes."""
-        obs.ObservabilityStore(db_path)
+    def _stamp_version(self, db_path, version):
         conn = sqlite3.connect(db_path)
-        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.execute(f"PRAGMA user_version = {version}")
         conn.commit()
         conn.close()
+
+    def test_read_only_store_refuses_a_schema_it_cannot_read(self, db_path):
+        """The read-only view is refused up front with the reason, instead of
+        failing later on a column the reader assumes (fix-49m.3 adjustment b).
+
+        The boundary moved down by exactly one version at the v7 feedback
+        bump: v6 is the oldest READABLE schema, because real recorded evidence
+        exists at v6 and the only difference the reader has to survive is the
+        feedback columns v6 does not have. Anything older is still refused.
+        """
+        obs.ObservabilityStore(db_path)
+        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION - 1)
         with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
             obs.ReadOnlyObservabilityStore(db_path)
-        # And the current version still opens read-only.
-        conn = sqlite3.connect(db_path)
-        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION}")
-        conn.commit()
-        conn.close()
-        obs.ReadOnlyObservabilityStore(db_path)
+        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION)
+        older = obs.ReadOnlyObservabilityStore(db_path)
+        assert older.schema_version == obs.MIN_READABLE_SCHEMA_VERSION
+        self._stamp_version(db_path, obs.SCHEMA_VERSION)
+        current = obs.ReadOnlyObservabilityStore(db_path)
+        assert current.schema_version == obs.SCHEMA_VERSION
+
+    def test_the_writable_store_still_refuses_everything_older(self, db_path):
+        """Reading old evidence is not permission to write to it.
+
+        A v6 database has no category, subcategory, anchor or identity column,
+        so an append would either fail on the insert or record a note the task
+        view could never file. The refusal is at open, before either.
+        """
+        obs.ObservabilityStore(db_path)
+        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION)
+        with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
+            obs.ObservabilityStore(db_path)
+        with pytest.raises(obs.IncompatibleObservabilityDB):
+            obs.ObservabilityStore.open_for_annotation(db_path)
 
 
 # ----------------------------------------------------------------------
@@ -593,17 +619,36 @@ class TestConversationMemoryRoundTrip:
         window = store.get_memory_window("c", 1, max_turns=10)
         assert window[0]["conversation summary"] == "the resumed turn"
 
-    def test_feedback_joins_into_the_memory_window(self, db_path, sink):
+    def test_no_feedback_joins_into_the_memory_window(self, db_path, sink):
+        """The join is gone with the table it read (fix-9eg.16).
+
+        It used to put whatever had been posted to the old `/post_feedback`
+        into the window, which `restore_history_from_turns` turned into a
+        `dspy.History` message and `_refine_user_query` rendered into the
+        refiner's prompt. Review notes replaced it and deliberately do not
+        travel that path: nothing in this build feeds recorded feedback back
+        into a model.
+        """
         turn_result = self._turn_result("a turn with feedback", "{}")
         sink.emit_turn_record(turn_result)
         assert sink.flush()
 
         store = obs.ObservabilityStore(db_path)
-        store.upsert_feedback(
-            turn_result.turn_output.turn_key, json.dumps({"nl_feedback": "helpful"})
+        assert not hasattr(store, "upsert_feedback")
+        turn_key = turn_result.turn_output.turn_key
+        store.add_human_feedback(
+            turn_key,
+            target_kind="turn",
+            span_ids=[],
+            target_label="Turn",
+            provenance="human",
+            comment="helpful",
+            category="conclusions",
+            subcategory="what_went_right",
         )
         window = store.get_memory_window("c", 1, max_turns=10)
-        assert window[0]["feedback"] == {"nl_feedback": "helpful"}
+        assert set(window[0]) == {"conversation summary", "conversation_traces"}
+        assert len(store.list_human_feedback(turn_key)) == 1
 
 
 # ----------------------------------------------------------------------

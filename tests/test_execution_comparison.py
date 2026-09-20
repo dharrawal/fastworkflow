@@ -1525,7 +1525,9 @@ class TestAnchorsAndDigest:
             span_ids=list(anchor.span_ids),
             target_label="open_directory",
             provenance="human",
-            worked="matched the reference",
+            comment="matched the reference",
+            category="conclusions",
+            subcategory="what_went_right",
         )
         recorded = store.list_human_feedback("turn-winner")
         assert len(recorded) == 1
@@ -1545,7 +1547,9 @@ class TestAnchorsAndDigest:
             span_ids=[],
             target_label="wildcard hop",
             provenance="coding_agent",
-            went_wrong="no span to anchor to",
+            comment="no span to anchor to",
+            category="conclusions",
+            subcategory="what_went_wrong",
         )
         assert len(store.list_human_feedback("turn-winner")) == 1
 

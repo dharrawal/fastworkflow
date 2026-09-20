@@ -77,7 +77,7 @@ from .utils import (
     MAX_CONVERSATION_TURNS_IN_MEMORY,
     ensure_topic_and_summary,
     reserve_conversation_id,
-    save_last_turn_feedback,
+    record_turn_feedback,
     try_ensure_topic_and_summary,
     ConversationSummary,
     InitializationRequest,
@@ -87,6 +87,7 @@ from .utils import (
     InvokeRequest,
     PerformActionRequest,
     PostFeedbackRequest,
+    observability_feedback,
     ActivateConversationRequest,
     DumpConversationsRequest,
     GenerateMCPTokenRequest,
@@ -2278,24 +2279,37 @@ async def list_conversations(
 @app.post(
     "/post_feedback",
     operation_id="post_feedback",
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_201_CREATED,
     responses={
-        200: {"description": "Feedback posted successfully"},
+        201: {"description": "Review note recorded"},
+        400: {"description": "The note does not describe recorded evidence"},
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
-        422: {"description": "No feedback provided or no turns to give feedback on"}
+        422: {"description": "Malformed body, or category/subcategory do not pair"}
     }
 )
 async def post_feedback(
     request: PostFeedbackRequest,
     session: SessionData = Depends(get_session_and_ensure_runtime)
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """
-    Post feedback on the latest turn of the active (in-memory) conversation.
-    Feedback is attached to the turn in conversation_history and will be persisted
-    when the conversation ends (on /new_conversation or shutdown).
-    At least one of binary_or_numeric_score or nl_feedback must be provided.
-    
+    Record one review note against a recorded turn, or a component of it.
+
+    This is the single write surface for review notes, for people and for
+    coding agents alike (fix-9eg.16). It replaced the old agent-memory post,
+    which attached a score and free text to whatever turn was last completed
+    and replayed it into the agent's conversation history; nothing here is fed
+    back into a prompt.
+
+    The note names the turn it is about. `category` and `subcategory` are the
+    owner-confirmed enums (see GET /feedback_taxonomy) and are validated as a
+    pair; `comment` is free-form and is stored verbatim. `paired` names a
+    second execution when the note is a comparison. Everything the note claims
+    about the evidence -- the turn, its spans, a declared experiment, task or
+    attempt -- is checked against what the store actually recorded.
+
+    Reads live on GET /feedback, so a read is never spelled as a post.
+
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
     channel_id = session.channel_id
@@ -2307,29 +2321,19 @@ async def post_feedback(
                     detail=f"User session not found: {channel_id}"
                 )
 
-            # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
+            # Serialize with turns; reject if a turn is active (§3.4). The note
+            # lands in the same DB the writer is appending evidence to.
             _reject_if_busy(channel_id)
             async with runtime.lock:
-                # Check if there are any in-memory turns to give feedback on
-                if not runtime.execution_context.conversation_history.messages:
+                try:
+                    stored = record_turn_feedback(runtime, request, logger)
+                except (observability_feedback.FeedbackError, ValueError) as exc:
                     raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"No turns available to give feedback on for user: {channel_id}"
-                    )
-
-                # Update feedback on the last turn in the in-memory conversation history
-                last_turn = runtime.execution_context.conversation_history.messages[-1]
-                last_turn["feedback"] = {
-                    "binary_or_numeric_score": request.binary_or_numeric_score,
-                    "nl_feedback": request.nl_feedback,
-                    "timestamp": int(time.time() * 1000)
-                }
-
-                # Persist the edit to the turn it belongs to
-                save_last_turn_feedback(runtime, logger)
-
-                logger.info(f"Added feedback to latest turn for session {channel_id}")
-                return {"status": "ok"}
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=str(exc),
+                    ) from exc
+                logger.info(f"Recorded a review note for session {channel_id}")
+                return {"status": "ok", "feedback": stored}
 
     except HTTPException:
         raise
@@ -2340,6 +2344,81 @@ async def post_feedback(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal error in post_feedback() for channel_id: {channel_id}",
         ) from e
+
+
+@app.get(
+    "/feedback",
+    operation_id="get_feedback",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Recorded review notes for the turn"},
+        401: {"description": "Invalid or expired JWT token"},
+        404: {"description": "Session or turn not found"}
+    }
+)
+async def get_feedback(
+    turn_key: str,
+    session: SessionData = Depends(get_session_and_ensure_runtime)
+) -> dict[str, Any]:
+    """
+    List the review notes recorded on one turn, oldest first.
+
+    A distinct GET rather than a second meaning for POST /post_feedback: the
+    write surface was renamed, the read was not folded into it. Notes written
+    before the taxonomy existed come back with a null category and
+    `classified: false` — unclassified, with their text untouched.
+    """
+    channel_id = session.channel_id
+    try:
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
+                )
+            store = runtime.observability_store
+            if store is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="no observability store is active for this channel",
+                )
+            if store.get_turn(turn_key) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"turn not found: {turn_key}",
+                )
+            return {
+                "turn_key": turn_key,
+                "feedback": observability_feedback.present(
+                    store.list_human_feedback(turn_key)
+                ),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_feedback for session {channel_id}: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal error in get_feedback() for channel_id: {channel_id}",
+        ) from e
+
+
+@app.get(
+    "/feedback_taxonomy",
+    operation_id="get_feedback_taxonomy",
+    status_code=status.HTTP_200_OK,
+    responses={200: {"description": "The categories, subcategories and prompts"}},
+)
+async def get_feedback_taxonomy() -> dict[str, Any]:
+    """
+    The owner-confirmed feedback categories and their subcategories.
+
+    One source for the composer's selectors and for an agent that wants the
+    enum values before posting, so the two cannot drift apart. Unauthenticated
+    because it is a fixed vocabulary, not evidence.
+    """
+    return observability_feedback.taxonomy_payload()
 
 
 @app.post(

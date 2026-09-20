@@ -268,7 +268,12 @@ def _row_counts(db_path: str) -> dict:
     try:
         return {
             table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("conversations", "turns", "spans", "artifacts", "feedback")
+            # `human_feedback` replaced the agent-memory `feedback` table
+            # (fix-9eg.16); clearing has to reach the review notes too, since
+            # they are anchored to the turns being deleted.
+            for table in (
+                "conversations", "turns", "spans", "artifacts", "human_feedback",
+            )
         }
     finally:
         conn.close()
@@ -526,7 +531,7 @@ class TestApi:
             "turns": 0,
             "spans": 0,
             "artifacts": 0,
-            "feedback": 0,
+            "human_feedback": 0,
         }
         # Clearing data never rewinds conversation identity.
         assert obs.ObservabilityStore(seeded_db).mint_conversation_id("chan1") == 2

@@ -213,11 +213,15 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     )
     # Annotations are written to this registered source, even when the UI's
     # default database points elsewhere. Cross-experiment writes are refused.
-    feedback_path = "/api/human-feedback?turn_key=registered-turn&benchmark_experiment=" + experiment_id
+    scope = "?turn_key=registered-turn&benchmark_experiment=" + experiment_id
+    # One write route and a separate read route since fix-9eg.16.
+    write_path = "/post_feedback" + scope
+    read_path = "/api/feedback-notes" + scope
     comment = {"target_kind": "turn", "span_ids": [], "target_label": "Turn",
                "comment": "Check the final answer against the task prompt.",
-               "provenance": "human"}
-    assert _request(server, feedback_path, "POST", comment)[0] == 201
+               "provenance": "human", "category": "recommendations",
+               "subcategory": "what_to_do"}
+    assert _request(server, write_path, "POST", comment)[0] == 201
     assert store.list_human_feedback("registered-turn")[0]["comment"] == comment["comment"]
     assert _request(server, "/api/experiment/" + experiment_id + "/analysis" + suffix,
                     "PUT", {"analysis": "Free-form review"})[0] == 405
@@ -227,9 +231,9 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     default = obs.ObservabilityStore(str(tmp_path / "default.sqlite3"))
     _write_turn(default, _turn_row("plain-turn", "chatbot"))
     server.db_path = default.db_path
-    assert _request(server, feedback_path, "GET")[1]["feedback"][0]["comment"] == comment["comment"]
+    assert _request(server, read_path)[1]["feedback"][0]["comment"] == comment["comment"]
     assert default.list_human_feedback("plain-turn") == []
-    assert _request(server, "/api/human-feedback?turn_key=plain-turn&benchmark_experiment=" + experiment_id,
+    assert _request(server, "/post_feedback?turn_key=plain-turn&benchmark_experiment=" + experiment_id,
                     "POST", comment)[0] == 404
     assert _request(server, "/api/turns")[1]["turns"][0]["turn_key"] == "plain-turn"
     assert (
@@ -238,7 +242,7 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     )
 
     _write_turn(store, _turn_row("unrelated-turn", "chatbot"))
-    assert _request(server, "/api/human-feedback?turn_key=unrelated-turn&benchmark_experiment=" + experiment_id,
+    assert _request(server, "/post_feedback?turn_key=unrelated-turn&benchmark_experiment=" + experiment_id,
                     "POST", comment)[0] == 400
 
 

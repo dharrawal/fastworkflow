@@ -26,6 +26,7 @@ Design invariants (docs/fastworkflow_observability_studio_design.md §3.4):
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import importlib.resources
@@ -57,8 +58,22 @@ from fastworkflow.benchmark.catalog import (
     write_analysis,
     write_version,
 )
+from fastworkflow.observability import feedback, feedback_sidecar
+from fastworkflow.observability.comparison import (
+    ExecutionRef,
+    InvalidExecutionRef,
+    PassSelector,
+    project_execution,
+)
+from fastworkflow.observability.diagnosis import (
+    InvalidTurnQuery,
+    TurnQuery,
+    diagnose_turn,
+    search_turns,
+)
 from fastworkflow.observability.store import (
     FEATURE_EXPERIMENTS_V1,
+    FEEDBACK_TAXONOMY_SCHEMA_VERSION,
     ExperimentNotFound,
     IncompatibleObservabilityDB,
     ObservabilityStore,
@@ -83,6 +98,7 @@ from fastworkflow.review.sidecar import (
     project_review_turn,
 )
 from fastworkflow.run_chatbot import launcher
+from fastworkflow.run_chatbot import selection_api
 
 logger = logging.getLogger(__name__)
 
@@ -804,6 +820,179 @@ def annotate_turn_detail(turn: dict[str, Any], spans: Iterable[Mapping[str, Any]
     span_list = list(spans)
     turn["execution_ledger"] = execution_ledger(turn.get("record"), span_list)
     turn.update(turn_span_stamps(span_list))
+
+
+def annotate_turn_diagnosis(
+    turn: dict[str, Any],
+    spans: Iterable[Mapping[str, Any]],
+    *,
+    store_id: Optional[str] = None,
+    low_confidence_below: Optional[float] = None,
+) -> None:
+    """Stamp an opened turn with its diagnosis (`fix-9eg.18.2/.18.3`).
+
+    Deliberately separate from `annotate_turn_detail` rather than folded into
+    it: the ledger, chips and cost are what every reader of a turn gets,
+    including the formal review projection, and widening that shape would
+    change a payload this slice does not own.
+
+    The steps come from the ledger `annotate_turn_detail` already projected --
+    `project_execution` runs that same `execution_ledger` -- so the markers
+    describe the dispatch sequence the trace view renders rather than a second
+    one derived here.
+    """
+    span_list = [dict(span) for span in spans]
+    turn_key = str(turn.get("logical_turn_key") or turn.get("turn_key") or "")
+    ref = ExecutionRef(store_id=store_id or "", turn_keys=(turn_key,))
+    projection = project_execution(
+        ref,
+        _SingleTurnReader(turn, span_list),
+        ledger=execution_ledger,
+        cost_rollup=cost_rollup,
+    )
+    turn["diagnosis"] = diagnose_turn(
+        turn_key,
+        turn,
+        turn.get("record"),
+        span_list,
+        projection.steps,
+        ref=ref,
+        low_confidence_below=low_confidence_below,
+    ).as_dict()
+
+
+# Wire values are parsed EXACTLY or refused. The rail's older parsing fell back
+# to a default when a value did not convert, so `?limit=abc` quietly served 100
+# rows and `?attempt=1.5` quietly served every attempt -- a filter that silently
+# means something else is worse than one that fails, because the operator reads
+# the result as an answer about the dataset.
+_EXACT_INT_RE = re.compile(r"^[+-]?[0-9]+$")
+_EXACT_NUMBER_RE = re.compile(
+    r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$"
+)
+# `nan` and `inf` match no pattern here on purpose: both are floats a caller can
+# write and neither is a threshold. See `TurnQuery`, which refuses them again.
+_WIRE_TRUE = frozenset({"1", "true"})
+_WIRE_FALSE = frozenset({"0", "false"})
+
+
+def _wire_int(value: Optional[str], name: str) -> Optional[int]:
+    if value is None:
+        return None
+    text = value.strip()
+    if not _EXACT_INT_RE.match(text):
+        raise InvalidTurnQuery(f"{name} must be an integer, not {value!r}")
+    return int(text)
+
+
+def _wire_number(value: Optional[str], name: str) -> Optional[float]:
+    if value is None:
+        return None
+    text = value.strip()
+    if not _EXACT_NUMBER_RE.match(text):
+        raise InvalidTurnQuery(f"{name} must be a finite number, not {value!r}")
+    return float(text)
+
+
+def _wire_bool(value: Optional[str], name: str) -> Optional[bool]:
+    if value is None:
+        return None
+    text = value.strip().casefold()
+    if text in _WIRE_TRUE:
+        return True
+    if text in _WIRE_FALSE:
+        return False
+    raise InvalidTurnQuery(f"{name} must be true or false, not {value!r}")
+
+
+def _defaulted(value: Optional[int], fallback: int) -> int:
+    return fallback if value is None else value
+
+
+def _wire_markers(value: Optional[str], name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    names = tuple(part.strip() for part in value.split(",") if part.strip())
+    # Unknown names are refused by TurnQuery, which owns the vocabulary; this
+    # only rejects a request that named the parameter and then said nothing,
+    # which is far likelier to be a client bug than an empty filter.
+    if not names:
+        raise InvalidTurnQuery(f"{name} was given with no marker names")
+    return names
+
+
+def turn_query_from_params(q: Any, *, default_limit: int = 100) -> TurnQuery:
+    """Build one `TurnQuery` from the wire, or refuse with `InvalidTurnQuery`.
+
+    One function for every route that searches turns -- live, workspace, and an
+    agent read -- so a filter means the same thing wherever it is asked. The
+    store-level names are the rail's existing ones (`channel`, `conversation`,
+    `command`, ...), kept so an existing link keeps working; the diagnostic ones
+    are new.
+    """
+    return TurnQuery(
+        channel_id=q("channel"),
+        conversation_id=_wire_int(q("conversation"), "conversation"),
+        status=q("status"),
+        success=_wire_bool(q("success"), "success"),
+        command_name=q("command"),
+        context=q("context"),
+        experiment_id=q("experiment"),
+        task_id=q("task"),
+        attempt=_wire_int(q("attempt"), "attempt"),
+        markers_any=_wire_markers(q("markers_any"), "markers_any"),
+        markers_all=_wire_markers(q("markers_all"), "markers_all"),
+        low_confidence_below=_wire_number(
+            q("low_confidence_below"), "low_confidence_below"
+        ),
+        text_contains=q("text") or None,
+        # An explicit bound is honoured even when it is refusable: `limit=0` is
+        # a mistake to be told about, not a value to be replaced by the
+        # default, which is what makes `or default_limit` the wrong idiom here.
+        limit=_defaulted(_wire_int(q("limit"), "limit"), default_limit),
+        offset=_defaulted(_wire_int(q("offset"), "offset"), 0),
+        scan_limit=_wire_int(q("scan_limit"), "scan_limit"),
+        resume_after=q("resume_after") or None,
+        include_record=_wire_bool(q("include_record"), "include_record"),
+    )
+
+
+# A store minted before store identities existed answers `store_identity()` with
+# None. Its turns are still worth diagnosing, so the projection carries this in
+# place of a name rather than inventing one that would collide with a real
+# store; anchors built from it are refused by the feedback writer, which is the
+# honest outcome for evidence nobody can address.
+UNIDENTIFIED_STORE_ID = "unidentified-store"
+
+
+def diagnostic_store_id(store: Any) -> str:
+    """The id a diagnosis anchors against: the store's own recorded identity."""
+    try:
+        identity = store.store_identity()
+    except AttributeError:
+        identity = None
+    return str(identity) if identity else UNIDENTIFIED_STORE_ID
+
+
+class _SingleTurnReader:
+    """The `ExecutionReader` shape over one turn the route already read.
+
+    Exists so diagnosing an opened turn costs no further store reads: the route
+    has the row and the trace in hand, and re-opening the store to fetch them
+    again is the kind of duplicate read `project_execution` takes a reader to
+    avoid.
+    """
+
+    def __init__(self, turn: Mapping[str, Any], spans: list[dict[str, Any]]) -> None:
+        self._turn = turn
+        self._spans = spans
+        self._key = str(turn.get("logical_turn_key") or turn.get("turn_key") or "")
+
+    def turn(self, store_id: str, turn_key: str) -> Optional[Mapping[str, Any]]:
+        return self._turn if turn_key == self._key else None
+
+    def trace(self, store_id: str, turn_key: str) -> list[dict[str, Any]]:
+        return self._spans if turn_key == self._key else []
 
 
 # -- (c) provenance and comparability -------------------------------------------
@@ -2090,8 +2279,10 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 split.path.startswith("/api/benchmarks/")
                 and split.path.endswith("/versions")
             )
+            selection_post_path = selection_api.owns_write(split.path)
             if (
-                not benchmark_setup_path
+                not selection_post_path
+                and not benchmark_setup_path
                 and not benchmark_experiment_path
                 and not setup_post_path
                 and not review_answer_path
@@ -2099,7 +2290,10 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 and not benchmark_post_path
                 and split.path
                 not in {
-                "/api/human-feedback",
+                # The one write surface for recorded review notes (fix-9eg.16,
+                # owner wording). Reads live on GET /api/feedback-notes and
+                # GET /api/task-feedback, so a read is never spelled as a post.
+                "/post_feedback",
                 "/api/select_workflow",
                 "/api/select_workspace",
                 "/api/configure_env",
@@ -2123,11 +2317,11 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 self._error(400, "invalid JSON body")
                 return
-            if split.path == "/api/human-feedback":
+            if split.path == "/post_feedback":
                 if not isinstance(body, dict):
                     self._error(400, "body must be a JSON object")
                     return
-                self._handle_human_feedback(query, body)
+                self._handle_feedback_notes(query, body)
                 return
             if benchmark_setup_path or benchmark_experiment_path:
                 folder = self._benchmark_workflow_path(write=True)
@@ -2140,15 +2334,22 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                         self._send_json({"version": benchmark_setup.save_benchmark(folder, body)}, status=201)
                     else:
                         benchmark_id = unquote(split.path[len("/api/benchmarks/"):-len("/experiments")])
+                        # `runs_per_task` is the existing declared-attempt
+                        # count surfaced at setup; omitting it still means 1,
+                        # and n > 1 asks for no target, rubric or review gate.
                         record = benchmark_setup.create_experiment(
                             folder, benchmark_id, body.get("version"),
                             body.get("description", ""),
+                            runs_per_task=body.get("runs_per_task", 1),
                         )
                         self._send_json({"experiment": record}, status=201)
                 except benchmark_setup.BenchmarkSetupConflict as exc:
                     self._error(409, str(exc))
                 except (BenchmarkManifestError, ValueError, TypeError) as exc:
                     self._error(400, str(exc))
+                return
+            if selection_post_path:
+                self._handle_selection_api("POST", split.path, body=body)
                 return
             if setup_post_path:
                 self._handle_setup(split.path, body=body, write=True)
@@ -2358,7 +2559,8 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         try:
             split = urlsplit(self.path)
             prefix = "/api/benchmark-experiments/"
-            if not split.path.startswith(prefix):
+            selection_delete = split.path.startswith(selection_api.EXPERIMENTS_PREFIX)
+            if not selection_delete and not split.path.startswith(prefix):
                 self._refuse_write()
                 return
             query = parse_qs(split.query)
@@ -2367,6 +2569,17 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 return
             if not self._token_valid(query):
                 self._error(401, "unauthorized: missing or invalid token")
+                return
+            if selection_delete:
+                # Withdrawing a task's best run carries `expected_selection_id`,
+                # so this DELETE has a body like the POST that installed it.
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                except (ValueError, TypeError):
+                    self._error(400, "invalid JSON body")
+                    return
+                self._handle_selection_api("DELETE", split.path, body=body)
                 return
             folder = self._benchmark_workflow_path(write=True)
             if folder is None:
@@ -2452,8 +2665,16 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/navigation":
             self._handle_navigation()
             return
-        if path == "/api/human-feedback":
-            self._handle_human_feedback(query)
+        if path == "/api/feedback-notes":
+            self._handle_feedback_notes(query)
+            return
+        if path == "/api/feedback-taxonomy":
+            # One source for the composer's selectors and for a coding agent
+            # that wants to know the enum values before posting.
+            self._send_json(feedback.taxonomy_payload())
+            return
+        if path.startswith(selection_api.EXPERIMENTS_PREFIX):
+            self._handle_selection_api("GET", path, query=query)
             return
         if path.startswith("/api/benchmark-experiments/"):
             self._handle_benchmark_registration(unquote(path[len("/api/benchmark-experiments/"):]))
@@ -2491,14 +2712,14 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         }:
             self._error(
                 400,
-                "workspace reads must be scoped by store_id; unscoped search is refused",
+                "workspace reads must be scoped by store_id; unscoped search is "
+                "refused. Search one store with "
+                "/api/workspace/turns?store_id=<id>",
             )
         elif self.chatbot.workspace is not None and (
             path.startswith("/api/turn/")
             or path.startswith("/api/spans/")
             or path.startswith("/api/experiment/")
-            or path == "/api/feedback"
-            or path.startswith("/api/feedback/")
         ):
             self._error(
                 400,
@@ -2525,8 +2746,6 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 )
             elif path in ("/api/channels", "/api/conversations", "/api/turns"):
                 self._send_json({"channels": [], "conversations": [], "turns": []})
-            elif path == "/api/feedback":
-                self._send_json({"feedback": []})
             elif path == "/api/experiments":
                 # An empty state, not "observability DB not found": a cold start
                 # has no experiments, which is a fact about the DB rather than
@@ -2547,57 +2766,13 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 }
             )
         elif path == "/api/turns":
-            success = q("success")
-            attempt_filter = None
-            if q("attempt") is not None:
-                try:
-                    attempt_filter = int(q("attempt"))
-                except ValueError:
-                    self._error(400, "attempt must be an integer")
-                    return
-            # (b) the rail's low-confidence filter: a turn whose least
-            # confident intent decision recorded a top-k margin below this.
-            # Applied to the annotated page, after the store's own filters;
-            # a turn with no recorded margin is never counted.
-            low_confidence_below = None
-            if q("low_confidence_below") is not None:
-                low_confidence_below = _finite_number(
-                    self._float_or_none(q("low_confidence_below"))
-                )
-                if low_confidence_below is None or low_confidence_below < 0:
-                    self._error(
-                        400, "low_confidence_below must be a non-negative number"
-                    )
-                    return
-            turns = store.list_turns(
-                channel_id=q("channel"),
-                conversation_id=(
-                    self._int(q("conversation"), None)
-                    if q("conversation") is not None
-                    else None
-                ),
-                status=q("status"),
-                success=(
-                    None
-                    if success is None
-                    else success in ("1", "true", "True")
-                ),
-                command_name=q("command"),
-                context=q("context"),
-                experiment_id=q("experiment"),
-                task_id=q("task"),
-                attempt=attempt_filter,
-                limit=self._int(q("limit"), 100),
-                offset=self._int(q("offset"), 0),
-            )
-            annotate_turn_rows(store, turns)
-            if low_confidence_below is not None:
-                turns = [
-                    turn
-                    for turn in turns
-                    if is_low_confidence(turn["decision_signals"], low_confidence_below)
-                ]
-            self._send_json({"turns": turns})
+            # Every filter -- the store's own, the marker predicates and the
+            # low-confidence test -- is applied by `search_turns` to the whole
+            # authorized dataset. This route used to list one page and then drop
+            # rows from it, so a turn matching on page four was reported as no
+            # match at all (fix-9eg.18.1); the filtering now happens before the
+            # page is cut rather than after.
+            self._search_turns_response(store, q)
         elif path.startswith("/api/turn/"):
             turn_key = path[len("/api/turn/") :]
             turn = store.get_turn(turn_key)
@@ -2608,24 +2783,28 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 turn["record"] = json.loads(turn.pop("record_json"))
             except (ValueError, KeyError):
                 turn["record"] = None
-            annotate_turn_detail(turn, store.get_spans(turn_key))
-            self._send_json({"turn": turn})
-        elif path == "/api/feedback":
-            self._send_json(
-                {
-                    "feedback": store.list_feedback(
-                        channel_id=q("channel"),
-                        limit=self._int(q("limit"), 100),
-                    )
-                }
-            )
-        elif path.startswith("/api/feedback/"):
-            turn_key = unquote(path[len("/api/feedback/") :])
-            feedback = store.get_feedback(turn_key)
-            if feedback is None:
-                self._error(404, "feedback not found")
+            spans = store.get_spans(turn_key)
+            annotate_turn_detail(turn, spans)
+            try:
+                annotate_turn_diagnosis(
+                    turn,
+                    spans,
+                    store_id=diagnostic_store_id(store),
+                    low_confidence_below=_wire_number(
+                        q("low_confidence_below"), "low_confidence_below"
+                    ),
+                )
+            except InvalidTurnQuery as exc:
+                self._error(400, str(exc))
                 return
-            self._send_json({"feedback": feedback})
+            self._send_json({"turn": turn})
+        # GET /api/feedback and /api/feedback/<turn_key> read the agent-memory
+        # `feedback` table and were removed with it (fix-9eg.16). They are not
+        # re-pointed at review notes: a client still calling them is asking
+        # for something that no longer exists, and a 404 says so, where a
+        # silently different payload would not.
+        elif path == "/api/task-feedback":
+            self._handle_task_feedback(store, query)
         elif path.startswith("/api/spans/"):
             trace_id = path[len("/api/spans/") :]
             spans = store.get_spans(trace_id)
@@ -2771,6 +2950,41 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         except WorkspaceBusyError as exc:
             self._error(503, str(exc))
 
+    def _search_turns_response(self, store: Any, q: Any, *, store_id: str = "") -> None:
+        """Answer a turn search over the complete authorized dataset.
+
+        Shared by the live rail and the store-scoped workspace route so both
+        mean the same thing by the same code, which is the point of the
+        predicate living in `diagnosis` rather than in either caller.
+
+        The response keeps `turns` at its top level, so a client reading only
+        that keeps working, and adds the counts, facets and continuation the
+        list needs to say honestly how much of the dataset it has looked at.
+        """
+        try:
+            query = turn_query_from_params(q)
+        except InvalidTurnQuery as exc:
+            self._error(400, str(exc))
+            return
+        try:
+            page = search_turns(
+                store,
+                query,
+                store_id=store_id or diagnostic_store_id(store),
+                with_facets=_wire_bool(q("facets"), "facets") is not False,
+            )
+        except InvalidTurnQuery as exc:
+            self._error(400, str(exc))
+            return
+        payload = page.as_dict()
+        # The rail's existing chips read the cut-at-limit tally and the cost
+        # roll-up, which are tier-1/2 stamps rather than diagnostic markers and
+        # so are not part of the scan's projection. Stamping the PAGE keeps
+        # that read bounded by the page: the scan may have walked the store,
+        # but only these rows are rendered.
+        annotate_turn_rows(store, payload["turns"])
+        self._send_json(payload)
+
     def _handle_workspace(self, path: str, q: Any) -> None:
         """Read-only HTTP projection of a validated multi-store workspace."""
         workspace = self.chatbot.workspace
@@ -2786,6 +3000,25 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/workspace/experiments":
                 self._send_json({"experiments": workspace.experiments()})
+                return
+            if path == "/api/workspace/turns":
+                # The scoped twin of `/api/turns`. `store_id` is required and is
+                # resolved by the registry, which is what keeps a workspace read
+                # inside the stores the manifest named: an unknown id raises
+                # `UnknownWorkspaceStore` below rather than resolving a path.
+                store_id = q("store_id") or ""
+                if not store_id:
+                    self._error(
+                        400,
+                        "workspace turn search requires store_id; turns are "
+                        "never searched across stores",
+                    )
+                    return
+                with workspace.registry.open(store_id) as scoped:
+                    self._search_turns_response(scoped, q, store_id=store_id)
+                return
+            if path == "/api/workspace/task-feedback":
+                self._handle_workspace_task_feedback(workspace, q)
                 return
             if path == "/api/workspace/projected_attempts":
                 attempt = None
@@ -2871,9 +3104,20 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                     if turn is None:
                         self._error(404, "turn not found in the named store")
                         return
-                    annotate_turn_detail(
-                        turn, workspace.trace(store_id, logical_turn_key)
-                    )
+                    spans = workspace.trace(store_id, logical_turn_key)
+                    annotate_turn_detail(turn, spans)
+                    try:
+                        annotate_turn_diagnosis(
+                            turn,
+                            spans,
+                            store_id=store_id,
+                            low_confidence_below=_wire_number(
+                                q("low_confidence_below"), "low_confidence_below"
+                            ),
+                        )
+                    except InvalidTurnQuery as exc:
+                        self._error(400, str(exc))
+                        return
                     self._send_json({"turn": turn})
                 else:
                     self._send_json(
@@ -2984,6 +3228,62 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             return None
         return workflow_path
 
+    def _handle_selection_api(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: Optional[dict[str, list[str]]] = None,
+        body: Any = None,
+    ) -> None:
+        """Winner, best-run, comparison and pair-review routes (`selection_api`).
+
+        Judgements are live-workflow only. The winner of a contest and the best
+        run of a task live in the WORKFLOW's control sidecar, not in the
+        evidence; a sealed workspace carries the evidence and not that sidecar,
+        so answering those from workspace mode would report the live machine's
+        decisions as if they were the archive's.
+
+        Reading the EVIDENCE is different, and in workspace mode the archive is
+        the only thing there is to read: attempts, one attempt's projection and
+        a comparison of two are answered from the manifest's own read-only
+        stores. `selection_api.handle_workspace_get` refuses the judgement
+        routes itself, and nothing on that path can write.
+        """
+        if self.chatbot.workspace is not None:
+            if method != "GET":
+                self._error(
+                    403,
+                    "a sealed workspace records no decisions; select a live "
+                    "workflow to choose a winner, a best run or to mark a pair "
+                    "reviewed",
+                )
+                return
+            archived = selection_api.handle_workspace_get(
+                self.chatbot.workspace, path, query or {}
+            )
+            if archived is None:
+                self._error(404, "not found")
+                return
+            status, payload = archived
+            self._send_json(payload, status=status)
+            return
+        workflow_path = (self.chatbot.workflow_path or "").strip()
+        if not workflow_path:
+            self._error(409, "select a workflow before using experiment selections")
+            return
+        if method == "GET":
+            result = selection_api.handle_get(workflow_path, path, query or {})
+        elif method == "POST":
+            result = selection_api.handle_post(workflow_path, path, body)
+        else:
+            result = selection_api.handle_delete(workflow_path, path, body)
+        if result is None:
+            self._error(404, "not found")
+            return
+        status, payload = result
+        self._send_json(payload, status=status)
+
     def _handle_navigation(self):
         from .navigation import build_navigation, read_source
         benchmarks, registrations, sources, warnings = [], [], [], []
@@ -3031,28 +3331,57 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 record["warning"] = str(exc)
         self._send_json({"root": build_navigation(benchmarks, registrations, sources, warnings)})
 
-    def _handle_human_feedback(self, query, body=None):
-        """Owner-authenticated annotations in the selected evidence database."""
-        q = lambda key: (query.get(key) or [None])[0]
+    def _handle_feedback_notes(self, query, body=None):
+        """Recorded review notes: GET lists a turn's, POST appends one.
+
+        The same route serves a person in the composer and a coding agent
+        posting over HTTP. Only `provenance` distinguishes them, and neither
+        gets to skip the category, the subcategory, or the validation of the
+        evidence its anchors name.
+        """
+        q = lambda key: (query.get(key) or [None])[0]  # noqa: E731
         writing = body is not None
         if writing and not isinstance(body, dict):
             self._error(400, "body must be a JSON object")
             return
         turn_key = q("turn_key")
+        if not turn_key and writing and isinstance(body.get("ref"), dict):
+            turn_key = body["ref"].get("turn_key")
         if not turn_key:
             self._error(400, "turn_key is required")
             return
         try:
             workspace = self.chatbot.workspace
             if workspace is not None:
-                if writing:
-                    self._error(403, "workspace evidence is read-only; annotate the working database")
-                    return
                 with workspace.registry.open(q("store_id") or "") as store:
                     if store.get_turn(turn_key) is None:
                         self._error(404, "turn not found")
                         return
-                    self._send_json({"feedback": store.list_human_feedback(turn_key), "read_only": True})
+                    # Sealed or not, workspace evidence is never appended to.
+                    # The note goes to the annotation sidecar beside it, and
+                    # the read is the union, so a reader cannot tell which
+                    # file a comment came out of (fix-9eg.19.1). A GET goes
+                    # through `reader_for`, which creates nothing: listing
+                    # comments must not be what puts a control file beside
+                    # somebody's sealed archive.
+                    if writing:
+                        writable = feedback_sidecar.AnnotatedEvidence.for_writing(store)
+                        self._append_feedback_note(
+                            writable, turn_key, body, writable=writable
+                        )
+                        reader = writable
+                    else:
+                        reader = feedback_sidecar.reader_for(store)
+                    self._send_json(
+                        {
+                            "feedback": feedback.present(
+                                reader.list_human_feedback(turn_key)
+                            ),
+                            "read_only": True,
+                            "annotated": True,
+                        },
+                        status=201 if writing else 200,
+                    )
                 return
             source = q("benchmark_experiment")
             store = self._registered_store(source) if source else self.chatbot.open_store()
@@ -3063,21 +3392,306 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
             if source and turn.get("experiment_id") != source:
                 self._error(400, "turn does not belong to the selected experiment")
                 return
+            reader = self._feedback_reader(store)
             if writing:
-                required = {"target_kind", "span_ids", "target_label", "provenance"}
-                allowed = required | {"comment", "went_wrong", "worked", "should_change"}
-                if not required <= set(body) or not set(body) <= allowed:
-                    raise ValueError(
-                        "provide target_kind, span_ids, target_label, provenance, "
-                        "and comment or the went_wrong / worked / should_change fields"
-                    )
-                ObservabilityStore.open_for_annotation(store.db_path).add_human_feedback(turn_key, **body)
-            self._send_json({"feedback": store.list_human_feedback(turn_key), "read_only": False},
-                            status=201 if writing else 200)
-        except (IncompatibleObservabilityDB, UnknownWorkspaceStore) as exc:
+                self._append_feedback_note(store, turn_key, body)
+                reader = self._feedback_reader(store)
+            self._send_json(
+                {
+                    "feedback": feedback.present(reader.list_human_feedback(turn_key)),
+                    "read_only": False,
+                    "annotated": reader is not store,
+                },
+                status=201 if writing else 200,
+            )
+        except (IncompatibleObservabilityDB, UnknownWorkspaceStore,
+                feedback_sidecar.FeedbackSidecarError) as exc:
             self._error(409, str(exc))
+        except (feedback.FeedbackError, InvalidExecutionRef) as exc:
+            self._error(400, str(exc))
         except (ValueError, TypeError, KeyError) as exc:
             self._error(400, str(exc))
+
+    _FEEDBACK_WRITE_REQUIRED = {
+        "target_kind", "span_ids", "target_label", "provenance",
+        "comment", "category", "subcategory",
+    }
+    _FEEDBACK_WRITE_ALLOWED = _FEEDBACK_WRITE_REQUIRED | {
+        "ref", "pass_selector", "paired",
+    }
+
+    def _feedback_writer(self, store):
+        """Where a new note lands: the evidence database, or a sidecar.
+
+        Appending to the evidence is the ordinary case and stays the default.
+        Two kinds of evidence must not be appended to, and neither is a reason
+        to refuse somebody's comment:
+
+        - a store an older build wrote, which has no columns to put a
+          category, an anchor or an identity in, and which this build does not
+          migrate (fresh schema, fix-49m.3); and
+        - a file this process cannot write, which is what a read-only or
+          sealed archive on disk looks like from here.
+
+        Both route to `feedback_sidecar`, a mutable control file beside the
+        evidence. Workspace mode never reaches this — it is unconditionally
+        annotated, because "writable on disk" is not permission to break a
+        seal somebody attested to.
+        """
+        if store.schema_version < FEEDBACK_TAXONOMY_SCHEMA_VERSION or not os.access(
+            store.db_path, os.W_OK
+        ):
+            return feedback_sidecar.AnnotatedEvidence.for_writing(store)
+        return ObservabilityStore.open_for_annotation(store.db_path)
+
+    @staticmethod
+    def _feedback_reader(store):
+        """The store plus its annotation sidecar, if one was ever written.
+
+        A store with no sidecar file reads exactly as before, and reading does
+        not create one: `reader_for` opens an existing sidecar read-only and
+        otherwise hands back the evidence store untouched.
+        """
+        return feedback_sidecar.reader_for(store)
+
+    def _append_feedback_note(self, store, turn_key, body, writable=None):
+        """Validate one posted note and append it where it is allowed to go.
+
+        The body's `ref` is optional scope on the PRIMARY side; its
+        experiment/task/attempt are checked against the turn row rather than
+        believed. `paired` names the second execution of a comparison and may
+        live in another registered store, which is resolved and authorized
+        here (`_feedback_source_for`) rather than trusted from the request.
+        """
+        if not self._FEEDBACK_WRITE_REQUIRED <= set(body) or not set(body) <= self._FEEDBACK_WRITE_ALLOWED:
+            raise ValueError(
+                "provide target_kind, span_ids, target_label, provenance, "
+                "category, subcategory and comment; optionally ref, "
+                "pass_selector and paired"
+            )
+        with contextlib.ExitStack() as stack:
+            return self._record_feedback_note(store, turn_key, body, writable, stack)
+
+    def _record_feedback_note(self, store, turn_key, body, writable, stack):
+        """The write itself, with the paired side's store held open.
+
+        The stack is what lets a comparison comment name evidence in ANOTHER
+        archive: the second store is leased from the workspace registry for
+        the length of this write, verified on the way in, and released here
+        rather than being kept by the anchor it authorized.
+        """
+        if writable is None:
+            writable = self._feedback_writer(store)
+        identity = writable.store_identity()
+        primary_raw = dict(body.get("ref") or {})
+        primary_raw.update({
+            "store_id": primary_raw.get("store_id") or identity,
+            "turn_key": turn_key,
+            "target_kind": body["target_kind"],
+            "span_ids": body["span_ids"],
+            "target_label": body["target_label"],
+        })
+        primary = feedback.FeedbackTarget.from_mapping(primary_raw)
+        sources = {identity: writable}
+        paired = paired_selector = None
+        if body.get("paired") is not None:
+            if not isinstance(body["paired"], dict):
+                raise ValueError("paired must be an object")
+            paired = feedback.FeedbackTarget.from_mapping(body["paired"])
+            sources[paired.store_id] = self._feedback_source_for(
+                paired, writable, identity, stack
+            )
+            paired_selector = self._pass_selector(body["paired"].get("pass_selector"))
+        return feedback.record_feedback(
+            writable,
+            primary=primary,
+            comment=body["comment"],
+            category=body["category"],
+            subcategory=body["subcategory"],
+            provenance=body["provenance"],
+            sources=sources,
+            paired=paired,
+            primary_pass_selector=self._pass_selector(body.get("pass_selector")),
+            paired_pass_selector=paired_selector,
+        )
+
+    def _feedback_source_for(self, target, writable, identity, stack=None):
+        """The store a paired reference names, or a refusal.
+
+        Three authorized answers and no fourth: the database being written
+        to, another store the loaded workspace manifest DECLARES by evidence
+        identity, and a benchmark experiment registered against the selected
+        workflow whose recorded store identity matches what the reference
+        claims. A store id nobody declared or registered is not resolved by
+        searching the disk.
+        """
+        if target.store_id == identity:
+            return writable
+        workspace = self.chatbot.workspace
+        if workspace is not None:
+            # The manifest already declares each store's `store_identity()`,
+            # and `registry.open` re-verifies the archive against it, so the
+            # translation from the identity an ExecutionRef carries to the
+            # manifest's own store id is a lookup rather than a search of the
+            # disk. Leasing it through the registry is what keeps the paired
+            # side inside the same authorization as every other workspace
+            # read: an undeclared identity raises `UnknownWorkspaceStore`.
+            other_id = workspace.registry.store_id_for_identity(target.store_id)
+            if stack is None:  # pragma: no cover - callers pass one
+                stack = contextlib.ExitStack()
+            other = stack.enter_context(workspace.registry.open(other_id))
+            # Read through the sidecar reader so the paired side's own
+            # annotations are visible to anything that reads back from the
+            # authorized set, and creating nothing if it has none.
+            return feedback_sidecar.reader_for(other)
+        if not target.ref.experiment_id:
+            raise feedback.FeedbackError(
+                f"store {target.store_id!r} was not authorized for this write; "
+                "a paired reference in another store must name the registered "
+                "experiment it belongs to"
+            )
+        other = self._registered_store(target.ref.experiment_id)
+        if other.store_identity() != target.store_id:
+            raise feedback.FeedbackError(
+                f"experiment {target.ref.experiment_id!r} records evidence in a "
+                f"different store than the reference's {target.store_id!r}"
+            )
+        return other
+
+    @staticmethod
+    def _pass_selector(value):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("pass_selector must be an object")
+        try:
+            return PassSelector(
+                pass_id=str(value.get("pass_id") or ""),
+                attribute_key=value.get("attribute_key"),
+                attribute_value=value.get("attribute_value"),
+                root_span_ids=frozenset(value.get("root_span_ids") or ()),
+                span_ids=frozenset(value.get("span_ids") or ()),
+                exclude_span_ids=frozenset(value.get("exclude_span_ids") or ()),
+            )
+        except (TypeError, AttributeError) as exc:
+            raise ValueError(f"invalid pass_selector: {exc}") from exc
+
+    def _handle_workspace_task_feedback(self, workspace, q):
+        """The task Feedback view over a workspace, scoped by its manifest.
+
+        The store-aware twin of `/api/task-feedback`. The scope is not a
+        `store_id` the caller supplies but the segments the manifest already
+        declares for the logical experiment, which is what makes a comparison
+        comment visible from BOTH of its tasks: the note lives in the sidecar
+        beside the left-hand archive, and the right-hand task's view finds it
+        because that archive is one of the experiment's own segments. Asking
+        the reader to know which archive somebody happened to write in would
+        make the read depend on where the comment landed.
+
+        Each segment is queried under its own `local_experiment_id`; the page
+        still reports the logical id the reader asked about.
+        """
+        experiment_id, task_id = q("experiment"), q("task")
+        if not experiment_id or not task_id:
+            self._error(400, "experiment and task are required")
+            return
+        try:
+            with contextlib.ExitStack() as stack:
+                sources, locals_ = {}, []
+                for segment in workspace.segments(experiment_id):
+                    store = stack.enter_context(
+                        workspace.registry.open(segment["store_id"])
+                    )
+                    identity = store.store_identity() or segment["store_id"]
+                    sources[identity] = feedback_sidecar.reader_for(store)
+                    if segment["local_experiment_id"] not in locals_:
+                        locals_.append(segment["local_experiment_id"])
+                page = feedback.consolidate_task_feedback(
+                    sources,
+                    experiment_id=experiment_id,
+                    task_id=task_id,
+                    local_experiment_ids=locals_,
+                    category=q("category"),
+                    subcategory=q("subcategory"),
+                    provenance=q("provenance"),
+                    target_kind=q("target_kind"),
+                    component=q("component"),
+                    attempt=(
+                        self._int(q("attempt"), None)
+                        if q("attempt") is not None
+                        else None
+                    ),
+                    limit=self._int(q("limit"), 100),
+                    offset=self._int(q("offset"), 0),
+                )
+        except (UnknownLogicalExperiment, UnknownWorkspaceStore,
+                IncompatibleObservabilityDB,
+                feedback_sidecar.FeedbackSidecarError) as exc:
+            self._error(409, str(exc))
+            return
+        except (feedback.FeedbackError, ValueError, TypeError, KeyError) as exc:
+            self._error(400, str(exc))
+            return
+        payload = page.as_dict()
+        payload["feedback"] = feedback.present(payload["feedback"])
+        payload["read_only"] = True
+        self._send_json(payload)
+
+    def _handle_task_feedback(self, store, query):
+        """Every authorized comment on one task, across attempts and stores.
+
+        No hidden default filter: without query parameters this answers the
+        whole authorized record for the task, including comparison comments
+        anchored on the other side of a pair and task-level summaries. The
+        filters below narrow it only when a reader asks.
+
+        Sources follow the experiment rather than a default database: the
+        store serving the request, plus any `store=<experiment_id>` the
+        selected workflow has registered, so an experiment whose evidence is
+        split across databases still reads as one task.
+        """
+        q = lambda name: (query.get(name) or [None])[0]  # noqa: E731
+        experiment_id, task_id = q("experiment"), q("task")
+        if not experiment_id or not task_id:
+            self._error(400, "experiment and task are required")
+            return
+        sources = {}
+        identity = store.store_identity()
+        if identity:
+            # Each source is read through `_feedback_reader`, so a store whose
+            # evidence could not be appended to still contributes the notes
+            # recorded in its sidecar. They merge into one list under one store
+            # id and deduplicate on the same `feedback_uid`.
+            sources[identity] = self._feedback_reader(store)
+        try:
+            for extra in query.get("store") or []:
+                other = self._registered_store(extra)
+                other_identity = other.store_identity()
+                if other_identity:
+                    sources[other_identity] = self._feedback_reader(other)
+            page = feedback.consolidate_task_feedback(
+                sources,
+                experiment_id=experiment_id,
+                task_id=task_id,
+                category=q("category"),
+                subcategory=q("subcategory"),
+                provenance=q("provenance"),
+                target_kind=q("target_kind"),
+                component=q("component"),
+                attempt=self._int(q("attempt"), None) if q("attempt") is not None else None,
+                limit=self._int(q("limit"), 100),
+                offset=self._int(q("offset"), 0),
+            )
+        except (IncompatibleObservabilityDB, UnknownWorkspaceStore,
+                feedback_sidecar.FeedbackSidecarError) as exc:
+            self._error(409, str(exc))
+            return
+        except (feedback.FeedbackError, ValueError, TypeError, KeyError) as exc:
+            self._error(400, str(exc))
+            return
+        payload = page.as_dict()
+        payload["feedback"] = feedback.present(payload["feedback"])
+        self._send_json(payload)
 
     def _registered_store(self, experiment_id):
         if self.chatbot.workspace is not None or not self.chatbot.workflow_path:
@@ -3114,8 +3728,23 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
                 recorded = True
             except (ValueError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
                 warning = str(exc)
+        # The winner is read here, not fetched separately, because the detail
+        # screen has to say whether THIS experiment is the one the contest
+        # currently names -- and `workflow_winner` never creates the control,
+        # so a read of a workflow nobody has decided in leaves it untouched.
+        winner = None
+        if self.chatbot.workspace is None:
+            try:
+                winner = benchmark_setup.workflow_winner(folder, experiment_id)
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                warning = warning or str(exc)
         self._send_json({"experiment": record, "benchmark": manifest,
                          "recorded": recorded, "warning": warning,
+                         "runs_per_task": record.get("runs_per_task"),
+                         "winner": winner,
+                         "is_winner": bool(
+                             winner and winner.get("experiment_id") == experiment_id
+                         ),
                          "can_delete": record.get("store") is None and self.chatbot.workspace is None})
 
     def _handle_registration_patch(self, path: str, body: dict[str, Any]) -> None:

@@ -145,8 +145,41 @@ Execute a specific command directly, bypassing intent + parameter extraction.
 - `POST /new_conversation` — persist the current conversation (generates topic/summary) and start fresh. Use for the **New chat** button.
 - `GET /conversations?limit=20` — list past conversations (`ConversationSummary[]`, newest first). Use to render the **history list**.
 - `POST /activate_conversation` `{ "conversation_id": 7 }` — restore a past conversation into the active session. Use for **continue previous chat**.
-- `POST /post_feedback` `{ "binary_or_numeric_score": 1.0, "nl_feedback": "…" }` — feedback on the latest turn (optional thumbs up/down).
 - `POST /cancel_pending` — abandon a suspended `ask_user` clarification turn.
+
+### Feedback (auth)
+`POST /post_feedback` records ONE free-form comment about recorded evidence. It
+is not a thumbs up/down and carries no score: the old
+`{binary_or_numeric_score, nl_feedback}` body and the agent-memory table behind
+it were removed, and a request in that shape is rejected rather than scored.
+
+The comment is anchored explicitly — a turn, or a component within it — and
+classified with a category and one of its own subcategories:
+
+| `category` | `subcategory` |
+| --- | --- |
+| `observations_analysis` | `observation`, `analysis` |
+| `conclusions` | `what_went_right`, `what_went_wrong` |
+| `recommendations` | `what_to_do`, `what_not_to_do` |
+
+```json
+POST /post_feedback?turn_key=<turn_key>
+{ "target_kind": "turn", "span_ids": [], "target_label": "Turn",
+  "provenance": "coding_agent",
+  "category": "recommendations", "subcategory": "what_to_do",
+  "comment": "Plan all three items before answering." }
+```
+
+`comment` is arbitrary text and is stored as written. A comparison comment adds
+a `paired` object naming the other execution (`store_id`, `turn_keys`,
+`experiment_id`, `task_id`, `attempt`, plus the same target fields), and the one
+row is then visible from both tasks.
+
+Reads are separate GETs, never a POST: `GET /api/feedback-notes?turn_key=…` for
+one turn, `GET /api/task-feedback?experiment=…&task=…` for a whole task, and
+`GET /api/feedback-taxonomy` for the categories above. Evidence that cannot be
+written to — a sealed archive, or an older store — still accepts a comment: it
+is recorded beside the evidence and the evidence file is not modified.
 
 ### Health probes (public)
 - `GET /probes/healthz` → `{"status":"alive"}` (liveness).

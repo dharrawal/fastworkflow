@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import queue
 import time
@@ -9,7 +8,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import Annotated, Any, Callable, Optional
+from typing import Annotated, Any, Callable, Literal, Optional
 
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -41,7 +40,9 @@ from fastworkflow.checkpoint_store import (
     RetentionPolicy,
 )
 from fastworkflow.conversation_history_io import restore_history_from_turns
+from fastworkflow.observability import feedback as observability_feedback
 from fastworkflow.observability.store import (
+    FEEDBACK_PROVENANCES,
     AttemptClaimError,
     ObservabilityStore,
     SQLiteTraceSink,
@@ -222,23 +223,83 @@ class PerformActionRequest(BaseModel):
     timeout_seconds: int = 60
 
 
-class PostFeedbackRequest(BaseModel):
-    """
-    Request to post feedback on the latest turn.
-    Requires channel_id to be passed in the Authorization header (via JWT token).
-    
-    Note: binary_or_numeric_score accepts numeric values (float).
-    Boolean values (True/False) are automatically converted to 1.0/0.0.
-    """
-    binary_or_numeric_score: Optional[float] = None
-    nl_feedback: Optional[str] = None
+# The taxonomy as TYPES, so the three categories, the six subcategories, the
+# target kinds and the provenances appear as enumerations in the generated
+# OpenAPI schema and in the MCP tool description. A coding agent reading the
+# schema can then see the allowed values instead of having to be told them in
+# prose, and an unknown value is refused by the model rather than by a string
+# comparison further in. Derived from the taxonomy rather than restated, so the
+# schema cannot drift from what the writer accepts.
+FeedbackCategory = Literal[tuple(observability_feedback.FEEDBACK_CATEGORIES)]
+FeedbackSubcategory = Literal[
+    tuple(
+        value
+        for values in observability_feedback.FEEDBACK_SUBCATEGORIES.values()
+        for value in values
+    )
+]
+FeedbackTargetKind = Literal[tuple(observability_feedback.FEEDBACK_TARGET_KINDS)]
+FeedbackProvenance = Literal[tuple(sorted(FEEDBACK_PROVENANCES))]
 
-    @field_validator('nl_feedback')
+
+class FeedbackAnchorRequest(BaseModel):
+    """The second execution a comparison comment refers to.
+
+    Same vocabulary as the primary target. `store_id` may be given and is
+    checked; it must be this channel's evidence store, because the live
+    runtime holds exactly one and resolving another database from a request
+    would be reaching for evidence nobody authorized. Cross-store pairs are
+    recorded through the Observability server, which knows which experiment
+    stores are registered.
+    """
+    turn_key: str
+    target_label: str
+    target_kind: FeedbackTargetKind = "turn"
+    span_ids: list[str] = Field(default_factory=list)
+    store_id: Optional[str] = None
+    experiment_id: Optional[str] = None
+    task_id: Optional[str] = None
+    attempt: Optional[int] = None
+    pass_id: Optional[str] = None
+
+
+class PostFeedbackRequest(BaseModel):
+    """Request to record one review note against recorded evidence.
+
+    This replaced the agent-memory feedback post in fix-9eg.16. The old body
+    (`binary_or_numeric_score` / `nl_feedback`) wrote one mutable row per turn
+    that was read straight back into the agent's `dspy.History`; that table,
+    that route and that injection are gone. What is recorded now is an
+    append-only review note on a turn or a component of it, categorized with
+    the owner-confirmed taxonomy, and never fed back into a prompt.
+
+    A coding agent and a person post the SAME body. `provenance` says which,
+    and `comment` is free-form for both: structure it however you like, but
+    the category and subcategory arrive as enums rather than being inferred
+    from the text.
+    """
+    turn_key: str
+    target_label: str
+    comment: str
+    category: FeedbackCategory
+    subcategory: FeedbackSubcategory
+    target_kind: FeedbackTargetKind = "turn"
+    span_ids: list[str] = Field(default_factory=list)
+    provenance: FeedbackProvenance = "coding_agent"
+    experiment_id: Optional[str] = None
+    task_id: Optional[str] = None
+    attempt: Optional[int] = None
+    pass_id: Optional[str] = None
+    paired: Optional[FeedbackAnchorRequest] = None
+
+    @field_validator('subcategory')
     @classmethod
-    def validate_feedback_presence(cls, v, info):
-        """Ensure at least one feedback field is provided"""
-        if v is None and info.data.get('binary_or_numeric_score') is None:
-            raise ValueError("At least one of binary_or_numeric_score or nl_feedback must be provided")
+    def validate_taxonomy(cls, v, info):
+        """Refuse an unpaired category/subcategory at the door, as a 422."""
+        category = info.data.get('category')
+        if category is None:
+            return v
+        observability_feedback.validate_category(category, v)
         return v
 
 
@@ -1815,40 +1876,70 @@ def trim_conversation_window(runtime: ChannelRuntime, logger) -> int:
     return trimmed
 
 
-def save_last_turn_feedback(runtime: ChannelRuntime, logger) -> None:
-    """Persist feedback against the turn it was given on (rulings I3/C4).
+def _feedback_target(
+    store: ObservabilityStore, anchor: Any
+) -> "observability_feedback.FeedbackTarget":
+    """One posted anchor as a validated feedback target in THIS store.
 
-    Feedback is keyed by the turn_key the WEC recorded at terminal finalize,
-    never inferred from SQL. A max-ordinal query would attach it to whatever
-    row was written last, which after a suspended or cancelled turn is not the
-    turn the user was looking at when they clicked.
-
-    The feedback table is mutable by design [R3] and joined into the memory
-    window, so this stays a plain upsert while turn rows remain write-once. The
-    row may not exist yet if the turn record is still queued; the join reunites
-    them when it lands.
+    The store id is filled in from the store actually serving the channel, and
+    a request that names a different one is refused rather than resolved: the
+    live runtime holds one evidence database and has no authorized way to
+    reach another.
     """
-    turn_key = runtime.execution_context.last_completed_turn_key
-    store = runtime.observability_store
-    if store is None or not turn_key:
-        logger.warning(
-            f"Skipping feedback write for channel_id {runtime.channel_id}: "
-            + (
-                "no conversation store is active"
-                if store is None
-                else "no completed turn to attach it to"
-            )
+    identity = store.store_identity()
+    claimed = getattr(anchor, "store_id", None)
+    if claimed and claimed != identity:
+        raise ValueError(
+            f"store {claimed!r} is not this channel's evidence store; record "
+            "a cross-store comparison through the observability server"
         )
-        return
+    return observability_feedback.FeedbackTarget.from_mapping({
+        "store_id": identity,
+        "turn_key": anchor.turn_key,
+        "experiment_id": anchor.experiment_id,
+        "task_id": anchor.task_id,
+        "attempt": anchor.attempt,
+        "pass_id": anchor.pass_id,
+        "target_kind": anchor.target_kind,
+        "span_ids": anchor.span_ids,
+        "target_label": anchor.target_label,
+    })
 
-    messages = runtime.execution_context.conversation_history.messages
-    feedback = messages[-1].get("feedback") if messages else None
-    if feedback is None:
-        return
-    store.upsert_feedback(turn_key, json.dumps(feedback))
-    logger.debug(
-        f"Recorded feedback on turn {turn_key} for channel_id {runtime.channel_id}"
+
+def record_turn_feedback(
+    runtime: ChannelRuntime, request: Any, logger
+) -> dict[str, Any]:
+    """Append one review note to this channel's evidence store.
+
+    `save_last_turn_feedback` stood here until fix-9eg.16. It upserted the
+    agent-memory feedback row for whatever turn the WEC had last completed,
+    and `get_memory_window` joined it back into `dspy.History` on the next
+    turn. Both the table and that injection are gone; a note now names the
+    turn it is about explicitly, is appended rather than replaced, and is
+    validated against recorded evidence before it is stored.
+    """
+    store = runtime.observability_store
+    if store is None:
+        raise ValueError(
+            "no observability store is active for this channel; feedback is "
+            "recorded against recorded evidence and there is none"
+        )
+    primary = _feedback_target(store, request)
+    paired = _feedback_target(store, request.paired) if request.paired else None
+    stored = observability_feedback.record_feedback(
+        store,
+        primary=primary,
+        comment=request.comment,
+        category=request.category,
+        subcategory=request.subcategory,
+        provenance=request.provenance,
+        paired=paired,
     )
+    logger.debug(
+        f"Recorded {request.category}/{request.subcategory} feedback on turn "
+        f"{primary.turn_key} for channel_id {runtime.channel_id}"
+    )
+    return stored
 
 
 # ============================================================================

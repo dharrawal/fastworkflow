@@ -46,7 +46,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -70,8 +70,26 @@ from fastworkflow.utils.logging import logger
 # v5 (fix-46l.2): feedback provenance distinguishes human, coding-agent, and
 # distillation-agent annotations.
 # v6 (fix-w6w): experiment archival is a durable annotation.
+# v7 (fix-9eg.16/.19.1): the agent-memory `feedback` table is gone, and review
+# notes carry their category, subcategory, stable identity and frozen evidence
+# anchors as columns.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+# ...but a v6 store still READS. This is the one place the fresh-schema rule
+# (fix-49m.3) is relaxed, and only for `ReadOnlyObservabilityStore`: v6 is the
+# shipped format, real recorded evidence exists in it, and refusing to open it
+# would make this change destroy the ability to look at last week's runs. The
+# relaxation is narrow and checkable — v7 differs from v6 in the feedback
+# surface alone, so `list_human_feedback` reads the older row shape and every
+# other read is byte-identical. Writes are NOT relaxed: a v6 file is still
+# refused by the writable store and by `open_for_annotation`, because adding a
+# categorized row to it would mean migrating a user's live database, which no
+# part of this change is authorized to do.
+MIN_READABLE_SCHEMA_VERSION = 6
+# The schema version that first recorded a feedback row's category,
+# subcategory, stable identity and frozen anchors.
+FEEDBACK_TAXONOMY_SCHEMA_VERSION = 7
 
 # Which capture profile this deployment records under (arch §12.0 delta 3).
 # Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
@@ -269,86 +287,46 @@ FEATURE_EXPERIMENT_DECLARATIONS_V1 = "experiment_declarations_v1"
 FEATURE_EXPERIMENT_CLAIMS_V1 = "experiment_claims_v1"
 FEATURE_EXPERIMENT_SEALING_V1 = "experiment_sealing_v1"
 FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
-# Composer tabs and stored-comment labels. Existing comments already used these
-# headings (and "What did not work" as a synonym for went-wrong); reads parse
-# them without rewriting the comment column, so older stores stay intact.
-HUMAN_FEEDBACK_SECTIONS = (
-    ("went_wrong", "What went wrong", ("what went wrong", "what did not work")),
-    ("worked", "What worked", ("what worked",)),
-    ("should_change", "What should change", ("what should change",)),
-)
-_HUMAN_FEEDBACK_HEADER_RE = re.compile(
-    r"(?im)^[ \t]*(What went wrong|What did not work|What worked|What should change)"
-    r"[ \t]*:[ \t]*"
-)
-_HUMAN_FEEDBACK_HEADER_TO_KEY = {
-    alias: key
-    for key, _label, aliases in HUMAN_FEEDBACK_SECTIONS
-    for alias in aliases
-}
+FEEDBACK_COMMENT_MAX_CHARS = 100_000
 
-
-def parse_human_feedback_comment(comment: str) -> dict[str, str]:
-    """Split a stored comment into the three composer tabs.
-
-    Unlabelled text is left in ``comment`` only: guessing a tab would invent a
-    category the author did not choose. Duplicate headings concatenate.
-    """
-    sections = {key: "" for key, _label, _aliases in HUMAN_FEEDBACK_SECTIONS}
-    if not isinstance(comment, str) or not comment:
-        return sections
-    matches = list(_HUMAN_FEEDBACK_HEADER_RE.finditer(comment))
-    if not matches:
-        return sections
-    for index, match in enumerate(matches):
-        key = _HUMAN_FEEDBACK_HEADER_TO_KEY[match.group(1).strip().lower()]
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(comment)
-        chunk = comment[start:end].strip()
-        if not chunk:
-            continue
-        sections[key] = f"{sections[key]}\n\n{chunk}".strip() if sections[key] else chunk
-    return sections
-
-
-def compose_human_feedback_comment(
-    *,
-    went_wrong: str = "",
-    worked: str = "",
-    should_change: str = "",
-    comment: str | None = None,
-) -> str:
-    """Build the stored comment from tab fields, or keep a legacy free-form comment."""
-    values = {
-        "went_wrong": went_wrong,
-        "worked": worked,
-        "should_change": should_change,
-    }
-    for key, value in values.items():
-        if value is None:
-            values[key] = ""
-        elif not isinstance(value, str):
-            raise ValueError(f"{key} must be text")
-    parts = []
-    for key, label, _aliases in HUMAN_FEEDBACK_SECTIONS:
-        text = values[key].strip()
-        if text:
-            parts.append(f"{label}: {text}")
-    if parts:
-        composed = "\n\n".join(parts)
-    elif isinstance(comment, str) and comment.strip():
-        composed = comment.strip()
-    else:
-        raise ValueError("feedback must contain text (at most 100000 characters)")
-    if len(composed) > 100000:
-        raise ValueError("feedback must contain text (at most 100000 characters)")
-    return composed
+# The composer's three headings ("What went wrong:" / "What worked:" / "What
+# should change:") and the reader that split a stored comment on them lived
+# here until fix-9eg.19.1. They are gone rather than remapped: the owner-
+# confirmed taxonomy in `observability/feedback.py` carries category and
+# subcategory as explicit enum columns, and re-deriving one of its six
+# subcategories from a legacy heading would record a guess as the author's
+# choice. Comments written before the columns existed read back with
+# `category`/`subcategory` of None and are shown as unclassified, text
+# untouched.
 
 
 def _human_feedback_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored comment in wire shape, whether v6 or v7 recorded it.
+
+    A v6 row has no taxonomy, identity or anchor columns, so they read as
+    None. That is the honest answer for a comment written before they existed;
+    `feedback.dedupe_key` knows how to give such a row an identity for a
+    consolidated read without writing one back into a store this build will
+    not migrate.
+    """
     value = dict(row)
     value["span_ids"] = json.loads(value.pop("span_ids_json"))
-    value.update(parse_human_feedback_comment(value.get("comment") or ""))
+    value.setdefault("feedback_uid", None)
+    value.setdefault("category", None)
+    value.setdefault("subcategory", None)
+    raw_anchors = value.pop("anchors_json", None)
+    anchors: Any = None
+    if isinstance(raw_anchors, str) and raw_anchors:
+        try:
+            anchors = json.loads(raw_anchors)
+        except ValueError:
+            anchors = None
+    value["anchors"] = anchors
+    paired = anchors.get("paired") if isinstance(anchors, Mapping) else None
+    value["paired"] = paired
+    value["pair_key"] = (
+        anchors.get("pair_key") if isinstance(anchors, Mapping) else None
+    )
     return value
 
 # Single source: the policy engine's own version (fix-49m.3 wiring).
@@ -464,7 +442,7 @@ _POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
 # `serialize_turn_result` is where the capture policy meets a turn, and
 # `upsert_turn_row` is where the credential scrub meets one. Five persisted
 # surfaces reach SQLite without passing through either: conversation labels,
-# feedback, train-run metrics, writer diagnostics, and the SCALAR columns beside
+# review notes, train-run metrics, writer diagnostics, and the SCALAR columns beside
 # a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
 # every captured field to have a declared policy, so each of the five is decided
 # here rather than by omission — including the three that are deliberately
@@ -714,7 +692,7 @@ _POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
 # `serialize_turn_result` is where the capture policy meets a turn, and
 # `upsert_turn_row` is where the credential scrub meets one. Five persisted
 # surfaces reach SQLite without passing through either: conversation labels,
-# feedback, train-run metrics, writer diagnostics, and the SCALAR columns beside
+# review notes, train-run metrics, writer diagnostics, and the SCALAR columns beside
 # a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
 # every captured field to have a declared policy, so each of the five is decided
 # here rather than by omission — including the three that are deliberately
@@ -1348,18 +1326,29 @@ _SCHEMA_STATEMENTS = [
         experiment_id TEXT, task_id TEXT, attempt INTEGER,
         claim_epoch INTEGER, server_incarnation TEXT,
         record_json TEXT NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS feedback (
-        turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL)""",
+    # The agent-memory `feedback` table (one mutable row per turn, joined into
+    # dspy.History) was removed in fix-9eg.16. It is not recreated and it is
+    # not read: a v6 file still carries the table, and this build leaves those
+    # bytes alone rather than dropping them out from under a store it does not
+    # own.
     """CREATE TABLE IF NOT EXISTS human_feedback (
         feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        feedback_uid TEXT NOT NULL UNIQUE,
         turn_key TEXT NOT NULL REFERENCES turns(turn_key),
         target_kind TEXT NOT NULL, span_ids_json TEXT NOT NULL,
         target_label TEXT NOT NULL, comment TEXT NOT NULL,
         provenance TEXT NOT NULL,
+        category TEXT, subcategory TEXT,
+        anchors_json TEXT NOT NULL,
+        pair_experiment_id TEXT, pair_task_id TEXT,
         created_at TEXT NOT NULL)""",
     """CREATE INDEX IF NOT EXISTS idx_human_feedback_turn
         ON human_feedback(turn_key, feedback_id)""",
+    # A comparison comment is about two executions and is reachable from the
+    # task on EITHER side. The primary side is found through `turns`; this is
+    # how the other side is found without scanning every anchor blob.
+    """CREATE INDEX IF NOT EXISTS idx_human_feedback_pair
+        ON human_feedback(pair_experiment_id, pair_task_id)""",
     """CREATE TRIGGER IF NOT EXISTS delete_turn_human_feedback
         AFTER DELETE ON turns BEGIN
         DELETE FROM human_feedback WHERE turn_key=OLD.turn_key;
@@ -1490,12 +1479,45 @@ class ObservabilityStore:
         self.db_path = db_path
         if migrate:
             self._ensure_schema()
+        # The version the FILE is at, which `_ensure_schema` has just pinned
+        # to `SCHEMA_VERSION` on the writable path. It is recorded rather than
+        # assumed because `open_for_annotation` and the read-only subclass
+        # both reach files this build did not create.
+        self.schema_version = self._read_schema_version()
         self._features = self._load_features()
 
     @staticmethod
     def open_for_annotation(db_path: str) -> "ObservabilityStore":
-        """Open an existing DB read-write without creating or migrating it."""
-        return ObservabilityStore(db_path, migrate=False)
+        """Open an existing DB read-write without creating or migrating it.
+
+        Refuses anything but the current schema. Annotating an older store
+        would mean writing a row shape its file has no columns for, and the
+        alternative — quietly adding them — is the migration this build does
+        not do to a database somebody else owns.
+        """
+        store = ObservabilityStore(db_path, migrate=False)
+        if store.schema_version != SCHEMA_VERSION:
+            raise IncompatibleObservabilityDB(
+                f"{db_path} has schema v{store.schema_version}; annotating "
+                f"requires v{SCHEMA_VERSION} and this build carries no "
+                "migration. It can still be read."
+            )
+        return store
+
+    def _read_schema_version(self) -> int:
+        # Closed explicitly, not merely committed: `with` on a sqlite3
+        # connection ends the transaction and leaves the handle open, and an
+        # open handle in WAL mode keeps the -wal sidecar alive. That sidecar
+        # is writable even when the database file is not, so a leak here
+        # would let a read-only store accept writes for as long as it took
+        # the garbage collector to get round to it.
+        conn = self._connect(timeout=5.0)
+        try:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except Exception:
+            return 0
+        finally:
+            conn.close()
 
     def _store_redactor(self) -> Redactor:
         redactor = getattr(self, "_redactor", None)
@@ -2428,34 +2450,35 @@ class ObservabilityStore:
     def get_memory_window(
         self, channel_id: str, conversation_id: int, max_turns: int
     ) -> list[dict[str, Any]]:
-        """The newest ``max_turns`` usable turns as canonical 3-key memory
-        dicts (oldest-first), feedback joined in — the gate-1 [R3] read that
-        replaces the legacy ``get_conversation_window``."""
+        """The newest ``max_turns`` usable turns as canonical memory dicts
+        (oldest-first) — the gate-1 [R3] read that replaces the legacy
+        ``get_conversation_window``.
+
+        Two keys, not three. The third used to be `feedback`, joined from the
+        agent-memory `feedback` table so that whatever a caller had posted to
+        `/post_feedback` was replayed into the agent's `dspy.History` on the
+        next turn. fix-9eg.16 removed that table and that injection: it was an
+        unreviewed free-text channel straight into the model's context, and
+        the review notes the Observability loop actually uses are a different
+        thing entirely (`human_feedback`, append-only, categorized, never fed
+        back into a prompt by this build).
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                f"""SELECT t.conversation_summary, t.conversation_traces, f.feedback_json
-                    FROM turns t LEFT JOIN feedback f ON f.turn_key = t.turn_key
+                f"""SELECT t.conversation_summary, t.conversation_traces
+                    FROM turns t
                     WHERE t.channel_id=? AND t.conversation_id=?
                       AND {self._USABLE_TURN_FILTER}
                     ORDER BY t.ordinal DESC, t.turn_key DESC LIMIT ?""",
                 (channel_id, conversation_id, max_turns),
             ).fetchall()
-        window = []
-        for row in reversed(rows):
-            feedback = None
-            if row["feedback_json"]:
-                try:
-                    feedback = json.loads(row["feedback_json"])
-                except ValueError:
-                    feedback = row["feedback_json"]
-            window.append(
-                {
-                    "conversation summary": row["conversation_summary"],
-                    "conversation_traces": row["conversation_traces"],
-                    "feedback": feedback,
-                }
-            )
-        return window
+        return [
+            {
+                "conversation summary": row["conversation_summary"],
+                "conversation_traces": row["conversation_traces"],
+            }
+            for row in reversed(rows)
+        ]
 
     def conversation_summaries(
         self, channel_id: str, conversation_id: int
@@ -2538,7 +2561,7 @@ class ObservabilityStore:
 
     def dump_all_conversations(self, channel_id: str) -> list[dict[str, Any]]:
         """Admin-dump reconstruction of the hydrated legacy shape (ruling C7):
-        one object per conversation with 3-key turns (+feedback) inlined."""
+        one object per conversation with its memory turns inlined."""
         dumped = []
         for conv in self.list_conversation_summaries(channel_id, limit=1_000_000):
             conv_id = conv["conversation_id"]
@@ -2555,72 +2578,12 @@ class ObservabilityStore:
             )
         return dumped
 
-    def upsert_feedback(self, turn_key: str, feedback_json: str) -> None:
-        """Upsert a turn's feedback. Credential-scrubbed, NOT policy-withheld.
-
-        fix-ajv.9 item 1, and the one of the five where the two layers disagree.
-        The scrub applies for the same reason it applies everywhere: it is
-        unconditional, and `nl_feedback` is free text a user typed, which is a
-        place a pasted token lands. Scrubbing serialized JSON cannot corrupt it —
-        every credential pattern is confined to characters that cannot appear
-        unescaped inside a JSON string, so a replacement can never cross a
-        delimiter (pinned by test).
-        WHY NO CAPTURE POLICY: this column is read by `get_memory_window`,
-        which passes the parsed value straight into `dspy.History` through
-        `conversation_history_io.restore_history_from_turns` — it is the agent's
-        memory of being corrected, not evidence about the agent. Under `evidence`
-        a withheld value would still parse, so the agent would silently receive a
-        badge dict where its feedback used to be and behave differently. That is a
-        behavior change, not a reduction in exposure, and Phase 0 does not make
-        those; it is the same call `_POLICY_EXEMPT_TURN_COLUMNS` records for
-        `conversation_summary` and `conversation_traces`, and it belongs with
-        fix-cj4's conversation-memory redaction, which has to leave memory usable.
-        """
-        feedback_json = self._store_redactor().redact(feedback_json)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """INSERT INTO feedback (turn_key, feedback_json, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(turn_key) DO UPDATE SET
-                     feedback_json=excluded.feedback_json, updated_at=excluded.updated_at""",
-                (turn_key, feedback_json, _utcnow_iso()),
-            )
-            conn.commit()
-
-    def get_feedback(self, turn_key: str) -> Optional[dict[str, Any]]:
-        """Return the stored agent-memory feedback for one turn, unchanged.
-
-        This deliberately queries ``feedback`` directly. Feedback remains
-        readable when its turn has no conversation summary and is therefore
-        excluded from the conversation-memory window.
-        """
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT turn_key, feedback_json, updated_at "
-                "FROM feedback WHERE turn_key=?",
-                (turn_key,),
-            ).fetchone()
-        return dict(row) if row is not None else None
-
-    def list_feedback(
-        self, channel_id: Optional[str] = None, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """List stored agent-memory feedback without interpreting verdicts."""
-        if limit < 0:
-            raise ValueError("limit must be non-negative")
-        query = (
-            "SELECT f.turn_key, f.feedback_json, f.updated_at, t.channel_id "
-            "FROM feedback f LEFT JOIN turns t ON t.turn_key=f.turn_key"
-        )
-        params: list[Any] = []
-        if channel_id is not None:
-            query += " WHERE t.channel_id=?"
-            params.append(channel_id)
-        query += " ORDER BY f.updated_at DESC, f.turn_key DESC LIMIT ?"
-        params.append(limit)
-        with self._connect() as conn:
-            return [dict(row) for row in conn.execute(query, params).fetchall()]
+    # `upsert_feedback`, `get_feedback` and `list_feedback` were the whole of
+    # the agent-memory feedback table (fix-9eg.16). They were an upsert of one
+    # mutable row per turn, read straight back into `dspy.History`; the review
+    # loop uses `add_human_feedback` / `list_human_feedback` instead, which
+    # append, carry provenance and a category, and are never injected into a
+    # prompt. There is no dual read and no compatibility shim.
 
     def record_train_run(
         self,
@@ -2748,40 +2711,137 @@ class ObservabilityStore:
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
     def list_human_feedback(self, turn_key: str) -> list[dict[str, Any]]:
-        """Human annotations, separate from agent-memory feedback in this DB."""
+        """Every recorded review note on one turn, oldest first.
+
+        Works against a v6 store too: the taxonomy, identity and anchor
+        columns simply are not there, and `_human_feedback_row` reports them
+        as None rather than inventing them.
+        """
+        columns = (
+            "*"
+            if self._records_feedback_taxonomy()
+            else "feedback_id, turn_key, target_kind, span_ids_json, "
+                 "target_label, comment, provenance, created_at"
+        )
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM human_feedback WHERE turn_key=? ORDER BY feedback_id",
+                f"SELECT {columns} FROM human_feedback WHERE turn_key=? "
+                "ORDER BY feedback_id",
                 (turn_key,),
             ).fetchall()
         return [_human_feedback_row(row) for row in rows]
 
+    def list_task_feedback(
+        self, *, experiment_id: str, task_id: str
+    ) -> list[dict[str, Any]]:
+        """Every review note this store holds about one task.
+
+        "About one task" is deliberately two things ORed together, because a
+        comparison comment is about two executions and must be findable from
+        either of them:
+
+        - notes anchored to a turn the store records under this
+          experiment/task, across every attempt, turn and component; and
+        - notes whose FROZEN paired anchor names this experiment/task, which
+          is how the winner-versus-candidate remark written on the winner's
+          step shows up on the candidate's task page.
+
+        A row satisfying both appears once — it is one row. No component,
+        category or attempt filter is applied here: filtering is the caller's
+        choice and a default would quietly answer a narrower question. The
+        attempt/turn columns come from the turn row, so a reader can group by
+        attempt without the anchor having to restate it.
+
+        Ordered by `created_at` then `feedback_id` so that paging is stable.
+        """
+        if not self._records_feedback_taxonomy():
+            # v6: no pair columns exist, so the paired side cannot be stored
+            # and the primary side is all there is.
+            query = (
+                "SELECT hf.feedback_id, hf.turn_key, hf.target_kind, "
+                "hf.span_ids_json, hf.target_label, hf.comment, hf.provenance, "
+                "hf.created_at, t.experiment_id AS turn_experiment_id, "
+                "t.task_id AS turn_task_id, t.attempt AS attempt, "
+                "t.channel_id AS channel_id "
+                "FROM human_feedback hf JOIN turns t ON t.turn_key=hf.turn_key "
+                "WHERE t.experiment_id=? AND t.task_id=? "
+                "ORDER BY hf.created_at, hf.feedback_id"
+            )
+            params: tuple[Any, ...] = (experiment_id, task_id)
+        else:
+            query = (
+                "SELECT hf.*, t.experiment_id AS turn_experiment_id, "
+                "t.task_id AS turn_task_id, t.attempt AS attempt, "
+                "t.channel_id AS channel_id "
+                "FROM human_feedback hf JOIN turns t ON t.turn_key=hf.turn_key "
+                "WHERE (t.experiment_id=? AND t.task_id=?) "
+                "   OR (hf.pair_experiment_id=? AND hf.pair_task_id=?) "
+                "ORDER BY hf.created_at, hf.feedback_id"
+            )
+            params = (experiment_id, task_id, experiment_id, task_id)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_human_feedback_row(row) for row in rows]
+
     def add_human_feedback(self, turn_key: str, *, target_kind: str,
                            span_ids: list[str], target_label: str,
-                           provenance: str, comment: str | None = None,
-                           went_wrong: str = "", worked: str = "",
-                           should_change: str = "") -> None:
-        """Append feedback after validating its provenance and evidence anchor."""
+                           provenance: str, comment: str,
+                           category: str, subcategory: str,
+                           anchors: Any = None) -> dict[str, Any]:
+        """Append one categorized review note against recorded evidence.
+
+        The same call for a person typing in the UI and for a coding agent
+        posting over HTTP: `provenance` says which, and nothing else differs.
+        `category`/`subcategory` are the owner-confirmed enums and are
+        required — this build records no new uncategorized comments, and it
+        does not read the comment's text to fill them in.
+
+        `anchors` is a validated `feedback.FeedbackAnchors`. It is validated
+        by `feedback.record_feedback`, which can see the OTHER store a
+        comparison's second side lives in; this method re-checks everything
+        that is answerable from here (the turn, its spans, the vocabularies)
+        so that a direct caller cannot skip those. When it is omitted, a
+        primary-only anchor is built from this store's identity and the turn's
+        own recorded scope.
+
+        Returns the stored row, so a caller does not have to re-read to learn
+        the identity and timestamp it was given.
+        """
+        from fastworkflow.observability import feedback as feedback_module
+
+        if not self._records_feedback_taxonomy():
+            raise IncompatibleObservabilityDB(
+                f"{self.db_path} was written by a build whose review notes "
+                "carry no category; this build does not migrate an existing "
+                "store. Read it, or record new notes in a store this build "
+                "created."
+            )
         if not isinstance(turn_key, str) or not turn_key:
             raise ValueError("turn_key is required")
-        if target_kind not in ("turn", "phase", "step", "span"):
-            raise ValueError("invalid feedback target kind")
-        if (not isinstance(span_ids, list) or len(span_ids) > 10000
-                or any(not isinstance(v, str) or not v for v in span_ids)):
-            raise ValueError("span_ids must be a list of recorded span IDs")
-        ids = sorted(set(span_ids))
-        if (target_kind == "turn" and ids) or (target_kind != "turn" and not ids):
-            raise ValueError("component feedback requires spans; turn feedback has none")
-        comment = compose_human_feedback_comment(
-            went_wrong=went_wrong, worked=worked, should_change=should_change,
+        note = feedback_module.normalize_note(
+            target_kind=target_kind,
+            span_ids=span_ids,
+            target_label=target_label,
+            provenance=provenance,
             comment=comment,
+            category=category,
+            subcategory=subcategory,
         )
-        if not isinstance(target_label, str) or not target_label or len(target_label) > 1000:
-            raise ValueError("target_label is required (at most 1000 characters)")
-        if provenance not in FEEDBACK_PROVENANCES:
-            raise ValueError(
-                "provenance must be human, coding_agent, or distillation_agent"
+        ids = note["span_ids"]
+        comment = note["comment"]
+        category, subcategory = note["category"], note["subcategory"]
+        if anchors is None:
+            anchors = self._own_anchor(
+                turn_key,
+                target_kind=target_kind,
+                span_ids=ids,
+                target_label=target_label,
             )
+        if anchors.primary.turn_key != turn_key:
+            raise ValueError("the primary anchor must name the turn being annotated")
+        paired = anchors.paired
+        feedback_uid = f"fb-{uuid.uuid4().hex}"
+        created_at = _utcnow_iso()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM turns WHERE turn_key=?", (turn_key,)).fetchone() is None:
@@ -2792,11 +2852,68 @@ class ObservabilityStore:
                 raise ValueError("feedback spans must belong to the selected turn")
             conn.execute(
                 "INSERT INTO human_feedback "
-                "(turn_key,target_kind,span_ids_json,target_label,comment,provenance,created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (turn_key, target_kind, json.dumps(ids), self._scrub(target_label),
-                 self._scrub(comment), provenance, _utcnow_iso()),
+                "(feedback_uid,turn_key,target_kind,span_ids_json,target_label,"
+                "comment,provenance,category,subcategory,anchors_json,"
+                "pair_experiment_id,pair_task_id,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (feedback_uid, turn_key, target_kind, json.dumps(ids),
+                 self._scrub(target_label), self._scrub(comment), provenance,
+                 category, subcategory,
+                 # Scrubbed through the same redactor as the columns: the
+                 # anchor repeats `target_label` and `ref.label`, and storing
+                 # those verbatim put a credential back into the row the
+                 # column scrub had just cleaned. Identity keys are untouched.
+                 json.dumps(
+                     feedback_module.scrubbed_anchor_dict(anchors, self._scrub),
+                     ensure_ascii=False,
+                 ),
+                 paired.ref.experiment_id if paired else None,
+                 paired.ref.task_id if paired else None,
+                 created_at),
             )
+            conn.commit()
+        stored = [
+            row for row in self.list_human_feedback(turn_key)
+            if row.get("feedback_uid") == feedback_uid
+        ]
+        return stored[0] if stored else {}
+
+    def _records_feedback_taxonomy(self) -> bool:
+        """Whether this file's `human_feedback` has the v7 columns.
+
+        Answered from the schema version the store was opened at, not by
+        looking at column names: the fresh-schema rule (fix-49m.3) exists so
+        that one build never guesses another build's shape, and the version is
+        what both open paths already checked.
+        """
+        return self.schema_version >= FEEDBACK_TAXONOMY_SCHEMA_VERSION
+
+    def _own_anchor(self, turn_key: str, *, target_kind: str,
+                    span_ids: list[str], target_label: str) -> Any:
+        """A primary-only anchor from this store's identity and the turn row.
+
+        The scope is COPIED from the recorded turn rather than asked for, so
+        the default path cannot record a claim the evidence does not support.
+        """
+        from fastworkflow.observability.comparison import ExecutionRef
+        from fastworkflow.observability import feedback as feedback_module
+
+        row = self.get_turn(turn_key) or {}
+        ref = ExecutionRef(
+            store_id=self.store_identity(),
+            turn_keys=(turn_key,),
+            experiment_id=row.get("experiment_id"),
+            task_id=row.get("task_id"),
+            attempt=row.get("attempt"),
+        )
+        return feedback_module.FeedbackAnchors(
+            primary=feedback_module.FeedbackTarget(
+                ref=ref,
+                target_kind=target_kind,
+                span_ids=tuple(span_ids),
+                target_label=target_label,
+            )
+        )
 
     def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
         with self._connect() as conn:
@@ -2873,14 +2990,29 @@ class ObservabilityStore:
         attempt: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
+        before_turn_key: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Turn rows, newest first, without record_json (fetch one turn for that).
 
         The experiment filters extend this route rather than getting a parallel
         implementation (`[XR9]`); they ride `idx_turns_experiment`.
+
+        `before_turn_key` is a KEYSET bound: rows strictly after it in this
+        route's own `turn_key DESC` order. Paging by `offset` alone is only
+        stable against a store nobody is writing to -- a turn recorded between
+        two pages shifts every later offset by one, so a live scan can repeat a
+        row or skip one entirely, and a count taken across such a scan is wrong
+        in a way nothing downstream can detect. A caller that resumes from the
+        last key it saw is immune to that, and is also able to walk a dataset
+        larger than any one bounded scan (`observability/diagnosis.py`, which is
+        why this exists). Combining it with `offset` is allowed and means what
+        it says: skip that many rows of the remainder.
         """
         clauses: list[str] = []
         params: list[Any] = []
+        if before_turn_key is not None:
+            clauses.append("turn_key<?")
+            params.append(before_turn_key)
         if channel_id is not None:
             clauses.append("channel_id=?")
             params.append(channel_id)
@@ -3085,6 +3217,8 @@ class ObservabilityStore:
         benchmark_id: Optional[str] = None,
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
+        initialize_winner: bool = True,
+        selection_control_db_path: Optional[str] = None,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
 
@@ -3097,6 +3231,23 @@ class ObservabilityStore:
         `DO UPDATE` set deliberately excludes `status`, `invalid_reason` and
         `invalid_detail`: a resume must not be able to launder an `invalid`
         verdict back to `running`.
+
+        `initialize_winner` (`fix-9eg.17.1`) records the experiment in its
+        comparison group afterwards, where the FIRST experiment of a group
+        becomes its current winner automatically. That write lands in a control
+        sidecar, never in this DB: evidence is what happened, a winner is a
+        judgement about it, and sealed evidence must stay byte-identical while
+        judgements about it keep being made. Registration is idempotent, so the
+        resume path above re-registers without disturbing a winner that has
+        since moved. It is deliberately AFTER the commit: a control sidecar
+        that cannot be written must not be able to fail an experiment's
+        creation. Because it is after the commit it cannot raise either —
+        `initialize_winner_for` reports every control-side problem through its
+        return value and the log, since there is nothing this method could roll
+        back and nothing the caller could retry. An experiment whose group
+        already holds older unadopted runs is registered WITHOUT becoming their
+        winner; the embedder bootstraps that group explicitly
+        (`SelectionControlStore.adopt_existing_experiments`).
         """
         if not experiment_id:
             raise ValueError("experiment_id is required")
@@ -3228,6 +3379,18 @@ class ObservabilityStore:
                 ),
             )
             conn.commit()
+            created = conn.execute(
+                "SELECT * FROM experiments WHERE experiment_id=?", (experiment_id,)
+            ).fetchone()
+        if initialize_winner and created is not None:
+            from fastworkflow.observability import selection as selection_module
+
+            selection_module.initialize_winner_for(
+                self,
+                experiment_id,
+                control_db_path=selection_control_db_path,
+                experiment=dict(created),
+            )
 
     def declare_experiment_attempts(
         self,
@@ -4291,9 +4454,6 @@ class ObservabilityStore:
                 for chunk in _chunked(turn_keys):
                     marks = ", ".join("?" for _ in chunk)
                     conn.execute(
-                        f"DELETE FROM feedback WHERE turn_key IN ({marks})", chunk
-                    )
-                    conn.execute(
                         f"DELETE FROM artifacts WHERE turn_key IN ({marks})", chunk
                     )
                     conn.execute(
@@ -5196,7 +5356,8 @@ class ObservabilityStore:
 
         ``include_conversationless_turns`` (operator opt-in, ruling C10) also
         deletes conversation-less turn records (e.g. per-invocation CLI
-        channels) older than the horizon, with their feedback — otherwise no
+        channels) older than the horizon, with their spans, artifacts and review
+        notes — otherwise no
         retention knob ever reaches them.
         """
         if pruning_suppressed():
@@ -5249,7 +5410,6 @@ class ObservabilityStore:
                         ).fetchall()
                     ]
                     for key in keys:
-                        conn.execute("DELETE FROM feedback WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
                         conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
@@ -5291,11 +5451,10 @@ class ObservabilityStore:
                     (channel_id,),
                 ).fetchall()
             ]
-            deleted["feedback"] = conn.execute(
-                "DELETE FROM feedback WHERE turn_key IN "
-                "(SELECT turn_key FROM turns WHERE channel_id=?)",
-                (channel_id,),
-            ).rowcount
+            # `human_feedback` needs no delete of its own: the
+            # `delete_turn_human_feedback` trigger removes a turn's review
+            # notes with the turn, which is what erasure [R21] has to mean now
+            # that the notes are the only feedback rows left.
             deleted["spans"] = conn.execute(
                 "DELETE FROM spans WHERE channel_id=? OR trace_id IN "
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
@@ -5353,7 +5512,7 @@ class ObservabilityStore:
                 "experiments",
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
-            for table in ("feedback", "spans", "artifacts", "turns", "conversations"):
+            for table in ("spans", "artifacts", "turns", "conversations"):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -5381,18 +5540,23 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
-            if found < SCHEMA_VERSION:
+            if found < MIN_READABLE_SCHEMA_VERSION:
                 # Same rule as the writable store (fresh schema, fix-49m.3):
                 # an older store is refused up front with the reason, instead
                 # of failing later on a column the reader assumes exists.
                 raise IncompatibleObservabilityDB(
-                    f"{self.db_path} has schema v{found}; this build requires "
-                    f"v{SCHEMA_VERSION} and carries no migration (fresh "
-                    "observability schema, fix-49m.3). Open it with a "
-                    f"v{found} build."
+                    f"{self.db_path} has schema v{found}; this build reads "
+                    f"v{MIN_READABLE_SCHEMA_VERSION} and newer and carries no "
+                    "migration (fresh observability schema, fix-49m.3). Open "
+                    f"it with a v{found} build."
                 )
         finally:
             conn.close()
+        # Reading v6 as well as v7 is deliberate and is the ONLY tolerated
+        # version spread (see MIN_READABLE_SCHEMA_VERSION). The difference is
+        # confined to `human_feedback`, so this is what the two feedback reads
+        # branch on; no other read has a second shape.
+        self.schema_version = found
         self._features = self._load_features()
 
     def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:

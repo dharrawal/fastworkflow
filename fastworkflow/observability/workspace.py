@@ -194,6 +194,40 @@ class ReadOnlyWorkspaceStoreRegistry:
         except KeyError as exc:
             raise UnknownWorkspaceStore(f"unknown store_id {store_id!r}") from exc
 
+    def store_id_for_identity(self, identity: str) -> str:
+        """The manifest store whose DECLARED identity is `identity`.
+
+        An `ExecutionRef` names its store by `store_identity()`; the manifest
+        names the same store by `store_id`. A comparison comment whose two
+        sides live in different archives needs the one translated into the
+        other, and the manifest is the only place this build is willing to
+        read it from: the declaration is already there, `_verify_store`
+        already checks the archive still matches it, and answering from the
+        declaration searches no directory and opens no file the manifest did
+        not name.
+
+        A store the manifest declares no identity for is NOT resolved by
+        opening it to look: the declaration is the authorization, and an
+        undeclared store raises rather than being adopted. Two declarations of
+        the same identity are refused for the same reason -- the right answer
+        is to fix the manifest, not to pick one.
+        """
+        matches = [
+            store.store_id
+            for store in self._stores.values()
+            if store.store_identity is not None and store.store_identity == identity
+        ]
+        if not matches:
+            raise UnknownWorkspaceStore(
+                f"no workspace store declares evidence identity {identity!r}"
+            )
+        if len(matches) > 1:
+            raise UnknownWorkspaceStore(
+                f"evidence identity {identity!r} is declared by more than one "
+                f"workspace store ({', '.join(sorted(matches))})"
+            )
+        return matches[0]
+
     @contextmanager
     def open(self, store_id: str) -> Iterator[ReadOnlyObservabilityStore]:
         descriptor = self.descriptor(store_id)
