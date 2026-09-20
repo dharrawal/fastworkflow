@@ -44,6 +44,24 @@ It said ~24 minutes for a long time, from back when the suite was ~495 tests; if
 you budget against that number you will conclude a healthy run has hung. Budget
 for it rather than backgrounding it and hoping.
 
+### Browser checks skip themselves unless you ask for them
+
+Every DOM test begins by reading `TEST_JSDOM_ROOT` and skipping when it is
+unset, so `pytest` on a machine without jsdom silently executes no browser code
+at all. Claiming "the browser checks passed" after a plain run is therefore
+claiming nothing. When a change touches the chatbot UI, run the gate, which
+discovers the DOM tests, runs them, and fails when a required one skipped:
+
+```bash
+source .venv/bin/activate
+TEST_JSDOM_ROOT=/path/to/dir-with-node_modules-jsdom python -m tests.browser_validation
+```
+
+`TEST_JSDOM_ROOT` is a directory containing `node_modules/jsdom` (the harness
+scripts require it from there by path). On the owner's box that is
+`~/.cache/fw-jsdom`; the location is configuration, so nothing in the repo
+assumes it. Pass test files to narrow the run, `--list` to see what would run.
+
 ## fastworkflow CLI
 
 Run `fastworkflow --help` for the full command list (`examples`, `train`, `run`, `build`, `refine`, `run_fastapi_mcp`). Non-obvious behavior:

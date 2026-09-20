@@ -409,96 +409,6 @@ def resolve_capture_policy() -> "capture_policy_module.CapturePolicy":
     return policy
 
 
-# Turn columns the capture policy deliberately does NOT touch.
-#
-# These two are not evidence, they are operational state: `get_memory_window` and
-# `_USABLE_TURN_FILTER` read exactly `conversation_summary` and
-# `conversation_traces` to rebuild the agent's conversation memory, and the filter
-# requires the summary to be non-NULL. Withholding them would not reduce what a
-# bundle exposes — it would make the agent forget, which is a behavior change and
-# therefore outside a Phase 0 slice.
-#
-# PII in conversation memory is a real gap; it is fix-cj4's. It needs a redaction
-# that leaves memory usable, which is a different problem from withholding
-# evidence, and solving it by omission here would silently degrade every
-# evidence-profile run's agent.
-_POLICY_EXEMPT_TURN_COLUMNS = frozenset({"conversation_summary", "conversation_traces"})
-
-# Turn columns that are pure evidence — nothing operational reads them — paired
-# with what they actually contain. `failure_reason` is `opaque-payload` rather
-# than text because it can embed a provider error body (the [R20] scenario), so
-# nobody can say what is in it.
-_POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("user_message", "user-text"),
-    ("refined_user_message", "user-text"),
-    ("answer", "user-text"),
-    ("failure_reason", "opaque-payload"),
-)
-
-# ----------------------------------------------------------------------
-# The write paths that do NOT ride the TurnResult pipeline (fix-ajv.9)
-# ----------------------------------------------------------------------
-#
-# `serialize_turn_result` is where the capture policy meets a turn, and
-# `upsert_turn_row` is where the credential scrub meets one. Five persisted
-# surfaces reach SQLite without passing through either: conversation labels,
-# review notes, train-run metrics, writer diagnostics, and the SCALAR columns beside
-# a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
-# every captured field to have a declared policy, so each of the five is decided
-# here rather than by omission — including the three that are deliberately
-# scrub-only, whose reasons are recorded at their write sites.
-#
-# Policy paths are named constants because a deployment re-admitting one of these
-# under the evidence profile has to spell the path exactly (see
-# `CapturePolicy.policy_for`), and a path that only exists as a literal inside a
-# method is a path nobody can find in order to spell it.
-POLICY_PATH_SPAN_NAME = "span.name"
-POLICY_PATH_SPAN_COMMAND_NAME = "span.command_name"
-POLICY_PATH_SPAN_CONTEXT = "span.context"
-POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
-POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
-POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
-
-
-def _protected_text(
-    value: Any,
-    *,
-    redactor: Redactor,
-    policy: "capture_policy_module.CapturePolicy",
-    field_path: str,
-    classification: str,
-) -> Any:
-    """Credential-scrub a persisted string, then apply the capture policy to it.
-
-    **Scrub first, policy second**, which is the opposite order from
-    `_POLICED_TURN_COLUMNS` (there the policy runs in `serialize_turn_result` and
-    the scrub runs later, in `upsert_turn_row`). Two reasons it has to be this way
-    on these paths:
-
-    * A conversation label can arrive by either of two routes —
-      `SQLiteTraceSink._apply_label`, which scrubs before calling
-      `apply_label_txn`, or `ObservabilityStore.record_conversation_label`, which
-      does not. Scrubbing first makes both produce `policy(scrub(text))`, because
-      the scrub is idempotent. Policing first would give the same label two
-      different digests depending on which route wrote it, and a digest that
-      depends on plumbing is not a digest anyone can compare.
-    * The badge left behind carries a digest of what it replaced. Digesting the
-      unscrubbed text would make the badge a confirmation oracle for a guessed
-      credential, which is a strange thing for a redaction record to be.
-
-    Returns TEXT, always: an envelope is serialized here because every caller
-    binds the result to a TEXT column and sqlite3 cannot bind a mapping. Same
-    reasoning as `_policed_column`, which does it for the turn row.
-    """
-    if not value:
-        return value
-    scrubbed = redactor.redact(value)
-    captured = policy.apply(field_path, scrubbed, classification=classification)
-    if capture_policy_module.is_capture_envelope(captured):
-        return json.dumps(captured, ensure_ascii=False)
-    return captured
-
-
 class WriterHealthDelta(BaseModel):
     """What the store lost between two health snapshots (§12.4).
 
@@ -5190,13 +5100,17 @@ class ObservabilityStore:
         `quiesce_live_writer=False` restores the unconditional refusal for a
         caller whose contract is "the writer must already be gone" — the seal
         path checks that itself, before it promotes the experiment's status.
+
+        WHAT THIS IS NOT. Reaching this method still means constructing a store
+        on the source, and construction is a writer: `_connect`'s journal-mode
+        pragma is write-capable, so a database carrying a pending WAL is
+        checkpointed — main rewritten, `-wal`/`-shm` removed — before the
+        `before` snapshot below is taken. The unchanged-bytes claim is
+        therefore about the source as it stood AFTER this store opened it.
+        Archiving evidence this process does not own needs a baseline from
+        before any open: `fastworkflow.observability.archive`.
         """
-        target = Path(destination)
-        if target.exists():
-            raise FileExistsError(
-                f"refusing to overwrite an existing evidence archive: {target}"
-            )
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target = self._prepare_archive_target(destination)
         source = os.path.abspath(self.db_path)
         live_sink = sink_for_db_path(source)
         if live_sink is not None and not live_sink._closed:
@@ -5208,6 +5122,34 @@ class ObservabilityStore:
                 return self._snapshot_to(target, source)
         self._refuse_if_an_unreachable_writer_holds(source)
         return self._snapshot_to(target, source)
+
+    def _prepare_archive_target(self, destination: str) -> Path:
+        """Refuse to overwrite an archive, and make room for a new one."""
+        target = Path(destination)
+        if target.exists():
+            raise FileExistsError(
+                f"refusing to overwrite an existing evidence archive: {target}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def snapshot_settled_source_to(self, destination: str) -> dict[str, Any]:
+        """Snapshot a source the CALLER has already established is settled.
+
+        `archive_to` answers the "is anyone writing this?" question the only
+        way it can from inside the store — by looking for a sink this process
+        minted and, failing that, at the writer-health row. A caller archiving
+        a private copy it has just taken and byte-verified knows something
+        stronger than that row does: nothing can write this file, and the
+        health row is the historical writer's, copied in along with the rest of
+        the evidence. It would be a stale-pid coincidence away from refusing an
+        archive that is provably safe. Such a caller skips the negotiation and
+        asks for the snapshot itself; everybody else calls `archive_to`.
+        """
+        return self._snapshot_to(
+            self._prepare_archive_target(destination),
+            os.path.abspath(self.db_path),
+        )
 
     def _refuse_if_an_unreachable_writer_holds(self, source: str) -> None:
         """Refuse a snapshot of a store some OTHER writer is still holding.
@@ -5314,6 +5256,13 @@ class ObservabilityStore:
                 integrity = archive_conn.execute(
                     "PRAGMA integrity_check"
                 ).fetchone()[0]
+                # Read from the archive rather than reported from this build's
+                # SCHEMA_VERSION. Archiving does not migrate, so a v6 database
+                # sealed by a v7 build is a v6 archive, and saying seven would
+                # describe the archiver instead of the file it produced.
+                archive_schema_version = archive_conn.execute(
+                    "PRAGMA user_version"
+                ).fetchone()[0]
             if integrity != "ok":
                 raise RuntimeError(f"archive integrity check failed: {integrity}")
             if identity_row is None or not identity_row[0]:
@@ -5324,7 +5273,7 @@ class ObservabilityStore:
                 "size_bytes": archive_digest["size_bytes"],
                 "sha256": archive_digest["sha256"],
                 "store_identity": str(identity_row[0]),
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": archive_schema_version,
                 "read_only": True,
                 "sealed": True,
                 "source_bytes_verified_unchanged": True,
