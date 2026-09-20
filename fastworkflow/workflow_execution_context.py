@@ -2244,12 +2244,21 @@ class WorkflowExecutionContext:
                 desc="A multiline paragraph summary"
             )
 
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-        with dspy.context(lm=planner_lm):
-            cs_func = dspy.ChainOfThought(ConversationSummarySignature)
-            prediction = cs_func(
-                user_query=user_query,
-                workflow_actions=workflow_actions,
-                final_agent_response=final_agent_response,
-            )
-            return prediction.conversation_summary, json.dumps(conversation_traces)
+        from fastworkflow.conversation_summary import bounded_summary_inputs
+
+        inputs = bounded_summary_inputs(user_query, workflow_actions, final_agent_response)
+        try:
+            planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+            with dspy.context(lm=planner_lm):
+                prediction = dspy.ChainOfThought(ConversationSummarySignature)(**inputs)
+            summary = prediction.conversation_summary
+        except Exception as exc:
+            # Conversation memory is ancillary: failure must not discard the
+            # executor's completed answer. Preserve raw evidence in traces.
+            logger.warning("Conversation summary failed; using bounded fallback (%s)",
+                           type(exc).__name__)
+            conversation_traces["summary_fallback_error_type"] = type(exc).__name__
+            summary = ("Conversation summary unavailable. User request excerpt: "
+                       + inputs["user_query"] + "\nAgent response excerpt: "
+                       + inputs["final_agent_response"])
+        return summary, json.dumps(conversation_traces)
