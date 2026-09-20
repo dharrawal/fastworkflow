@@ -56,6 +56,7 @@ from urllib.parse import unquote
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup as benchmark_setup
 from fastworkflow.observability import best_run as best_run_module
+from fastworkflow.observability import command_summary as command_summary_module
 from fastworkflow.observability import comparison as comparison_module
 from fastworkflow.observability import consistency as consistency_module
 from fastworkflow.observability import pair_review as pair_review_module
@@ -541,6 +542,11 @@ def _projection_payload(
     data = projection.as_dict()
     data["step_count"] = len(projection.steps)
     data["unassigned_step_count"] = len(projection.unassigned_steps)
+    # Derived from the canonical projection BEFORE the view trims the steps it
+    # was derived from, so the default answers view carries the same summary
+    # the steps view does instead of a shorter one. Additive: a client that
+    # does not know the key reads exactly what it read before.
+    data["command_summary"] = command_summary_module.summarize_projection(projection)
     if manifest_store_id:
         data["manifest_store_id"] = manifest_store_id
     if view == VIEW_ANSWERS:

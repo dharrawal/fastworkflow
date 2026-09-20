@@ -350,6 +350,9 @@ tr.markedStep td:first-child::before { content: "!"; font-weight: 700; margin-ri
 .turnFindRow { display: flex; gap: 6px; padding-top: 10px; }
 #turnFindText { flex: 1; min-width: 0; }
 #turnFindStatus { font-size: 11px; color: var(--muted); margin-top: 6px; }
+#turnFindScope { display: none; }
+#turnFindScope.scoped { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+  font-size: 11px; color: var(--muted); margin-top: 8px; }
 #turnFindMarkers { margin-top: 8px; }
 /* fix-aou (a): the turn's execution ledger, one row per dispatch */
 .ledgerWrap { overflow-x: auto; }
@@ -1023,6 +1026,7 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
         <input id="turnFindText" type="search" autocomplete="off" placeholder="Find turns…" aria-label="Search recorded turn text">
         <button id="turnFindGo" type="submit">Find</button>
       </div>
+      <div id="turnFindScope" role="group" aria-label="What this search is scoped to"></div>
       <div id="turnFindMarkers" role="group" aria-label="Filter by what the trace recorded"></div>
       <div id="turnFindStatus" role="status" aria-live="polite"></div>
     </form>
@@ -2188,6 +2192,40 @@ function openSpanInTree(spanId) {
   renderLevel();
 }
 
+/* Focus one recorded span in the trace that has JUST been rendered.
+
+   Called from inside `selectTurn`/`selectWorkspaceTurn`'s own stale-guarded
+   completion and never from a timer: a span id identifies a call only within the
+   trace that recorded it, so a focus request left running after a later
+   navigation could land on a same-named span of ANOTHER run. Waiting for the
+   render that was asked for is the only way to know which trace is on screen.
+
+   A trace with no span of that id says so. A reader who asked for one exact
+   call and silently got the top of a turn cannot tell that the evidence is
+   missing, which is the whole thing this message exists to prevent. */
+function focusLoadedSpan(spanId, note) {
+  if (!spanId) { return; }
+  if (state.path.length && findSpanPath(state.path[0], spanId)) {
+    openSpanInTree(spanId);
+    if (note) { note.textContent = ""; }
+    return;
+  }
+  var missing = "The recorded trace of this turn holds no span " + spanId
+    + ", so that exact call is not in the evidence this store holds. The turn "
+    + "is open at its top level.";
+  if (note) { note.textContent = missing; }
+  /* Said on the screen the reader is now looking at. The note belongs to the
+     pane the link was clicked on, and `renderDetail` has just replaced that
+     pane -- so a message left only there is one nobody can see, which is
+     indistinguishable from a link that silently opened the wrong thing. */
+  var host = document.getElementById("detail");
+  if (host) {
+    var notice = el("div", "card");
+    notice.appendChild(el("div", "empty", missing));
+    host.insertBefore(notice, host.firstChild);
+  }
+}
+
 /* -- provenance and comparability [fix-aou (c)] --------------------------- */
 /* `provenance` is the server's experiment_provenance(): one field per row,
    keys verbatim, each naming its source -- the experiment row, the
@@ -2993,8 +3031,59 @@ var TURN_FIND_DEBOUNCE_MS = 250;
 var turnFind = {
   seq: 0, timer: null, rows: [], cursor: null, scanned: 0, matched: 0,
   complete: true, facets: null, markers: {}, text: "", running: false,
-  stopped: false, active: false, error: null, basis: "", nav: 0
+  stopped: false, active: false, error: null, basis: "", nav: 0,
+  scope: null, source: null, sourceMoved: false
 };
+
+/* -- scoping the search to one experiment, task or attempt [fix-9eg.3.1.1]
+   `/api/turns` has filtered by experiment/task/attempt since the attempt
+   opener was written against it (see openExperimentAttempt); the finder
+   simply never sent them, so "what went wrong in this run" meant searching
+   the whole store and reading past every other run to find out.
+
+   A scope belongs to the SOURCE it was chosen in. One experiment id can
+   exist in this workflow's store and in a registered archive and mean two
+   different sets of runs, so a scope carried across a source change would
+   ask the new database for the old one's labels and present whatever came
+   back under the old one's heading. The scope is stamped with the source it
+   was chosen in -- this workflow's store or the selected registered one --
+   and is dropped, with the walk and its cursor, when that source moves.
+
+   What a scoped result is: the turns RECORDED under that experiment, task
+   or attempt. A marker on one of them says that turn recorded it; it does
+   not attribute the trouble to the scope, and the counts stay the scan's
+   own the way they are for an unscoped search. */
+function turnFindSourceKey() {
+  /* What `api()` will actually read: a workspace read is pinned to its
+     store by turnFindPath below, a registered archive is pinned by
+     benchmarkEvidencePath from a global, and everything else is this
+     workflow's own store. */
+  if (session && session.workspace_mode) { return "workspace:" + (state.storeId || ""); }
+  if (benchmarkExperimentSource) { return "registered:" + benchmarkExperimentSource; }
+  return "current";
+}
+
+function turnFindSourceMoved() {
+  return turnFind.source !== null && turnFind.source !== turnFindSourceKey();
+}
+
+function turnFindScopeText(scope) {
+  var parts = [];
+  if (scope.experiment) { parts.push("experiment " + scope.experiment); }
+  if (scope.task) { parts.push("task " + scope.task); }
+  /* attempt 0 is a legal attempt number, so emptiness is tested and not
+     truthiness -- the one that would silently widen the scope. */
+  if (scope.attempt !== null && scope.attempt !== undefined) {
+    parts.push("attempt " + scope.attempt);
+  }
+  return parts.join(" \u00b7 ");
+}
+
+function turnFindScopePhrase(prefix) {
+  /* "the whole store" stops being true the moment a scope is on: the walk
+     covered the scope, and the rest of the store was never looked at. */
+  return prefix + (turnFind.scope ? "the whole of this scope" : "the whole store");
+}
 
 function turnFindSelected() {
   return Object.keys(turnFind.markers).filter(function (k) { return turnFind.markers[k]; });
@@ -3015,6 +3104,20 @@ function turnFindPath(cursor) {
   if (markers.indexOf("low_confidence") >= 0) {
     params.push("low_confidence_below=" + lowConfidenceThreshold());
   }
+  /* The store's own filters, passed through by the same names the route has
+     always taken, so a scoped search here is the scoped search an agent
+     makes and an attempt link opens. */
+  if (turnFind.scope) {
+    if (turnFind.scope.experiment) {
+      params.push("experiment=" + encodeURIComponent(turnFind.scope.experiment));
+    }
+    if (turnFind.scope.task) {
+      params.push("task=" + encodeURIComponent(turnFind.scope.task));
+    }
+    if (turnFind.scope.attempt !== null && turnFind.scope.attempt !== undefined) {
+      params.push("attempt=" + encodeURIComponent(turnFind.scope.attempt));
+    }
+  }
   if (cursor) { params.push("resume_after=" + encodeURIComponent(cursor)); }
   return path + "?" + params.join("&");
 }
@@ -3024,14 +3127,58 @@ function turnFindReset() {
   turnFind.rows = []; turnFind.cursor = null; turnFind.scanned = 0;
   turnFind.matched = 0; turnFind.complete = true; turnFind.facets = null;
   turnFind.stopped = false; turnFind.error = null; turnFind.basis = "";
+  turnFind.sourceMoved = false;
+  /* The scope survives: a marker chip, a new search word and every
+     continuation are all asked WITHIN the scope the operator chose, and
+     silently widening back to the store is how a scoped count becomes a
+     store-wide one under a scoped heading. It is dropped by the Clear
+     control, by a source change, and by the source boundary. */
   return turnFind.seq;
 }
 
+function turnFindDropScopedWalk() {
+  /* The source moved under an open walk. Its cursor, counts and scope all
+     describe the database being left, so the next segment would be asked of
+     a different one and would read as more of the same result. Nothing is
+     carried over and the page says why, rather than leaving an answer on
+     screen whose source is gone.
+
+     The finder also stands down rather than repainting itself empty: an empty
+     result list with a finished walk is rendered as "no turn in this store
+     matches", which would be this page answering a question it never asked
+     the source now open. */
+  var owned = turnFind.active;
+  turnFind.seq += 1;
+  turnFind.rows = []; turnFind.cursor = null; turnFind.scanned = 0;
+  turnFind.matched = 0; turnFind.complete = true; turnFind.facets = null;
+  turnFind.stopped = false; turnFind.error = null; turnFind.basis = "";
+  turnFind.scope = null;
+  turnFind.running = false;
+  turnFind.active = false;
+  turnFind.sourceMoved = true;
+  turnFind.source = turnFindSourceKey();
+  turnFindRenderScope();
+  turnFindRenderMarkers();
+  turnFindRender();
+  if (owned) {
+    /* Only the pane the search itself was holding: a reader who had navigated
+       to a turn keeps what they were reading. */
+    var pane = document.getElementById("detail");
+    clear(pane);
+    pane.appendChild(el("div", "empty", turnFindStatusText()));
+  }
+}
+
 function turnFindRun(seq, cursor) {
+  /* Before the request, because a continuation issued against the source
+     now open is the wrong question asked of the wrong database. */
+  if (turnFindSourceMoved()) { turnFindDropScopedWalk(); return; }
   turnFind.running = true;
   turnFindRender();
   api(turnFindPath(cursor)).then(function (page) {
     if (seq !== turnFind.seq) { return; }   /* a later search owns the view */
+    /* And after it: the switch can land while this one is in flight. */
+    if (turnFindSourceMoved()) { turnFindDropScopedWalk(); return; }
     turnFind.running = false;
     /* Every fetched row is kept. The cursor moves past these rows whether or
        not they are rendered, so a row dropped here could never be asked for
@@ -3089,8 +3236,82 @@ document.getElementById("recordNav")
   .addEventListener("click", turnFindRelease, true);
 
 function turnFindStart() {
+  /* A scope chosen in another source names runs this one may not have, or
+     may have under the same labels and different evidence; either way it is
+     not the scope the operator picked, so it goes rather than travels. */
+  if (turnFind.scope && turnFindSourceMoved()) { turnFind.scope = null; }
+  turnFind.source = turnFindSourceKey();
   turnFind.active = true;
+  turnFindRenderScope();
   turnFindRun(turnFindReset(), null);
+}
+
+/* Entry from the run being read, on the source that is SELECTED.
+
+   A registered evidence source is searched by this finder already:
+   benchmarkEvidencePath appends `benchmark_experiment=` to /api/turns from
+   the same global this gate reads, and the route resolves it to that
+   registration's own store. So the scoped search a reader starts while that
+   source is open is answered by the database whose experiment they are
+   looking at, which is the acceptance this leaf is held to -- UI and API
+   selecting the same authorized source.
+
+   Carrying a scope ACROSS a source change is a different thing and is not
+   offered: the guards above discard an open walk, its cursor and its scope the
+   moment the selected source moves, rather than asking the new database for
+   the old one's labels.
+
+   What is deferred is a WORKSPACE: its logical experiments span several sealed
+   stores and /api/workspace/turns takes one store_id per request, so scoping
+   one needs multi-store routing this slice does not build (fix-luut). */
+function turnFindEntrySupported() {
+  return !(session && session.workspace_mode);
+}
+
+function turnFindEntryButton(container, scope, label, help) {
+  if (!turnFindEntrySupported()) { return null; }
+  var button = el("button", "ghost", label);
+  button.type = "button";
+  button.title = help;
+  button.setAttribute("data-find-scope",
+    (scope.attempt === null || scope.attempt === undefined)
+      ? (scope.task ? "task" : "experiment") : "attempt");
+  button.addEventListener("click", function () { turnFindScopeTo(scope); });
+  container.appendChild(button);
+  return button;
+}
+
+function turnFindScopeTo(scope) {
+  turnFind.scope = {
+    experiment: scope.experiment || null,
+    task: scope.task || null,
+    attempt: (scope.attempt === undefined ? null : scope.attempt)
+  };
+  turnFind.source = turnFindSourceKey();
+  /* Whatever is in the box is what the box says the search is; entering a
+     scope narrows that search rather than quietly replacing it. */
+  var box = document.getElementById("turnFindText");
+  if (box) { turnFind.text = box.value.trim(); }
+  turnFindStart();
+}
+
+function turnFindRenderScope() {
+  var box = document.getElementById("turnFindScope");
+  if (!box) { return; }
+  clear(box);
+  box.className = turnFind.scope ? "scoped" : "";
+  if (!turnFind.scope) { return; }
+  box.appendChild(el("span", null, "Scope: " + turnFindScopeText(turnFind.scope)));
+  var drop = el("button", "traceLink", "Clear scope");
+  drop.type = "button";
+  drop.id = "turnFindScopeClear";
+  drop.title = "Search this source's whole store again";
+  drop.addEventListener("click", function () {
+    turnFind.scope = null;
+    turnFindRenderScope();
+    turnFindStart();
+  });
+  box.appendChild(drop);
 }
 
 function turnFindSchedule() {
@@ -3103,6 +3324,10 @@ function turnFindSchedule() {
 
 function turnFindStatusText() {
   if (turnFind.error) { return "Search failed: " + turnFind.error; }
+  if (turnFind.sourceMoved) {
+    return "The evidence source changed, so this search was discarded along "
+      + "with its scope. Search again to look in the source now open.";
+  }
   if (!turnFind.active) { return ""; }
   var scanned = turnFind.scanned + " turn" + (turnFind.scanned === 1 ? "" : "s") + " scanned";
   if (turnFind.running) {
@@ -3113,12 +3338,12 @@ function turnFindStatusText() {
     /* The count is a floor and is written as one: the rest of the store has
        not been looked at, so neither "12 matches" nor "no matches" is true. */
     return (turnFind.matched ? "At least " + turnFind.matched + " matching" : "No match yet")
-      + " \u2014 " + scanned + ", not the whole store"
+      + " \u2014 " + scanned + ", " + turnFindScopePhrase("not ")
       + (turnFind.stopped ? " (stopped)" : "");
   }
   return (turnFind.matched
     ? turnFind.matched + " matching turn" + (turnFind.matched === 1 ? "" : "s")
-    : "No matching turns") + " \u2014 " + scanned + ", the whole store";
+    : "No matching turns") + " \u2014 " + scanned + ", " + turnFindScopePhrase("");
 }
 
 function turnFindRenderMarkers() {
@@ -3175,6 +3400,16 @@ function turnFindRender() {
     ? "Turns matching this search" : "All recorded turns";
   card.appendChild(el("h2", null, heading));
   card.appendChild(el("div", "sub", turnFindStatusText()));
+  if (turnFind.scope) {
+    /* Beside the count, not in a tooltip: "12 matching turns" under a
+       scoped search is a statement about the scope, and a reader who does
+       not know the scope is on reads it as one about the store. */
+    card.appendChild(el("div", "diagNote",
+      "Scoped to " + turnFindScopeText(turnFind.scope)
+      + " in the source this page has open. Turns recorded outside it were "
+      + "not searched, and these are turns that recorded the marker rather "
+      + "than commands blamed for it."));
+  }
   if (turnFind.basis === "spans") {
     card.appendChild(el("div", "diagNote",
       "Searched recorded traces. A dispatch whose span was dropped is found "
@@ -3204,8 +3439,9 @@ function turnFindRender() {
     card.appendChild(item);
   });
   if (!turnFind.rows.length && turnFind.complete && !turnFind.running) {
-    card.appendChild(el("div", "empty",
-      "No turn in this store matches. The whole store was searched."));
+    card.appendChild(el("div", "empty", turnFind.scope
+      ? "No turn in this scope matches. The whole scope was searched."
+      : "No turn in this store matches. The whole store was searched."));
   }
   if (turnFind.rows.length && turnFind.complete && !turnFind.running) {
     /* Says the list is all of them, which is only true once the walk ended.
@@ -3252,6 +3488,7 @@ document.getElementById("turnFindText").addEventListener("input", function (even
   turnFindSchedule();
 });
 turnFindRenderMarkers();
+turnFindRenderScope();
 
 /* -- the experiment browser (fix-bn1.6) --------------------------------
    experiment -> task -> attempt is the same three-level grouping the rail
@@ -3409,6 +3646,17 @@ function showExperiment(experimentId) {
         });
       });
       actions.appendChild(archive);
+    }
+    /* "Where did this run go wrong" is a question about recorded turns, so
+       it opens the finder already scoped rather than a second search UI. */
+    turnFindEntryButton(actions, { experiment: experimentId },
+      "Find problems in this experiment",
+      "Search the turns this source recorded for this experiment.");
+    if (!turnFindEntrySupported()) {
+      card.appendChild(el("div", "sub",
+        "The turn finder searches one store at a time. This experiment is "
+        + "read through a workspace whose evidence spans several stores, so "
+        + "no scoped search is offered here."));
     }
 
     /* An invalid experiment first, and loudly. A run whose turns were dropped
@@ -4071,6 +4319,12 @@ function renderTaskRuns(container, experimentId, taskId, label, crumbs, nav) {
       "Per-attempt outcomes are retained rather than collapsed to a per-task " +
       "rate: an agent that passes a task often can still fail pass^k, and a " +
       "rate stored at write time cannot say which."));
+    var findRow = el("div", "runDecision");
+    turnFindEntryButton(findRow, { experiment: experimentId, task: taskId },
+      "Find problems in this task",
+      "Search the turns this source recorded for this task, across every "
+      + "attempt of it.");
+    if (findRow.childNodes.length) { card.appendChild(findRow); }
     container.appendChild(card);
     renderTaskRunList(card, experimentId, taskId, label, evidence, runs, nav);
     /* Consistency reads the same recorded attempts this list just printed, so
@@ -4200,6 +4454,10 @@ function bestRunProvenance(pointer) {
    disabled with the evidence's own words for why. */
 function renderAttemptActions(actions, experimentId, taskId, label, row, runs,
                               decisions) {
+  turnFindEntryButton(actions,
+    { experiment: experimentId, task: taskId, attempt: row.attempt },
+    "Find problems in this attempt",
+    "Search the turns this attempt recorded.");
   if (row.comparable) {
     var compare = el("button", null, row.is_best
       ? "Compare with another attempt" : "Compare with the best run");
@@ -5211,6 +5469,8 @@ function renderRunComparison(container, cmp, ctx) {
 
   renderPairReview(container, cmp, ctx);
   renderComparisonSummary(container, cmp);
+  renderCommandSummary(container, cmp, ctx);
+  renderComparisonCallCosts(container, cmp, ctx);
   renderAlignment(container, cmp, ctx);
 }
 
@@ -5730,20 +5990,41 @@ function pairReadScope(ctx, side) {
    The cross-store case is probed before the page's scope moves, so a
    registration that cannot be resolved reports itself instead of leaving the
    page pointed at a store it cannot read. */
-function openPairTurn(ctx, side, turnKey, note) {
+/* Which cross-source probe is the current one. Monotonic, like `expNav`, and
+   read by the only two places that touch it. */
+var pairProbeNav = 0;
+
+function openPairTurn(ctx, side, turnKey, note, spanId) {
   var scope = pairReadScope(ctx, side);
   if (scope.kind === "unaddressable") {
     if (note) { note.textContent = scope.why; }
     return;
   }
   if (scope.kind === "workspace") {
-    selectWorkspaceTurn(scope.storeId, turnKey);
+    selectWorkspaceTurn(scope.storeId, turnKey, spanId, note);
     return;
   }
   if (scope.kind === "current") {
-    selectTurn(turnKey);
+    selectTurn(turnKey, spanId, note);
     return;
   }
+  /* Two guards, because two different things can overtake this probe while it is
+     in flight.
+
+     `pairProbeNav` sequences the probes themselves: the NEWEST click owns the
+     navigation, so a slower answer to an earlier click cannot win the race and
+     open the run the reader has already clicked past.
+
+     `expNav` is the page's existing navigation token, read here and compared
+     below rather than claimed: a reader who changed source or view meanwhile
+     gets told nothing was opened. It is deliberately not claimed at this point,
+     because a probe that ends up REFUSED leaves the comparison pane on screen,
+     and claiming the token would leave that pane's own repaint guard
+     permanently stale -- its picker would stop working after a failed link. The
+     navigation token is claimed where navigation actually happens, by
+     `selectTurn`. */
+  var probe = ++pairProbeNav;
+  var opened = expNav;
   if (note) { note.textContent = "opening the other experiment's records…"; }
   scopedRead("/api/turn/" + encodeURIComponent(turnKey), scope.experimentId)
     .then(function (data) {
@@ -5754,12 +6035,32 @@ function openPairTurn(ctx, side, turnKey, note) {
         }
         return;
       }
+      if (probe !== pairProbeNav || expNav !== opened) {
+        if (note) {
+          note.textContent = "The page moved on before that other database "
+            + "answered, so nothing was opened.";
+        }
+        return;
+      }
       if (note) { note.textContent = ""; }
       benchmarkExperimentSource = scope.experimentId;
-      selectTurn(turnKey);
+      selectTurn(turnKey, spanId, note);
     }).catch(function (e) {
       if (note) { note.textContent = e.message; }
     });
+}
+
+/* ONE exact recorded call, on the side that recorded it, by the canonical span
+   id the projection published for it.
+
+   The shared entry point for every pane that lists contributing calls or steps:
+   the source is resolved from the side's own reference (`openPairTurn`), and the
+   span is focused inside the stale-guarded render of the trace that holds it
+   (`focusLoadedSpan`). Nothing here polls, so no link can focus a same-named
+   span in another store, and a span the evidence does not hold is reported as
+   absent rather than quietly becoming the top of a turn. */
+function openPairSpan(ctx, side, turnKey, spanId, note) {
+  openPairTurn(ctx, side, turnKey, note, spanId);
 }
 
 /* Review progress and comment count, kept apart on purpose.
@@ -5871,6 +6172,278 @@ function countPairComments(node, cmp, ctx) {
   }).catch(function (e) { node.textContent = e.message; });
 }
 
+/* -- recorded command outcomes, per side [fix-9eg.3.1.3] ------------------ */
+/* The server's `command_summary` reducer, rendered. Deliberately not
+   re-derived here: the default comparison view does not load the steps at all,
+   and a second tally on the page is exactly how a chip and an agent's
+   structured read come to disagree about one recorded execution.
+
+   Every number is per DISPATCH. A turn that contained a failure does not make
+   every command in it a failure, so opening a group lists the exact dispatches
+   that were counted -- it does not filter the turn by command name, which
+   would hand back every failure in every turn the group appears in. */
+
+function commandOutcomeWord(value) {
+  if (value === true) { return "recorded success"; }
+  if (value === false) { return "recorded failure"; }
+  /* Not "no failure". Nothing recorded an outcome for this dispatch, which is
+     a fact about the recording and not about the command. */
+  return "outcome not recorded";
+}
+
+function commandGroupName(group) {
+  return group.unknown_command
+    ? "(no command name recorded)" : policedText(group.command_name);
+}
+
+/* Recorded dispatch timing [fix-9eg.3.1.4].
+
+   Three order statistics over the durations that WERE recorded, and never a
+   total: a dispatch's recorded duration already contains the inner dispatches
+   recorded beneath it, so a sum of these would read as elapsed time and is
+   not one. A group nothing timed says so instead of showing zeroes. */
+function fmtCommandDuration(duration) {
+  if (!duration || !duration.timed) { return "not timed"; }
+  if (duration.timed === 1) { return fmtNs(duration.median_ns) + " (one dispatch)"; }
+  return fmtNs(duration.min_ns) + " / " + fmtNs(duration.median_ns)
+    + " / " + fmtNs(duration.max_ns);
+}
+
+function fmtCommandTimedCoverage(duration) {
+  if (!duration) { return "—"; }
+  if (!duration.untimed) { return fmtCount(duration.timed) + " timed"; }
+  /* Untimed is untimed. Folding it into the timed count would put dispatches
+     nobody measured inside a median. */
+  return fmtCount(duration.timed) + " timed, "
+    + fmtCount(duration.untimed) + " not"
+    + (duration.invalid
+        ? " (" + fmtCount(duration.invalid) + " recorded an unusable duration)"
+        : "");
+}
+
+function commandHeadline(summary) {
+  var totals = summary.totals || {};
+  var outcomes = totals.response_success || {};
+  return fmtCount(totals.dispatches || 0)
+    + ((totals.dispatches === 1) ? " dispatch" : " dispatches")
+    + " · " + fmtCount(totals.groups || 0)
+    + ((totals.groups === 1) ? " command" : " commands")
+    + " · " + fmtCount(outcomes.true || 0) + " succeeded, "
+    + fmtCount(outcomes.false || 0) + " failed, "
+    + fmtCount(outcomes.unknown || 0) + " not recorded";
+}
+
+/* What this side's numbers are about, and what they are NOT about. An
+   unreadable turn is missing coverage; presenting the counts without it would
+   let "0 failures" stand for a run half of which could not be read. */
+function appendCommandCoverage(box, summary) {
+  var observed = (summary.scope && summary.scope.observed) || {};
+  var coverage = summary.coverage || {};
+  var totals = summary.totals || {};
+  box.appendChild(el("div", "sub",
+    "One run, on its own: " + fmtCount(observed.turns || 0)
+    + " recorded turn(s) examined, counted in " + (summary.unit || "dispatches")
+    + " · " + summary.metric_version));
+  /* Two different questions, and the second is the one that misleads. Every
+     turn being readable does not make every dispatch inside them recorded, so
+     a run can enumerate completely and still be missing the spans, the record
+     entries or the outcomes the counts above are made of. */
+  if (coverage.enumeration_complete === false) {
+    box.appendChild(el("div", "chipMarker unknown",
+      fmtCount(coverage.turns_unreadable || 0) + " turn(s) this run names could "
+      + "not be read, so these counts describe what was examined — not a claim "
+      + "that the unread turns recorded no failure"));
+  }
+  if (coverage.capture === "none") {
+    box.appendChild(el("div", "chipMarker unknown",
+      "No dispatch was observed on this side at all, so there is nothing here "
+      + "whose recording could be called complete — this is not a finding that "
+      + "the run dispatched nothing"));
+  } else if (coverage.capture === "partial") {
+    var gaps = el("div", "chipMarker unknown",
+      "Partially recorded, so a zero above is a zero among what was recorded:");
+    box.appendChild(gaps);
+    (coverage.capture_gaps || []).forEach(function (gap) {
+      box.appendChild(el("div", "sub", "— " + gap));
+    });
+  }
+  if (totals.unknown_command_dispatches) {
+    box.appendChild(el("div", "chipMarker unknown",
+      fmtCount(totals.unknown_command_dispatches) + " dispatch(es) recorded no "
+      + "command name and are grouped on their own rather than guessed at"));
+  }
+  if (totals.conflicts) {
+    box.appendChild(el("div", "chipMarker warn",
+      fmtCount(totals.conflicts) + " dispatch(es) where the turn record and the "
+      + "span disagree about the outcome; both are kept and neither is "
+      + "overwritten"));
+  }
+  var timing = totals.duration;
+  if (timing) {
+    box.appendChild(el("div", "sub",
+      "Timing: " + fmtCount(timing.timed || 0) + " of "
+      + fmtCount((timing.timed || 0) + (timing.untimed || 0))
+      + " dispatch(es) recorded a usable duration · " + timing.metric_version
+      + " · " + timing.unit
+      + ". Each duration is INCLUSIVE — it covers the inner dispatches recorded "
+      + "beneath it — so these are not added up, and they are neither elapsed "
+      + "time, critical-path time nor time with the wait for a person removed."));
+  }
+}
+
+/* The dispatches a group counted, each openable where it was recorded.
+
+   The link is the same `openPairTurn` the answer and alignment rows use, so a
+   drill-down lands in the current trace/feedback navigation with this side's
+   own source rather than a new one. */
+function appendCommandContributors(cell, group, side, ctx) {
+  cell.appendChild(el("div", "sub",
+    "The exact dispatches counted in this row:"));
+  (group.contributors || []).forEach(function (contributor) {
+    var row = el("div", "sub");
+    row.setAttribute("data-command-contributor", contributor.command_call_id);
+    row.appendChild(el("span", "mono", contributor.command_call_id));
+    row.appendChild(el("span", null,
+      " · turn " + contributor.turn_index + " · step " + contributor.position
+      + " · " + commandOutcomeWord(contributor.response_success)
+      /* The observation the group's statistics were computed from, kept on the
+         row: a reader can check the median against the dispatches, and an
+         untimed one says so rather than showing 0. */
+      + " · " + (contributor.duration_recorded
+          ? fmtNs(contributor.duration_ns) + " inclusive"
+          : (contributor.duration_invalid
+              ? "recorded an unusable duration" : "not timed"))));
+    if (contributor.conflict) {
+      row.appendChild(el("span", "chipMarker warn",
+        "the span recorded " + contributor.span_outcome + " for this same "
+        + "dispatch"));
+    }
+    if (!contributor.span_recorded) {
+      row.appendChild(el("span", "chipMarker unknown", "no span recorded"));
+    }
+    if (!contributor.in_record) {
+      row.appendChild(el("span", "chipMarker unknown", "not in the turn record"));
+    }
+    if (contributor.child_call) {
+      row.appendChild(el("span", "pill", "inner call"));
+    }
+    if (contributor.pass_id) {
+      row.appendChild(el("span", "pill", "pass " + contributor.pass_id));
+    }
+    /* The EXACT dispatch, not its turn, wherever the trace recorded a span
+       for it: `openPairSpan` focuses the span through the same source-scoped
+       navigation `openPairTurn` uses. A dispatch the trace never held has no
+       span to focus, so that row opens the turn and SAYS it is doing that
+       rather than presenting a turn-scoped landing as the dispatch. */
+    var focusable = !!contributor.span_id;
+    var open = el("button", "evidenceLink", focusable
+      ? "Open this dispatch" : "Open the recorded turn");
+    open.type = "button";
+    var note = el("div", "sub", "");
+    if (!focusable) {
+      row.appendChild(el("span", "chipMarker unknown",
+        "no span was recorded for this dispatch, so this opens the whole turn"));
+    }
+    open.addEventListener("click", function () {
+      if (focusable) {
+        openPairSpan(ctx, side, contributor.turn_key, contributor.span_id, note);
+        return;
+      }
+      openPairTurn(ctx, side, contributor.turn_key, note);
+    });
+    row.appendChild(open);
+    row.appendChild(note);
+    cell.appendChild(row);
+  });
+}
+
+function commandGroupRows(group, side, ctx) {
+  var outcomes = group.response_success || {};
+  var tr = el("tr", "openable");
+  tr.setAttribute("data-command-group", group.unknown_command
+    ? "" : String(group.command_name));
+  tr.appendChild(el("td", null, commandGroupName(group)));
+  tr.appendChild(el("td", null, fmtCount(group.dispatches)));
+  tr.appendChild(el("td", null, fmtCount(outcomes.true || 0)));
+  tr.appendChild(el("td", null, fmtCount(outcomes.false || 0)));
+  tr.appendChild(el("td", null, fmtCount(outcomes.unknown || 0)));
+  tr.appendChild(el("td", null, group.conflict_count
+    ? fmtCount(group.conflict_count) : "—"));
+  tr.appendChild(el("td", null, fmtCommandDuration(group.duration)));
+  tr.appendChild(el("td", null, fmtCommandTimedCoverage(group.duration)));
+  var detail = el("tr", "child");
+  detail.hidden = true;
+  var cell = el("td");
+  cell.colSpan = 8;
+  detail.appendChild(cell);
+  var loaded = false;
+  function toggle() {
+    if (!loaded) {
+      appendCommandContributors(cell, group, side, ctx);
+      loaded = true;
+    }
+    detail.hidden = !detail.hidden;
+  }
+  tr.title = "show the dispatches this row counted";
+  tr.tabIndex = 0;
+  tr.addEventListener("click", toggle);
+  tr.addEventListener("keydown", function (event) {
+    if (event.target === tr && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      toggle();
+    }
+  });
+  return [tr, detail];
+}
+
+function renderCommandSide(label, side, summary, ctx) {
+  var box = el("details", "artifactPreview");
+  box.setAttribute("data-command-summary", label.toLowerCase());
+  box.appendChild(el("summary", null, label + " — " + commandHeadline(summary)));
+  appendCommandCoverage(box, summary);
+  var groups = summary.groups || [];
+  if (!groups.length) {
+    box.appendChild(el("div", "empty",
+      "No command dispatch is recorded on this side."));
+    return box;
+  }
+  var wrap = el("div", "ledgerWrap");
+  var table = el("table", "ledger");
+  var head = el("tr");
+  ["command", "dispatches", "succeeded", "failed", "not recorded",
+   "record vs span", "inclusive min / median / max", "timed"]
+    .forEach(function (column) {
+      head.appendChild(el("th", null, column));
+    });
+  table.appendChild(head);
+  groups.forEach(function (group) {
+    commandGroupRows(group, side, ctx).forEach(function (row) {
+      table.appendChild(row);
+    });
+  });
+  wrap.appendChild(table);
+  box.appendChild(wrap);
+  return box;
+}
+
+function renderCommandSummary(container, cmp, ctx) {
+  var sides = [["Left", "left"], ["Right", "right"]].filter(function (side) {
+    var projection = side[1] === "left" ? cmp.left : cmp.right;
+    return projection && projection.command_summary;
+  });
+  if (!sides.length) { return; }
+  container.appendChild(el("h2", null, "Commands"));
+  container.appendChild(el("div", "sub",
+    "Grouped by the command name the evidence recorded, per dispatch, and "
+    + "independently for each side: these are two runs' tallies, never one "
+    + "pooled figure, and the better answer is still the one above."));
+  sides.forEach(function (side) {
+    var projection = side[1] === "left" ? cmp.left : cmp.right;
+    container.appendChild(renderCommandSide(
+      side[0], pairSide(cmp, side[1]), projection.command_summary, ctx));
+  });
+}
+
 function renderComparisonSummary(container, cmp) {
   var summary = cmp.summary || {};
   var kv = el("dl", "kv");
@@ -5927,6 +6500,13 @@ function renderComparisonUsage(container, cmp) {
       + "what either run did, and it does not decide between them."));
   }
 }
+
+/* The expensive recorded LLM calls of each side are rendered by
+   `renderComparisonCallCosts`, which lives below the pair composer rather than
+   here beside its neighbours: it orders one side's calls by the cost the server
+   published for each of them, and this region is pinned to derive no ordering of
+   its own, because the step alignment and every reference on the compare view
+   must come from the recorded evidence and nothing else. */
 
 function renderAlignment(container, cmp, ctx) {
   if (!cmp.alignment) {
@@ -6241,6 +6821,327 @@ function renderPairComposer(container, cmp, ctx, row, labelFor) {
    the API returned. The anchored turn is each side's FIRST recorded turn and
    the reference stays whole, so this comment carries the same pair identity a
    comment on any row of the same comparison does. */
+/* -- the expensive recorded LLM calls of one side [fix-9eg.3.1.2] ---------- */
+/* WHICH recorded calls a side's totals above are made of, dearest first, for
+   each side separately and never pooled across the two.
+
+   Read off `turns[].usage.calls_detail` -- the per-call anchors the server
+   publishes beside the roll-up -- and never re-derived from spans: this pane
+   never loads them, and a second tally here is exactly how a list and a total
+   come to disagree about one recorded execution. Nothing is charged again
+   either: a wrapper recorded at two levels was folded away upstream, and a call
+   quoting a provider response another call already accounts for carries no cost
+   of its own, so the rows add up to the money the chips already reported.
+
+   Three absences, kept apart, because collapsing any two of them is the failure
+   this section exists to avoid: a call that recorded 0 spent nothing, a call
+   that recorded no cost at all is unknown, and a shared response is accounted
+   under its twin. The order is by recorded cost WITHIN one side; a side that
+   spent less is not thereby the better answer and nothing here ranks the two
+   runs against each other. */
+
+/* How many rows a side shows before it says how many it is not showing.
+   Nothing is aggregated away: the rest stay in their own turns' traces. */
+var COMPARISON_CALLS_SHOWN = 20;
+
+var CALL_COST_RECORDED = 0;     /* a cost is on record -- a real 0 included */
+var CALL_COST_UNRECORDED = 1;   /* nothing recorded one: unknown, not free */
+var CALL_COST_SHARED = 2;       /* accounted under another call's response */
+
+function callCostGroup(call) {
+  if (!call || typeof call !== "object") { return CALL_COST_UNRECORDED; }
+  if (call.usage_state === "shared_response") { return CALL_COST_SHARED; }
+  return finiteNumber(call.cost) === null
+    ? CALL_COST_UNRECORDED : CALL_COST_RECORDED;
+}
+
+/* Every canonical call one side recorded, dearest known cost first.
+
+   `turnsWithoutDetail` is its own answer rather than a shorter list: a payload
+   that carries a turn's roll-up without its per-call anchors is one this pane
+   cannot list, and saying so is the difference between "no expensive call here"
+   and "not published here". */
+function comparisonSideCalls(projection) {
+  var calls = [];
+  var turnsWithoutDetail = 0;
+  var callsWithoutDetail = 0;
+  ((projection && projection.turns) || []).forEach(function (turn) {
+    var usage = turn.usage || {};
+    if (!usage.calls_detail) {
+      if (usage.calls) {
+        turnsWithoutDetail += 1;
+        callsWithoutDetail += usage.calls;
+      }
+      return;
+    }
+    usage.calls_detail.forEach(function (call) {
+      calls.push({
+        call: call,
+        turnKey: call.turn_key || turn.turn_key,
+        turnIndex: turn.turn_index,
+        passId: turn.pass_id || null
+      });
+    });
+  });
+  /* Dearest recorded cost first, then the unknown ones, then the ones charged
+     under another call. Ties fall back to the recorded turn and span id so two
+     readers of one payload see one order. */
+  calls.sort(function (a, b) {
+    var groupA = callCostGroup(a.call), groupB = callCostGroup(b.call);
+    if (groupA !== groupB) { return groupA - groupB; }
+    if (groupA === CALL_COST_RECORDED && a.call.cost !== b.call.cost) {
+      return b.call.cost - a.call.cost;
+    }
+    if (a.turnIndex !== b.turnIndex) {
+      return (a.turnIndex || 0) - (b.turnIndex || 0);
+    }
+    return String(a.call.span_id).localeCompare(String(b.call.span_id));
+  });
+  return {
+    calls: calls,
+    turnsWithoutDetail: turnsWithoutDetail,
+    callsWithoutDetail: callsWithoutDetail
+  };
+}
+
+function fmtRecordedCallCost(call) {
+  if (callCostGroup(call) === CALL_COST_SHARED) {
+    return "cost counted under another call quoting the same provider response";
+  }
+  var cost = finiteNumber(call.cost);
+  if (cost === null) { return "cost not recorded for this call"; }
+  if (cost === 0) { return "cost 0.0000 — recorded, not missing"; }
+  return "cost " + cost.toFixed(4);
+}
+
+function fmtRecordedCallTokens(call) {
+  if (callCostGroup(call) === CALL_COST_SHARED) {
+    return "tokens counted under that call too";
+  }
+  var total = exactInt(call.total_tokens);
+  if (total === null) { return "tokens not recorded"; }
+  return fmtCount(total) + " tok";
+}
+
+function fmtRecordedCallCache(call) {
+  if (call.cache_state === "hit") { return "from cache"; }
+  if (call.cache_state === "miss") { return "from the provider"; }
+  return "cache state not recorded";
+}
+
+/* One recorded call: what it spent, how its answer arrived, and where it is. */
+function renderRecordedCallRow(entry, cmp, which, label, ctx) {
+  var call = entry.call;
+  var row = el("div", "compareRow");
+  var meta = el("div", "rowMeta");
+  var priced = callCostGroup(call) === CALL_COST_RECORDED;
+  meta.appendChild(el("span", "chipCost" + (priced ? "" : " unrecorded"),
+    fmtRecordedCallCost(call)));
+  meta.appendChild(el("span",
+    "chipCost" + (exactInt(call.total_tokens) === null ? " unrecorded" : ""),
+    fmtRecordedCallTokens(call)));
+  meta.appendChild(el("span",
+    "chipCost" + (call.cache_state === "hit" ? "" : " unrecorded"),
+    fmtRecordedCallCache(call)));
+  if (call.usage_state === "partial") {
+    meta.appendChild(el("span", "chipMarker unknown",
+      "usage partly recorded, so this call's tokens are not a whole count"));
+  }
+  if (call.completed === false) {
+    meta.appendChild(el("span", "chipMarker warn",
+      "still open — recorded before this call finished"));
+  }
+  row.appendChild(meta);
+  row.appendChild(el("div", "sub",
+    (call.model || "model not recorded")
+    + " · " + label.toLowerCase() + " side"
+    + " · turn " + (exactInt(entry.turnIndex) === null ? "—" : entry.turnIndex)
+    + " " + (entry.turnKey || "not recorded")
+    + " · span " + (call.span_id || "not recorded")
+    + (entry.passId ? " · pass " + entry.passId : "")));
+  var note = el("div", "sub", "");
+  var open = el("button", "evidenceLink", "Open this recorded call");
+  open.type = "button";
+  open.setAttribute("data-recorded-call", call.span_id || "");
+  open.setAttribute("data-recorded-call-side", which);
+  open.addEventListener("click", function () {
+    openPairCall(ctx, pairSide(cmp, which), entry, note);
+  });
+  row.appendChild(open);
+  row.appendChild(note);
+  return row;
+}
+
+/* One side's list, named by the evidence it was read from: the store that
+   recorded it, the experiment it belongs to, and the recorded pass this
+   projection was scoped to -- or that there is none, which is not the same as
+   a pass nobody stamped a name on. */
+function renderSideCallCosts(cmp, which, label, ctx) {
+  var projection = which === "left" ? cmp.left : cmp.right;
+  var run = (which === "left" ? cmp.left_run : cmp.right_run) || {};
+  var side = pairSide(cmp, which);
+  var usage = (projection && projection.usage) || {};
+  var found = comparisonSideCalls(projection);
+  function grouped(group) {
+    return found.calls.filter(function (entry) {
+      return callCostGroup(entry.call) === group;
+    });
+  }
+  var priced = grouped(CALL_COST_RECORDED);
+  var unknown = grouped(CALL_COST_UNRECORDED);
+  var shared = grouped(CALL_COST_SHARED);
+  var box = el("details", "side");
+  var attempt = (run.attempt === undefined || run.attempt === null)
+    ? "—" : run.attempt;
+  /* Counted BEFORE the summary is written. The fold is closed when a reader
+     first sees this side, so the summary is the only line showing -- and
+     heading a side whose evidence could not be read with "0 recorded LLM
+     calls" would state the one fact this list exists to avoid stating. */
+  var unreadable = ((projection && projection.unavailable) || []).length;
+  var withheld = unreadable || found.turnsWithoutDetail;
+  box.appendChild(el("summary", null,
+    label + ": attempt " + attempt + " — "
+    + ((!found.calls.length && withheld)
+        ? "no recorded LLM call can be listed, and that is missing evidence"
+        : found.calls.length
+          + (found.calls.length === 1
+              ? " recorded LLM call" : " recorded LLM calls")
+          + (priced.length
+              ? ", dearest " + priced[0].call.cost.toFixed(4)
+              : ", none of them priced"))));
+  box.appendChild(el("div", "sub",
+    "source " + (side.storeId || "not recorded")
+    + (side.experimentId ? " · experiment " + side.experimentId : "")
+    + ((projection && projection.ref && projection.ref.pass_id)
+        ? " · pass " + projection.ref.pass_id
+        : " · no recorded pass scope")));
+  box.appendChild(el("div", "sub",
+    priced.length + " priced, " + unknown.length + " with no recorded cost, "
+    + shared.length + " quoting a response another call accounts for. These are "
+    + "the same calls the totals above were counted over, so nothing is "
+    + "charged twice here."));
+  var coverage = (usage.tokens || {}).coverage;
+  var cache = fmtCacheCounts(usage.cache);
+  box.appendChild(el("div", "sub",
+    "tokens " + (coverage ? "coverage " + coverage : "coverage not reported")
+    + (cache ? " · " + cache : "")));
+  /* Turns this side could not be read at all. Their calls are missing from the
+     list because the evidence is missing, which is not the same as a run that
+     made fewer calls -- so the count is shown whether or not anything else is
+     listed. */
+  if (unreadable) {
+    box.appendChild(el("div", "sub",
+      unreadable + " turn(s) of this side could not be read, so any call they "
+      + "recorded is missing from this list rather than absent from the run."));
+  }
+  if (found.turnsWithoutDetail) {
+    box.appendChild(el("div", "sub",
+      found.turnsWithoutDetail + " turn(s) of this side published a roll-up "
+      + "without per-call anchors, so " + found.callsWithoutDetail
+      + " recorded call(s) of it cannot be listed here."));
+  }
+  var counted = exactInt(usage.calls) || 0;
+  if (!found.calls.length) {
+    /* "Nothing to list" and "nothing happened" are different findings. A side
+       whose roll-up counted calls, or whose turns could not be read, has
+       missing evidence -- and reporting that as a run which made no LLM call
+       would be inventing the one fact this list is read for. */
+    box.appendChild(el("div", "empty",
+      (counted || unreadable || found.turnsWithoutDetail)
+        ? "No call of this side can be listed here, and that is missing "
+          + "evidence rather than a side that made no LLM call."
+        : "No LLM call is recorded on this side."));
+    return box;
+  }
+  if (counted && found.calls.length < counted) {
+    box.appendChild(el("div", "sub",
+      "Listing " + found.calls.length + " of the " + counted
+      + " calls counted above; the rest recorded no per-call anchor here."));
+  }
+  var rows = el("div");
+  box.appendChild(rows);
+  paintRecordedCallRows(rows, found.calls, COMPARISON_CALLS_SHOWN,
+                        cmp, which, label, ctx);
+  return box;
+}
+
+/* Bounded first, complete on request.
+
+   Every call of this side is already in the payload on screen, so showing the
+   rest reveals what is in hand and issues no read, no scan and no second
+   accounting. The hidden ones are counted BY KIND because the order puts the
+   unknown-cost and shared-response calls last: without that line, a side with
+   many priced calls would leave a reader unable to tell whether any unpriced
+   call exists at all. */
+function paintRecordedCallRows(rows, entries, limit, cmp, which, label, ctx) {
+  clear(rows);
+  var shown = Math.min(limit, entries.length);
+  entries.slice(0, shown).forEach(function (entry) {
+    rows.appendChild(renderRecordedCallRow(entry, cmp, which, label, ctx));
+  });
+  if (shown >= entries.length) { return; }
+  var hidden = entries.slice(shown);
+  function hiddenOf(group) {
+    return hidden.filter(function (entry) {
+      return callCostGroup(entry.call) === group;
+    }).length;
+  }
+  rows.appendChild(el("div", "sub",
+    "Showing the " + shown + " dearest of " + entries.length
+    + " recorded calls. Not shown: " + hiddenOf(CALL_COST_RECORDED)
+    + " priced, " + hiddenOf(CALL_COST_UNRECORDED) + " with no recorded cost, "
+    + hiddenOf(CALL_COST_SHARED)
+    + " quoting a response another call accounts for. None of them is "
+    + "aggregated away."));
+  var more = el("button", "evidenceLink",
+    "Show all " + entries.length + " recorded calls of this side");
+  more.type = "button";
+  more.setAttribute("data-show-all-calls", which);
+  more.addEventListener("click", function () {
+    paintRecordedCallRows(rows, entries, entries.length, cmp, which, label, ctx);
+  });
+  rows.appendChild(more);
+}
+
+function renderComparisonCallCosts(container, cmp, ctx) {
+  var sides = [["left", "Left"], ["right", "Right"]].filter(function (side) {
+    var projection = side[0] === "left" ? cmp.left : cmp.right;
+    return projection && projection.usage;
+  });
+  if (!sides.length) { return; }
+  container.appendChild(el("h2", null, "Expensive recorded LLM calls"));
+  container.appendChild(el("div", "sub",
+    "Each side's own recorded calls, dearest recorded cost first, with the turn "
+    + "and span that recorded each one. Costing less is not being right: these "
+    + "two lists are read separately and neither picks a winner."));
+  var panes = el("div", "comparePanes");
+  sides.forEach(function (side) {
+    panes.appendChild(renderSideCallCosts(cmp, side[0], side[1], ctx));
+  });
+  container.appendChild(panes);
+}
+
+/* One row's link, through the shared `openPairSpan`: the side's own reference
+   decides the source, and the anchor is the CANONICAL span id this call was
+   published under -- not its parent span and not its position in this list, so
+   a folded wrapper or a re-ordered list can never redirect a reader to a
+   different recorded call. */
+function openPairCall(ctx, side, entry, note) {
+  var spanId = entry.call.span_id;
+  if (!spanId) {
+    /* An anonymous record is still a call that was made, so the roll-up counts
+       it -- but there is no span to anchor to, and only its turn can be
+       opened. */
+    openPairTurn(ctx, side, entry.turnKey, note);
+    if (!note.textContent) {
+      note.textContent = "This call recorded no span id, so only the turn that "
+        + "recorded it could be opened.";
+    }
+    return;
+  }
+  openPairSpan(ctx, side, entry.turnKey, spanId, note);
+}
+
 function pairTurnAnchors(cmp) {
   function anchor(projection) {
     var ref = projection && projection.ref;
@@ -7404,7 +8305,10 @@ function loadWorkspaceChrome() {
   });
 }
 
-function selectWorkspaceTurn(storeId, logicalTurnKey) {
+/* `spanId` and `note` are optional and used by `openPairSpan` only: a caller
+   that wants one exact recorded call focused once this archive's trace is on
+   screen. Every existing caller opens the turn and passes neither. */
+function selectWorkspaceTurn(storeId, logicalTurnKey, spanId, note) {
   var detailNav = expNavToken();
   benchmarkExperimentSource = null;
   var nav = ++workspaceNav;
@@ -7448,6 +8352,7 @@ function selectWorkspaceTurn(storeId, logicalTurnKey) {
     var turn = results[0].turn;
     turn.turn_key = turn.logical_turn_key || turn.turn_key;
     renderDetail(turn, results[1].spans || []);
+    focusLoadedSpan(spanId, note);
   }).catch(function (e) {
     if (nav !== workspaceNav || state.storeId !== storeId || expNavStale(detailNav)) { return; }
     clear(d);
@@ -7456,7 +8361,11 @@ function selectWorkspaceTurn(storeId, logicalTurnKey) {
 }
 
 /* -- turn detail ------------------------------------------------------- */
-function selectTurn(turnKey) {
+/* `spanId` and `note` are optional and used by `openPairSpan` only: the span is
+   focused inside the stale guard below, after the trace it belongs to has been
+   rendered, so a focus request can never be applied to another run's trace.
+   Every existing caller opens the turn and passes neither. */
+function selectTurn(turnKey, spanId, note) {
   var nav = expNavToken();   // this view now owns #detail
   state.turnKey = turnKey;
   state.turn = null;
@@ -7468,6 +8377,7 @@ function selectTurn(turnKey) {
   ]).then(function (results) {
     if (expNavStale(nav)) { return; }
     renderDetail(results[0].turn, results[1].spans || []);
+    focusLoadedSpan(spanId, note);
   }).catch(function (e) {
     if (expNavStale(nav)) { return; }
     var d = document.getElementById("detail");
@@ -10804,9 +11714,16 @@ function resetSourceScopedState() {
   turnFind.running = false;
   turnFind.text = "";
   turnFind.markers = {};
+  /* The scope named an experiment, task or attempt IN THE SOURCE BEING
+     LEFT. The one being opened can hold those same labels over other runs,
+     so it goes with the rest of the search rather than being re-applied. */
+  turnFind.scope = null;
+  turnFind.source = null;
+  turnFind.sourceMoved = false;
   var findText = document.getElementById("turnFindText");
   if (findText) { findText.value = ""; }
   turnFindRenderMarkers();
+  turnFindRenderScope();
   turnFindRender();
 
   benchmarkExperimentSource = null;
