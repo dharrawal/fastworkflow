@@ -44,7 +44,7 @@ collapsing to its final answer.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from fastworkflow.observability.comparison import ExecutionRef
 from fastworkflow.observability.selection import (
@@ -348,6 +348,80 @@ def list_task_attempts(
     scope = _TaskScope(control, experiment_id, task_id, store_id=store_id)
     rows = sorted(scope.attempt_rows(), key=lambda row: int(row["attempt"]))
     return [project_attempt(scope, row) for row in rows]
+
+
+def select_task_attempts(
+    control: SelectionControlStore,
+    experiment_id: str,
+    task_id: str,
+    attempts: Sequence[int],
+    *,
+    store_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """The attempts a caller NAMED, projected; the rest enumerated only.
+
+    `list_task_attempts` pages every attempt's whole conversation, which is
+    what the task header needs and exactly what a caller asking about three of
+    forty runs must not pay for -- and, more importantly, must not PUBLISH:
+    projecting the other thirty-seven would put evidence nobody asked about
+    into the answer.
+
+    So the attempt rows are enumerated (metadata the store already holds: the
+    attempt number, its status, its completion marker) and `project_attempt`
+    -- the part that pages turn keys and builds an `ExecutionRef` -- runs for
+    the named attempts only. `recorded_attempts` says which numbers exist, so a
+    caller can report the ones it named that do not, without reading them.
+
+    `best_attempt` and `reference_attempt` are resolved as NUMBERS here, from
+    the control pointer and from the attempt rows' own status, for the same
+    reason: labelling the named runs does not require projecting the others.
+    """
+    scope = _TaskScope(control, experiment_id, task_id, store_id=store_id,
+                       require_store=False)
+    rows = sorted(scope.attempt_rows(), key=lambda row: int(row["attempt"]))
+    by_attempt = {int(row["attempt"]): row for row in rows}
+    pointer = control.scoped_pointer(
+        scope_kind=TASK_BEST_SCOPE, group_id=scope.group_id, scope_key=scope.scope_key
+    )
+    best_attempt = (
+        None
+        if pointer is None or pointer.get("attempt") is None
+        else int(pointer["attempt"])
+    )
+    reference = next(
+        (
+            int(row["attempt"])
+            for row in rows
+            if row.get("execution_status") == "completed" and attempt_is_finished(row)
+        ),
+        None,
+    )
+    wanted = sorted({int(attempt) for attempt in attempts})
+    selected: list[dict[str, Any]] = []
+    for attempt in wanted:
+        row = by_attempt.get(attempt)
+        if row is None:
+            continue
+        projected = project_attempt(scope, row)
+        projected["is_best"] = best_attempt is not None and attempt == best_attempt
+        projected["is_reference"] = reference is not None and attempt == reference
+        selected.append(projected)
+    return {
+        "experiment_id": scope.experiment_id,
+        "task_id": scope.task_id,
+        "group_id": scope.group_id,
+        "source_id": scope.source_id,
+        "store_id": scope.store_id,
+        "scope_key": scope.scope_key,
+        "evidence_readable": scope.store is not None,
+        "recorded_attempts": [int(row["attempt"]) for row in rows],
+        "best_attempt": best_attempt,
+        "reference_attempt": reference,
+        "selected": selected,
+        "not_recorded": [
+            attempt for attempt in wanted if attempt not in by_attempt
+        ],
+    }
 
 
 def reference_attempt(
@@ -720,6 +794,7 @@ __all__ = [
     "project_attempt",
     "reference_attempt",
     "select_best_run",
+    "select_task_attempts",
     "task_run_summary",
     "task_scope_key",
 ]

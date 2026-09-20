@@ -60,6 +60,7 @@ from fastworkflow.observability import command_summary as command_summary_module
 from fastworkflow.observability import comparison as comparison_module
 from fastworkflow.observability import consistency as consistency_module
 from fastworkflow.observability import pair_review as pair_review_module
+from fastworkflow.observability import selected_runs as selected_runs_module
 from fastworkflow.observability import selection
 from fastworkflow.observability import workspace as workspace_module
 from fastworkflow.observability.store import FEEDBACK_PROVENANCES
@@ -174,6 +175,69 @@ def _view(query: dict[str, list[str]]) -> str:
     if view not in VIEWS:
         raise ApiError(400, "view must be one of " + ", ".join(VIEWS))
     return view
+
+
+def _refuse_unsupported(
+    query: dict[str, list[str]], allowed: frozenset[str], *, route: str
+) -> None:
+    """Refuse a parameter this route does not implement, rather than drop it.
+
+    Ignoring an unknown `right_experiment`, `pass_id` or `store_id` would
+    answer a NARROWER question than the one asked and label the answer with
+    the caller's own words for the wider one. Every scope this route does not
+    support is therefore a refusal that names what it refused.
+    """
+    unsupported = sorted(name for name in query if name not in allowed)
+    if not unsupported:
+        return
+    raise ApiError(
+        400,
+        f"{route} does not accept " + ", ".join(unsupported)
+        + ". This route summarizes whole finished runs of the one experiment "
+        "and task named in its path, from the source that experiment is "
+        "authorized against: there is no pass scope, no second experiment, no "
+        "client-named store and no default-store fallback. Accepted "
+        "parameters: " + ", ".join(sorted(allowed)),
+        refused="unsupported_parameter",
+        unsupported=unsupported,
+        accepted=sorted(allowed),
+    )
+
+
+def _selected_attempts(
+    query: dict[str, list[str]], *, allowed: frozenset[str], route: str
+) -> tuple[list[int], int]:
+    """The runs a request names: exact integers, deduplicated and bounded."""
+    _refuse_unsupported(query, allowed, route=route)
+    raw = list(query.get("attempt") or [])
+    if len(raw) > selected_runs_module.MAX_ATTEMPT_PARAMS:
+        raise ApiError(
+            400,
+            f"this request names {len(raw)} attempt parameters; at most "
+            f"{selected_runs_module.MAX_ATTEMPT_PARAMS} are parsed",
+            refused="too_many_parameters",
+            max_parameters=selected_runs_module.MAX_ATTEMPT_PARAMS,
+        )
+    return selected_runs_module.bound_attempts(
+        [_exact_int(value, "attempt") for value in raw]
+    )
+
+
+def _expected_members(query: dict[str, list[str]]) -> dict[int, str]:
+    """`?expect_member=3:mev-...` repeated, for a drill-down that revalidates
+    only the run it is about to open."""
+    expected: dict[int, str] = {}
+    for value in (query.get("expect_member") or []):
+        text = _text(value, "expect_member") or ""
+        attempt, separator, digest = text.partition(":")
+        if not separator or not digest.strip():
+            raise ApiError(
+                400,
+                "expect_member must be '<attempt>:<evidence digest>', as the "
+                "selection summary published it",
+            )
+        expected[_exact_int(attempt.strip(), "expect_member attempt")] = digest.strip()
+    return expected
 
 
 def _actor(body: dict[str, Any]) -> dict[str, str]:
@@ -345,6 +409,95 @@ def _task_summary(
     control: selection.SelectionControlStore, experiment_id: str, task_id: str
 ) -> dict[str, Any]:
     return best_run_module.task_run_summary(control, experiment_id, task_id)
+
+
+# ----------------------------------------------------------------------
+# A bounded, explicitly selected set of whole runs (`fix-9eg.3.2.1`)
+# ----------------------------------------------------------------------
+#
+# Deliberately NOT built on `_task_summary`: that projects every recorded
+# attempt of the task, and a request naming three of forty runs must neither
+# pay for the other thirty-seven nor publish them. `select_task_attempts`
+# enumerates the attempt rows and projects the named ones only.
+
+SELECTED_RUNS_PARAMS = frozenset({"attempt"})
+SELECTED_RUNS_VALIDATION_PARAMS = frozenset({"attempt", "expect", "expect_member"})
+# One archive is one source. `segment_id` is not a wider scope: it is how a
+# workspace names WHICH archive an attempt number belongs to when two hold it.
+WORKSPACE_SELECTED_RUNS_PARAMS = frozenset({"attempt", "segment_id"})
+WORKSPACE_SELECTED_RUNS_VALIDATION_PARAMS = frozenset(
+    {"attempt", "segment_id", "expect", "expect_member"}
+)
+
+
+def _selected_scope(
+    control: selection.SelectionControlStore,
+    experiment_id: str,
+    task_id: str,
+    attempts: list[int],
+) -> dict[str, Any]:
+    resolved = best_run_module.select_task_attempts(
+        control, experiment_id, task_id, attempts
+    )
+    if not resolved["evidence_readable"]:
+        raise ApiError(
+            409,
+            f"the evidence store behind source {resolved['source_id']!r} is "
+            "not readable right now, so these runs cannot be summarized",
+        )
+    return resolved
+
+
+def _selected_runs_payload(
+    control: selection.SelectionControlStore,
+    experiment_id: str,
+    task_id: str,
+    query: dict[str, list[str]],
+) -> dict[str, Any]:
+    attempts, duplicates = _selected_attempts(
+        query, allowed=SELECTED_RUNS_PARAMS, route="selected-runs"
+    )
+    resolved = _selected_scope(control, experiment_id, task_id, attempts)
+    return selected_runs_module.aggregate_selected_runs(
+        experiment_id=experiment_id,
+        task_id=task_id,
+        source_id=resolved["source_id"],
+        store_id=resolved["store_id"],
+        requested=attempts,
+        duplicate_requests=duplicates,
+        recorded_attempts=resolved["recorded_attempts"],
+        candidate_rows=resolved["selected"],
+        reader=_AuthorizedReader(control),
+    )
+
+
+def _selected_runs_validation(
+    control: selection.SelectionControlStore,
+    experiment_id: str,
+    task_id: str,
+    query: dict[str, list[str]],
+) -> dict[str, Any]:
+    attempts, _duplicates = _selected_attempts(
+        query,
+        allowed=SELECTED_RUNS_VALIDATION_PARAMS,
+        route="selected-runs/validation",
+    )
+    resolved = _selected_scope(control, experiment_id, task_id, attempts)
+    return selected_runs_module.validate_selection(
+        experiment_id=experiment_id,
+        task_id=task_id,
+        # The same scope the aggregate was computed under: the result
+        # digest is bound to it, so validating without it would
+        # compare against a digest this route never published.
+        source_id=resolved["source_id"],
+        store_id=resolved["store_id"],
+        requested=attempts,
+        recorded_attempts=resolved["recorded_attempts"],
+        candidate_rows=resolved["selected"],
+        reader=_AuthorizedReader(control),
+        expect=_text((query.get("expect") or [None])[0], "expect", required=False),
+        expect_members=_expected_members(query),
+    )
 
 
 def _side(
@@ -690,6 +843,12 @@ def _get_task(
             "pass_turns_omitted": omitted,
             "view": view,
         }
+
+    if rest == ["selected-runs"]:
+        return 200, _selected_runs_payload(control, experiment_id, task_id, query)
+
+    if rest == ["selected-runs", "validation"]:
+        return 200, _selected_runs_validation(control, experiment_id, task_id, query)
 
     if rest == ["comparison"]:
         return 200, _comparison_payload(workflow_path, control, experiment_id, task_id, query)
@@ -1480,6 +1639,12 @@ def _workspace_attempts(
                 # or scoping a write uses the right one of the two.
                 "manifest_store_id": manifest_store_id,
                 "execution_status": row.get("execution_status"),
+                "execution_finished_at": row.get("execution_finished_at"),
+                # The execution completion marker, carried out of the
+                # archive rather than inferred from the status: a summary
+                # over whole FINISHED runs has to be able to tell a run
+                # that stopped from a run that ended.
+                "finished": best_run_module.attempt_is_finished(row),
                 "outcome": row.get("outcome"),
                 "outcome_source": row.get("outcome_source"),
                 "reward": row.get("reward"),
@@ -1567,6 +1732,115 @@ def _workspace_consistency(
         )
         payload["compare_experiment_id"] = compare_experiment
     return payload
+
+
+def _workspace_selected_rows(
+    workspace: Any,
+    names: "_WorkspaceNames",
+    experiment_id: str,
+    task_id: str,
+    attempts: list[int],
+    segment_id: Optional[str],
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """`(rows for the named attempts, every recorded attempt number)`.
+
+    A sealed archive carries evidence, and summarizing the evidence of runs a
+    reader names is a READ of it -- so it is answered here rather than refused
+    with the decisions wording, which is about winners and best runs and has
+    nothing to say about counting dispatches.
+
+    Two archive-only ambiguities are refused, both about SCOPE and neither
+    about decisions. A logical experiment stitched from several segments can
+    record attempt 2 twice, and pooling two different runs under one number is
+    exactly the error this whole route exists to avoid, so a duplicated
+    attempt asks for `segment_id`. A selection whose members resolve to more
+    than one archive is refused downstream by the coordinator, because one
+    summary over two sources is not a summary of a source.
+    """
+    rows = _workspace_attempts(workspace, experiment_id, task_id, names)
+    if segment_id:
+        rows = [row for row in rows if str(row["segment_id"]) == segment_id]
+    wanted = set(attempts)
+    chosen: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        attempt = int(row["attempt"])
+        if attempt not in wanted:
+            continue
+        if attempt in chosen:
+            raise ApiError(
+                409,
+                f"attempt {attempt} is recorded in more than one segment of "
+                "this archive, so a summary over it would pool two different "
+                "runs under one number; name segment_id",
+                segment_ids=sorted(
+                    {
+                        str(chosen[attempt].get("segment_id") or ""),
+                        str(row.get("segment_id") or ""),
+                    }
+                ),
+            )
+        chosen[attempt] = row
+    return (
+        [chosen[attempt] for attempt in sorted(chosen)],
+        [int(row["attempt"]) for row in rows],
+    )
+
+
+def _workspace_selected_runs(
+    workspace: Any,
+    names: "_WorkspaceNames",
+    reader: Any,
+    experiment_id: str,
+    task_id: str,
+    query: dict[str, list[str]],
+    *,
+    validate: bool,
+) -> dict[str, Any]:
+    attempts, duplicates = _selected_attempts(
+        query,
+        allowed=(
+            WORKSPACE_SELECTED_RUNS_VALIDATION_PARAMS
+            if validate
+            else WORKSPACE_SELECTED_RUNS_PARAMS
+        ),
+        route="selected-runs/validation" if validate else "selected-runs",
+    )
+    segment_id = (query.get("segment_id") or [None])[0]
+    selected, recorded = _workspace_selected_rows(
+        workspace, names, experiment_id, task_id, attempts, segment_id
+    )
+    # Both of an archive's names, resolved once and used by both
+    # routes: the evidence identity the references carry, and the
+    # manifest's own name, which is what every workspace turn and
+    # span route is addressed by.
+    source_id = selected[0].get("manifest_store_id") if selected else None
+    store_id = selected[0].get("store_id") if selected else None
+    if validate:
+        return selected_runs_module.validate_selection(
+            experiment_id=experiment_id,
+            task_id=task_id,
+            source_id=source_id,
+            store_id=store_id,
+            requested=attempts,
+            recorded_attempts=recorded,
+            candidate_rows=selected,
+            reader=reader,
+            expect=_text((query.get("expect") or [None])[0], "expect", required=False),
+            expect_members=_expected_members(query),
+            sealed=True,
+        )
+    return selected_runs_module.aggregate_selected_runs(
+        experiment_id=experiment_id,
+        task_id=task_id,
+        source_id=source_id,
+        store_id=store_id,
+        requested=attempts,
+        duplicate_requests=duplicates,
+        recorded_attempts=recorded,
+        candidate_rows=selected,
+        reader=reader,
+        sealed=True,
+    )
 
 
 def _refuse_ambiguous_attempts(
@@ -1714,6 +1988,18 @@ def _workspace_get(
             "view": view,
             "sealed": True,
         }
+
+    if tail == ["selected-runs"]:
+        return 200, _workspace_selected_runs(
+            workspace, names, reader, experiment_id, task_id, query,
+            validate=False,
+        )
+
+    if tail == ["selected-runs", "validation"]:
+        return 200, _workspace_selected_runs(
+            workspace, names, reader, experiment_id, task_id, query,
+            validate=True,
+        )
 
     if tail == ["consistency"]:
         return 200, _workspace_consistency(
@@ -1878,6 +2164,15 @@ def _guard(fn: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str,
         return fn()
     except ApiError as exc:
         return exc.as_response()
+    except selected_runs_module.SelectedRunsError as exc:
+        # A refusal about the SELECTION itself: too many runs, none at
+        # all, two sources, overlapping evidence. Each says which it was,
+        # because a client retries a bound differently from a conflict.
+        return exc.status, {
+            "error": exc.message,
+            "refused": exc.reason,
+            **exc.payload,
+        }
     except selection.StaleSelection as exc:
         return 409, {
             "error": str(exc),

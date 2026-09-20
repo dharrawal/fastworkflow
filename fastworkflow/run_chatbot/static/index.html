@@ -3888,6 +3888,7 @@ function showExperimentTask(experimentId, taskId, label) {
   /* Compare state belongs to one task. Arriving at a different task resets it
      rather than carrying "attempt 3" into a task that has two. */
   resetTaskCompare(experimentId, taskId);
+  resetSelectedRuns(experimentId, taskId);
   if (taskView !== "runs") {
     var view = TASK_VIEWS.filter(function (v) { return v.key === taskView; })[0];
     var viewCard = el("div", "card");
@@ -4399,11 +4400,15 @@ function renderTaskRunList(card, experimentId, taskId, label, evidence, runs, na
         + "unknown — the decision to prefer it stands regardless."));
     }
   }
+  /* Assigned by the panel below, which renders after these rows. A tick
+     before it exists cannot happen -- the panel is appended synchronously in
+     the same paint -- and the no-op default says so rather than crashing. */
+  var selectionChanged = function () {};
   rows.forEach(function (row) {
     var extra = byAttempt[row.attempt] || {};
     var item = el("div", "listItem");
     item.setAttribute("data-attempt", String(row.attempt));
-    item.appendChild(attemptTitle(row));
+    appendRunSelector(item, row);
     var sub = "source: " + (row.outcome_source || extra.outcome_source || "—")
       + (row.reward === null || row.reward === undefined
           ? "" : "  reward " + row.reward)
@@ -4433,9 +4438,447 @@ function renderTaskRunList(card, experimentId, taskId, label, evidence, runs, na
     item.appendChild(actions);
     card.appendChild(item);
   });
+  selectionChanged = renderSelectedRunsPanel(
+    card, experimentId, taskId, label, runs, nav
+  );
+  selectionChanged();
   if (!runs.unavailable && decisions) {
     renderBestRunHistory(card, experimentId, taskId, nav);
   }
+
+  /* The tick itself. Default unticked: a summary is something a reader asks
+     for, never the state the page opens in. Only a FINISHED run can be
+     ticked, because a run still going has not produced the behaviour a
+     summary would be about -- and it is shown disabled with the reason
+     rather than omitted, so the reader can see it was not quietly counted.
+     An attempt whose finished state is not known here (an evidence-only
+     fallback list, with no decision view to say) gets no tick at all rather
+     than one whose meaning nobody can state. */
+  function appendRunSelector(item, row) {
+    var finished = row.selectable === true || row.finished === true;
+    var unfinished = row.selectable === false || row.finished === false;
+    if (!finished && !unfinished) { item.appendChild(attemptTitle(row)); return; }
+    var wrap = el("label", "sub");
+    var box = el("input");
+    box.type = "checkbox";
+    box.setAttribute("data-run-select", String(row.attempt));
+    box.setAttribute("aria-label", "Include attempt " + row.attempt
+                                   + " in the summary of selected runs");
+    if (unfinished) {
+      box.disabled = true;
+      box.title = "This attempt has not finished, so it cannot be summarized "
+        + "with the others yet.";
+    } else {
+      box.checked = !!selectedRuns.chosen[row.attempt];
+      box.addEventListener("change", function () {
+        selectedRuns.chosen[row.attempt] = box.checked;
+        selectionChanged();
+      });
+    }
+    wrap.appendChild(box);
+    wrap.appendChild(el("span", null, " summarize"));
+    item.appendChild(wrap);
+    item.appendChild(attemptTitle(row));
+    if (unfinished) {
+      item.appendChild(el("span", "sub",
+        "Not finished, so it cannot be part of a summary of runs."));
+    }
+  }
+}
+
+/* -- a summary over the runs a reader ticked -------------------------- */
+
+/* Which runs are ticked, for ONE task read from ONE source.
+
+   The key carries the source as well as the task, so switching either drops
+   the ticks rather than carrying "attempt 3" into a task, or an archive, that
+   means something else by it. `generation` rises on every tick and every
+   refresh: a response whose generation, source or navigation token no longer
+   matches is dropped instead of rendered under a question nobody asked.
+
+   The Runs view's own navigation token is used AS PASSED IN. Claiming a new
+   one here would stale the task list and the consistency band that share it,
+   and this panel is part of that render rather than a navigation of its
+   own. */
+var selectedRuns = { key: null, chosen: {}, generation: 0 };
+
+/* Request safety, matching the route: it refuses more than this rather than
+   summarizing some of them, so the page says so before asking. */
+var SELECTED_RUNS_MAX = 20;
+
+/* Which drill-down click owns the navigation. Monotonic, and separate from
+   the summary's generation: two contributors clicked while both validations
+   are in flight must not both navigate, and the one that wins has to be the
+   one the reader clicked LAST -- not whichever check happened to answer
+   first. Claimed on the click, checked before the navigation. */
+var selectedRunsClick = 0;
+
+function selectedRunsKey(experimentId, taskId) {
+  return String(benchmarkExperimentSource) + "\u001f" + experimentId
+    + "\u001f" + taskId;
+}
+
+function resetSelectedRuns(experimentId, taskId) {
+  var key = selectedRunsKey(experimentId, taskId);
+  if (selectedRuns.key === key) { return; }
+  selectedRuns = { key: key, chosen: {}, generation: 0 };
+}
+
+function selectedRunAttempts() {
+  return Object.keys(selectedRuns.chosen)
+    .filter(function (attempt) { return selectedRuns.chosen[attempt]; })
+    .map(Number)
+    .sort(function (a, b) { return a - b; });
+}
+
+function selectedRunsMember(data, attempt) {
+  var found = null;
+  (data.members || []).forEach(function (member) {
+    if (Number(member.attempt) === Number(attempt)) { found = member; }
+  });
+  return found;
+}
+
+/* One member's source, resolved from its OWN reference.
+
+   An archive has two names and they are not interchangeable: the reference
+   carries the evidence identity, and every workspace route is addressed by
+   the manifest's name. Both travel on the member, and `pairReadScope` picks
+   the one its route needs. */
+function selectedRunsSide(data, attempt, experimentId) {
+  var member = selectedRunsMember(data, attempt);
+  return {
+    which: "attempt " + attempt,
+    run: member || {},
+    projection: {},
+    storeId: (member && member.store_id) || null,
+    manifestStoreId: (member && member.manifest_store_id) || null,
+    experimentId: experimentId
+  };
+}
+
+/* Re-check ONE member before opening it, and refuse to open it if what it
+   records is no longer what was counted.
+
+   The route re-projects that run and compares the digest the summary
+   published for it, so an outcome, a duration, a cost or an answer edited in
+   place -- with every identifier unchanged -- is disclosed here rather than
+   quietly standing in for the evidence the totals were made of. Optimistic:
+   it detects a change, it does not prevent one. */
+function validateSelectedMember(data, attempt, experimentId, taskId, note, nav,
+                                then) {
+  var claim = ++selectedRunsClick;
+  var member = selectedRunsMember(data, attempt);
+  if (!member || !member.evidence_digest) { then(); return; }
+  var generation = selectedRuns.generation;
+  var source = selectedRuns.key;
+  var query = "?attempt=" + attempt + "&expect_member="
+    + encodeURIComponent(attempt + ":" + member.evidence_digest);
+  if (note) {
+    note.textContent = "checking that this run still records what was counted…";
+  }
+  selectionRead(
+    taskSelectionPath(experimentId, taskId, "/selected-runs/validation" + query)
+  ).then(function (check) {
+    if (expNavStale(nav) || generation !== selectedRuns.generation
+        || source !== selectedRuns.key || claim !== selectedRunsClick) {
+      /* Four ways to be overtaken: the reader navigated, ticked a different
+         selection, changed source, or clicked something else. The last one
+         is why this is checked at all -- a slow check of the FIRST click
+         answering after a second click would otherwise open the run the
+         reader has already clicked past. */
+      if (note) {
+        note.textContent = "The page moved on before that check answered, so "
+          + "nothing was opened.";
+      }
+      return;
+    }
+    if (check.unavailable) {
+      if (note) { note.textContent = check.error; }
+      return;
+    }
+    if (check.stale) {
+      if (note) {
+        note.textContent = (check.changed && check.changed.length)
+          ? "This run no longer records what these totals were computed from, "
+            + "so it was not opened. Refresh the summary to count it as it is "
+            + "now."
+          : "This run is no longer part of the selection the totals were "
+            + "computed over, so it was not opened.";
+      }
+      return;
+    }
+    if (note) { note.textContent = ""; }
+    then();
+  }).catch(function (e) {
+    if (note) { note.textContent = e.message; }
+  });
+}
+
+/* The exact members, each saying what it put into the totals -- and what it
+   did not. A run that finished having recorded nothing is HERE, in the
+   population, contributing no dispatch and saying so: leaving it out would
+   quietly shrink the denominator of everything above. */
+function renderSelectedRunsMembers(box, data, experimentId, taskId, label, nav) {
+  var list = el("div");
+  list.setAttribute("data-selected-members", "");
+  (data.members || []).forEach(function (member) {
+    var row = el("div", "sub");
+    row.setAttribute("data-selected-member", String(member.attempt));
+    row.appendChild(el("span", null,
+      "attempt " + member.attempt + " · "
+      + (member.outcome || member.execution_status || "unfinished")
+      + " · " + fmtCount(member.dispatches) + " dispatch(es) counted · "
+      + fmtCount(member.turns_read) + " turn(s) read"));
+    if (member.is_best) { row.appendChild(el("span", "pill ok", "Best run")); }
+    if (!member.execution_ref) {
+      row.appendChild(el("span", "chipMarker unknown",
+        "finished with no recorded turns, so it is in this population and in "
+        + "none of these counts"));
+    }
+    if (member.turns_unreadable) {
+      row.appendChild(el("span", "chipMarker unknown",
+        fmtCount(member.turns_unreadable) + " turn(s) it names could not be "
+        + "read"));
+    }
+    var note = el("div", "sub", "");
+    if (member.execution_ref) {
+      var compare = el("button", "evidenceLink", member.is_best
+        ? "Compare with another attempt" : "Compare with the best run");
+      compare.type = "button";
+      compare.addEventListener("click", function () {
+        validateSelectedMember(data, member.attempt, experimentId, taskId, note,
+                               nav, function () {
+          taskCompare.left = member.is_best ? String(member.attempt) : null;
+          taskCompare.right = member.is_best ? null : String(member.attempt);
+          taskCompare.rightExperiment = experimentId;
+          /* A member is a WHOLE run, so the pair opens whole. The picker
+             keeps its pass selection per task, and inheriting a teacher/
+             student scope from an earlier comparison would silently compare
+             part of the run this panel counted all of. */
+          taskCompare.leftPass = null;
+          taskCompare.rightPass = null;
+          taskView = "compare";
+          showExperimentTask(experimentId, taskId, label);
+        });
+      });
+      row.appendChild(compare);
+    }
+    /* The existing task Feedback view, unchanged: comments are written about
+       runs and pairs, and this summary does not invent an object to comment
+       on. */
+    var comment = el("button", "evidenceLink", "Comment");
+    comment.type = "button";
+    comment.addEventListener("click", function () {
+      taskView = "feedback";
+      showExperimentTask(experimentId, taskId, label);
+    });
+    row.appendChild(comment);
+    row.appendChild(note);
+    list.appendChild(row);
+  });
+  box.appendChild(list);
+}
+
+/* Requested, included, and every run that is neither -- named, not counted.
+
+   Nothing here is a rate: "3 of 5" is two numbers and stays two numbers. */
+function appendSelectedRunsPopulation(box, data) {
+  var population = data.population || {};
+  var line = el("div", "sub");
+  line.setAttribute("data-selected-population", "");
+  line.textContent = fmtCount(population.requested || 0)
+    + " run(s) asked for · " + fmtCount(population.included || 0)
+    + " in these counts · " + fmtCount(population.with_readable_evidence || 0)
+    + " with readable evidence";
+  box.appendChild(line);
+  (population.excluded_runs || []).forEach(function (row) {
+    box.appendChild(el("div", "chipMarker unknown",
+      "attempt " + row.attempt + " is not in these counts: " + row.detail));
+  });
+  (population.missing_evidence || []).forEach(function (attempt) {
+    box.appendChild(el("div", "chipMarker unknown",
+      "attempt " + attempt + " finished having recorded nothing, so it is in "
+      + "this population and in none of these counts; how much it would have "
+      + "contributed is unknown"));
+  });
+}
+
+function renderSelectedRunsResult(body, data, experimentId, taskId, label, ctx,
+                                  nav) {
+  var summary = data.command_summary || {};
+  var coverage = summary.coverage || {};
+  body.appendChild(el("div", "sub", commandHeadline(summary)));
+  appendSelectedRunsPopulation(body, data);
+  appendCommandCoverage(body, summary, {
+    headline: fmtCount(coverage.runs_included || 0)
+      + " run(s) pooled: " + fmtCount(coverage.turns_examined || 0)
+      + " recorded turn(s) examined across them, counted in "
+      + (summary.unit || "dispatches") + " · " + summary.metric_version
+      + ". Every figure below is over the dispatches themselves, so a median "
+      + "is the median of the durations and not an average of the runs.",
+    subject: "the selected runs",
+    where: "in the selected runs"
+  });
+  if (coverage.population_complete === false) {
+    body.appendChild(el("div", "chipMarker unknown",
+      "These totals cover the observed evidence of the runs that are in them; "
+      + "the population above says what that is a part of."));
+  }
+  /* The same words the rest of the page uses for money, including the ones
+     for "calls were made and none recorded a cost", which is not zero. */
+  var cost = data.cost || {};
+  var money = fmtCostAmount(cost);
+  body.appendChild(el("div", "sub",
+    "Recorded LLM cost: "
+    + (money || "no LLM call was observed in the selected runs")
+    + ". This is what the evidence charged, not an allocation: no share of it "
+    + "is attributed to a command or a dispatch."
+    + (cost.population_complete === false
+        ? " " + fmtCount(cost.members_without_readable_evidence)
+          + " selected run(s) recorded no readable evidence, so this covers "
+          + "the calls that were observed rather than the selection."
+        : "")));
+  var outcomes = data.run_outcomes || {};
+  var tally = [];
+  Object.keys(outcomes.by_outcome || {}).sort().forEach(function (key) {
+    tally.push(fmtCount(outcomes.by_outcome[key]) + " " + key);
+  });
+  body.appendChild(el("div", "sub",
+    "Run outcomes: " + (tally.length ? tally.join(", ") : "none recorded")
+    + " · " + fmtCount(outcomes.runs_with_failed_dispatches || 0)
+    + " run(s) contain a failed dispatch, which is a different count from a "
+    + "failed run and is not derived from it."));
+  renderSelectedRunsMembers(body, data, experimentId, taskId, label, nav);
+  var groups = summary.groups || [];
+  if (!groups.length) {
+    body.appendChild(el("div", "empty",
+      "No command dispatch was observed in the selected runs."));
+    return;
+  }
+  /* The pair view's own renderers, with the source resolved per contributor
+     and the drill-down gated on the member still recording what was counted.
+     Nothing is recomputed here: every number came off the response. */
+  var pooled = {
+    experimentId: ctx.experimentId, taskId: ctx.taskId, storeId: ctx.storeId,
+    comparison: null,
+    beforeOpen: function (contributor, note, open) {
+      validateSelectedMember(data, contributor.attempt, experimentId, taskId,
+                             note, nav, open);
+    }
+  };
+  var resolve = function (contributor) {
+    return selectedRunsSide(data, contributor.attempt, experimentId);
+  };
+  var wrap = el("div", "ledgerWrap");
+  var table = el("table", "ledger");
+  var head = el("tr");
+  ["command", "dispatches", "succeeded", "failed", "not recorded",
+   "record vs span", "inclusive min / median / max", "timed"]
+    .forEach(function (column) { head.appendChild(el("th", null, column)); });
+  table.appendChild(head);
+  groups.forEach(function (group) {
+    commandGroupRows(group, resolve, pooled).forEach(function (row) {
+      table.appendChild(row);
+    });
+  });
+  wrap.appendChild(table);
+  body.appendChild(wrap);
+}
+
+/* The panel: tick runs above, summarize them here.
+
+   One endpoint, the same one a coding agent calls, and no arithmetic on this
+   side of it. Membership is fixed to what the server resolved when the
+   summary was made: a later tick does not edit the answer on screen, it
+   discards it, because a figure re-labelled with a population it was not
+   computed over is worse than no figure. */
+function renderSelectedRunsPanel(card, experimentId, taskId, label, runs, nav) {
+  var ctx = { experimentId: experimentId, taskId: taskId,
+              storeId: runs.store_id || null };
+  var panel = el("div", "card");
+  panel.setAttribute("data-selected-runs", "");
+  panel.appendChild(el("h2", null, "Summary of selected runs"));
+  panel.appendChild(el("div", "sub",
+    "Tick the finished runs above and summarize them together. The dispatches "
+    + "of the ticked runs are pooled, the runs that were asked for and are "
+    + "not in the counts are named, and nothing here ranks them or picks one."));
+  var controls = el("div", "runDecision");
+  var summarize = el("button", "primary", "Summarize the selected runs");
+  summarize.type = "button";
+  summarize.setAttribute("data-selected-runs-submit", "");
+  var refresh = el("button", null, "Refresh");
+  refresh.type = "button";
+  refresh.setAttribute("data-selected-runs-refresh", "");
+  refresh.hidden = true;
+  var count = el("span", "sub", "");
+  count.setAttribute("data-selected-runs-count", "");
+  controls.appendChild(summarize);
+  controls.appendChild(refresh);
+  controls.appendChild(count);
+  panel.appendChild(controls);
+  var body = el("div");
+  body.setAttribute("data-selected-runs-body", "");
+  panel.appendChild(body);
+  card.appendChild(panel);
+
+  function load() {
+    var attempts = selectedRunAttempts();
+    if (!attempts.length || attempts.length > SELECTED_RUNS_MAX) { return; }
+    var generation = ++selectedRuns.generation;
+    var source = selectedRuns.key;
+    clear(body);
+    body.appendChild(el("div", "empty",
+      "summarizing " + fmtCount(attempts.length) + " run(s)…"));
+    var query = attempts.map(function (attempt) {
+      return "attempt=" + encodeURIComponent(attempt);
+    }).join("&");
+    selectionRead(
+      taskSelectionPath(experimentId, taskId, "/selected-runs?" + query)
+    ).then(function (data) {
+      /* Three guards, for the three things that can overtake this answer: the
+         reader navigated, ticked something else, or changed source. */
+      if (expNavStale(nav) || generation !== selectedRuns.generation
+          || source !== selectedRuns.key) { return; }
+      clear(body);
+      if (data.unavailable) {
+        selectionNote(body, "These runs cannot be summarized together.",
+                      data.error);
+        return;
+      }
+      refresh.hidden = false;
+      renderSelectedRunsResult(body, data, experimentId, taskId, label, ctx,
+                               nav);
+    }).catch(function (e) {
+      if (expNavStale(nav) || generation !== selectedRuns.generation
+          || source !== selectedRuns.key) { return; }
+      clear(body);
+      /* The route's own refusal, which says which runs and why. */
+      body.appendChild(el("div", "empty", "Not summarized: " + e.message));
+    });
+  }
+  summarize.addEventListener("click", load);
+  refresh.addEventListener("click", load);
+
+  return function update() {
+    var attempts = selectedRunAttempts();
+    var tooMany = attempts.length > SELECTED_RUNS_MAX;
+    count.textContent = !attempts.length
+      ? "No run is selected yet."
+      : (tooMany
+          ? (fmtCount(attempts.length) + " run(s) selected, and at most "
+             + SELECTED_RUNS_MAX + " can be summarized in one request. "
+             + "Nothing is sampled, so untick some rather than being shown "
+             + "part of what you asked for.")
+          : (fmtCount(attempts.length) + " run(s) selected"));
+    summarize.disabled = !attempts.length || tooMany;
+    /* A different selection is a different question, so any answer on screen
+       stops being an answer to it, and any request still in flight stops
+       being one anybody asked for. */
+    selectedRuns.generation++;
+    refresh.hidden = true;
+    clear(body);
+  };
 }
 
 /* The pointer says WHAT was decided and WHEN; who decided it and why is in
@@ -6236,29 +6679,35 @@ function commandHeadline(summary) {
 /* What this side's numbers are about, and what they are NOT about. An
    unreadable turn is missing coverage; presenting the counts without it would
    let "0 failures" stand for a run half of which could not be read. */
-function appendCommandCoverage(box, summary) {
+/* `labels` lets a caller that is NOT one side of one pair say so. The
+   defaults are this pane's own words; an aggregate over several runs passes
+   its own, because "One run, on its own" and "on this side" would each be a
+   false statement about a pooled population. */
+function appendCommandCoverage(box, summary, labels) {
   var observed = (summary.scope && summary.scope.observed) || {};
   var coverage = summary.coverage || {};
   var totals = summary.totals || {};
-  box.appendChild(el("div", "sub",
+  var named = (labels && labels.subject) || "this run";
+  var where = (labels && labels.where) || "on this side";
+  box.appendChild(el("div", "sub", (labels && labels.headline) || (
     "One run, on its own: " + fmtCount(observed.turns || 0)
     + " recorded turn(s) examined, counted in " + (summary.unit || "dispatches")
-    + " · " + summary.metric_version));
+    + " · " + summary.metric_version)));
   /* Two different questions, and the second is the one that misleads. Every
      turn being readable does not make every dispatch inside them recorded, so
      a run can enumerate completely and still be missing the spans, the record
      entries or the outcomes the counts above are made of. */
   if (coverage.enumeration_complete === false) {
     box.appendChild(el("div", "chipMarker unknown",
-      fmtCount(coverage.turns_unreadable || 0) + " turn(s) this run names could "
-      + "not be read, so these counts describe what was examined — not a claim "
-      + "that the unread turns recorded no failure"));
+      fmtCount(coverage.turns_unreadable || 0) + " turn(s) " + named
+      + " names could not be read, so these counts describe what was examined "
+      + "— not a claim that the unread turns recorded no failure"));
   }
   if (coverage.capture === "none") {
     box.appendChild(el("div", "chipMarker unknown",
-      "No dispatch was observed on this side at all, so there is nothing here "
-      + "whose recording could be called complete — this is not a finding that "
-      + "the run dispatched nothing"));
+      "No dispatch was observed " + where + " at all, so there is nothing "
+      + "here whose recording could be called complete — this is not a finding "
+      + "that " + named + " dispatched nothing"));
   } else if (coverage.capture === "partial") {
     var gaps = el("div", "chipMarker unknown",
       "Partially recorded, so a zero above is a zero among what was recorded:");
@@ -6295,8 +6744,18 @@ function appendCommandCoverage(box, summary) {
 
    The link is the same `openPairTurn` the answer and alignment rows use, so a
    drill-down lands in the current trace/feedback navigation with this side's
-   own source rather than a new one. */
-function appendCommandContributors(cell, group, side, ctx) {
+   own source rather than a new one.
+
+   `side` may be a FUNCTION of the contributor. A pair has one source per
+   side, but a group pooled over several runs has one per contributor, and
+   resolving it per row is what keeps "open this dispatch" opening the run
+   that recorded it instead of whichever run the pane was labelled with.
+
+   `ctx.beforeOpen(contributor, note, open)`, when a caller supplies it, runs
+   between the click and the navigation. The aggregate uses it to re-check
+   that the run still records what was counted, so a drill-down cannot
+   silently show evidence that no longer supports the totals above it. */
+function appendCommandContributors(cell, group, sides, ctx) {
   cell.appendChild(el("div", "sub",
     "The exact dispatches counted in this row:"));
   (group.contributors || []).forEach(function (contributor) {
@@ -6345,11 +6804,22 @@ function appendCommandContributors(cell, group, side, ctx) {
         "no span was recorded for this dispatch, so this opens the whole turn"));
     }
     open.addEventListener("click", function () {
-      if (focusable) {
-        openPairSpan(ctx, side, contributor.turn_key, contributor.span_id, note);
+      /* One side per pane is a pair's shape, not a pooled group's: resolved
+         per row when the caller passes a function, so a dispatch opens in the
+         run that recorded it. */
+      var side = (typeof sides === "function") ? sides(contributor) : sides;
+      var go = function () {
+        if (focusable) {
+          openPairSpan(ctx, side, contributor.turn_key, contributor.span_id, note);
+          return;
+        }
+        openPairTurn(ctx, side, contributor.turn_key, note);
+      };
+      if (ctx && typeof ctx.beforeOpen === "function") {
+        ctx.beforeOpen(contributor, note, go);
         return;
       }
-      openPairTurn(ctx, side, contributor.turn_key, note);
+      go();
     });
     row.appendChild(open);
     row.appendChild(note);
