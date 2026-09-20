@@ -205,9 +205,17 @@ def _refuse_unsupported(
 
 
 def _selected_attempts(
-    query: dict[str, list[str]], *, allowed: frozenset[str], route: str
+    query: dict[str, list[str]],
+    *,
+    allowed: frozenset[str],
+    route: str,
+    allow_empty: bool = False,
 ) -> tuple[list[int], int]:
-    """The runs a request names: exact integers, deduplicated and bounded."""
+    """The runs a request names: exact integers, deduplicated and bounded.
+
+    `allow_empty` is the metadata-only population check, which names no run on
+    purpose and therefore re-projects none.
+    """
     _refuse_unsupported(query, allowed, route=route)
     raw = list(query.get("attempt") or [])
     if len(raw) > selected_runs_module.MAX_ATTEMPT_PARAMS:
@@ -219,7 +227,7 @@ def _selected_attempts(
             max_parameters=selected_runs_module.MAX_ATTEMPT_PARAMS,
         )
     return selected_runs_module.bound_attempts(
-        [_exact_int(value, "attempt") for value in raw]
+        [_exact_int(value, "attempt") for value in raw], allow_empty=allow_empty
     )
 
 
@@ -420,24 +428,244 @@ def _task_summary(
 # pay for the other thirty-seven nor publish them. `select_task_attempts`
 # enumerates the attempt rows and projects the named ones only.
 
-SELECTED_RUNS_PARAMS = frozenset({"attempt"})
-SELECTED_RUNS_VALIDATION_PARAMS = frozenset({"attempt", "expect", "expect_member"})
+# `scope=all_finished` is the server-resolved rule (`fix-9eg.3.2.2.1`): the
+# members are every finished run of this task, decided from the store's own
+# attempt metadata rather than from a list a page built out of visible rows.
+POPULATION_BASELINE_PARAMS = frozenset(
+    {
+        "population_scope",
+        "population_rule",
+        "expect_population",
+        "baseline_member",
+        "baseline_member_count",
+        "baseline_unfinished",
+        "baseline_unfinished_complete",
+    }
+)
+SELECTED_RUNS_PARAMS = frozenset({"attempt", "scope"})
+SELECTED_RUNS_VALIDATION_PARAMS = (
+    frozenset({"attempt", "expect", "expect_member"}) | POPULATION_BASELINE_PARAMS
+)
 # One archive is one source. `segment_id` is not a wider scope: it is how a
 # workspace names WHICH archive an attempt number belongs to when two hold it.
-WORKSPACE_SELECTED_RUNS_PARAMS = frozenset({"attempt", "segment_id"})
-WORKSPACE_SELECTED_RUNS_VALIDATION_PARAMS = frozenset(
-    {"attempt", "segment_id", "expect", "expect_member"}
+WORKSPACE_SELECTED_RUNS_PARAMS = frozenset({"attempt", "segment_id", "scope"})
+WORKSPACE_SELECTED_RUNS_VALIDATION_PARAMS = (
+    frozenset({"attempt", "segment_id", "expect", "expect_member"})
+    | POPULATION_BASELINE_PARAMS
 )
+
+
+def _selection_rule(query: dict[str, list[str]], *, route: str) -> str:
+    """`explicit` or `all_finished`, refusing the mixture.
+
+    A rule and a list are two different questions. Answering a request that
+    carries both would publish a figure over one population under the other's
+    label, so it is refused rather than resolved by precedence.
+    """
+    raw = (query.get("scope") or [None])[0]
+    if raw is None:
+        return selected_runs_module.SELECTION_EXPLICIT
+    rule = _text(raw, "scope")
+    if rule != selected_runs_module.SELECTION_ALL_FINISHED:
+        raise ApiError(
+            400,
+            f"{route} does not support scope={rule!r}. The only scope it "
+            f"resolves is {selected_runs_module.SELECTION_ALL_FINISHED!r}, "
+            "which summarizes every finished run of this task; name runs with "
+            "?attempt= to summarize a chosen few",
+            refused="unsupported_scope",
+            accepted=[selected_runs_module.SELECTION_ALL_FINISHED],
+        )
+    if query.get("attempt"):
+        raise ApiError(
+            400,
+            f"{route} was given both scope="
+            f"{selected_runs_module.SELECTION_ALL_FINISHED!r} and named "
+            "attempts. Those are two different populations and answering one "
+            "under the other's label is the error this refuses; send one or "
+            "the other",
+            refused="mixed_scope",
+        )
+    return rule
+
+
+def _flag(value: Any, field: str) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes"):
+        return True
+    if text in ("false", "0", "no"):
+        return False
+    raise ApiError(400, f"{field} must be true or false")
+
+
+_BASELINE_SINGLETONS = (
+    "population_scope",
+    "expect_population",
+    "population_rule",
+    "baseline_member_count",
+    "baseline_unfinished_complete",
+)
+
+
+def _singleton(query: dict[str, list[str]], name: str) -> Optional[str]:
+    """One value or none. Two of anything here is a malformed request.
+
+    A repeated `expect_population` would otherwise be silently narrowed to
+    whichever arrived first, and the answer would be about a baseline the
+    caller did not entirely send.
+    """
+    values = query.get(name) or []
+    if len(values) > 1:
+        raise ApiError(400, f"{name} must be given at most once")
+    return values[0] if values else None
+
+
+def _population_baseline(
+    query: dict[str, list[str]]
+) -> Optional[dict[str, Any]]:
+    """The population a caller was shown, as it may echo it back.
+
+    Two opaque values and some attempt numbers, and none of them is believed
+    as a description of anything: both opaque values are re-derived from
+    authoritative metadata and COMPARED, and the lists are required to be
+    consistent with the digest they arrive with. Nothing in a request can name
+    a source, a store or an archive.
+
+    An omitted list is never read as an empty one. `baseline_member_count` is
+    required and may be 0, which is how "this population had no finished run"
+    is stated; without it a client that simply forgot its members would be
+    told every current member is new.
+    """
+    for name in _BASELINE_SINGLETONS:
+        _singleton(query, name)
+    scope = _singleton(query, "population_scope")
+    expect = _singleton(query, "expect_population")
+    members = list(query.get("baseline_member") or [])
+    unfinished = list(query.get("baseline_unfinished") or [])
+    complete = _singleton(query, "baseline_unfinished_complete")
+    declared = _singleton(query, "baseline_member_count")
+    rule = _singleton(query, "population_rule")
+    if not any((scope, expect, members, unfinished, complete, rule, declared)):
+        return None
+    missing = [
+        name
+        for name, value in (
+            ("population_scope", scope),
+            ("expect_population", expect),
+            ("baseline_member_count", declared),
+            ("baseline_unfinished_complete", complete),
+        )
+        if value is None or value == ""
+    ]
+    if missing:
+        raise ApiError(
+            400,
+            "a population baseline needs " + ", ".join(missing)
+            + ", exactly as the summary published them; attempt numbers on "
+            "their own are not bound to any scope, and an omitted list is not "
+            "an empty one",
+            refused="incomplete_population_baseline",
+            missing=missing,
+        )
+    for name, values, cap in (
+        ("baseline_member", members, selected_runs_module.MAX_SELECTED_RUNS),
+        ("baseline_unfinished", unfinished,
+         selected_runs_module.MAX_ATTEMPT_PARAMS),
+    ):
+        if len(values) > cap:
+            raise ApiError(
+                400,
+                f"this request names {len(values)} {name} parameters; at most "
+                f"{cap} are accepted",
+                refused="too_many_parameters",
+            )
+    member_ids = [_exact_int(value, "baseline_member") for value in members]
+    unfinished_ids = [
+        _exact_int(value, "baseline_unfinished") for value in unfinished
+    ]
+    declared_count = _exact_int(declared, "baseline_member_count")
+    if len(set(member_ids)) != len(member_ids):
+        raise ApiError(
+            400, "baseline_member names the same attempt twice",
+            refused="inconsistent_population_baseline",
+        )
+    if len(set(unfinished_ids)) != len(unfinished_ids):
+        raise ApiError(
+            400, "baseline_unfinished names the same attempt twice",
+            refused="inconsistent_population_baseline",
+        )
+    overlap = sorted(set(member_ids) & set(unfinished_ids))
+    if overlap:
+        raise ApiError(
+            400,
+            "baseline_member and baseline_unfinished both name attempt(s) "
+            + ", ".join(str(attempt) for attempt in overlap)
+            + "; a run was either finished or it was not",
+            refused="inconsistent_population_baseline",
+        )
+    if declared_count != len(member_ids):
+        raise ApiError(
+            400,
+            f"baseline_member_count says {declared_count} but "
+            f"{len(member_ids)} baseline_member parameter(s) arrived; the "
+            "count is what tells an empty population from a forgotten list",
+            refused="inconsistent_population_baseline",
+        )
+    rule = selected_runs_module.SELECTION_ALL_FINISHED if rule is None else _text(
+        rule, "population_rule"
+    )
+    if rule not in selected_runs_module.SELECTION_RULES:
+        raise ApiError(
+            400,
+            "population_rule must be one of "
+            + ", ".join(selected_runs_module.SELECTION_RULES),
+        )
+    return {
+        "population_scope": _text(scope, "population_scope"),
+        "expect_population": _text(expect, "expect_population"),
+        "selection_rule": rule,
+        "members": member_ids,
+        "unfinished": unfinished_ids,
+        "unfinished_complete": _flag(complete, "baseline_unfinished_complete"),
+    }
+
+
+def _planned_runs(
+    workflow_path: str, experiment_id: str
+) -> tuple[Optional[int], Optional[str]]:
+    """How many runs were planned for ONE task, or nothing.
+
+    The experiment registration's `runs_per_task` is a per-task figure and is
+    the only plan reported here. An experiment-wide declared attempt total is
+    not a task plan and is never substituted for one.
+    """
+    registration = _registration(workflow_path, experiment_id)
+    planned = None if registration is None else registration.get("runs_per_task")
+    if isinstance(planned, bool) or not isinstance(planned, int):
+        return None, None
+    return planned, "experiment_registration.runs_per_task"
 
 
 def _selected_scope(
     control: selection.SelectionControlStore,
     experiment_id: str,
     task_id: str,
-    attempts: list[int],
+    attempts: Optional[list[int]],
 ) -> dict[str, Any]:
+    """One scoped metadata read, serving members AND population alike.
+
+    `attempts=None` is the all-finished rule. Either way this enumerates the
+    attempt rows once and projects only the members, so a population check
+    costs no turn read and no unselected trace is ever touched.
+    """
     resolved = best_run_module.select_task_attempts(
-        control, experiment_id, task_id, attempts
+        control,
+        experiment_id,
+        task_id,
+        attempts,
+        max_selected=selected_runs_module.MAX_SELECTED_RUNS,
     )
     if not resolved["evidence_readable"]:
         raise ApiError(
@@ -448,41 +676,100 @@ def _selected_scope(
     return resolved
 
 
+def _live_population(
+    workflow_path: str,
+    experiment_id: str,
+    task_id: str,
+    resolved: Mapping[str, Any],
+    selection_rule: str,
+) -> dict[str, Any]:
+    """This task's runs, bound to the source the control authorized.
+
+    Derived from the enumerated metadata and never from a member, so a task
+    with no finished run at all is scope-bound exactly as tightly as a full
+    one.
+    """
+    planned, planned_source = _planned_runs(workflow_path, experiment_id)
+    return selected_runs_module.build_task_population(
+        selection_rule=selection_rule,
+        experiment_id=experiment_id,
+        task_id=task_id,
+        source_id=resolved["source_id"],
+        store_id=resolved["store_id"],
+        recorded_attempts=resolved["recorded_attempts"],
+        finished_attempts=resolved["finished_attempts"],
+        unfinished_attempts=resolved["unfinished_attempts"],
+        planned=planned,
+        planned_source=planned_source,
+    )
+
+
 def _selected_runs_payload(
+    workflow_path: str,
     control: selection.SelectionControlStore,
     experiment_id: str,
     task_id: str,
     query: dict[str, list[str]],
 ) -> dict[str, Any]:
-    attempts, duplicates = _selected_attempts(
-        query, allowed=SELECTED_RUNS_PARAMS, route="selected-runs"
-    )
+    rule = _selection_rule(query, route="selected-runs")
+    if rule == selected_runs_module.SELECTION_ALL_FINISHED:
+        _refuse_unsupported(query, SELECTED_RUNS_PARAMS, route="selected-runs")
+        attempts, duplicates = None, 0
+    else:
+        attempts, duplicates = _selected_attempts(
+            query, allowed=SELECTED_RUNS_PARAMS, route="selected-runs"
+        )
     resolved = _selected_scope(control, experiment_id, task_id, attempts)
+    # Only where the population is the question. An explicit selection did not
+    # ask about the rest of the task, and publishing a task's whole finished
+    # list beside it would put an unbounded array on a legacy payload.
+    population = (
+        _live_population(workflow_path, experiment_id, task_id, resolved, rule)
+        if rule == selected_runs_module.SELECTION_ALL_FINISHED
+        else None
+    )
+    if resolved["over_limit"]:
+        selected_runs_module.refuse_over_limit(
+            population, experiment_id=experiment_id, task_id=task_id
+        )
     return selected_runs_module.aggregate_selected_runs(
         experiment_id=experiment_id,
         task_id=task_id,
         source_id=resolved["source_id"],
         store_id=resolved["store_id"],
-        requested=attempts,
+        requested=resolved["requested_attempts"],
         duplicate_requests=duplicates,
         recorded_attempts=resolved["recorded_attempts"],
         candidate_rows=resolved["selected"],
         reader=_AuthorizedReader(control),
+        selection_rule=rule,
+        task_population=population,
     )
 
 
 def _selected_runs_validation(
+    workflow_path: str,
     control: selection.SelectionControlStore,
     experiment_id: str,
     task_id: str,
     query: dict[str, list[str]],
 ) -> dict[str, Any]:
+    baseline = _population_baseline(query)
     attempts, _duplicates = _selected_attempts(
         query,
         allowed=SELECTED_RUNS_VALIDATION_PARAMS,
         route="selected-runs/validation",
+        allow_empty=baseline is not None,
     )
     resolved = _selected_scope(control, experiment_id, task_id, attempts)
+    population = (
+        None
+        if baseline is None
+        else _live_population(
+            workflow_path, experiment_id, task_id, resolved,
+            baseline["selection_rule"],
+        )
+    )
     return selected_runs_module.validate_selection(
         experiment_id=experiment_id,
         task_id=task_id,
@@ -497,6 +784,10 @@ def _selected_runs_validation(
         reader=_AuthorizedReader(control),
         expect=_text((query.get("expect") or [None])[0], "expect", required=False),
         expect_members=_expected_members(query),
+        task_population=population,
+        population_baseline=baseline,
+        finished_attempts=resolved["finished_attempts"],
+        unfinished_attempts=resolved["unfinished_attempts"],
     )
 
 
@@ -845,10 +1136,14 @@ def _get_task(
         }
 
     if rest == ["selected-runs"]:
-        return 200, _selected_runs_payload(control, experiment_id, task_id, query)
+        return 200, _selected_runs_payload(
+            workflow_path, control, experiment_id, task_id, query
+        )
 
     if rest == ["selected-runs", "validation"]:
-        return 200, _selected_runs_validation(control, experiment_id, task_id, query)
+        return 200, _selected_runs_validation(
+            workflow_path, control, experiment_id, task_id, query
+        )
 
     if rest == ["comparison"]:
         return 200, _comparison_payload(workflow_path, control, experiment_id, task_id, query)
@@ -1585,17 +1880,27 @@ class _ManifestScopedReader:
 def _workspace_attempts(
     workspace: Any, experiment_id: str, task_id: str,
     names: Optional[_WorkspaceNames] = None,
+    *,
+    turn_refs_for: Optional[Any] = None,
 ) -> list[dict[str, Any]]:
     """Attempt rows of one task, each with the reference its turns support.
 
     `comparable` is the same fact it is live -- an attempt with no recorded
     turns has nothing to open -- stated here from the manifest's turn refs
     rather than inherited from a control that does not exist.
+
+    `turn_refs_for` bounds which attempts have their turns read at all. An
+    attempt outside it is reported with `evidence_state` "not_read" rather
+    than "no_turns": what a run recorded is unknown to this row, and saying
+    it recorded nothing would be a claim nobody made.
     """
     if names is None:
         names = _WorkspaceNames(workspace)
     rows: list[dict[str, Any]] = []
-    for row in workspace.attempts(experiment_id, task_id=task_id):
+    for row in workspace.attempts(
+        experiment_id, task_id=task_id, turn_refs_for=turn_refs_for
+    ):
+        read = "turn_refs" in row
         turn_refs = row.get("turn_refs") or []
         keys = tuple(str(ref["logical_turn_key"]) for ref in turn_refs)
         manifest_store_id = str(row["store_id"])
@@ -1615,7 +1920,7 @@ def _workspace_attempts(
         local_id = str(row.get("local_experiment_id") or experiment_id)
         ref = (
             None
-            if not keys
+            if not read or not keys
             else comparison_module.ExecutionRef(
                 store_id=store_id,
                 turn_keys=keys,
@@ -1649,9 +1954,11 @@ def _workspace_attempts(
                 "outcome_source": row.get("outcome_source"),
                 "reward": row.get("reward"),
                 "restarts": row.get("restarts"),
-                "turn_count": len(keys),
+                "turn_count": len(keys) if read else None,
                 "comparable": ref is not None,
-                "evidence_state": "recorded" if ref else "no_turns",
+                "evidence_state": (
+                    ("recorded" if ref else "no_turns") if read else "not_read"
+                ),
                 "evidence_label": (
                     None if ref else "this attempt recorded no turns in this archive"
                 ),
@@ -1664,6 +1971,58 @@ def _workspace_attempts(
         )
     rows.sort(key=lambda row: (row["attempt"], str(row["segment_id"] or "")))
     return rows
+
+
+def _with_turn_refs(
+    workspace: Any, row: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The same row, with the turns of THAT attempt read.
+
+    Resolved from the row's own identity -- this archive, this local
+    experiment, this task, this attempt -- rather than by looking an attempt
+    NUMBER up again. Two segments can record an attempt 1 each, and a second
+    search by number could read one archive's turns and hand them to the other
+    archive's row, or return metadata from a run that is not the one whose
+    population just passed its bounds.
+
+    The metadata stays as it was first read, exactly as the live resolver
+    keeps its own. Evidence that changes after that is what the optimistic
+    validation is for; re-reading it here would only narrow the window while
+    quietly mixing two reads into one answer.
+    """
+    keys = tuple(
+        workspace.attempt_turn_keys(
+            store_id=str(row["manifest_store_id"]),
+            local_experiment_id=str(row["local_experiment_id"]),
+            task_id=str(row["task_id"]),
+            attempt=int(row["attempt"]),
+        )
+    )
+    ref = (
+        None
+        if not keys
+        else comparison_module.ExecutionRef(
+            store_id=str(row["store_id"]),
+            turn_keys=keys,
+            experiment_id=str(row["local_experiment_id"]),
+            task_id=str(row["task_id"]),
+            attempt=int(row["attempt"]),
+            label=str(row["label"]),
+        )
+    )
+    resolved = dict(row)
+    resolved.update(
+        {
+            "turn_count": len(keys),
+            "comparable": ref is not None,
+            "evidence_state": "recorded" if ref else "no_turns",
+            "evidence_label": (
+                None if ref else "this attempt recorded no turns in this archive"
+            ),
+            "execution_ref": None if ref is None else ref.as_dict(),
+        }
+    )
+    return resolved
 
 
 def _workspace_consistency(
@@ -1739,10 +2098,17 @@ def _workspace_selected_rows(
     names: "_WorkspaceNames",
     experiment_id: str,
     task_id: str,
-    attempts: list[int],
+    attempts: Optional[list[int]],
     segment_id: Optional[str],
-) -> tuple[list[dict[str, Any]], list[int]]:
-    """`(rows for the named attempts, every recorded attempt number)`.
+    bounds: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> tuple[list[dict[str, Any]], list[int], dict[str, Any]]:
+    """`(rows for the named attempts, every recorded attempt number, scope)`.
+
+    `attempts=None` is the all-finished rule, resolved from the archive's own
+    attempt metadata. Under that rule an attempt number recorded in two
+    segments is refused for the whole population, because the population is
+    then not one population; a named selection keeps refusing only the
+    numbers it actually asked for.
 
     A sealed archive carries evidence, and summarizing the evidence of runs a
     reader names is a READ of it -- so it is answered here rather than refused
@@ -1757,16 +2123,48 @@ def _workspace_selected_rows(
     than one archive is refused downstream by the coordinator, because one
     summary over two sources is not a summary of a source.
     """
-    rows = _workspace_attempts(workspace, experiment_id, task_id, names)
+    # METADATA first, and only metadata: which runs exist and which are
+    # finished is recorded on the attempt rows themselves. Reading every
+    # attempt's turns to answer it would read the runs this request is about
+    # to refuse, or to leave out.
+    rows = _workspace_attempts(
+        workspace, experiment_id, task_id, names, turn_refs_for=(),
+    )
     if segment_id:
         rows = [row for row in rows if str(row["segment_id"]) == segment_id]
-    wanted = set(attempts)
-    chosen: dict[int, dict[str, Any]] = {}
+    all_finished = attempts is None
+    wanted = set() if all_finished else set(attempts)
+    # The whole population, for the population report: one segment when named,
+    # and an ambiguous attempt number left unstated rather than counted twice.
+    seen: dict[int, dict[str, Any]] = {}
+    duplicated: set[int] = set()
+    for row in rows:
+        attempt = int(row["attempt"])
+        if attempt in seen:
+            duplicated.add(attempt)
+        seen.setdefault(attempt, row)
+    scope = {
+        "ambiguous": bool(duplicated),
+        "duplicated": duplicated,
+        "segment_id": segment_id,
+        "recorded_attempts": sorted(seen),
+        "finished_attempts": sorted(
+            a for a, row in seen.items() if row.get("finished")
+        ),
+        "unfinished_attempts": sorted(
+            a for a, row in seen.items() if not row.get("finished")
+        ),
+    }
+    if all_finished:
+        wanted = set(scope["finished_attempts"])
+    # Ambiguity is decided on METADATA, before any turn is read: a request
+    # that is about to be refused must not read the runs it refuses.
+    ambiguous: dict[int, dict[str, Any]] = {}
     for row in rows:
         attempt = int(row["attempt"])
         if attempt not in wanted:
             continue
-        if attempt in chosen:
+        if attempt in ambiguous:
             raise ApiError(
                 409,
                 f"attempt {attempt} is recorded in more than one segment of "
@@ -1774,16 +2172,73 @@ def _workspace_selected_rows(
                 "runs under one number; name segment_id",
                 segment_ids=sorted(
                     {
-                        str(chosen[attempt].get("segment_id") or ""),
+                        str(ambiguous[attempt].get("segment_id") or ""),
                         str(row.get("segment_id") or ""),
                     }
                 ),
             )
-        chosen[attempt] = row
+        ambiguous[attempt] = row
+    recorded = [int(row["attempt"]) for row in rows]
+    if bounds is not None:
+        # Every refusal this request can make -- ambiguity, the selection
+        # bound, a foreign baseline -- happens HERE, before one turn is read.
+        # A request that is about to be refused must not read the runs it is
+        # refusing, and an over-cap task must not be scanned to say it is one.
+        bounds(scope)
+    # The rows already in hand, not another search: each member's turns are
+    # read against the identity of the row that was chosen.
     return (
-        [chosen[attempt] for attempt in sorted(chosen)],
-        [int(row["attempt"]) for row in rows],
+        [_with_turn_refs(workspace, ambiguous[attempt])
+         for attempt in sorted(ambiguous)],
+        recorded,
+        scope,
     )
+
+
+def _workspace_archive(
+    workspace: Any,
+    names: "_WorkspaceNames",
+    experiment_id: str,
+    segment_id: Optional[str],
+) -> dict[str, Any]:
+    """The ONE archive a population is a population of, from the manifest.
+
+    Read from the logical experiment's declared segments rather than from the
+    rows a task happens to have, so a task that recorded nothing is still
+    bound to the archive it would have recorded into. A logical experiment
+    stitched from two archives has no single source for a population and is
+    refused here -- naming a `segment_id` is how a caller says which one it
+    means -- because hashing such a population under a source of None would
+    make two different archives' populations share one identity.
+    """
+    segments = workspace.segments(experiment_id)
+    if segment_id:
+        segments = [
+            segment
+            for segment in segments
+            if str(segment["segment_id"]) == segment_id
+        ]
+        if not segments:
+            raise ApiError(
+                404,
+                f"this workspace records no segment {segment_id!r} of "
+                f"experiment {experiment_id!r}",
+            )
+    stores = sorted({str(segment["store_id"]) for segment in segments})
+    if len(stores) != 1:
+        raise ApiError(
+            409,
+            f"experiment {experiment_id!r} is stitched from more than one "
+            "archive (" + ", ".join(stores) + "), so its runs of this task are "
+            "not one population; name segment_id to say which archive you mean",
+            store_ids=stores,
+        )
+    manifest_store_id = stores[0]
+    return {
+        "manifest_store_id": manifest_store_id,
+        "store_id": names.ref_store_id(manifest_store_id),
+        "segments": sorted(str(segment["segment_id"]) for segment in segments),
+    }
 
 
 def _workspace_selected_runs(
@@ -1796,18 +2251,85 @@ def _workspace_selected_runs(
     *,
     validate: bool,
 ) -> dict[str, Any]:
-    attempts, duplicates = _selected_attempts(
-        query,
-        allowed=(
-            WORKSPACE_SELECTED_RUNS_VALIDATION_PARAMS
-            if validate
-            else WORKSPACE_SELECTED_RUNS_PARAMS
-        ),
-        route="selected-runs/validation" if validate else "selected-runs",
+    allowed = (
+        WORKSPACE_SELECTED_RUNS_VALIDATION_PARAMS
+        if validate
+        else WORKSPACE_SELECTED_RUNS_PARAMS
     )
+    route = "selected-runs/validation" if validate else "selected-runs"
+    baseline = _population_baseline(query) if validate else None
+    rule = (
+        selected_runs_module.SELECTION_EXPLICIT
+        if validate
+        else _selection_rule(query, route=route)
+    )
+    if rule == selected_runs_module.SELECTION_ALL_FINISHED:
+        _refuse_unsupported(query, allowed, route=route)
+        attempts, duplicates = None, 0
+    else:
+        attempts, duplicates = _selected_attempts(
+            query, allowed=allowed, route=route,
+            allow_empty=baseline is not None,
+        )
     segment_id = (query.get("segment_id") or [None])[0]
-    selected, recorded = _workspace_selected_rows(
-        workspace, names, experiment_id, task_id, attempts, segment_id
+    wants_population = (
+        rule == selected_runs_module.SELECTION_ALL_FINISHED or baseline is not None
+    )
+    population: Optional[dict[str, Any]] = None
+
+    def bounds(scope: dict[str, Any]) -> None:
+        """Everything that can refuse this request, before any turn is read."""
+        nonlocal population
+        if not wants_population:
+            return
+        if scope["ambiguous"]:
+            raise ApiError(
+                409,
+                "this archive records some attempt number of this task in "
+                "more than one segment, so its runs of this task are not one "
+                "population; name segment_id",
+                segment_scoped=False,
+            )
+        archive = _workspace_archive(workspace, names, experiment_id, segment_id)
+        population = selected_runs_module.build_task_population(
+            selection_rule=(
+                rule if baseline is None else baseline["selection_rule"]
+            ),
+            experiment_id=experiment_id,
+            task_id=task_id,
+            source_id=archive["manifest_store_id"],
+            store_id=archive["store_id"],
+            segment_id=segment_id,
+            segments=archive["segments"],
+            sealed=True,
+            recorded_attempts=scope["recorded_attempts"],
+            finished_attempts=scope["finished_attempts"],
+            unfinished_attempts=scope["unfinished_attempts"],
+        )
+        if rule == selected_runs_module.SELECTION_ALL_FINISHED and (
+            len(scope["finished_attempts"]) > selected_runs_module.MAX_SELECTED_RUNS
+        ):
+            selected_runs_module.refuse_over_limit(
+                population, experiment_id=experiment_id, task_id=task_id
+            )
+        if baseline is not None:
+            # A foreign or self-contradictory baseline is refused here too,
+            # for the same reason: it costs the metadata read and nothing.
+            selected_runs_module.population_drift(
+                population=population,
+                recorded_attempts=scope["recorded_attempts"],
+                finished_attempts=scope["finished_attempts"],
+                unfinished_attempts=scope["unfinished_attempts"],
+                baseline=baseline,
+            )
+
+    selected, recorded, scope = _workspace_selected_rows(
+        workspace, names, experiment_id, task_id, attempts, segment_id, bounds
+    )
+    requested = (
+        scope["finished_attempts"]
+        if rule == selected_runs_module.SELECTION_ALL_FINISHED
+        else attempts
     )
     # Both of an archive's names, resolved once and used by both
     # routes: the evidence identity the references carry, and the
@@ -1821,25 +2343,31 @@ def _workspace_selected_runs(
             task_id=task_id,
             source_id=source_id,
             store_id=store_id,
-            requested=attempts,
+            requested=requested,
             recorded_attempts=recorded,
             candidate_rows=selected,
             reader=reader,
             expect=_text((query.get("expect") or [None])[0], "expect", required=False),
             expect_members=_expected_members(query),
             sealed=True,
+            task_population=population,
+            population_baseline=baseline,
+            finished_attempts=scope["finished_attempts"],
+            unfinished_attempts=scope["unfinished_attempts"],
         )
     return selected_runs_module.aggregate_selected_runs(
         experiment_id=experiment_id,
         task_id=task_id,
         source_id=source_id,
         store_id=store_id,
-        requested=attempts,
+        requested=requested,
         duplicate_requests=duplicates,
         recorded_attempts=recorded,
         candidate_rows=selected,
         reader=reader,
         sealed=True,
+        selection_rule=rule,
+        task_population=population,
     )
 
 

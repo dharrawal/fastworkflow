@@ -317,7 +317,9 @@ class TestScope:
             assert status == 400, parameter
             assert payload["refused"] == "unsupported_parameter"
             assert payload["unsupported"] == [parameter]
-            assert payload["accepted"] == ["attempt"]
+            # `scope` joined the accepted list with the all-finished rule
+            # (`fix-9eg.3.2.2.1`); everything else is still refused by name.
+            assert payload["accepted"] == ["attempt", "scope"]
 
     def test_naming_no_run_is_refused_rather_than_answered_over_nothing(
         self, runs_world

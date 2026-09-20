@@ -100,6 +100,20 @@ MAX_SELECTED_RUNS = 20
 # the limit above exists to prevent.
 MAX_ATTEMPT_PARAMS = 200
 
+# How the members were chosen. `explicit` is a list a caller sent; `all_finished`
+# is a RULE the server resolved against this task's own attempt metadata. Both
+# produce the same answer over the same runs -- the rule is how the set was
+# arrived at, not what the set recorded -- which is why neither this nor the
+# population below is inside `evidence_digest`.
+SELECTION_EXPLICIT = "explicit"
+SELECTION_ALL_FINISHED = "all_finished"
+SELECTION_RULES = (SELECTION_EXPLICIT, SELECTION_ALL_FINISHED)
+
+# How many unfinished attempt numbers are LISTED beside the counts. A task with
+# thousands of runs still going has an honest count and a truncated list that
+# says it is truncated, rather than a URL-sized list or a silent cut.
+MAX_LISTED_UNFINISHED = 200
+
 METRIC_SCOPE = "selected_runs"
 DIGEST_BASIS = "selected_runs_evidence/1"
 
@@ -131,12 +145,18 @@ class SelectionIncoherent(SelectedRunsError):
     status = 409
 
 
-def bound_attempts(attempts: Sequence[int]) -> tuple[list[int], int]:
+def bound_attempts(
+    attempts: Sequence[int], *, allow_empty: bool = False
+) -> tuple[list[int], int]:
     """`(distinct ascending attempts, duplicates collapsed)`, or a refusal.
 
     Sorted, so the answer does not depend on the order a page happened to
     render its checkboxes in, and deduplicated, so naming a run twice is one
     member rather than a doubled contribution.
+
+    `allow_empty` is the metadata-only population check, which names no run on
+    purpose. Everywhere else an empty selection stays a refusal: a summary of
+    nothing is not an answer anybody asked for.
     """
     if len(attempts) > MAX_ATTEMPT_PARAMS:
         raise SelectionTooLarge(
@@ -147,6 +167,8 @@ def bound_attempts(attempts: Sequence[int]) -> tuple[list[int], int]:
             requested=len(attempts),
         )
     distinct = sorted({int(attempt) for attempt in attempts})
+    if not distinct and allow_empty:
+        return [], 0
     if not distinct:
         raise SelectedRunsError(
             "name at least one attempt to summarize, with one or more "
@@ -173,6 +195,352 @@ def _canonical(payload: Any) -> str:
 
 def _digest(prefix: str, payload: Any) -> str:
     return prefix + hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()[:16]
+
+
+# ----------------------------------------------------------------------
+# The POPULATION: which runs exist, and whether that has moved
+# ----------------------------------------------------------------------
+#
+# Kept entirely apart from the evidence digest above, because they answer
+# different questions and conflating them is the failure `fix-9eg.3.2.2.2`
+# exists to prevent: starting a new run must not make a summary's evidence
+# read as changed, and editing a recorded span must not read as a new run.
+
+POPULATION_BASIS = "all_finished_population/1"
+
+
+class PopulationScopeMismatch(SelectedRunsError):
+    """A population baseline from somewhere else.
+
+    Attempt numbers are not scope-bound -- every task has an attempt 1 -- so a
+    baseline echoed under another task, source or archive would otherwise be
+    compared against a population it was never about and, with luck, report
+    "unchanged". The scope identity is re-derived here and must match.
+    """
+
+    status = 400
+
+
+class PopulationBaselineInconsistent(SelectedRunsError):
+    """A baseline that contradicts itself, or contradicts its own digest.
+
+    Refused rather than answered. A baseline whose listed sets do not hash to
+    the digest it carries could otherwise be answered "unchanged" beside a
+    list of members it claims are new, and a client cannot tell which half of
+    that to believe.
+    """
+
+    status = 400
+
+
+def population_scope_id(
+    *,
+    experiment_id: str,
+    task_id: str,
+    source_id: Optional[str],
+    store_id: Optional[str],
+    segment_id: Optional[str] = None,
+    segments: Optional[Sequence[str]] = None,
+    sealed: bool = False,
+    selection_rule: str = SELECTION_ALL_FINISHED,
+) -> str:
+    """The identity a population baseline is bound to.
+
+    Resolved from AUTHORITATIVE metadata -- the source the control authorized,
+    the store it resolves to, the archive segments in play -- and never from a
+    member, so a population with no finished runs at all is bound exactly as
+    tightly as a full one.
+    """
+    return _digest(
+        "pscope-",
+        {
+            "basis": POPULATION_BASIS,
+            "experiment_id": experiment_id,
+            "task_id": task_id,
+            "source_id": source_id,
+            "store_id": store_id,
+            "segment_id": segment_id,
+            "segments": None if segments is None else sorted(str(s) for s in segments),
+            "sealed": bool(sealed),
+            "selection_rule": selection_rule,
+        },
+    )
+
+
+def population_digest(
+    *,
+    scope_id: str,
+    recorded_attempts: Sequence[int],
+    finished_attempts: Sequence[int],
+) -> str:
+    """Every recorded attempt of this task and whether it is eligible.
+
+    Over ALL of them, not over the listed ones: the detail list below is
+    capped, and a detection that was capped with it would miss a run recorded
+    beyond the cap, a run removed beyond it, and an eligibility change beyond
+    it. Capped detail is a limitation; capped detection would be a wrong
+    answer.
+    """
+    finished = {int(attempt) for attempt in finished_attempts}
+    return _digest(
+        "pop-",
+        {
+            "basis": POPULATION_BASIS,
+            "scope": scope_id,
+            "attempts": [
+                [int(attempt), int(attempt) in finished]
+                for attempt in sorted({int(a) for a in recorded_attempts})
+            ],
+        },
+    )
+
+
+def build_task_population(
+    *,
+    selection_rule: str,
+    experiment_id: str,
+    task_id: str,
+    source_id: Optional[str],
+    store_id: Optional[str],
+    recorded_attempts: Sequence[int],
+    finished_attempts: Sequence[int],
+    unfinished_attempts: Sequence[int],
+    segment_id: Optional[str] = None,
+    segments: Optional[Sequence[str]] = None,
+    sealed: bool = False,
+    planned: Optional[int] = None,
+    planned_source: Optional[str] = None,
+) -> dict[str, Any]:
+    """What this task's runs are, beside what this summary is over.
+
+    `planned` is a count of runs planned for THIS task, or None. An
+    experiment-wide declared total is not one and is never used here: a
+    workflow that declared sixty runs across twelve tasks has not planned
+    sixty runs of this one.
+    """
+    recorded = sorted({int(attempt) for attempt in recorded_attempts})
+    finished = sorted({int(attempt) for attempt in finished_attempts})
+    unfinished = sorted({int(attempt) for attempt in unfinished_attempts})
+    scope_id = population_scope_id(
+        experiment_id=experiment_id,
+        task_id=task_id,
+        source_id=source_id,
+        store_id=store_id,
+        segment_id=segment_id,
+        segments=segments,
+        sealed=sealed,
+        selection_rule=selection_rule,
+    )
+    listed = unfinished[:MAX_LISTED_UNFINISHED]
+    population: dict[str, Any] = {
+        "selection_rule": selection_rule,
+        "population_scope": scope_id,
+        "population_digest": population_digest(
+            scope_id=scope_id,
+            recorded_attempts=recorded,
+            finished_attempts=finished,
+        ),
+        "digest_basis": POPULATION_BASIS,
+        "segment_id": segment_id,
+        "sealed": bool(sealed),
+        "recorded": len(recorded),
+        "finished": len(finished),
+        "unfinished": len(unfinished),
+        "finished_attempts": finished,
+        "unfinished_attempts": listed,
+        "unfinished_listed": len(listed),
+        "unfinished_listing_complete": len(listed) == len(unfinished),
+        "max_runs": MAX_SELECTED_RUNS,
+        "planned": None if planned is None else int(planned),
+        "planned_source": planned_source if planned is not None else None,
+    }
+    if planned is None:
+        population["planned_note"] = (
+            "no per-task run plan is recorded for this task, so how many runs "
+            "were intended is not known here"
+        )
+    return population
+
+
+def _counted(rows: Mapping[str, list[int]]) -> dict[str, Any]:
+    """Each list beside its own count, so a client never has to count."""
+    out: dict[str, Any] = {}
+    for name, values in rows.items():
+        out[name] = list(values)
+        out[name + "_count"] = len(values)
+    return out
+
+
+def population_drift(
+    *,
+    population: Mapping[str, Any],
+    recorded_attempts: Sequence[int],
+    finished_attempts: Sequence[int],
+    unfinished_attempts: Sequence[int],
+    baseline: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Whether the runs that EXIST have moved since a caller was told.
+
+    `changed` comes from the full population digest and from nothing else. It
+    is never derived from whether the visible or the eligible id sets happen
+    to match, because both can match while an attempt nobody listed was
+    recorded, removed or became eligible.
+
+    The set diffs are DETAIL on top of that answer. The finished side is
+    always exact -- a member list is bounded and complete -- and the unfinished
+    side is exact only when the caller's listing was complete. When a change
+    cannot be attributed to any id the caller listed, `undetailed` says so
+    rather than the payload reporting nothing.
+    """
+    scope_id = str(population["population_scope"])
+    current_digest = str(population["population_digest"])
+    recorded = {int(attempt) for attempt in recorded_attempts}
+    finished = {int(attempt) for attempt in finished_attempts}
+    unfinished = {int(attempt) for attempt in unfinished_attempts}
+    check: dict[str, Any] = {
+        "population_scope": scope_id,
+        "selection_rule": population["selection_rule"],
+        "population_digest": current_digest,
+        "digest_basis": POPULATION_BASIS,
+        "recorded": population["recorded"],
+        "finished": population["finished"],
+        "unfinished": population["unfinished"],
+        "current_members": sorted(finished),
+        "expected_population_digest": None,
+        "compared": False,
+        "changed": None,
+        "detail_complete": False,
+        "undetailed": False,
+    }
+    if baseline is None:
+        check.update(
+            _counted(
+                {
+                    "added_members": [],
+                    "newly_recorded_finished": [],
+                    "newly_recorded_unfinished": [],
+                    "newly_finished": [],
+                    "removed_finished": [],
+                    "removed_unfinished": [],
+                    "lost_eligibility": [],
+                    "still_members": [],
+                }
+            )
+        )
+        check["note"] = (
+            "no baseline was supplied, so nothing is claimed about whether "
+            "this population has changed"
+        )
+        return check
+
+    supplied_scope = str(baseline.get("population_scope") or "")
+    if supplied_scope != scope_id:
+        raise PopulationScopeMismatch(
+            "this population baseline was taken under a different source, "
+            "experiment, task, archive segment or selection rule, so it says "
+            "nothing about the population this request resolved; attempt "
+            "numbers alone are not a scope",
+            reason="foreign_population_baseline",
+            population_scope=scope_id,
+            baseline_population_scope=supplied_scope or None,
+        )
+
+    expected = str(baseline.get("expect_population") or "")
+    members = {int(attempt) for attempt in (baseline.get("members") or ())}
+    base_unfinished = {int(attempt) for attempt in (baseline.get("unfinished") or ())}
+    detail_complete = bool(baseline.get("unfinished_complete"))
+    changed = expected != current_digest
+
+    # A baseline that claims to list every recorded attempt has to hash to the
+    # digest it carries. Otherwise an omitted or invented id would be read as
+    # a real difference, and "unchanged" could be answered beside a list of
+    # members this call had just called new.
+    if detail_complete:
+        rebuilt = population_digest(
+            scope_id=scope_id,
+            recorded_attempts=sorted(members | base_unfinished),
+            finished_attempts=sorted(members),
+        )
+        if rebuilt != expected:
+            raise PopulationBaselineInconsistent(
+                "this baseline's attempt lists do not hash to the population "
+                "digest it carries, so the two describe different populations "
+                "and neither can be compared against what is recorded now",
+                reason="inconsistent_population_baseline",
+                population_scope=scope_id,
+                expected_population_digest=expected,
+                baseline_population_digest=rebuilt,
+            )
+    elif not changed and (
+        members != finished or (base_unfinished - unfinished)
+    ):
+        # A truncated listing still carries a whole-population digest. If that
+        # digest says nothing moved while the ids it did list disagree with
+        # what is recorded, the request is self-contradictory: answering
+        # "unchanged" beside contradictory diffs would publish both.
+        raise PopulationBaselineInconsistent(
+            "this baseline's population digest says nothing has changed, but "
+            "the attempt ids it listed are not the ones recorded now; the "
+            "digest and the lists cannot both be about this population",
+            reason="inconsistent_population_baseline",
+            population_scope=scope_id,
+            expected_population_digest=expected,
+        )
+
+    # Always exact: the member list a summary publishes is bounded and whole.
+    added_members = sorted(finished - members)
+    removed_finished = sorted(members - recorded)
+    lost_eligibility = sorted(members & unfinished)
+    still_members = sorted(members & finished)
+    # Exact only with a complete baseline listing of the unfinished side.
+    newly_recorded_finished: list[int] = []
+    newly_recorded_unfinished: list[int] = []
+    newly_finished: list[int] = []
+    removed_unfinished: list[int] = []
+    if detail_complete:
+        base_recorded = members | base_unfinished
+        newly_recorded_finished = sorted(finished - base_recorded)
+        newly_recorded_unfinished = sorted(unfinished - base_recorded)
+        newly_finished = sorted(finished & base_unfinished)
+        removed_unfinished = sorted(base_unfinished - recorded)
+    attributed = any(
+        (added_members, removed_finished, lost_eligibility,
+         newly_recorded_unfinished, removed_unfinished)
+    )
+    check.update(
+        _counted(
+            {
+                "added_members": added_members,
+                "newly_recorded_finished": newly_recorded_finished,
+                "newly_recorded_unfinished": newly_recorded_unfinished,
+                "newly_finished": newly_finished,
+                "removed_finished": removed_finished,
+                "removed_unfinished": removed_unfinished,
+                "lost_eligibility": lost_eligibility,
+                "still_members": still_members,
+            }
+        )
+    )
+    check.update(
+        {
+            "expected_population_digest": expected,
+            "compared": True,
+            "changed": changed,
+            "detail_complete": detail_complete,
+            "undetailed": bool(changed and not attributed),
+        }
+    )
+    check["note"] = (
+        "this describes which runs exist, not what any of them recorded; the "
+        "runs listed in this summary are unchanged as members of it"
+        if not changed
+        else (
+            "the runs recorded for this task have changed since this summary "
+            "was made; its members and figures are unchanged and still "
+            "describe the runs it lists"
+        )
+    )
+    return check
 
 
 def _usage_without_anchors(usage: Optional[Mapping[str, Any]]) -> dict[str, Any]:
@@ -344,12 +712,20 @@ def _project_member(row: Mapping[str, Any], reader: Any) -> SelectedRun:
             usage={}, unavailable=(), digest=digest,
         )
     projection = project_execution(ref, reader)
-    data = projection.as_dict()
     observations = tuple(
         command_summary_module.observations_from_projection(projection)
     )
-    turns = tuple(data.get("turns") or ())
-    unavailable = tuple(data.get("unavailable") or ())
+    # The five values below, taken from the projection rather than from
+    # `as_dict()`, which would additionally serialize every step, every
+    # unassigned step, the answers and the timing -- none of which a summary
+    # reads. Each is the SAME expression `as_dict` uses for it, so the digest
+    # inputs are unchanged; nothing here is measured, so nothing is claimed
+    # about what it costs.
+    turns = tuple(turn.as_dict() for turn in projection.turns)
+    unavailable = tuple(projection.unavailable)
+    artifacts = [artifact.as_dict() for artifact in projection.artifacts]
+    cost = dict(projection.cost)
+    usage = dict(projection.usage)
     # The digest is built from the SAME values the summary is built from, and
     # from the answers and costs a drill-down opens. An identifier-only digest
     # would call a run unchanged after its recorded outcome, its duration or
@@ -368,9 +744,9 @@ def _project_member(row: Mapping[str, Any], reader: Any) -> SelectedRun:
                 ),
             ),
             "llm_calls": _llm_call_values(turns),
-            "artifacts": data.get("artifacts"),
-            "cost": data.get("cost"),
-            "usage": _usage_without_anchors(data.get("usage")),
+            "artifacts": artifacts,
+            "cost": cost,
+            "usage": _usage_without_anchors(usage),
         },
     )
     return SelectedRun(
@@ -379,8 +755,8 @@ def _project_member(row: Mapping[str, Any], reader: Any) -> SelectedRun:
         projection=projection,
         observations=observations,
         turns=turns,
-        cost=dict(data.get("cost") or {}),
-        usage=dict(data.get("usage") or {}),
+        cost=cost,
+        usage=usage,
         unavailable=unavailable,
         digest=digest,
     )
@@ -696,6 +1072,8 @@ def _build(
     unfinished: Sequence[int],
     not_recorded: Sequence[int],
     sealed: bool,
+    selection_rule: str = SELECTION_EXPLICIT,
+    task_population: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """The whole answer over runs that are already resolved and projected.
 
@@ -744,6 +1122,11 @@ def _build(
         "sealed": bool(sealed),
         "scope": {
             "kind": METRIC_SCOPE,
+            # How this member set was arrived at: a list a caller sent, or the
+            # server's own rule over this task's finished runs. Outside the
+            # digest below, with the task population, because both move when a
+            # run STARTS and neither says anything about recorded evidence.
+            "selection_rule": selection_rule,
             "requested_attempts": list(requested),
             "requested": len(requested),
             "duplicate_requests": int(duplicate_requests),
@@ -752,6 +1135,7 @@ def _build(
             "pass_scope": None,
         },
         "population": population,
+        "task_population": None if task_population is None else dict(task_population),
         "members": member_rows,
         "member_count": len(member_rows),
         "run_outcomes": _run_outcomes(members),
@@ -818,6 +1202,8 @@ def aggregate_selected_runs(
     candidate_rows: Sequence[Mapping[str, Any]],
     reader: Any,
     sealed: bool = False,
+    selection_rule: str = SELECTION_EXPLICIT,
+    task_population: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """One summary over exactly the runs a caller named.
 
@@ -845,6 +1231,38 @@ def aggregate_selected_runs(
         unfinished=unfinished,
         not_recorded=not_recorded,
         sealed=sealed,
+        selection_rule=selection_rule,
+        task_population=task_population,
+    )
+
+
+def refuse_over_limit(
+    population: Mapping[str, Any],
+    *,
+    experiment_id: str,
+    task_id: str,
+) -> None:
+    """Refuse the WHOLE all-finished request, with the counts that explain it.
+
+    Not a sample and not a truncation: summarizing the first twenty of this
+    task's finished runs would publish a figure over a population nobody
+    chose. The counts and the cap are in the payload so the caller can pick
+    runs explicitly instead.
+    """
+    finished = int(population["finished"])
+    raise SelectionTooLarge(
+        f"task {task_id!r} has {finished} finished runs recorded in "
+        f"{experiment_id!r} and at most {MAX_SELECTED_RUNS} can be summarized "
+        "in one request. Nothing was summarized and nothing was sampled: "
+        "select the runs you mean explicitly",
+        reason="too_many_runs",
+        max_runs=MAX_SELECTED_RUNS,
+        requested=finished,
+        selection_rule=SELECTION_ALL_FINISHED,
+        recorded=int(population["recorded"]),
+        finished=finished,
+        unfinished=int(population["unfinished"]),
+        task_population=dict(population),
     )
 
 
@@ -861,6 +1279,10 @@ def validate_selection(
     expect: Optional[str] = None,
     expect_members: Optional[Mapping[int, str]] = None,
     sealed: bool = False,
+    task_population: Optional[Mapping[str, Any]] = None,
+    population_baseline: Optional[Mapping[str, Any]] = None,
+    finished_attempts: Sequence[int] = (),
+    unfinished_attempts: Sequence[int] = (),
 ) -> dict[str, Any]:
     """Re-project the named runs and say which no longer match.
 
@@ -873,6 +1295,14 @@ def validate_selection(
     Optimistic, and says so: it detects a change rather than preventing one.
     Re-projection is bounded by the same selection limit, and a single-member
     check names one attempt and re-projects one run.
+
+    A population baseline may ride along, and naming NO attempt at all is the
+    metadata-only mode behind "check for run changes": the answer then comes
+    entirely from the attempt metadata already enumerated for this request, no
+    member is re-projected, and no unselected run's turns are read. Population
+    drift is reported beside the evidence answer and never inside it -- a run
+    recorded since this summary does not make its members stale, and a member
+    whose evidence changed does not make the population changed.
     """
     expected = {int(key): str(value) for key, value in (expect_members or {}).items()}
     unrelated = sorted(set(expected) - set(int(a) for a in requested))
@@ -885,6 +1315,19 @@ def validate_selection(
             reason="unrelated_expectation",
             attempts=unrelated,
         )
+    # Before any projection: a baseline from another scope is refused rather
+    # than answered, so a foreign check costs the metadata read and nothing.
+    population_check = (
+        None
+        if task_population is None
+        else population_drift(
+            population=task_population,
+            recorded_attempts=recorded_attempts,
+            finished_attempts=finished_attempts,
+            unfinished_attempts=unfinished_attempts,
+            baseline=population_baseline,
+        )
+    )
     members, excluded, unfinished, not_recorded = _resolve(
         requested=requested,
         recorded_attempts=recorded_attempts,
@@ -992,21 +1435,36 @@ def validate_selection(
         ),
         "unfinished": list(unfinished),
         "not_recorded": list(not_recorded),
+        "task_population": None if task_population is None else dict(task_population),
+        # Beside the evidence answer, never inside it.
+        "population_check": population_check,
     }
 
 
 __all__ = [
     "DIGEST_BASIS",
     "MAX_ATTEMPT_PARAMS",
+    "MAX_LISTED_UNFINISHED",
     "MAX_SELECTED_RUNS",
     "METRIC_SCOPE",
+    "POPULATION_BASIS",
+    "PopulationBaselineInconsistent",
     "REASON_NOT_RECORDED",
     "REASON_UNFINISHED",
+    "SELECTION_ALL_FINISHED",
+    "SELECTION_EXPLICIT",
+    "SELECTION_RULES",
+    "PopulationScopeMismatch",
     "SelectedRun",
     "SelectedRunsError",
     "SelectionIncoherent",
     "SelectionTooLarge",
     "aggregate_selected_runs",
     "bound_attempts",
+    "build_task_population",
+    "population_digest",
+    "population_drift",
+    "population_scope_id",
+    "refuse_over_limit",
     "validate_selection",
 ]

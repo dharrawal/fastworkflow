@@ -354,9 +354,10 @@ def select_task_attempts(
     control: SelectionControlStore,
     experiment_id: str,
     task_id: str,
-    attempts: Sequence[int],
+    attempts: Optional[Sequence[int]],
     *,
     store_id: Optional[str] = None,
+    max_selected: Optional[int] = None,
 ) -> dict[str, Any]:
     """The attempts a caller NAMED, projected; the rest enumerated only.
 
@@ -375,11 +376,29 @@ def select_task_attempts(
     `best_attempt` and `reference_attempt` are resolved as NUMBERS here, from
     the control pointer and from the attempt rows' own status, for the same
     reason: labelling the named runs does not require projecting the others.
+
+    `attempts=None` is the SERVER-RESOLVED rule (`fix-9eg.3.2.2.1`): every
+    finished attempt of this task, decided from the same enumerated metadata
+    rather than from a list somebody sent or a row somebody could see. It is
+    one read either way -- the finished/unfinished partition and the caller's
+    named set come off the same rows -- which is what keeps a population check
+    from re-reading anything.
+
+    `max_selected` bounds that rule, and is checked BEFORE any projection
+    happens: a population over the bound answers `over_limit` with its counts
+    and costs no turn read at all, so the caller can refuse the whole request
+    rather than summarize part of it.
     """
     scope = _TaskScope(control, experiment_id, task_id, store_id=store_id,
                        require_store=False)
     rows = sorted(scope.attempt_rows(), key=lambda row: int(row["attempt"]))
     by_attempt = {int(row["attempt"]): row for row in rows}
+    finished_attempts = [
+        int(row["attempt"]) for row in rows if attempt_is_finished(row)
+    ]
+    unfinished_attempts = [
+        int(row["attempt"]) for row in rows if not attempt_is_finished(row)
+    ]
     pointer = control.scoped_pointer(
         scope_kind=TASK_BEST_SCOPE, group_id=scope.group_id, scope_key=scope.scope_key
     )
@@ -396,16 +415,25 @@ def select_task_attempts(
         ),
         None,
     )
-    wanted = sorted({int(attempt) for attempt in attempts})
+    all_finished = attempts is None
+    wanted = (
+        list(finished_attempts)
+        if all_finished
+        else sorted({int(attempt) for attempt in attempts})
+    )
+    over_limit = (
+        all_finished and max_selected is not None and len(wanted) > int(max_selected)
+    )
     selected: list[dict[str, Any]] = []
-    for attempt in wanted:
-        row = by_attempt.get(attempt)
-        if row is None:
-            continue
-        projected = project_attempt(scope, row)
-        projected["is_best"] = best_attempt is not None and attempt == best_attempt
-        projected["is_reference"] = reference is not None and attempt == reference
-        selected.append(projected)
+    if not over_limit:
+        for attempt in wanted:
+            row = by_attempt.get(attempt)
+            if row is None:
+                continue
+            projected = project_attempt(scope, row)
+            projected["is_best"] = best_attempt is not None and attempt == best_attempt
+            projected["is_reference"] = reference is not None and attempt == reference
+            selected.append(projected)
     return {
         "experiment_id": scope.experiment_id,
         "task_id": scope.task_id,
@@ -415,8 +443,12 @@ def select_task_attempts(
         "scope_key": scope.scope_key,
         "evidence_readable": scope.store is not None,
         "recorded_attempts": [int(row["attempt"]) for row in rows],
+        "finished_attempts": finished_attempts,
+        "unfinished_attempts": unfinished_attempts,
         "best_attempt": best_attempt,
         "reference_attempt": reference,
+        "requested_attempts": wanted,
+        "over_limit": over_limit,
         "selected": selected,
         "not_recorded": [
             attempt for attempt in wanted if attempt not in by_attempt

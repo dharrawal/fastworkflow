@@ -4500,7 +4500,13 @@ function renderTaskRunList(card, experimentId, taskId, label, evidence, runs, na
    one here would stale the task list and the consistency band that share it,
    and this panel is part of that render rather than a navigation of its
    own. */
-var selectedRuns = { key: null, chosen: {}, generation: 0 };
+var selectedRuns = { key: null, chosen: {}, generation: 0, mode: null,
+                     population: null };
+
+/* Which "check for run changes" click owns the notice. Separate from the
+   drill-down claim below: checking is not navigating, so it must not cancel a
+   drill-down and a drill-down must not cancel it. */
+var selectedRunsCheck = 0;
 
 /* Request safety, matching the route: it refuses more than this rather than
    summarizing some of them, so the page says so before asking. */
@@ -4521,7 +4527,8 @@ function selectedRunsKey(experimentId, taskId) {
 function resetSelectedRuns(experimentId, taskId) {
   var key = selectedRunsKey(experimentId, taskId);
   if (selectedRuns.key === key) { return; }
-  selectedRuns = { key: key, chosen: {}, generation: 0 };
+  selectedRuns = { key: key, chosen: {}, generation: 0, mode: null,
+                   population: null };
 }
 
 function selectedRunAttempts() {
@@ -4529,6 +4536,113 @@ function selectedRunAttempts() {
     .filter(function (attempt) { return selectedRuns.chosen[attempt]; })
     .map(Number)
     .sort(function (a, b) { return a - b; });
+}
+
+/* The population a result was made over, as the page may echo it back.
+
+   Two opaque values the server published plus the ids it listed. Neither
+   opaque value is believed as a description of anything: the server re-derives
+   both from its own metadata and compares, and refuses a baseline taken under
+   another task, source or archive. Nothing here names a store. */
+function rememberPopulation(data) {
+  var population = data.task_population;
+  selectedRuns.population = !population ? null : {
+    scope: population.population_scope,
+    digest: population.population_digest,
+    rule: population.selection_rule,
+    members: population.finished_attempts || [],
+    memberCount: population.finished,
+    unfinished: population.unfinished_attempts || [],
+    unfinishedComplete: population.unfinished_listing_complete !== false
+  };
+}
+
+function populationBaselineQuery() {
+  var base = selectedRuns.population;
+  if (!base) { return ""; }
+  var parts = ["population_scope=" + encodeURIComponent(base.scope),
+               "expect_population=" + encodeURIComponent(base.digest),
+               "population_rule=" + encodeURIComponent(base.rule),
+               "baseline_member_count=" + encodeURIComponent(base.memberCount),
+               "baseline_unfinished_complete="
+                 + (base.unfinishedComplete ? "true" : "false")];
+  base.members.forEach(function (attempt) {
+    parts.push("baseline_member=" + encodeURIComponent(attempt));
+  });
+  base.unfinished.forEach(function (attempt) {
+    parts.push("baseline_unfinished=" + encodeURIComponent(attempt));
+  });
+  return parts.join("&");
+}
+
+function attemptList(ids) {
+  return (ids || []).map(function (id) { return "attempt " + id; }).join(", ");
+}
+
+/* What the population check answered, painted where it stays.
+
+   Membership is NOT touched here. A newly eligible run is news about the task,
+   not a change to any run this summary counted, so it is said plainly and the
+   result stays exactly as it was until somebody refreshes. */
+function renderPopulationNotice(box, check) {
+  if (!box) { return; }
+  clear(box);
+  if (!check) { return; }
+  if (check.changed === null || check.changed === undefined) {
+    box.appendChild(el("div", "sub",
+      "No baseline was available, so nothing is claimed about whether the "
+      + "runs recorded for this task have changed."));
+    return;
+  }
+  if (!check.changed) {
+    box.appendChild(el("div", "sub",
+      "Checked just now: this task still records " + fmtCount(check.recorded)
+      + " run(s), " + fmtCount(check.finished) + " of them finished, so the "
+      + "membership below is unchanged. This read the runs, not what they "
+      + "recorded: opening a contributor still re-checks that run's evidence."));
+    return;
+  }
+  var lines = [];
+  if (check.newly_finished_count) {
+    lines.push(fmtCount(check.newly_finished_count) + " run(s) that were "
+      + "still going have finished (" + attemptList(check.newly_finished) + ")");
+  }
+  if (check.newly_recorded_finished_count) {
+    lines.push(fmtCount(check.newly_recorded_finished_count) + " finished "
+      + "run(s) have been recorded since ("
+      + attemptList(check.newly_recorded_finished) + ")");
+  }
+  if (check.newly_recorded_unfinished_count) {
+    lines.push(fmtCount(check.newly_recorded_unfinished_count) + " unfinished "
+      + "run(s) have been recorded since ("
+      + attemptList(check.newly_recorded_unfinished) + ")");
+  }
+  if (!check.detail_complete && check.added_members_count) {
+    lines.push(fmtCount(check.added_members_count) + " finished run(s) are "
+      + "eligible now that were not (" + attemptList(check.added_members) + ")");
+  }
+  if (check.removed_finished_count) {
+    lines.push(fmtCount(check.removed_finished_count) + " run(s) this summary "
+      + "counted are no longer recorded ("
+      + attemptList(check.removed_finished) + ")");
+  }
+  if (check.removed_unfinished_count) {
+    lines.push(fmtCount(check.removed_unfinished_count) + " unfinished run(s) "
+      + "are no longer recorded (" + attemptList(check.removed_unfinished) + ")");
+  }
+  if (check.lost_eligibility_count) {
+    lines.push(fmtCount(check.lost_eligibility_count) + " run(s) this summary "
+      + "counted no longer read as finished ("
+      + attemptList(check.lost_eligibility) + ")");
+  }
+  if (check.undetailed || !lines.length) {
+    lines.push("the runs recorded for this task have changed in a way the "
+      + "listed attempts do not account for");
+  }
+  box.appendChild(el("div", "chipMarker unknown",
+    "The runs recorded for this task have changed: " + lines.join("; ")
+    + ". Nothing below has been replaced and no run it counted is claimed to "
+    + "have changed. Refresh to summarize the runs as they are now."));
 }
 
 function selectedRunsMember(data, attempt) {
@@ -4566,7 +4680,7 @@ function selectedRunsSide(data, attempt, experimentId) {
    quietly standing in for the evidence the totals were made of. Optimistic:
    it detects a change, it does not prevent one. */
 function validateSelectedMember(data, attempt, experimentId, taskId, note, nav,
-                                then) {
+                                then, notice) {
   var claim = ++selectedRunsClick;
   var member = selectedRunsMember(data, attempt);
   if (!member || !member.evidence_digest) { then(); return; }
@@ -4574,6 +4688,11 @@ function validateSelectedMember(data, attempt, experimentId, taskId, note, nav,
   var source = selectedRuns.key;
   var query = "?attempt=" + attempt + "&expect_member="
     + encodeURIComponent(attempt + ":" + member.evidence_digest);
+  /* The population rides along on the SAME request, answered from the same
+     metadata read. It never re-resolves the membership on screen: this
+     validates the one fixed member and reports drift beside it. */
+  var baseline = populationBaselineQuery();
+  if (baseline) { query += "&" + baseline; }
   if (note) {
     note.textContent = "checking that this run still records what was counted…";
   }
@@ -4597,6 +4716,7 @@ function validateSelectedMember(data, attempt, experimentId, taskId, note, nav,
       if (note) { note.textContent = check.error; }
       return;
     }
+    renderPopulationNotice(notice, check.population_check);
     if (check.stale) {
       if (note) {
         note.textContent = (check.changed && check.changed.length)
@@ -4619,7 +4739,8 @@ function validateSelectedMember(data, attempt, experimentId, taskId, note, nav,
    did not. A run that finished having recorded nothing is HERE, in the
    population, contributing no dispatch and saying so: leaving it out would
    quietly shrink the denominator of everything above. */
-function renderSelectedRunsMembers(box, data, experimentId, taskId, label, nav) {
+function renderSelectedRunsMembers(box, data, experimentId, taskId, label, nav,
+                                   notice) {
   var list = el("div");
   list.setAttribute("data-selected-members", "");
   (data.members || []).forEach(function (member) {
@@ -4660,7 +4781,7 @@ function renderSelectedRunsMembers(box, data, experimentId, taskId, label, nav) 
           taskCompare.rightPass = null;
           taskView = "compare";
           showExperimentTask(experimentId, taskId, label);
-        });
+        }, notice);
       });
       row.appendChild(compare);
     }
@@ -4704,11 +4825,48 @@ function appendSelectedRunsPopulation(box, data) {
   });
 }
 
+/* What this TASK has, beside what this summary is over.
+
+   Counts only, each one off the response. "Planned" appears only when a
+   per-task run plan is actually recorded: an experiment-wide declared total is
+   not a plan for this task and is never shown as one. */
+function appendTaskPopulation(box, data) {
+  var population = data.task_population;
+  if (!population) { return; }
+  var line = el("div", "sub");
+  line.setAttribute("data-task-population", "");
+  var text = "This task: " + fmtCount(population.recorded)
+    + " run(s) recorded · " + fmtCount(population.finished) + " finished · "
+    + fmtCount(population.unfinished) + " still running";
+  if (population.planned !== null && population.planned !== undefined) {
+    text += " · " + fmtCount(population.planned) + " planned for this task";
+  }
+  line.textContent = text;
+  box.appendChild(line);
+  if ((population.planned === null || population.planned === undefined)
+      && population.selection_rule === "all_finished") {
+    box.appendChild(el("div", "sub", population.planned_note || ""));
+  }
+}
+
 function renderSelectedRunsResult(body, data, experimentId, taskId, label, ctx,
-                                  nav) {
+                                  nav, notice) {
   var summary = data.command_summary || {};
   var coverage = summary.coverage || {};
+  var rule = (data.scope || {}).selection_rule;
+  /* Zero finished runs is an ANSWER. No counts, no cost, no fabricated zero:
+     a task that has finished nothing has spent nothing only in the sense that
+     nothing was recorded, and saying "$0.00" would be a claim. */
+  if (!data.member_count && rule === "all_finished") {
+    appendTaskPopulation(body, data);
+    body.appendChild(el("div", "empty",
+      "This task has recorded no finished run yet, so there is nothing to "
+      + "summarize. That is the answer rather than a missing one: no counts "
+      + "and no cost are shown because none were recorded."));
+    return;
+  }
   body.appendChild(el("div", "sub", commandHeadline(summary)));
+  appendTaskPopulation(body, data);
   appendSelectedRunsPopulation(body, data);
   appendCommandCoverage(body, summary, {
     headline: fmtCount(coverage.runs_included || 0)
@@ -4749,7 +4907,8 @@ function renderSelectedRunsResult(body, data, experimentId, taskId, label, ctx,
     + " · " + fmtCount(outcomes.runs_with_failed_dispatches || 0)
     + " run(s) contain a failed dispatch, which is a different count from a "
     + "failed run and is not derived from it."));
-  renderSelectedRunsMembers(body, data, experimentId, taskId, label, nav);
+  renderSelectedRunsMembers(body, data, experimentId, taskId, label, nav,
+                            notice);
   var groups = summary.groups || [];
   if (!groups.length) {
     body.appendChild(el("div", "empty",
@@ -4764,7 +4923,7 @@ function renderSelectedRunsResult(body, data, experimentId, taskId, label, ctx,
     comparison: null,
     beforeOpen: function (contributor, note, open) {
       validateSelectedMember(data, contributor.attempt, experimentId, taskId,
-                             note, nav, open);
+                             note, nav, open, notice);
     }
   };
   var resolve = function (contributor) {
@@ -4800,39 +4959,67 @@ function renderSelectedRunsPanel(card, experimentId, taskId, label, runs, nav) {
   panel.setAttribute("data-selected-runs", "");
   panel.appendChild(el("h2", null, "Summary of selected runs"));
   panel.appendChild(el("div", "sub",
-    "Tick the finished runs above and summarize them together. The dispatches "
-    + "of the ticked runs are pooled, the runs that were asked for and are "
-    + "not in the counts are named, and nothing here ranks them or picks one."));
+    "Tick the finished runs above and summarize them together, or summarize "
+    + "every finished run of this task. The dispatches of the member runs are "
+    + "pooled, the runs that are not in the counts are named, and nothing here "
+    + "ranks them or picks one."));
   var controls = el("div", "runDecision");
   var summarize = el("button", "primary", "Summarize the selected runs");
   summarize.type = "button";
   summarize.setAttribute("data-selected-runs-submit", "");
+  /* The rule, resolved by the server from this task's attempt metadata. The
+     page never builds this population out of the rows it happens to show. */
+  var allFinished = el("button", null, "Summarize all finished runs");
+  allFinished.type = "button";
+  allFinished.setAttribute("data-selected-runs-all", "");
   var refresh = el("button", null, "Refresh");
   refresh.type = "button";
   refresh.setAttribute("data-selected-runs-refresh", "");
   refresh.hidden = true;
+  var recheck = el("button", null, "Check for run changes");
+  recheck.type = "button";
+  recheck.setAttribute("data-selected-runs-check", "");
+  recheck.hidden = true;
   var count = el("span", "sub", "");
   count.setAttribute("data-selected-runs-count", "");
   controls.appendChild(summarize);
+  controls.appendChild(allFinished);
   controls.appendChild(refresh);
+  controls.appendChild(recheck);
   controls.appendChild(count);
   panel.appendChild(controls);
+  /* Its own region, above the result and outside it: a notice painted into a
+     drill-down row leaves with the view that drill-down opens, and a result
+     with no members has no row to paint into. */
+  var notice = el("div");
+  notice.setAttribute("data-selected-runs-notice", "");
+  panel.appendChild(notice);
   var body = el("div");
   body.setAttribute("data-selected-runs-body", "");
   panel.appendChild(body);
   card.appendChild(panel);
 
-  function load() {
+  function load(rule) {
+    var wholeTask = rule === "all_finished";
     var attempts = selectedRunAttempts();
-    if (!attempts.length || attempts.length > SELECTED_RUNS_MAX) { return; }
+    if (!wholeTask && (!attempts.length || attempts.length > SELECTED_RUNS_MAX)) {
+      return;
+    }
     var generation = ++selectedRuns.generation;
     var source = selectedRuns.key;
+    selectedRuns.mode = wholeTask ? "all_finished" : "explicit";
+    selectedRuns.population = null;
+    recheck.hidden = true;
+    clear(notice);
     clear(body);
-    body.appendChild(el("div", "empty",
-      "summarizing " + fmtCount(attempts.length) + " run(s)…"));
-    var query = attempts.map(function (attempt) {
-      return "attempt=" + encodeURIComponent(attempt);
-    }).join("&");
+    body.appendChild(el("div", "empty", wholeTask
+      ? "resolving every finished run of this task…"
+      : "summarizing " + fmtCount(attempts.length) + " run(s)…"));
+    var query = wholeTask
+      ? "scope=all_finished"
+      : attempts.map(function (attempt) {
+          return "attempt=" + encodeURIComponent(attempt);
+        }).join("&");
     selectionRead(
       taskSelectionPath(experimentId, taskId, "/selected-runs?" + query)
     ).then(function (data) {
@@ -4846,19 +5033,62 @@ function renderSelectedRunsPanel(card, experimentId, taskId, label, runs, nav) {
                       data.error);
         return;
       }
+      rememberPopulation(data);
       refresh.hidden = false;
+      recheck.hidden = !selectedRuns.population;
       renderSelectedRunsResult(body, data, experimentId, taskId, label, ctx,
-                               nav);
+                               nav, notice);
     }).catch(function (e) {
       if (expNavStale(nav) || generation !== selectedRuns.generation
           || source !== selectedRuns.key) { return; }
       clear(body);
-      /* The route's own refusal, which says which runs and why. */
+      /* The route's own refusal, which says how many runs there are and why
+         none of them was summarized. */
       body.appendChild(el("div", "empty", "Not summarized: " + e.message));
     });
   }
-  summarize.addEventListener("click", load);
-  refresh.addEventListener("click", load);
+
+  /* Metadata only: it names no attempt, so nothing is re-projected and no
+     unselected run's turns are read. The result on screen is left alone --
+     Refresh replaces membership and this never does. */
+  function checkRunChanges() {
+    var baseline = populationBaselineQuery();
+    if (!baseline) { return; }
+    var claim = ++selectedRunsCheck;
+    var generation = selectedRuns.generation;
+    var source = selectedRuns.key;
+    clear(notice);
+    notice.appendChild(el("div", "sub",
+      "checking whether the runs recorded for this task have changed…"));
+    selectionRead(taskSelectionPath(
+      experimentId, taskId, "/selected-runs/validation?" + baseline
+    )).then(function (answer) {
+      if (expNavStale(nav) || generation !== selectedRuns.generation
+          || source !== selectedRuns.key || claim !== selectedRunsCheck) {
+        return;
+      }
+      clear(notice);
+      if (answer.unavailable) {
+        notice.appendChild(el("div", "chipMarker unknown", answer.error));
+        return;
+      }
+      renderPopulationNotice(notice, answer.population_check);
+    }).catch(function (e) {
+      if (expNavStale(nav) || generation !== selectedRuns.generation
+          || source !== selectedRuns.key || claim !== selectedRunsCheck) {
+        return;
+      }
+      clear(notice);
+      notice.appendChild(el("div", "chipMarker unknown", e.message));
+    });
+  }
+
+  summarize.addEventListener("click", function () { load("explicit"); });
+  allFinished.addEventListener("click", function () { load("all_finished"); });
+  refresh.addEventListener("click", function () {
+    load(selectedRuns.mode || "explicit");
+  });
+  recheck.addEventListener("click", checkRunChanges);
 
   return function update() {
     var attempts = selectedRunAttempts();
@@ -4876,7 +5106,11 @@ function renderSelectedRunsPanel(card, experimentId, taskId, label, runs, nav) {
        stops being an answer to it, and any request still in flight stops
        being one anybody asked for. */
     selectedRuns.generation++;
+    selectedRuns.mode = null;
+    selectedRuns.population = null;
     refresh.hidden = true;
+    recheck.hidden = true;
+    clear(notice);
     clear(body);
   };
 }
