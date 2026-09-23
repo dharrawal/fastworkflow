@@ -16,6 +16,7 @@ from fastworkflow.observation_offloading.labels import offload_label, label_alia
 from fastworkflow import context_budget
 from fastworkflow.observation_offloading.search import (
     DEFAULT_PAGE_BYTES,
+    EVIDENCE_PREFIX_NOTICE,
     SEARCH_MEMORY_MAX_PAGES,
     SEARCH_MODEL_ENV,
     SEARCH_OBSERVATION,
@@ -159,7 +160,7 @@ class ContextWindowExceededError(Exception):
 
 
 class SearchInputBound(unittest.TestCase):
-    """F12 (ido-3vp): what one search_memory call may hand the search model.
+    """What one search_memory call may hand the search model.
 
     Every test here is offline. The predictor is a stub that records the
     ``observation`` it was constructed with, so the byte bound is proved by
@@ -206,7 +207,7 @@ class SearchInputBound(unittest.TestCase):
     # -- the budget ----------------------------------------------------------
 
     def test_the_declared_page_geometry_is_the_reference_value_of_the_budget(self):
-        # The two constants F12 found unused are now the budget's value at the
+        # The two page-geometry constants are the budget's value at the
         # reference window, not a second contract beside it.
         self.assertEqual(SEARCH_OBSERVATION.reference_bytes,
                          DEFAULT_PAGE_BYTES * SEARCH_MEMORY_MAX_PAGES)
@@ -261,19 +262,23 @@ class SearchInputBound(unittest.TestCase):
     # -- the input the model actually gets -----------------------------------
 
     def test_an_oversized_observation_is_cut_before_the_model_is_called(self):
-        # The F12 evidence case, byte for byte: 40,000 short rows, 440,000 bytes.
+        # The measured worst case, byte for byte: 40,000 short rows, 440,000 bytes.
         text = 'row  value\n' * 40_000
         self.assertEqual(len(text.encode('utf-8')), 440_000)
         self.persist(text)
         budget = search_observation_max_bytes()
         seen = self.run_search()
-        self.assertLessEqual(seen['observation_bytes'], budget)
-        # Not a token of the budget wasted either: a whole page is still read.
-        self.assertGreater(seen['observation_bytes'], budget - DEFAULT_PAGE_BYTES)
-        self.assertTrue(text.startswith(seen['observation']))
         event = seen['event']
+        # The budget bounds the EVIDENCE. What the model is handed is that read
+        # plus the truncation disclosure, appended after the budget.
+        evidence, _, notice = seen['observation'].partition('\n[TRUNCATED:')
+        self.assertLessEqual(event['observation_sent_bytes'], budget)
+        # Not a token of the budget wasted either: a whole page is still read.
+        self.assertGreater(event['observation_sent_bytes'], budget - DEFAULT_PAGE_BYTES)
+        self.assertTrue(text.startswith(evidence))
+        self.assertEqual(len(evidence.encode('utf-8')), event['observation_sent_bytes'])
+        self.assertTrue(notice)
         self.assertEqual(event['observation_bytes'], 440_000)
-        self.assertEqual(event['observation_sent_bytes'], seen['observation_bytes'])
         self.assertTrue(event['observation_bounded'])
         self.assertEqual(event['observation_max_bytes'], budget)
         self.assertEqual(event['status'], 'answered')
@@ -282,7 +287,9 @@ class SearchInputBound(unittest.TestCase):
         text = 'row  value\n' * 40_000
         self.persist(text)
         seen = self.run_search(answer='rows 1-3 mention value')
-        result, shown = seen['result'], seen['observation_bytes']
+        # The evidence read, not the model input: the input also carries the
+        # truncation disclosure appended after the budget.
+        result, shown = seen['result'], seen['event']['observation_sent_bytes']
         self.assertTrue(is_bounded_evidence_observation(result))
         self.assertTrue(result.startswith('Observation O1 (tier=sqlite, bounded):\n'), result)
         self.assertIn('rows 1-3 mention value', result)
@@ -354,3 +361,85 @@ class SearchInputBound(unittest.TestCase):
         # The provider message itself is never printed back.
         self.assertNotIn('connection reset', seen['result'])
         self.assertEqual(seen['event']['status'], 'error')
+
+    # -- what the search model is told about a partial read -------------------
+
+    def test_the_prefix_is_disclosed_to_the_model_only_when_it_is_one(self):
+        """DOC-5: the model must not read a cut list as the whole list.
+
+        ``bounded_evidence_marking`` denies the absence inference to the AGENT,
+        after the answer exists. This is the other end: the model that writes
+        the answer is told in band that it is holding a prefix, and by how much,
+        so a row it was never shown is not reported as missing.
+        """
+        cut = 'row  value\n' * 40_000
+        self.persist(cut)
+        seen = self.run_search()
+        omitted = 440_000 - seen['event']['observation_sent_bytes']
+        self.assertIn(EVIDENCE_PREFIX_NOTICE.format(omitted=omitted), seen['observation'])
+        self.assertTrue(seen['event']['observation_bounded'])
+
+        # An observation that fits is handed over byte-identical: no notice, and
+        # nothing that could make a complete read look partial.
+        reset_runtime_state()
+        whole = 'holder rows\n' + 'x' * 4_000
+        self.assertLess(len(whole.encode('utf-8')), search_observation_max_bytes())
+        self.persist(whole, alias='O2')
+        unbounded = self.run_search(alias='O2')
+        self.assertEqual(unbounded['observation'], whole)
+        self.assertNotIn('TRUNCATED', unbounded['observation'])
+        self.assertFalse(unbounded['event']['observation_bounded'])
+
+
+class SearchModelRole(unittest.TestCase):
+    """CORE-8: a deployment that never declared the search role still searches.
+
+    The window half already falls back to the agent's model
+    (``search_window_tokens``), so refusing to call the agent's model left the
+    two halves disagreeing: evidence sized for a model the search would not use.
+    ``get_lm`` is stubbed, so no provider, credential or network is reached.
+    """
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.archive = RuntimeHandleArchive(str(Path(self.tmp.name) / 'archive.sqlite3'))
+        self.scope = RuntimeHandleScope('store', 'channel', 'experiment', 'task', 1, 'turn')
+        text = 'holder rows'
+        self.archive.persist(self.scope, alias='O1', offload_order=1,
+                             command_name='show_holders', step_index=0, text=text,
+                             text_sha256=hashlib.sha256(text.encode()).hexdigest())
+
+    def selected_role(self, env):
+        """The (model_env, key_env) pair ``search_memory`` asks ``get_lm`` for."""
+        asked: dict = {}
+
+        def get_lm(model_env, key_env, **_kwargs):
+            asked['model_env'] = model_env
+            asked['key_env'] = key_env
+            raise RuntimeError('no provider in this test')
+
+        with patch.dict(os.environ, env), \
+                patch.dict('fastworkflow._env_vars', {}, clear=True), \
+                patch('fastworkflow.observation_offloading.search.get_lm', get_lm):
+            result = search_memory('Who?', 'O1', scope=self.scope,
+                                   selected_archive=self.archive)
+        asked['result'] = result
+        return asked
+
+    def test_an_undeclared_search_role_falls_back_to_the_agents_model(self):
+        asked = self.selected_role({SEARCH_MODEL_ENV: ''})
+        self.assertEqual(asked['model_env'], context_budget.AGENT_MODEL_ENV)
+        self.assertEqual(asked['key_env'], 'LITELLM_API_KEY_AGENT')
+        # And the diagnostic names the role that actually failed, not one the
+        # deployment never set.
+        self.assertIn('Check LLM_AGENT and LITELLM_API_KEY_AGENT', asked['result'])
+
+    def test_a_declared_search_role_is_used_unchanged(self):
+        asked = self.selected_role({SEARCH_MODEL_ENV: 'vendor/search-model'})
+        self.assertEqual(asked['model_env'], SEARCH_MODEL_ENV)
+        self.assertEqual(asked['key_env'], 'LITELLM_API_KEY_OBSERVATION_SEARCH')
+        self.assertIn(
+            'Check LLM_OBSERVATION_SEARCH and LITELLM_API_KEY_OBSERVATION_SEARCH',
+            asked['result'])

@@ -1,35 +1,21 @@
 """Answer-time rehydration: the extract step reads the evidence, not the pointers.
 
-``ido-8ps.18``. The ReAct loop's trajectory is a *working* surface: compaction
-swaps a 3 KB listing for a 250 B offload label, and a listing command shows one
-bounded page of a result handle whose remaining rows live in the store. That is
-what keeps the agent's peak prompt at ~37k tokens instead of the control's ~80k,
-and ``ido-8ps.17`` measured it as a clear win on trajectory correctness.
+The ReAct loop's trajectory is a *working* surface: compaction swaps a 3 KB
+listing for a 250 B offload label, which is what keeps the agent's peak prompt
+small enough to finish long runs.
 
-The extract step is a different reader with a different job. It has no tools, it
-runs once, and ``trajectory`` is its only evidence input -- so at answer time the
-same compaction that helped the loop is what leaves the writer holding pointers.
-``ido-8ps.17`` measured that too: 35 of 260 deliverable slots answered with "see
-Observation O23" about a listing sitting in that attempt's own archive, and two
-attempts in ten that wrote up work which never ran.
+The extract step is a different reader with a different job. It has no tools,
+it runs once, and ``trajectory`` is its only evidence input -- so at answer time
+the same compaction that helped the loop is what leaves the writer holding
+pointers, answering a deliverable slot with "see Observation O23" about a
+listing sitting in that turn's own archive.
 
 So immediately before the extract call, and only there, this module builds the
-extractor's OWN copy of the trajectory with the evidence put back:
-
-(a) an **offload label** becomes the raw archived observation it names, printed
-    with its alias line and the context clause recorded for that alias, exactly
-    as the agent first saw it (``ido-986.14.9`` / ``ido-8ps.13``);
-(b) a **bounded listing observation** that declared a result handle keeps its own
-    text and gains every stored row behind that handle, whole, as the producer
-    rendered them (``ido-986.14.1`` / ``14.2``);
-(c) a **fetch_result_page observation** is treated the same way through the
-    listing it paged: the rows behind the page it served are appended to it.
-
-(a) and (b) are not alternatives. A listing can be bounded AND later offloaded,
-and such an observation gets both: its archived page comes back under its alias
-line and the stored rows are appended to that (``ido-pex``). Before that fix the
-label step ended the walk for that observation, so pages 2..n reached the
-coverage corpus -- which reads the same stored rows -- but never the writer.
+extractor's OWN copy of the trajectory with the evidence put back: an **offload
+label** becomes the raw archived observation it names, printed with its alias
+line and the context clause recorded for that alias, exactly as the agent first
+saw it. Nothing else in the trajectory is rewritten; an observation whose full
+text is still inline has lost nothing and is left alone.
 
 Rules this module does not bend:
 
@@ -41,8 +27,8 @@ Rules this module does not bend:
   replacement that would not fit, and say which aliases were left as pointers so
   the extractor can name them unresolved instead of guessing.
 
-Unconditional since ``ido-pyw.1``: rehydration is what the extract step does,
-for every workflow. The budget is derived from the model's context window
+Rehydration is what the extract step does, for every workflow; there is no flag
+to turn it off. The budget is derived from the model's context window
 (``fastworkflow.context_budget``); ``FW_ANSWER_REHYDRATION_MAX_BYTES`` remains
 as a tuning override.
 """
@@ -76,7 +62,7 @@ logger = logging.getLogger(__name__)
 #: context window (``context_budget.ANSWER_REHYDRATION``).
 ANSWER_REHYDRATION_MAX_BYTES_ENV = context_budget.ANSWER_REHYDRATION.override_env
 #: ~250 KB of UTF-8 at the reference window -- about the 80k-token answer-time
-#: prompt the control cells of ``ido-8ps.17`` answered from. It is a ceiling,
+#: prompt measured on real answering runs. It is a ceiling,
 #: not a target: a run whose evidence is smaller produces a smaller prompt.
 DEFAULT_MAX_BYTES = context_budget.REFERENCE_ANSWER_REHYDRATION_MAX_BYTES
 #: Below this a budget could not hold one page of evidence, so it is refused and
@@ -90,18 +76,8 @@ NOT_REHYDRATED_KEY = "answer_rehydration_note"
 NOT_REHYDRATED_PREFIX = (
     "Not rehydrated for the answer (evidence exists under these observations): "
 )
-#: The second clause of the same note. An offloaded listing that got its
-#: archived text back but not the rows behind its handle is not "not
-#: rehydrated" -- its own page is there -- so it is named separately, and the
-#: extractor can say which listings it holds only in part (``ido-pex``).
-ROWS_OMITTED_PREFIX = (
-    "Rehydrated without the stored rows behind their result handles (the "
-    "observation's own text is present, the remaining pages are not): "
-)
 
 KIND_LABEL = "label"        # (a)
-KIND_LISTING = "listing"    # (b)
-KIND_PAGE = "page"          # (c)
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +105,9 @@ class RehydrationReport:
     budget_bytes: int = 0
     bytes_before: int = 0
     bytes_after: int = 0
-    counts: dict[str, int] = field(
-        default_factory=lambda: {KIND_LABEL: 0, KIND_LISTING: 0, KIND_PAGE: 0}
-    )
+    counts: dict[str, int] = field(default_factory=lambda: {KIND_LABEL: 0})
     rehydrated: list[dict[str, Any]] = field(default_factory=list)
     dropped_aliases: list[str] = field(default_factory=list)
-    #: Aliases whose observation WAS rehydrated but whose stored rows did not
-    #: fit beside it. Disjoint from ``dropped_aliases``: those got nothing.
-    rows_omitted_aliases: list[str] = field(default_factory=list)
     unresolved_aliases: list[str] = field(default_factory=list)
     note_line: str = ""
     stopped_on: str = ""
@@ -153,10 +124,7 @@ class RehydrationReport:
             "bytes_added": self.bytes_added,
             "rehydrated_total": len(self.rehydrated),
             "rehydrated_labels": self.counts[KIND_LABEL],
-            "rehydrated_listings": self.counts[KIND_LISTING],
-            "rehydrated_pages": self.counts[KIND_PAGE],
             "dropped_aliases": list(self.dropped_aliases),
-            "rows_omitted_aliases": list(self.rows_omitted_aliases),
             "unresolved_aliases": list(self.unresolved_aliases),
             "stopped_on": self.stopped_on,
             "aliases": [
@@ -205,7 +173,7 @@ def _candidates(trajectory: Mapping[str, Any]) -> list[tuple[int, str, str]]:
     """``(step_index, alias, text)`` for every aliased execute observation.
 
     Most recent first. The alias comes off the observation itself -- the printed
-    A1 line, or the label's own alias -- so this never has to recompute execute
+    alias line, or the label's own alias -- so this never has to recompute execute
     ordinals or know how many steps the loop truncated away. An execute step with
     no alias on it (an error string, a refusal) is not a candidate: there is
     nothing stored to put back.
@@ -261,16 +229,14 @@ def rehydrated_label(
 ) -> Optional[str]:
     """The label's observation, re-printed exactly as the agent first saw it.
 
-    The archive stores the command response WITHOUT the presentation line
-    (``ido-986.14.9``), so the line is rebuilt here from the alias and the
-    context clause recorded for it at dispatch (``ido-8ps.13``). An alias with no
-    recorded clause prints the plain A1 line: the clause is presentation and its
-    absence is never guessed at.
+    The archive stores the command response WITHOUT the presentation line, so
+    the line is rebuilt here from the alias and the context clause recorded for
+    it at dispatch. An alias with no recorded clause prints the plain alias
+    line: the clause is presentation and its absence is never guessed at.
 
     ``annotated_observation`` joins the two, exactly as the compaction hook did
     when the step completed, so a response whose own first line is shaped like
-    a handle line is quoted here too and reads back as the same response
-    (``ido-cku``).
+    an alias line is quoted here too and reads back as the same response.
     """
     text = archived_observation(alias, scope=scope, archive=archive)
     if text is None:
@@ -289,75 +255,6 @@ def rehydrated_label(
 # (b) and (c) The stored rows behind a result handle
 # ---------------------------------------------------------------------------
 
-def _page_query_scopes(store: Any, scope: RuntimeHandleScope, alias: str) -> list[str]:
-    """Every traversal stored for *alias*: the base one first, then filtered."""
-    lister = getattr(store, "list_page_query_scopes", None)
-    if lister is None:
-        return [""]
-    scopes = [str(value) for value in lister(scope, alias=alias)]
-    base = [value for value in scopes if not value]
-    return base + sorted(value for value in scopes if value)
-
-
-def _traversal_rows(store: Any, scope: RuntimeHandleScope, alias: str,
-                    query_scope: str) -> tuple[list[str], int]:
-    """Distinct rows of one traversal, first-seen order, and the pages read.
-
-    Distinct uids in first-seen order is exactly what ``_walk_records`` serves
-    the agent, so a duplicate page cannot make the answer's copy of the evidence
-    disagree with the copy the pager showed.
-    """
-    rows: list[str] = []
-    seen: set[str] = set()
-    pages = store.list_pages(scope, alias=alias, query_scope=query_scope)
-    for page in pages:
-        for entry in (page.get("record") or {}).get("records") or []:
-            uid = str(entry.get("uid") or "")
-            line = str(entry.get("line") or "")
-            if not line:
-                continue
-            if uid and uid in seen:
-                continue
-            if uid:
-                seen.add(uid)
-            rows.append(line)
-    return rows, len(pages)
-
-
-def stored_rows_block(
-    listing_alias: str,
-    *,
-    scope: RuntimeHandleScope,
-    store: Any,
-    shown_for: str = "",
-) -> str:
-    """Every stored row behind *listing_alias*, whole, as its producer rendered it.
-
-    One block per traversal: the base (unfiltered) walk first, then each filtered
-    traversal under the opaque query scope its cursor carried. The filter literal
-    is NOT reconstructed here -- the store keeps a digest of it, not its text, and
-    the page observation that ran it already prints ``filter="..."`` in its own
-    header, which is in the trajectory beside this block.
-    """
-    parts: list[str] = []
-    for query_scope in _page_query_scopes(store, scope, listing_alias):
-        rows, pages = _traversal_rows(store, scope, listing_alias, query_scope)
-        if not rows:
-            continue
-        traversal = (
-            "base traversal" if not query_scope
-            else "filtered traversal %s" % query_scope
-        )
-        heading = (
-            "[answer-time rehydration] stored rows behind result_handle=%s, %s: "
-            "%d rows from %d stored page(s), whole and unabridged%s"
-            % (listing_alias, traversal, len(rows), pages,
-               "" if not shown_for or shown_for == listing_alias
-               else " (shown here under %s, which paged it)" % shown_for)
-        )
-        parts.append("\n".join([heading, *rows]))
-    return "\n".join(parts)
-
 
 # ---------------------------------------------------------------------------
 # The walk
@@ -368,7 +265,6 @@ def rehydrate(
     *,
     scope: Optional[RuntimeHandleScope] = None,
     archive: Optional[RuntimeHandleArchive] = None,
-    handle_store: Any = None,
     budget: Optional[int] = None,
 ) -> tuple[dict[str, Any], RehydrationReport]:
     """The extractor's copy of *trajectory*, with the evidence behind it put back.
@@ -379,34 +275,21 @@ def rehydrate(
 
     Order is most recent first, and the walk STOPS at the first replacement that
     would take the copy over ``budget``. Everything older than that stop stays as
-    it was -- a label or a bounded page -- and every alias left that way is named
-    in one deterministic line appended to the copy, so the extractor can report
-    those slots as unresolved instead of inventing them.
-
-    One replacement can carry two treatments, for an observation that was both a
-    bounded listing and an offload label, and the budget sees them as the single
-    replacement they are. If the pair overruns, the archived text alone is kept
-    when it fits -- that is what the extractor held before ``ido-pex`` and it
-    beats a pointer -- the alias goes into ``rows_omitted_aliases``, the note
-    says the rest of that listing is absent, and the walk stops as it would for
-    any other overrun.
+    it was -- still a label -- and every alias left that way is named in one
+    deterministic line appended to the copy, so the extractor can report those
+    slots as unresolved instead of inventing them.
     """
-    from fastworkflow import result_handles
-
     selected_scope = scope or default_scope()
     if archive is None:
         from fastworkflow.observation_offloading import state as offload_state
 
         archive = offload_state.archive()
-    if handle_store is None:
-        handle_store = result_handles.store()
     budget_bytes = int(budget if budget is not None else max_bytes_from_env())
 
     copy: dict[str, Any] = dict(trajectory)
     report = RehydrationReport(budget_bytes=budget_bytes)
     report.bytes_before = trajectory_bytes(trajectory)
     used = report.bytes_before
-    seen_blocks: set[str] = set()
     seen_labels: set[str] = set()
     candidates = _candidates(trajectory)
     stopped = False
@@ -421,13 +304,11 @@ def rehydrate(
             # evidence as unresolved.
             if _evidence_behind(
                 alias, text, scope=selected_scope, archive=archive,
-                store=handle_store, report=report,
-                seen_labels=seen_labels, seen_blocks=seen_blocks,
+                report=report, seen_labels=seen_labels,
             ):
                 report.dropped_aliases.append(alias)
             continue
         kind = ""
-        listing_alias = ""
         # (a) The label, if this observation is one. ``base`` is the text the
         # rows are appended to below: the archived observation for a label, the
         # observation's own text otherwise.
@@ -450,61 +331,21 @@ def rehydrate(
             kind = KIND_LABEL
             base = restored
 
-        # (b)/(c) The stored rows, if this observation declared a handle. A
-        # listing that was BOTH bounded and offloaded gets both treatments:
-        # until ``ido-pex`` the label branch ended the step here, so the
-        # archived FIRST page came back and pages 2..n never reached the
-        # extractor -- while the coverage corpus, which reads the same stored
-        # rows, told the writer the item had been retrieved.
-        block = ""
-        declaration = _declaration(handle_store, selected_scope, alias)
-        if declaration is not None:
-            parent = str(declaration.get("parent_alias") or "")
-            of_handle = parent or alias
-            if of_handle not in seen_blocks:
-                # A later (more recent) observation already carries this
-                # handle's rows in full. Repeating them would spend the budget
-                # on bytes the extractor is already holding.
-                block = stored_rows_block(
-                    of_handle, scope=selected_scope, store=handle_store,
-                    shown_for=alias,
-                )
-                if block:
-                    listing_alias = of_handle
-                    kind = kind or (KIND_PAGE if parent else KIND_LISTING)
         if not kind:
-            # Neither a label nor a handle with stored rows: nothing to put back.
+            # Not an offload label: nothing to put back.
             continue
-        replacement: str = (base + "\n" + block) if block else base
+        replacement: str = base
 
         text_bytes = len(text.encode("utf-8"))
         added = len(replacement.encode("utf-8")) - text_bytes
         if used + added > budget_bytes:
-            # An offloaded listing asks the budget for two things at once: the
-            # archived text behind its label and the stored rows behind its
-            # handle. When both will not fit, the label alone is still what the
-            # extractor had before ``ido-pex``, and strictly better than a
-            # pointer -- so it is kept if IT fits, the rows are declared
-            # omitted in the note, and the walk stops here as it would for any
-            # other replacement that overran.
-            label_only = len(base.encode("utf-8")) - text_bytes
-            if not (block and kind == KIND_LABEL
-                    and used + label_only <= budget_bytes):
-                stopped = True
-                report.stopped_on = alias
-                report.dropped_aliases.append(alias)
-                continue
-            replacement = base
-            added = label_only
-            listing_alias = ""
-            report.rows_omitted_aliases.append(alias)
-            report.stopped_on = alias
             stopped = True
+            report.stopped_on = alias
+            report.dropped_aliases.append(alias)
+            continue
         copy[f"observation_{index}"] = replacement
         used += added
         report.counts[kind] += 1
-        if listing_alias:
-            seen_blocks.add(listing_alias)
         if kind == KIND_LABEL:
             # ``ido-1tu``/F34. This alias's archived text is now in the copy;
             # an older step printing the same label needs nothing further.
@@ -512,7 +353,6 @@ def rehydrate(
         report.rehydrated.append({
             "alias": alias,
             "kind": kind,
-            "listing_alias": listing_alias,
             "step_index": index,
             "recency_rank": position,
             "added_bytes": added,
@@ -523,31 +363,11 @@ def rehydrate(
     if report.dropped_aliases:
         report.dropped_aliases.sort(key=_alias_ordinal)
         clauses.append(NOT_REHYDRATED_PREFIX + ", ".join(report.dropped_aliases))
-    if report.rows_omitted_aliases:
-        report.rows_omitted_aliases.sort(key=_alias_ordinal)
-        clauses.append(ROWS_OMITTED_PREFIX + ", ".join(report.rows_omitted_aliases))
     if clauses:
         report.note_line = " ".join(clauses)
         copy[NOT_REHYDRATED_KEY] = report.note_line
     report.bytes_after = trajectory_bytes(copy)
     return copy, report
-
-
-def _declaration(store: Any, scope: RuntimeHandleScope, alias: str) -> Optional[dict]:
-    """The stored result-handle declaration for *alias*, or None.
-
-    A miss is the normal case -- most execute observations are not listings -- so
-    it is a return value, not an exception, and a store that cannot be read at
-    all leaves every observation exactly as it stands.
-    """
-    try:
-        return store.get_declaration(scope, alias)
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "answer rehydration could not read the declaration for %s",
-            alias, exc_info=True,
-        )
-        return None
 
 
 def _evidence_behind(
@@ -556,27 +376,21 @@ def _evidence_behind(
     *,
     scope: RuntimeHandleScope,
     archive: RuntimeHandleArchive,
-    store: Any,
     report: RehydrationReport,
     seen_labels: set[str],
-    seen_blocks: set[str],
 ) -> bool:
     """Would the walk have put anything back for this observation?
 
-    ``ido-1tu``/F34. Asked only after the budget stopped the walk, and it
-    answers exactly what the walk above would have done for the same
-    observation, so the dropped list names the aliases that really lost
-    evidence and nothing else:
+    Asked only after the budget stopped the walk, and it answers exactly what
+    the walk above would have done for the same observation, so the dropped
+    list names the aliases that really lost evidence and nothing else:
 
     * an offload label counts when the archive still holds its text, and not
       when a more recent step already restored the same alias (``seen_labels``)
       or the archive cannot be read -- an alias with nothing behind it is
       ``unresolved``, not dropped, and the note's "evidence exists" would be
       untrue of it;
-    * any other observation counts only when it declared a handle with stored
-      rows that no more recent observation has already printed in full
-      (``seen_blocks``);
-    * a plain inline observation counts for nothing: its whole text is in the
+    * any other observation counts for nothing: its whole text is in the
       trajectory the extractor is reading.
     """
     if is_offload_label(text):
@@ -586,32 +400,20 @@ def _evidence_behind(
             report.unresolved_aliases.append(alias)
             return False
         return True
-    declaration = _declaration(store, scope, alias)
-    if declaration is None:
-        return False
-    of_handle = str(declaration.get("parent_alias") or "") or alias
-    if of_handle in seen_blocks:
-        return False
-    return bool(
-        stored_rows_block(of_handle, scope=scope, store=store, shown_for=alias)
-    )
+    return False
 
 
 __all__ = [
     "ANSWER_REHYDRATION_MAX_BYTES_ENV",
     "DEFAULT_MAX_BYTES",
     "KIND_LABEL",
-    "KIND_LISTING",
-    "KIND_PAGE",
     "MIN_MAX_BYTES",
     "NOT_REHYDRATED_KEY",
     "NOT_REHYDRATED_PREFIX",
-    "ROWS_OMITTED_PREFIX",
     "RehydrationReport",
     "archived_observation",
     "max_bytes_from_env",
     "rehydrate",
     "rehydrated_label",
-    "stored_rows_block",
     "trajectory_bytes",
 ]

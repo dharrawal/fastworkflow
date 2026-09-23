@@ -93,7 +93,7 @@ def build_compacting_step(
 def open_handle_archive(
     archive_path: str, *, scope: Optional[RuntimeHandleScope] = None
 ) -> Any:
-    """The turn archive, or an inert stand-in and one event saying why (ido-t5x).
+    """The turn archive, or an inert stand-in and one event saying why.
 
     Opening or creating the sidecar is the FIRST thing agent construction does
     that touches the disk, and it used to be the only one allowed to fail the
@@ -177,8 +177,8 @@ def build_tool_agent(
 
     The DSPy signature build (tool wrapping, instruction assembly, the react and
     extract predictors) happens exactly once, with ``search_memory`` appended to
-    ``tools``. Unconditional since ``ido-pyw.1``: observation offloading is how
-    fastWorkflow runs a tool agent, not a mode it can be put into.
+    ``tools``. Observation offloading is how fastWorkflow runs a tool agent, not
+    a mode it can be put into.
     """
     install_span_policy()
     # The scope is re-resolved by the agent at every forward(), so the turn_key
@@ -276,7 +276,6 @@ def build_tool_agent(
             {
                 "kind": "evaluation_controls",
                 "scope_id": scope.scope_id,
-                "coverage_instructions_enabled": agent.coverage_instructions_enabled,
                 "finish_reminders_enabled": agent.finish_reminders_enabled,
                 "overrides": dict(agent.evaluation_control_overrides),
             }

@@ -6,19 +6,19 @@ protocol with a no-op default, the v1 span taxonomy, and safe emission
 helpers that NEVER raise to the caller — a broken sink degrades to a log
 line, not a failed turn.
 
-Spans are OTel-*aligned* records, not wire-conformant OTel (decision D4):
+Spans are OTel-*aligned* records, not wire-conformant OTel:
 ``trace_id`` is the logical turn_key, span ids are opaque strings, and the
-translation to real OTel ids is an external script's contract ([R26]).
+translation to real OTel ids is an external script's contract.
 
 Sink discovery is duck-typed off the host object (WorkflowExecutionContext,
 or ChatSession delegating to its core) via ``trace_sink`` /
 ``current_turn_key`` / ``trace_span_stack`` — deliberately NOT the
-transport-queue contract, so queue-less embedders still trace ([R28]).
+transport-queue contract, so queue-less embedders still trace.
 
 This module is stdlib-only by design: it is imported by core runtime
 modules and must never pull torch/dspy/transformers.
 
-Amendment (EXP-003 capture slice, arch §12.0 deltas 1/2/4): this module now also
+For the decision-signal capture slice (arch §12.0 deltas 1/2/4) this module also
 imports ``capture_policy`` and ``decision_signals``, which are architecture §22
 leaf modules — standard library, Pydantic, and ``runtime_manifest`` only. The
 invariant the paragraph above protects is unchanged: nothing on this import path
@@ -318,13 +318,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             {"agent_query", "attempt", "user_response", "human_wait_ms"}
         ),
     ),
-    # v2 (ido-8ps.9): the four auto-navigation keys. They are present only on a
-    # step the framework composed -- the declared entry command and the command
-    # the agent originally sent -- and absent on every step the agent typed, so
-    # a reader counts auto-navigated executes by the presence of the key rather
-    # than by a value.
+    # v3: the four auto-navigation keys (v2, ido-8ps.9) are gone with the
+    # two-step dispatch that wrote them. Every execute step is now a step the
+    # agent typed, so there is no composed-step shape to tell apart.
     SPAN_COMMAND_EXECUTE: SpanContract(
-        version=2,
+        version=3,
         attributes=frozenset(
             {
                 "raw_command",
@@ -332,10 +330,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "response_text",
                 "success",
                 "error_type",
-                "auto_navigated",
-                "auto_navigation_rule",
-                "auto_navigation_step",
-                "entered_context",
                 ATTR_COMMAND_CALL_ID,
                 ATTR_PARENT_CALL_ID,
                 ATTR_CHILD_CALLS,
@@ -559,7 +553,7 @@ def status_for_dispatch_exception(exc: BaseException) -> str:
     """The span status for an exception that ended a command dispatch.
 
     ONE mapping in ONE place, because five sites used to each carry their own
-    isinstance check and they did not agree (fix-ajv.19). The same
+    isinstance check and they did not agree. The same
     AskUserSuspend closed as `error` in three of them, `awaiting_user` in a
     fourth, and escaped a fifth without closing its span at all — so an
     ordinary pause for input drew as a red ERROR node in the chatbot waterfall
@@ -652,7 +646,7 @@ class NoOpTraceSink:
 
 def deterministic_span_id(turn_key: str, span_name: str, attempt: int = 0) -> str:
     """Deterministic span id for spans that must close in a different process
-    than the one that opened them (fw.turn, fw.ask_user) — [R6]."""
+    than the one that opened them (fw.turn, fw.ask_user)."""
     digest = hashlib.sha256(f"{turn_key}|{span_name}|{attempt}".encode()).hexdigest()
     return digest[:32]
 
@@ -665,7 +659,7 @@ def root_span_id(turn_key: str) -> str:
 def cap_attr_value(value: Any) -> Any:
     """Cap one attribute value at ``MAX_ATTR_BYTES``.
 
-    Truncation is lossy-and-counted ([R10]): an over-limit string becomes an
+    Truncation is lossy-and-counted: an over-limit string becomes an
     envelope carrying ``truncated: True``, the original byte length, and the
     sha256 of the original — never a silent prefix.
     """
@@ -774,7 +768,7 @@ def start_span(
 
     Short-lived spans are emitted once, at ``end_span``; pass
     ``emit_open=True`` for long-lived spans (fw.turn, fw.ask_user) whose open
-    event must be visible before — and closable after — a suspension ([R6]).
+    event must be visible before — and closable after — a suspension.
     ``use_stack=False`` keeps a span off the parenting stack (fw.turn and
     fw.ask_user: children reach the root via its deterministic id, which
     survives suspension where the in-memory stack does not).

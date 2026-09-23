@@ -2,38 +2,37 @@
 
 Deletion lives next door, in ``observation_offloading.erasure``: this
 module writes a turn's response bytes and never removes them, and that
-module owns erasure and retention for every scope-keyed table in the file,
-including the result-handle tables written beside this one. The two halves
-meet at ``scope_json``, which is why this module stores the whole scope and
-not only its digest: a row must be able to say which channel it came from,
-and whether it belongs to an experiment run, long after the process that
-wrote it is gone (ido-gls).
+module owns erasure and retention for every scope-keyed table in the file.
+The two halves meet at ``scope_json``, which is why this module stores the
+whole scope and not only its digest: a row must be able to say which channel
+it came from, and whether it belongs to an experiment run, long after the
+process that wrote it is gone.
 
 Redaction lives next door as well, in the sense that matters: the bytes a
 SEALED row holds are the bytes ``observability.store`` would have stored for
 the same text, because they are produced by calling into that module's own
-scrub-and-capture pipeline rather than by a second one written here (ido-zlm).
+scrub-and-capture pipeline rather than by a second one written here.
 The toggle, its default and the full policy are stated in
 ``observation_offloading.erasure``'s docstring, beside the retention policy,
 because a reader deciding what this file may keep needs both at once. The
 mechanism is below, in ``redaction_mode`` and ``capture_record_for``.
 
-WHEN that happens changed in ido-6sc, by an explicit owner decision. Redaction
-is no longer a write-time transform: ``persist`` stores what the command
-returned, VERBATIM, and the row is SEALED into its redacted form when the turn
-that produced it is genuinely over. Nothing is redacted while a turn is in
-flight, and in flight means the whole life of the turn -- an ask_user wait and
-any serialize/deserialize round trip included -- so every read an agent can
-make during its own turn returns raw: the live trajectory, ``search_memory``,
-rehydration, and those same reads after a resume in a fresh process. The owner
-accepted raw bytes on disk for the duration of a turn, conditionally, until
-someone demonstrates that redaction does not affect answer quality.
+WHEN that happens is a deliberate choice. Redaction is not a write-time
+transform: ``persist`` stores what the command returned, VERBATIM, and the row
+is SEALED into its redacted form when the turn that produced it is genuinely
+over. Nothing is redacted while a turn is in flight, and in flight means the
+whole life of the turn -- an ask_user wait and any serialize/deserialize round
+trip included -- so every read an agent can make during its own turn returns
+raw: the live trajectory, ``search_memory``, rehydration, and those same reads
+after a resume in a fresh process. The trade is raw bytes on disk for the
+duration of a turn, taken because redaction mid-turn would change what the
+agent reads back and therefore what it answers.
 
 Two consequences live in this file. ``seal_scope`` is the completion step, and
 it is only ever reached through the two places that already know a turn is over
 (``StructuredContinuationReAct.bind_scope`` and
 ``WorkflowExecutionContext._reclaim_offloading_scope``). ``sweep_unsealed`` is
-the backstop for a process that died mid-turn, so the accepted window is
+the backstop for a process that died mid-turn, so the raw-on-disk window is
 bounded rather than open-ended.
 """
 from __future__ import annotations
@@ -484,7 +483,7 @@ class RuntimeHandleArchive:
         returned.
 
         What is stored is that same text, byte for byte, whatever the redaction
-        toggle says (ido-6sc). The turn that produced it is in flight, and
+        toggle says. The turn that produced it is in flight, and
         nothing is redacted while a turn is in flight -- so the row's
         ``text_sha256`` is the caller's RAW digest, ``_decode_row`` verifies a
         read against the raw bytes beside it, and the hot cache a caller fills
@@ -499,9 +498,8 @@ class RuntimeHandleArchive:
         longer matches the caller's raw digest. That is not a collision, and
         ``_agrees_after_a_seal`` re-derives the answer rather than patching it:
         it seals the candidate text the same way the row was sealed and
-        compares. Nothing raw is persisted to make that comparison possible,
-        which is what keeps ido-zlm's refusal to write a confirmation oracle
-        intact.
+        compares. Nothing raw is persisted to make that comparison possible, so
+        the file never becomes an oracle that confirms unredacted text.
         """
         payload = text.encode("utf-8")
         if hashlib.sha256(payload).hexdigest() != text_sha256:
@@ -606,7 +604,7 @@ class RuntimeHandleArchive:
         """Whether *text* is what the SEALED row at *alias* was sealed from.
 
         The one case where a stored digest may legitimately differ from the
-        caller's raw digest (ido-6sc). Asked only when the digests already
+        caller's raw digest. Asked only when the digests already
         disagree, and answered by re-deriving: seal the candidate the way the
         row was sealed, and compare. A real collision -- two different
         observations under one alias -- still fails, because two different
@@ -663,11 +661,10 @@ class RuntimeHandleArchive:
         """Record the subject *alias* is evidence about, durably.
 
         An UPSERT, not insert-or-nothing: the dispatch-time stamp is a first
-        answer and ``result_handles._stamp_page_clause`` may replace it with the
-        clause the page's DECLARING handle carries, which is the fact a reader
-        of that page needs. The empty string is a real value -- "this ran at the
-        workflow root" -- and is stored as one; absence of the row is the only
-        thing that means "no subject was recorded".
+        answer and a later, better-informed writer may replace it. The empty
+        string is a real value -- "this ran at the workflow root" -- and is
+        stored as one; absence of the row is the only thing that means "no
+        subject was recorded".
         """
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -741,7 +738,7 @@ class RuntimeHandleArchive:
         it is the only honest answer for one: nothing in the file says whether
         those bytes are full fidelity, so nothing here claims they are.
 
-        ``seal_state`` (ido-6sc) is the field that makes the other five
+        ``seal_state`` is the field that makes the other five
         readable now that redaction happens at turn completion. ``pending``
         means the bytes are still the raw ones and ``redacted`` is ``False``
         because nothing has run yet, not because there was nothing to find;
@@ -820,9 +817,9 @@ class RuntimeHandleArchive:
     def seal_scope(
         self, scope: RuntimeHandleScope, *, mode: Optional[str] = None
     ) -> dict[str, Any]:
-        """Seal every pending observation of one FINISHED turn (ido-6sc).
+        """Seal every pending observation of one FINISHED turn.
 
-        The completion step the owner's decision asks for. It is reached only
+        The completion step for deferred redaction. It is reached only
         through the two callers that already know a turn is over -- see
         ``state.seal_scope`` -- so a suspended turn, whose whole point is that
         it is not over, is never sealed.
@@ -949,9 +946,9 @@ class RuntimeHandleArchive:
         now: Optional[datetime] = None,
         mode: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Seal rows whose turn never said it was over (ido-6sc).
+        """Seal rows whose turn never said it was over.
 
-        The bound on the owner's accepted risk. A turn seals its own evidence
+        The bound on how long raw bytes can sit on disk. A turn seals its own evidence
         at completion, but a process that is killed between the write and the
         completion leaves raw bytes behind with nobody left to seal them, and
         "until the next deletion request" is not a bound.
@@ -966,8 +963,8 @@ class RuntimeHandleArchive:
         WHAT IT LOOKS FOR: a row still ``pending`` whose ``owner_id`` is not
         this process's, and whose ``opened_at`` is older than the grace
         horizon. Both halves matter. The owner check is what makes the sweep
-        unable to reach a turn THIS process is running, which is the case the
-        owner's decision is actually about. The horizon is what makes it unable
+        unable to reach a turn THIS process is running, which is the case
+        deferred redaction is actually about. The horizon is what makes it unable
         to reach a turn ANOTHER live process is running, since the sweep cannot
         ask another process whether its turn is still in flight -- only how
         long ago it started.
@@ -1118,9 +1115,9 @@ class UnavailableHandleArchive:
     availability optimisation, and the surrounding design already says what a
     storage failure costs -- ``archive_execute_observations`` and
     ``compact_trajectory`` record the refusal and leave the observation inline.
-    Before ``ido-t5x`` an INITIALISATION failure cost the whole turn instead,
-    because it raised out of the agent's constructor and the persist-before-label
-    recovery never got to run.
+    Without this stand-in an INITIALISATION failure costs the whole turn instead,
+    because it raises out of the agent's constructor and the persist-before-label
+    recovery never gets to run.
 
     So the failure is degraded to the policy the writes already have, rather
     than to a second one. Every write refuses with the ``PersistenceError`` the

@@ -1,6 +1,6 @@
 """Observation offloading: compact, archive, search_memory, continuation.
 
-Unconditional since ``ido-pyw.1``: this is how fastWorkflow runs a tool agent.
+This is how fastWorkflow runs a tool agent; there is no flag to turn it off.
 ``build_tool_agent`` always returns a ``StructuredContinuationReAct``, execute
 observations always carry their canonical ``O`` alias, compaction always swaps
 an observation that is no longer worth its residency for its own label, and the

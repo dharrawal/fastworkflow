@@ -243,12 +243,11 @@ def test_derived_and_secret_trees_are_excluded_from_the_fingerprint(tmp_path):
 
 
 def test_generator_bookkeeping_files_are_out_of_scope(tmp_path):
-    """fix-oxr: a dot-prefixed file is tool bookkeeping, not source.
+    """A dot-prefixed file is tool bookkeeping, not source.
 
-    IDO's `.generated_manifest.json` carried a `generated_at` timestamp, which
-    made this hash time-dependent on an IDO workflow — the exact property §7.1
-    says it must not have. Excluding the class is what stops the next
-    bookkeeping file from doing it again.
+    A generated manifest carrying a `generated_at` timestamp makes this hash
+    time-dependent — the exact property §7.1 says it must not have. Excluding
+    the class is what stops the next bookkeeping file from doing it again.
     """
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     before = workflow_content_hash(root)
@@ -337,13 +336,12 @@ def test_fingerprint_verification_is_opt_in_at_startup(tmp_path):
 
 
 def test_a_manifest_may_declare_the_scope_rule_that_produced_its_fingerprint():
-    """fix-ijf: the field has to be modelled before a generator can emit it.
+    """The field has to be modelled before a generator can emit it.
 
     `_Strict` forbids unknown keys, so a generator declaring a field this class
-    does not carry has its manifest rejected by name and every startup
-    conformance check on that workflow fails. Until this landed the IDO
-    generator was holding the value internally because it could not write it
-    down.
+    does not carry has its manifest refused by name and every startup
+    conformance check on that workflow fails. Without the field modelled here a
+    generator can only hold the value internally.
     """
     manifest = _manifest(workflow_fingerprint="sha256:abc", workflow_scope_rule_version=1)
     assert manifest.workflow_scope_rule_version == 1
@@ -390,8 +388,8 @@ def test_an_unversioned_manifest_is_still_held_to_the_current_rule(tmp_path):
 
 def test_matching_digests_are_a_pass_whatever_the_rule_versions_say(tmp_path):
     """Equal digests mean the two selections produced identical bytes on this
-    tree, which is a genuine pass. Failing it on a version mismatch would be the
-    false alarm on a healthy workflow that fix-ijf was filed to avoid."""
+    tree, which is a genuine pass. Failing it on a version mismatch would be a
+    false alarm on a healthy workflow."""
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     verification = verify_workflow_fingerprint(
         root,
@@ -406,7 +404,7 @@ def test_matching_digests_are_a_pass_whatever_the_rule_versions_say(tmp_path):
 
 
 def test_framework_artifact_directories_are_excluded_by_prefix(tmp_path):
-    """fix-ijf: the artifact directories are a class, not three names.
+    """The artifact directories are a class, not three names.
 
     Naming ``___command_info``, ``___workflow_contexts`` and ``___convo_info``
     closes the instances that exist. A framework that adds a fourth would fold
@@ -486,7 +484,11 @@ _IDO_SUFFIXES = (".py", ".json", ".md")
 _IDO_CRUFT_DIRNAMES = frozenset({"__pycache__", ".pytest_cache"})
 _IDO_FRAMEWORK_ARTIFACT_PREFIX = "___"
 
-IDO_GENERATOR = "/home/drawal/rl/ido/gen_ido_scaffold.py"
+#: Root of a sibling IDO checkout, named by ``FW_TEST_IDO_ROOT``. The cases
+#: below compare fastWorkflow's file-selection rule against IDO's own, so they
+#: need IDO's source on disk; they skip when the variable is unset.
+IDO_ROOT = os.environ.get("FW_TEST_IDO_ROOT", "")
+IDO_GENERATOR = os.path.join(IDO_ROOT, "gen_ido_scaffold.py") if IDO_ROOT else ""
 
 
 @functools.lru_cache(maxsize=1)
@@ -500,6 +502,8 @@ def _import_ido_generator():
     importing it runs no generation. Cached because the filter is checked once
     per contract case.
     """
+    if not IDO_GENERATOR:
+        pytest.skip("set FW_TEST_IDO_ROOT to a sibling ido checkout to run this")
     directory = os.path.dirname(IDO_GENERATOR)
     spec = importlib.util.spec_from_file_location("gen_ido_scaffold", IDO_GENERATOR)
     module = importlib.util.module_from_spec(spec)
@@ -764,18 +768,20 @@ def test_a_fingerprint_declared_under_the_previous_rule_is_incomparable():
 def test_scope_rules_select_the_same_files_on_the_live_ido_tree():
     """The agreement ``verify_workflow_fingerprint`` rests on, as a set.
 
-    134 files on both sides, measured 28 August. The hash equality next door
-    already implies this; stating it as a set means a future divergence arrives
-    naming the files that moved instead of as two unequal digests.
+    The same file set on both sides. The hash equality next door already
+    implies this; stating it as a set means a future divergence arrives naming
+    the files that moved instead of as two unequal digests.
 
     Necessary and nowhere near sufficient: the live tree contains none of the
     divergent classes, which is precisely why the two scopes agreed on it for
     as long as they did while differing in seven ways. The contract table is
     what covers those.
     """
-    ido = "/home/drawal/rl/ido/ido_workflow"
+    if not IDO_ROOT:
+        pytest.skip("set FW_TEST_IDO_ROOT to a sibling ido checkout to run this")
+    ido = os.path.join(IDO_ROOT, "ido_workflow")
     if not os.path.isdir(ido):
-        pytest.skip("sibling ido repo not present")
+        pytest.skip(f"no ido_workflow under FW_TEST_IDO_ROOT ({IDO_ROOT})")
     assert _fw_selection(ido) == _ido_selection(ido)
 
 

@@ -116,7 +116,7 @@ def _command_response(text: str, alias: str) -> str:
 
     Only the handle line this module printed for *alias* is presentation, so
     only that line is removed. A first line naming a different alias is the
-    backend's own text (``ido-cku``): stripping it would drop a line of the
+    backend's own text: stripping it would drop a line of the
     response from the archive, its digest and every search of it.
     """
     return strip_alias_line(text) if printed_alias(text) == alias else text
@@ -144,7 +144,7 @@ def annotate_execute_observations(
     before this existed.
 
     The ordinal decides the alias, and nothing read out of the response ever
-    does (``ido-cku``). A command response is backend text: one whose own first
+    does. A command response is backend text: one whose own first
     line is shaped like this line, or like an offload label, is quoted by
     ``escape_response`` and printed UNDER the handle line this step is really
     called by, so no backend can name a handle. The quote is undone by
@@ -152,18 +152,18 @@ def annotate_execute_observations(
     command returned. The alias itself is never rewritten -- a line already
     naming this step's own ordinal is left exactly as it stands -- and a line
     naming any other ordinal is still recorded as ``alias_conflict``, because
-    after ido-7qd the ledger cannot disagree with itself and such a line is
-    either the backend's or a bug.
+    the agent's own execute ledger cannot disagree with itself and such a line
+    is either the backend's or a bug.
 
-    ``ido-8ps.13``: the line also names the context the command RAN IN and, where
+    The line also names the context the command RAN IN and, where
     the workflow declares one, that context's instance identity. The clause was
     captured at dispatch (``CommandExecutor._remember_execute_context``) and is
     read here rather than recomputed, because by now the current context may
     have moved -- a command that ENTERS a context is printed with the context it
     ran in, not with the one it entered. A step whose clause was never recorded
     (no dispatch of ours, an older recording, a capture that failed) prints the
-    plain A1 line: the clause is presentation, and its absence is never guessed
-    at.
+    plain alias line: the clause is presentation, and its absence is never
+    guessed at.
     """
     if executes is None:
         executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
@@ -238,8 +238,8 @@ def archive_execute_observations(
     and never a name read off the observation. Taking the printed one let a
     command response whose first line was shaped like a handle line file itself
     under any alias it liked: the genuine step of that ordinal was then refused
-    its archive and a search of the alias answered with the backend's text
-    (``ido-cku``). ``annotate_execute_observations`` runs first and prints that
+    its archive and a search of the alias answered with the backend's text.
+    ``annotate_execute_observations`` runs first and prints that
     same ordinal, so the handle the agent can see is still the key it is stored
     under.
 
@@ -388,7 +388,7 @@ def compact_trajectory(
     the steps still present.
 
     ``executes`` is the agent's own ``(step_index, ordinal)`` ledger when there
-    is an agent (ido-7qd). Passing it, rather than recounting here, is what
+    is an agent. Passing it, rather than recounting here, is what
     keeps the alias printed on an observation identical to the alias the
     command already declared and stamped under -- including after a cold
     resume, where this trajectory begins mid-turn. ``ordinal_offset`` is then

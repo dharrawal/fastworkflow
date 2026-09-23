@@ -1,4 +1,4 @@
-"""ido-t5x (F9): an archive that cannot be OPENED must not fail the turn.
+"""An archive that cannot be OPENED must not fail the turn.
 
 Agent construction opens or creates the offload sidecar before the fail-open
 compaction hook is installed, so every failure mode of that one file --
@@ -9,7 +9,7 @@ precisely so that a storage failure keeps the evidence inline, never got the
 chance to run.
 
 Everything here breaks ONLY the archive file and leaves the rest of the state
-root usable, which is the case the finding is about. No model, no backend: a
+root usable, which is the case at issue. No model, no backend: a
 temporary directory, a permission bit and scripted ReAct decisions.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import dspy
 
 import fastworkflow
-from fastworkflow import result_handles, state_paths, tracing
+from fastworkflow import state_paths, tracing
 from fastworkflow.observation_offloading import erasure
 from fastworkflow.observation_offloading.agent import (
     build_tool_agent,
@@ -40,14 +40,6 @@ from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import (
     reset_runtime_state,
     snapshot_events,
-)
-from fastworkflow.result_handles import (
-    ResultHandleSpec,
-    SourceDescriptor,
-    current_execute_alias,
-    current_scope,
-    declare,
-    reset_result_handle_state,
 )
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -236,7 +228,6 @@ class InlineOnlyTurn(unittest.TestCase):
     workflow_path = str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
 
     def setUp(self) -> None:
-        reset_result_handle_state()
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.cleanup)
@@ -257,7 +248,6 @@ class InlineOnlyTurn(unittest.TestCase):
                 workflow.close()
             except Exception:  # noqa: BLE001
                 pass
-        reset_result_handle_state()
         reset_runtime_state()
         os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         self.temp.cleanup()
@@ -266,16 +256,7 @@ class InlineOnlyTurn(unittest.TestCase):
         rows = ["row-%03d  fixture row %d %s" % (i, i, "x" * 48) for i in range(40)]
 
         def execute_workflow_query(command: str) -> str:
-            """Declare a locally generated listing under this step's own alias."""
-            declare(
-                ResultHandleSpec(kind="fixture", summary=command, items=rows,
-                                 total=len(rows), source_complete=True),
-                source=SourceDescriptor(
-                    resolver="offline-never-called",
-                    state={"view": "fixture", "params": {"q": command}}),
-                alias=current_execute_alias(),
-                scope=current_scope(),
-            )
+            """A locally generated listing, big enough to want offloading."""
             return "\n".join(rows)
 
         workflow = fastworkflow.Workflow.create(
@@ -312,9 +293,6 @@ class InlineOnlyTurn(unittest.TestCase):
         kinds = {e["kind"] for e in snapshot_events()}
         self.assertIn("archive_unavailable", kinds)
         self.assertIn("archive_refused", kinds)
-        # The result-handle store shares this one file, so it degrades through
-        # its OWN fail-open policy rather than failing the command.
-        self.assertIn("result_handle_declare_refused", kinds)
         # The sidecar was never replaced by a database this run could write.
         with open(self.archive_path, "rb") as handle:
             self.assertEqual(handle.read(), NOT_A_DATABASE)

@@ -1,13 +1,14 @@
-"""R1 (ido-8ps.8): a known command name is never answered by a foreign context.
+"""A known command name is never answered by a foreign context.
 
-The defect (`ido-8ps.6.1`): the exact-command-name matcher in
+The defect: the exact-command-name matcher in
 `CommandNamePrediction._predict_impl` is scoped to the CURRENT context's command
 set, so a command the workflow owns *somewhere else* -- typed verbatim, with its
 parameters -- is invisible to the exact and fuzzy layers and is adjudicated by
-this context's classifier instead. Across 31 stored IDO runs that produced 100
-misroutes, 69 of them silent: `fetch_result_page <handle>O9</handle>
-<contains>Alan Cooper</contains>` was answered `Directory/find_permission` ->
-"No permissions found.", which reads as a true negative.
+this context's classifier instead. Measured on a large multi-context workflow,
+that produced a hundred misroutes across thirty-one runs, most of them silent:
+`fetch_result_page <handle>O9</handle> <contains>Alan Cooper</contains>` was
+answered `Directory/find_permission` -> "No permissions found.", which reads as
+a true negative.
 
 The guard: after the context-scoped exact-prefix miss and BEFORE fuzzy, cache or
 classifier, the first token is tested against the workflow's FULL inventory. A
@@ -17,11 +18,11 @@ once, which is already the signal that drives the parent-chain walk in
 
 Two levels, both offline and deterministic:
 
-* against the real `ido_workflow` inventory (`tests/fixtures/ido_routing_inventory.json`,
-  copied from its `___command_info/routing_definition.json`), table-driven from
-  the misroute table in section 4.2 of the investigation. The real `predict` path
-  runs; only the command inventory is supplied, and the classifier double raises
-  if it is ever consulted;
+* against a captured multi-context inventory
+  (`tests/fixtures/multi_context_routing_inventory.json`, a copy of a real
+  workflow's `___command_info/routing_definition.json`), table-driven from the
+  observed misroutes. The real `predict` path runs; only the command inventory
+  is supplied, and the classifier double raises if it is ever consulted;
 * against the real `tests/todo_list_workflow` with its real `RoutingDefinition`,
   so the guard is also exercised end to end with no inventory injected at all.
 
@@ -43,11 +44,8 @@ from fastworkflow._workflows.command_metadata_extraction.intent_detection import
     foreign_context_hint,
 )
 
-INVENTORY_FIXTURE = Path(__file__).parent / "fixtures" / "ido_routing_inventory.json"
-#: Where the fixture was copied from. Present on the machine the IDO series runs
-#: on and absent everywhere else, so the drift check below skips rather than fails.
-LIVE_IDO_ROUTING_DEFINITION = Path(
-    "/home/drawal/rl/ido/ido_workflow/___command_info/routing_definition.json"
+INVENTORY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "multi_context_routing_inventory.json"
 )
 
 INTENT_DETECTION = fastworkflow.NLUPipelineStage.INTENT_DETECTION
@@ -63,7 +61,7 @@ INTENT_DETECTION = fastworkflow.NLUPipelineStage.INTENT_DETECTION
 #: space and '(' only -- never on '<' -- which is why the XML tail is part of
 #: what the classifier was given.
 MISROUTE_TABLE = [
-    # The bead's case: four occurrences across four runs, each "No permissions found."
+    # The original report: four occurrences across four runs, each "No permissions found."
     ("Permission", "fetch_result_page <handle>O9</handle> <contains>Alan Cooper</contains>",
      ["*"]),
     ("DirectoryExplorer", "fetch_result_page <handle>O6</handle> <contains>Alan Cooper</contains>",
@@ -80,7 +78,7 @@ MISROUTE_TABLE = [
     # 4x / 3 runs, SILENT.
     ("DirectoryExplorer", "list_findings", ["ControlsMonitor"]),
     ("Account", "list_findings", ["ControlsMonitor"]),
-    # 28x / 13 runs, SILENT -- that bucket was the embedding cache (R2), but the
+    # 28x / 13 runs, SILENT -- that bucket came from the embedding cache, but the
     # name is foreign to the issuing context either way and the guard returns
     # before the cache is consulted.
     ("*", "open_identity_by_uid <identity_uid>81b86cf622ed7f1f3be7b964852e0f42</identity_uid>",
@@ -236,15 +234,6 @@ def ido_predictor(todolist_workflows, ido_contexts, monkeypatch):
 # The fixture is the real inventory
 # ---------------------------------------------------------------------------
 
-def test_inventory_fixture_matches_the_live_ido_workflow():
-    """The copied inventory must not drift from the workflow it was copied from."""
-    if not LIVE_IDO_ROUTING_DEFINITION.exists():
-        pytest.skip("the IDO workflow is not on this machine")
-    live = json.loads(LIVE_IDO_ROUTING_DEFINITION.read_text())["contexts"]
-    fixture = json.loads(INVENTORY_FIXTURE.read_text())["contexts"]
-    assert {k: sorted(v) for k, v in live.items()} == fixture
-
-
 def test_fixture_carries_the_topology_the_defect_needs(ido_contexts):
     """`*` is a peer context that nothing inherits -- the structural exposure."""
     assert "fetch_result_page" in ido_contexts["*"]
@@ -308,11 +297,12 @@ def test_the_owning_context_still_resolves_the_same_name(
 def test_the_walk_lands_the_bead_case_on_the_root_context(
     ido_predictor, monkeypatch, setup_test_environment
 ):
-    """`Permission -> DirectoryExplorer -> *`, the chain the bead's call walked.
+    """`Permission -> DirectoryExplorer -> *`, the chain the misrouted call walked.
 
     This is the loop `_commands/wildcard.py:98-106` runs: keep asking the parent
-    while the name is None. Before R1 it stopped at the first context whose
-    classifier produced a label -- `Directory/find_permission`, at 0.284.
+    while the name is None. Without the foreign-context guard it stopped at the
+    first context whose classifier produced a label -- `Directory/find_permission`,
+    at 0.284.
     """
     monkeypatch.setattr(
         intent_detection, "CommandRouter", _refusing_router([]))
@@ -335,6 +325,67 @@ def test_the_walk_lands_the_bead_case_on_the_root_context(
         ("DirectoryExplorer", None, MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT),
         ("*", "fetch_result_page", "exact_prefix"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# The separator: any whitespace ends the command name, not a space alone
+# ---------------------------------------------------------------------------
+
+#: The separator between a command name and its tail. An agent writes
+#: `list_permissions\n<scope>all</scope>` as readily as it writes the same thing
+#: with a space, and on a space-only split the whole line becomes the tentative
+#: name: it matches nothing, the refusal guard never fires, and a context that
+#: cannot run the command adjudicates it anyway -- the silent misroute this
+#: guard exists to stop. The last two cases split either way and are here as
+#: the controls that say so.
+SEPARATORS = [
+    ("newline", "\n"),
+    ("tab", "\t"),
+    ("carriage return", "\r"),
+    ("newline after space", " \n"),
+    ("two spaces", "  "),
+]
+
+
+@pytest.mark.parametrize("name,separator", SEPARATORS, ids=[n for n, _ in SEPARATORS])
+def test_any_whitespace_ends_the_command_name_for_the_guard(
+    ido_predictor, monkeypatch, setup_test_environment, name, separator
+):
+    consulted: list[str] = []
+    monkeypatch.setattr(
+        intent_detection, "CommandRouter", _refusing_router(consulted))
+
+    # `list_permissions` from Identity is row 6 of the misroute table: owned by
+    # Account, 12 silent occurrences across 4 runs.
+    nlu_trace: dict = {}
+    result = ido_predictor._predict_impl(
+        "Identity", f"list_permissions{separator}<scope>all</scope>",
+        INTENT_DETECTION, nlu_trace)
+
+    assert result.command_name is None
+    assert nlu_trace["matcher_layer"] == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
+    assert nlu_trace["known_name_foreign_context"] is True
+    assert nlu_trace["known_name_owner_contexts"] == ["Account"]
+    assert not consulted
+
+
+@pytest.mark.parametrize("name,separator", SEPARATORS, ids=[n for n, _ in SEPARATORS])
+def test_the_owner_still_resolves_the_name_across_separators(
+    ido_predictor, monkeypatch, setup_test_environment, name, separator
+):
+    """The other half: the same parse must not break the owning context."""
+    consulted: list[str] = []
+    monkeypatch.setattr(
+        intent_detection, "CommandRouter", _refusing_router(consulted))
+
+    nlu_trace: dict = {}
+    result = ido_predictor._predict_impl(
+        "Account", f"list_permissions{separator}<scope>all</scope>",
+        INTENT_DETECTION, nlu_trace)
+
+    assert result.command_name.split("/")[-1] == "list_permissions"
+    assert nlu_trace["matcher_layer"] == "exact_prefix"
+    assert not consulted
 
 
 # ---------------------------------------------------------------------------
@@ -552,10 +603,9 @@ class TestTheHintIsComposedAndRecorded:
     def test_the_guard_declines_and_records_no_flag(
         self, ido_predictor, monkeypatch, setup_test_environment
     ):
-        """ido-8ps.9, as ido-pyw.1 left it. Auto-navigation is unconditional, so
-        there is no setting for the routing event to carry and the guard's own
-        record says only what the guard did: it declined, at the known-name
-        foreign-context layer, and the walk runs."""
+        """There is no auto-navigation setting for the routing event to carry,
+        so the guard's own record says only what the guard did: it declined, at
+        the known-name foreign-context layer, and the walk runs."""
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
         nlu_trace: dict = {}

@@ -22,15 +22,14 @@ from fastworkflow.model_pipeline_training import (
     CommandRouter,
     GLOBAL_CONTEXT_FOLDER,
 )
-# `auto_navigation` owns the entry-command declaration contract (ido-8ps.9
-# part a): one canonical source for "which command enters this context", read
-# by the hint here and by the dispatcher there. Nothing in the routing
-# definition or the context model records the fact, and inferring it from a
-# command's NAME would bake one workflow's spelling conventions into the
-# framework. `CONTEXT_ENTER_COMMAND_ATTRS` is re-exported because this module
-# is where R1's callers already look for it.
-from fastworkflow import auto_navigation
-from fastworkflow.auto_navigation import (
+# `entry_declarations` owns the entry-command declaration contract: one
+# canonical source for "which command enters this context", read here by the
+# foreign-context hint. Nothing in the routing definition or the context model
+# records the fact, and inferring it from a command's NAME would bake one
+# workflow's spelling conventions into the framework.
+# `CONTEXT_ENTER_COMMAND_ATTRS` is re-exported because this module is where the
+# foreign-context callers already look for it.
+from fastworkflow.entry_declarations import (
     CONTEXT_ENTER_COMMAND_ATTRS,
     declared_entry_commands,
 )
@@ -86,28 +85,18 @@ _FUZZY_PREMATCH_MAX_DISTANCE = 0.3  # Adjust threshold as needed
 # changing the field name.
 _FUZZY_MATCHER_VERSION = "levenshtein-leading-window/1"
 
-# The matching layer R1 (ido-8ps.8) adds between the context-scoped exact-name
-# match and the fuzzy pre-match: the first token names a real command of this
-# workflow, and this context is not one that owns it. Recorded as its own layer
+# The matching layer between the context-scoped exact-name match and the fuzzy
+# pre-match: the first token names a real command of this workflow, and this
+# context is not one that owns it. Recorded as its own layer
 # rather than folded into "no matcher claimed it", because the two are opposite
 # facts -- this one is a deterministic refusal to answer, and a span that says
 # so is how a misroute is counted after the fact.
 MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT = "known_name_foreign_context"
 
-# Reported when the classifier artifacts are not under the R4 versioned layout. A
+# Reported when the classifier artifacts are not under the versioned layout. A
 # tree that has never been trained under versioning has no version to report, and
 # saying so is better than inventing one that would look comparable across runs.
 _UNVERSIONED_ARTIFACT = "unversioned"
-# Threshold-semantics generation of the classifier signal. Bumped to "r3" by
-# ido-8ps.25, which changed what `tiny_ambiguous_threshold.json` /
-# `large_ambiguous_threshold.json` MEAN: before r3 the tiny tier's ambiguity
-# threshold sat at or below its tier threshold, so "confident" was structurally
-# unfalsifiable there; from r3 it sits strictly above, with an absolute floor on
-# single-label resolution at either tier. A confidence and a `confident` flag from
-# either side are therefore not the same measurement even when the model weights
-# and the artifact version are identical, which is exactly what signal_version
-# exists to say. Version the semantics, not just the bytes.
-_SIGNAL_SEMANTICS_VERSION = "r3"
 
 # Reported when the router did not say which model answered. Named rather than
 # defaulted to "tiny", because a signal_version that claims the wrong tier is worse
@@ -120,11 +109,11 @@ def foreign_context_hint(
 ) -> str:
     """What to say when a real command name reaches a context that cannot run it.
 
-    R1 returns None for such a name and the parent walk carries it up; when no
-    context on that chain owns it either, the walk ends at `you_misunderstood`,
-    which says only that nothing matched. That is true and useless: the name IS
-    a command, the runtime knows exactly which contexts have it, and the caller
-    is one navigation away from being able to run it.
+    The foreign-context matcher returns None for such a name and the parent walk
+    carries it up; when no context on that chain owns it either, the walk ends at
+    `you_misunderstood`, which says only that nothing matched. That is true and
+    useless: the name IS a command, the runtime knows exactly which contexts have
+    it, and the caller is one navigation away from being able to run it.
 
     A hint, never an action: this composes text and nothing here navigates. The
     difference matters because auto-navigating on a misrouted call would change
@@ -175,8 +164,9 @@ def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str
     confidence of 0.8 from the next, and FW-REQ-021 clause 13 requires thresholds
     be re-validated when the producing artifact changes.
 
-    Under R4 versioning the per-context entry in ``___command_info`` is a
-    compatibility link into ``___command_info/versions/<version>/<context>``, so one
+    Under the versioned artifact layout the per-context entry in
+    ``___command_info`` is a compatibility link into
+    ``___command_info/versions/<version>/<context>``, so one
     ``realpath`` recovers the published version without importing the trainer's
     resolver or re-reading its pointer file on every prediction. The ``*`` to
     ``global`` mapping mirrors ``CommandRouter.__init__``, which does the same
@@ -192,7 +182,7 @@ def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str
         else _UNVERSIONED_ARTIFACT
     )
     return (
-        f"intent-classifier/{_SIGNAL_SEMANTICS_VERSION}/{version}"
+        f"intent-classifier/{version}"
         f"/{os.path.basename(resolved)}/{model_tier}"
     )
 
@@ -229,8 +219,7 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
     A pure function of the facts ``_predict_impl`` recorded, and deliberately
     one-way: it reads the capture bag and writes nothing back, so the resolution
     path cannot come to depend on what is being measured about it. That is the
-    EXP-003 exit criterion and the architecture §17.3 stop condition — capture
-    only, no threshold, no branch.
+    architecture §17.3 stop condition — capture only, no threshold, no branch.
 
     It reads ``matcher_layer``, which is the name of the branch that has already
     run, not a measurement of it. No confidence, distance, count, or assembled
@@ -291,12 +280,12 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
         # computed. There is no second-best probability to subtract, and inventing
         # one is worse than its absence.
         #
-        # Amendment (fix-ajv.12): it no longer is. `predict_single_sentence` now
-        # carries `top_k_scores` through to `predict_with_details`, so the
-        # second-best probability is a fact the same forward pass already produced.
-        # It stays absent when the details dict does not carry it — a stubbed
-        # router, or a record written before this — which is why the helper returns
-        # a list instead of raising on a missing key.
+        # That is no longer true: `predict_single_sentence` carries `top_k_scores`
+        # through to `predict_with_details`, so the second-best probability is a
+        # fact the same forward pass already produced. It stays absent when the
+        # details dict does not carry it — a stubbed router, or an older record —
+        # which is why the helper returns a list instead of raising on a missing
+        # key.
         signals.extend(
             _topk_margin_signals(nlu_trace["classifier"], signal_version)
         )
@@ -468,7 +457,7 @@ class CommandNamePrediction:
     def enter_commands_for(self, context_name: str) -> list[str]:
         """The command(s) a workflow declares as entering *context_name*.
 
-        Read through `auto_navigation.declared_entry_commands`, which owns the
+        Read through `entry_declarations.declared_entry_commands`, which owns the
         declaration contract; the context's own callback class is the only
         place the fact is recorded. Empty when the workflow declares nothing,
         when the context has no callback class, or when loading it fails -- a
@@ -498,8 +487,8 @@ class CommandNamePrediction:
         Empty when the token names no command of this workflow (ordinary free
         text, which is what the classifier is for) and empty when this
         context's own candidate set contains it (already matched above). A
-        non-empty result is the R1 condition: a real command name, reached in a
-        context that cannot execute it.
+        non-empty result is the foreign-context condition: a real command name,
+        reached in a context that cannot execute it.
         """
         if normalized_command_name in command_name_dict:
             return []
@@ -579,8 +568,12 @@ class CommandNamePrediction:
                 ].plain_utterances
             }
 
-        # See if the command starts with a command name followed by a space or a '('
-        tentative_command_name = command.split(" ", 1)[0].split("(", 1)[0]
+        # A command name ends at whitespace or a '(' -- ANY whitespace, not a
+        # space alone: `list_permissions\n<scope>all</scope>` otherwise makes the
+        # whole line the tentative name, so neither the matcher nor the foreign-
+        # name guard sees one (F31/ido-nx6). "" splits to [], hence the guard.
+        tentative_command_name = (
+            command.split(None, 1)[0].split("(", 1)[0] if command.strip() else "")
         normalized_command_name = tentative_command_name.lower()
         command_name = None
         if normalized_command_name in command_name_dict:
@@ -791,15 +784,14 @@ class CommandNamePrediction:
         Shared across sessions by default, which is the point of the cache: a
         disambiguation learned in one session helps the next.
 
-        `FW_UTTERANCE_CACHE_SCOPE=workflow` shards it by workflow id instead
-        (`fix-bn1` `[XR16]`). A pass^k experiment must not have correlated
-        attempts, and this file is read on the runtime turn path
-        (`cache_match`) and written on it (`store_utterance_cache`) while being
-        keyed on nothing -- so attempt 2 would inherit attempt 1's
-        disambiguation decisions, and a treatment arm would inherit the
-        baseline arm's, both arms running against the same workflow folder.
-        The sibling `_get_cache_path` is already sharded this way; this is the
-        same treatment, opt-in so ordinary runs keep their shared cache.
+        `FW_UTTERANCE_CACHE_SCOPE=workflow` shards it by workflow id instead.
+        Repeated independent runs must not have correlated attempts, and this
+        file is read on the runtime turn path (`cache_match`) and written on it
+        (`store_utterance_cache`) while being keyed on nothing -- so a second
+        run would inherit the first run's disambiguation decisions whenever
+        both run against the same workflow folder. The sibling
+        `_get_cache_path` is already sharded this way; this is the same
+        treatment, opt-in so ordinary runs keep their shared cache.
         """
         base_dir = convo_path
         # Create directory if it doesn't exist

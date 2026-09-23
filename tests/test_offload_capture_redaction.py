@@ -1,10 +1,10 @@
-"""ido-zlm: the evidence sidecar's response bytes ride the trace sink's pipeline.
+"""The evidence sidecar's response bytes ride the trace sink's redaction pipeline.
 
-Before this change, ``RuntimeHandleArchive.persist`` wrote exactly the bytes a
-command returned. A credential in a command response therefore landed verbatim
-in ``<observability.sqlite3>.offload-handles.sqlite3``, while the same text
-inside a span attribute was scrubbed by ``observability.store.Redactor`` on its
-way into the main database. The sidecar bypassed that pipeline entirely.
+An archive that wrote exactly the bytes a command returned would land a
+credential in a command response verbatim in
+``<observability.sqlite3>.offload-handles.sqlite3``, while the same text inside
+a span attribute was scrubbed by ``observability.store.Redactor`` on its way
+into the main database. The sidecar must not bypass that pipeline.
 
 Redaction is now a toggle, ``FW_OFFLOAD_EVIDENCE_REDACTION``, and it is ON by
 default. Both states are first-class: a developer turns it off because the
@@ -12,13 +12,11 @@ archive's whole job is to reproduce what the agent read, and devops leave it on
 so a secret is not written to disk. Each archived observation records which
 mode produced it, so an archive stays auditable about its own fidelity.
 
-ido-6sc moved WHEN it happens, by an explicit owner decision: the toggle still
-decides WHETHER, and the SEAL at turn completion is when. So every claim below
-about what is or is not in the file is made after ``seal_scope``, which is what
-a completed turn runs -- the mid-turn state, where the file holds raw bytes on
-purpose and with the owner's stated acceptance, is the subject of
-``test_offload_seal_timing``. The cases here are unchanged in substance: the
-protection is the same protection, and it is reached one step later.
+The toggle decides WHETHER; the SEAL at turn completion decides WHEN. So every
+claim below about what is or is not in the file is made after ``seal_scope``,
+which is what a completed turn runs. The mid-turn state, where the file holds
+raw bytes deliberately so the agent can still read them, is the subject of
+``test_offload_seal_timing``.
 
 The claims here are made in BYTES wherever a leak is the thing being denied: a
 row read back through the archive's own API proves what the API returns, not
@@ -210,10 +208,10 @@ class RedactionFixture(unittest.TestCase):
         return archive, row if row is not None else stored
 
     def seal(self, scope=None, *, archive=None):
-        """Complete the turn: seal its stored evidence (ido-6sc).
+        """Complete the turn: seal its stored evidence.
 
-        A no-op on a revision that redacted at write time, so every case that
-        calls it states its claim about the same end state on both.
+        Harmless where nothing was left raw, so every case that calls it
+        states its claim about the same end state either way.
         """
         scope = scope or chatbot_scope()
         target = archive or RuntimeHandleArchive(self.sidecar)
@@ -326,10 +324,9 @@ class CapturePolicyRecordTests(RedactionFixture):
     def test_the_policy_version_is_recorded_with_redaction_on(self) -> None:
         """The record names the policy that produced the bytes now in the file.
 
-        Which, since ido-6sc, is the policy resolved at the SEAL rather than at
-        the write. Nothing about this assertion changes, and that is the
-        point: the seal re-records the version, the profile and ``redacted``
-        from the run that actually rewrote the bytes.
+        That is the policy resolved at the SEAL, not at the write: the seal
+        re-records the version, the profile and ``redacted`` from the run that
+        actually rewrote the bytes.
         """
         self.plant_env_secret()
         archive, _ = self.persist(response_with_credential())
@@ -422,7 +419,7 @@ class CapturePolicyRecordTests(RedactionFixture):
         record that describes them, because ``persist`` is insert-or-nothing and
         a record that outran its bytes would describe a file that does not
         exist. It is also not a collision -- it is the same observation -- so it
-        is accepted rather than refused.
+        is allowed rather than refused.
         """
         os.environ[REDACTION_ENV] = REDACTION_OFF
         archive, _ = self.persist(response_with_credential())

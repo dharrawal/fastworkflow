@@ -259,9 +259,9 @@ SCRIPT = [_pred("finish"), _pred("a_tool"), _pred("finish")]
 
 
 def test_the_async_loop_fires_the_roster_nudge_and_returns_control(monkeypatch):
-    """ido-dpx. `aforward` recognised finish and broke: no nudge, no
-    `_roster_nudges_fired` bookkeeping, so the two loops implemented different
-    accepted behaviour (ido-8ps.27) for the same rule."""
+    """`aforward` must not recognise finish and break out with no nudge and no
+    `_roster_nudges_fired` bookkeeping, which would leave the sync and async
+    loops implementing the same rule differently."""
     import asyncio
 
     agent = _looping_agent(list(SCRIPT), monkeypatch)

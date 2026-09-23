@@ -1,4 +1,4 @@
-"""ido-8ps.13: the alias line names the context instance a command ran in.
+"""The alias line names the context instance a command ran in.
 
 Offline only. Nothing here starts a server, calls a model or touches a backend:
 the whole change is a presentation line and a turn-scoped lookup, and both are

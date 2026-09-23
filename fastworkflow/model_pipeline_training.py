@@ -173,7 +173,7 @@ def get_label_encoder(filepath) -> LabelEncoder:
     another context's command name. Also spares every prediction an unpickle
     from disk, which the previous ``load_label_encoder`` call per prediction
     paid. The cache key is the artefact's (st_mtime_ns, st_size), so a retrain
-    in the same process is not served a stale encoder. fix-ajv.15.
+    in the same process is not served a stale encoder.
     """
     stat = os.stat(filepath)
     identity = (stat.st_mtime_ns, stat.st_size)
@@ -489,11 +489,11 @@ def write_ambiguity_thresholds(
     invariant it establishes -- ``tiny_ambiguous > tier`` and both ambiguity
     thresholds at or above `SINGLE_LABEL_RESOLUTION_FLOOR` -- can be exercised over
     real files for every context without loading a model or a routing definition.
-    Raises `ValueError` rather than publishing a collapsed pair, because a silently
-    collapsed threshold is the exact defect R3 exists to prevent and it survived
-    unnoticed in a published artifact set for a fortnight. The guard is reserved for a
-    pair no legitimate sweep could produce — a tier threshold at or above certainty, or
-    a margin computation that stopped separating (ido-ik6). A tier threshold the sweep
+    Raises `ValueError` rather than publishing a collapsed pair: a collapsed pair
+    makes "confident" structurally unfalsifiable at that tier, and because nothing
+    downstream notices, it can sit unnoticed in a published artifact set. The guard
+    is reserved for a pair no legitimate sweep could produce — a tier threshold at
+    or above certainty, or a margin computation that stopped separating. A tier threshold the sweep
     can actually pick, including one at or above `MAX_AMBIGUITY_THRESHOLD`, is always
     published, because aborting `train()` for the whole workflow is a far worse answer
     to a well separated context than a narrow ambiguity band is.
@@ -630,18 +630,18 @@ class CommandRouter:
         return self.predict_with_details(command)[0]
 
     def predict_with_details(self, command: str) -> tuple[list[str], dict]:
-        """``predict`` plus the numbers behind the decision, for observability
-        (fw.nlu.intent span attributes — D3 as amended).
+        """``predict`` plus the numbers behind the decision, for the
+        ``fw.nlu.intent`` span attributes.
 
         The details dict is JSON-safe: {model_tier, confidence,
-        ambiguous_threshold, confident, top_label, topk_labels}. The behavior
-        of ``predict`` is unchanged — it delegates here.
+        ambiguous_threshold, confident, top_label, topk_labels, topk_scores}.
+        The behavior of ``predict`` is unchanged — it delegates here.
 
-        Amendment (fix-ajv.12): ``topk_scores`` joins the list, positionally
-        aligned with ``topk_labels``. It is the probability behind each ranked
-        label, which is what a top-k margin is the difference of; the winning
-        label's own probability is ``confidence``, so the first score is that same
-        number rather than a second measurement of it.
+        ``topk_scores`` is positionally aligned with ``topk_labels``. It is the
+        probability behind each ranked label, which is what a top-k margin is
+        the difference of; the winning label's own probability is
+        ``confidence``, so the first score is that same number rather than a
+        second measurement of it.
         """
         results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
         used_distil = bool(results['used_distil'])
@@ -948,8 +948,9 @@ def set_active_artifact_version(workflow_folderpath: str, version_id: Optional[s
     """Route `get_artifact_path` writes for *workflow_folderpath* into *version_id*.
 
     Pass ``None`` to clear. The trainer installs this for the duration of a run so a
-    retrain assembles a NEW version instead of overwriting the live one in place (R4 /
-    finding F5). Keeping it here rather than threading a parameter through means the six
+    retrain assembles a NEW version instead of overwriting the live one in place, which
+    would leave a failed run with neither the old artifacts nor a complete new set.
+    Keeping it here rather than threading a parameter through means the six
     existing `get_artifact_path` call sites need no changes.
     """
     key = str(Path(workflow_folderpath).resolve())
@@ -968,8 +969,8 @@ def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str
     at ``<workflow>/___command_info/<context_name>/``.
 
     When no version is active and none has been published (a workflow that has never been
-    trained under R4) this falls back to the historical unversioned path, so a partially
-    migrated tree keeps working.
+    trained under the versioned layout) this falls back to the historical unversioned
+    path, so a partially migrated tree keeps working.
 
     The directory is created if it does not yet exist. The special context name "*" is
     mapped to GLOBAL_CONTEXT_FOLDER.
@@ -1343,7 +1344,7 @@ def cache_context_command_utterances(
     branch that only ran when the cached branch produced nothing at all. A context
     previously visited as an ancestor has a cache holding only
     `context_model.commands()`, so the cached branch dropped every core command for it
-    -- making those commands unroutable in that context (AR5 / bd fix-9mo).
+    -- making those commands unroutable in that context.
 
     The returned mapping is restricted to the labels asked for, so an entry an earlier
     ancestor visit left behind for some other command can never become a label this
@@ -1404,15 +1405,15 @@ def select_escalation_rows(
 ) -> EscalationSelection:
     """Choose the escalation-class rows for one context, and report every denominator.
 
-    Extracted from `train()` so the whole R7.2 decision is one callable. It reads the
-    shared utterance cache, which every other context in the run also writes, so it is
+    Extracted from `train()` so the whole escalation-row decision is one callable. It
+    reads the shared utterance cache, which every other context in the run also writes, so it is
     where a visit-order dependence can show up in the training rows -- and a test that
     drives this drives the shipped decision, where one that reimplements the arithmetic
     does not.
 
     `core_command_names` is passed to `group_ancestor_utterances` as `skip_commands`, so
     a core command is never an escalation source no matter which path filled the cache
-    (bd fix-4ej; the derivation is in `class_balance`'s module docstring).
+    (the derivation is in `class_balance`'s module docstring).
 
     WILDCARD_LABEL is the ESCALATION signal: "an ancestor context can serve this". It is
     emitted only where that can be true. In a context with no ancestors the class would
@@ -1468,8 +1469,8 @@ def select_escalation_rows(
     # makes the ratio mean "multiplier on this context's own training cost".
     # 1.0 is the fixed cost invariant: escalation may add at most as many rows
     # as the context's real commands, so reserved rows can at most double cost.
-    # It is not an accuracy-tuned value; R7.3 weighting measured null and is
-    # intentionally not shipped.
+    # It is not an accuracy-tuned value; weighting the reserved rows measured
+    # null and is intentionally not shipped.
     budget = class_balance.reserved_class_budget(
         own_row_count,
         coverage_floor,
@@ -1619,7 +1620,8 @@ def preflight_benchmark(
         if metadata := cmd_dir.get_utterance_metadata(command_key):
             seed_utterances_by_command[command_key] = list(metadata.plain_utterances)
     # Deliberately NOT caught: an unnoticed leak silently turns the whole evaluation
-    # into a memorisation score, which is the failure R1 exists to remove.
+    # into a memorisation score, which is the failure this disjointness check
+    # exists to remove.
     heldout_evaluation.assert_benchmark_disjoint_from_seeds(
         benchmark_cases, seed_utterances_by_command)
     # A close-but-not-equal match is a judgement call, so it is reported, not enforced.
@@ -1663,7 +1665,7 @@ def train(
 ):
     """Train intent-classification models **per command context**.
 
-    ``contexts_to_train`` is R5's selective-retraining hook. ``None`` trains every
+    ``contexts_to_train`` is the selective-retraining hook. ``None`` trains every
     context. Automatic planning passes a set when unchanged contexts can safely be
     carried forward. A set restricts the run
     to those contexts, and the CALLER then becomes responsible for carrying every other
@@ -1707,7 +1709,8 @@ def train(
 
     # Get contexts specific to this workflow (not from command_metadata_extraction)
     # The set itself is computed by `selective_training.contexts_for_training` so that the
-    # R5 planner and this loop cannot disagree about which contexts exist. A context the
+    # selective-retraining planner and this loop cannot disagree about which contexts
+    # exist. A context the
     # planner never considered would be neither retrained nor carried forward, and that
     # presents as part of a workflow silently becoming untrained.
     context_set_for_training = contexts_for_training(workflow_folderpath)

@@ -4,7 +4,6 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Any, Optional
 import hashlib
-import logging
 import re
 import time
 
@@ -24,8 +23,6 @@ from fastworkflow.observation_offloading.state import (
     record_event,
     stored_handles,
 )
-
-logger = logging.getLogger(__name__)
 
 #: The reference page geometry of an observation read: one 4 KB page, at most
 #: three of them in a single search. Their product is no longer an independent
@@ -118,24 +115,10 @@ def search_observation_max_bytes() -> int:
 
     ``FW_SEARCH_OBSERVATION_MAX_BYTES`` is a tuning override on the same terms
     as every other budget: an override below the floor is refused with a
-    warning and the derived value stands.
+    warning and the derived value stands. The only thing special about this
+    budget is the window it is cut from, so that is the only thing stated here.
     """
-    derived = SEARCH_OBSERVATION.bytes_for(search_window_tokens()[0])
-    raw = context_budget.env_value(SEARCH_OBSERVATION.override_env)
-    if not raw:
-        return derived
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("%s=%r is not an integer; using the derived budget %d",
-                       SEARCH_OBSERVATION.override_env, raw, derived)
-        return derived
-    if value < SEARCH_OBSERVATION.floor:
-        logger.warning("%s=%d is below the minimum %d; using the derived budget %d",
-                       SEARCH_OBSERVATION.override_env, value,
-                       SEARCH_OBSERVATION.floor, derived)
-        return derived
-    return value
+    return context_budget.budget_bytes(SEARCH_OBSERVATION, search_window_tokens()[0])
 
 
 def search_answer_max_bytes_from_env() -> int:
@@ -212,7 +195,7 @@ UNKNOWN_SUBJECT_MARK = "NOT RECORDED"
 def declaring_subject(alias: str, clause: Optional[str], command: str = "") -> str:
     """The subject metadata handed to the search model beside the observation.
 
-    ``ido-kmm`` (F4). The archived text is the raw command response: the handle
+    The archived text is the raw command response: the handle
     line naming the alias and the context it ran in is presentation, stripped
     before the bytes are stored and hashed. So a stored ``list_permissions``
     response is a table of permission rows with nothing in it saying WHOSE
@@ -257,9 +240,9 @@ def subject_is_unknown(subject: str) -> bool:
 def evidence_max_bytes(subject: str, max_bytes: Optional[int] = None) -> int:
     """How much OBSERVATION fits once the subject metadata is paid for.
 
-    The subject travels beside the evidence but inside the SAME budget
-    (``ido-3vp``): the bound exists because the search model's window is
-    finite, and the whole input is what the provider measures. The metadata is
+    The subject travels beside the evidence but inside the SAME budget: the
+    bound exists because the search model's window is finite, and the whole
+    input is what the provider measures. The metadata is
     a couple of hundred bytes against a budget whose floor is a 4 KB page, so
     what this really does is shorten the last line of the read by a row.
     """
@@ -383,6 +366,31 @@ def bounded_evidence_marking(
 def is_bounded_evidence_observation(text: str) -> bool:
     """True when this search observation was answered from a partial read."""
     return BOUNDED_EVIDENCE_MARK in text
+
+
+#: Said to the SEARCH MODEL, in band with the evidence, when the evidence was
+#: cut. ``bounded_evidence_marking`` denies the absence inference to the AGENT,
+#: after the answer exists; this denies it to the model that writes the answer,
+#: which otherwise reads a prefix of a list as the list and reports a row it was
+#: never shown as missing.
+EVIDENCE_PREFIX_NOTICE = (
+    "[TRUNCATED: the text above is the LEADING BYTES of this observation, not "
+    "all of it; {omitted:,} further UTF-8 bytes were not included. Anything not "
+    "shown above may be present in them, so do not report it as absent.]"
+)
+
+
+def evidence_for_search_model(evidence: dict[str, Any]) -> str:
+    """The observation text the search model is given, prefix disclosed in band.
+
+    Appended after the byte bound rather than reserved inside it, on the same
+    terms as the answer-time rehydration note: the disclosure is small, fixed and
+    worth more than the bytes of evidence it would displace.
+    """
+    if not evidence["bounded"]:
+        return evidence["text"]
+    omitted = evidence["total_bytes"] - evidence["shown_bytes"]
+    return f"{evidence['text']}\n{EVIDENCE_PREFIX_NOTICE.format(omitted=omitted)}"
 
 
 def is_context_window_error(error: BaseException) -> bool:
@@ -546,7 +554,9 @@ class ObservationSearchSignature(dspy.Signature):
     question: str = dspy.InputField(desc="Current agent reasoning followed by its question")
     subject: str = dspy.InputField(
         desc="Framework-recorded context the observation was produced in, or NOT RECORDED")
-    observation: str = dspy.InputField(desc="Complete text of the single selected observation")
+    observation: str = dspy.InputField(
+        desc="Leading bytes of the single selected observation; may be a bounded "
+             "prefix, in which case the text itself says so")
     answer: str = dspy.OutputField(desc="Evidence-grounded answer, or an explicit evidence gap")
 
 
@@ -680,15 +690,23 @@ def search_memory(
              "subject_recorded": not subject_is_unknown(subject),
              "subject_utf8_bytes": subject_bytes,
              "text_sha256": handle["text_sha256"]}
+    # A deployment that never declared the search role gets the agent's model
+    # and credential rather than a failed search: the window half already falls
+    # back that way (``search_window_tokens``), so this makes the halves agree.
+    model_env, key_env = (
+        (SEARCH_MODEL_ENV, "LITELLM_API_KEY_OBSERVATION_SEARCH")
+        if context_budget.env_value(SEARCH_MODEL_ENV)
+        else (context_budget.AGENT_MODEL_ENV, "LITELLM_API_KEY_AGENT"))
     started = time.monotonic()
     try:
-        lm = get_lm("LLM_OBSERVATION_SEARCH", "LITELLM_API_KEY_OBSERVATION_SEARCH",
+        lm = get_lm(model_env, key_env,
                     temperature=0, max_tokens=2048, timeout=120, num_retries=1)
         # Keep one response locally so completion-limit detection also works when
         # the surrounding server disables DSPy history.
         with dspy.context(lm=lm, disable_history=False, max_history_size=1):
             prediction = dspy.Predict(ObservationSearchSignature)(
-                question=query, subject=subject, observation=evidence["text"])
+                question=query, subject=subject,
+                observation=evidence_for_search_model(evidence))
         history = lm.history[-1] if lm.history else {}
         if completion_was_truncated(history):
             record_event({**event, "status": "incomplete", "reason": "completion_limit"})
@@ -715,8 +733,8 @@ def search_memory(
         record_event({**event, "status": "error", "error": type(error).__name__})
         # Do not print provider exceptions: they may include credentials or payloads.
         return (f"search_memory: search of {wanted} failed ({type(error).__name__}); "
-                "no evidence answer was produced. Check LLM_OBSERVATION_SEARCH and "
-                "LITELLM_API_KEY_OBSERVATION_SEARCH configuration or retry.")
+                f"no evidence answer was produced. Check {model_env} and "
+                f"{key_env} configuration or retry.")
     history = lm.history[-1] if lm.history else {}
     text, bound = bound_answer_for_trajectory(
         answer, alias=wanted, tier=tier, scope=selected_scope, store=store,

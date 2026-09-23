@@ -1,14 +1,12 @@
 """Scope-aware erasure and retention for the offload evidence sidecar.
 
-**What this module is for (ido-gls, F5).** Every execute response is persisted
-in ``<observability.sqlite3>.offload-handles.sqlite3`` -- the *sidecar* -- and
-result handles add raw source pages, cursor tokens and walk verdicts to the
-same file. The sidecar holds exact response bytes and a ``scope_json`` that
-names the channel that produced them. Until this module existed neither the
-archive nor the result-handle store offered any deletion path at all, so
-``ObservabilityStore.forget_channel`` erased a channel from the main store and
-left its complete responses fully recoverable beside it, and the configured
-age/size retention never reached the file.
+**What this module is for.** Every execute response is persisted in
+``<observability.sqlite3>.offload-handles.sqlite3`` -- the *sidecar*. It holds
+exact response bytes and a ``scope_json`` that names the channel that produced
+them. Without a deletion path of its own,
+``ObservabilityStore.forget_channel`` would erase a channel from the main store
+and leave its complete responses fully recoverable beside it, and the
+configured age/size retention would never reach the file.
 
 **Evidence-retention and sensitive-data policy for this store.**
 
@@ -30,15 +28,15 @@ age/size retention never reached the file.
    trace sink's own credential scrub and capture policy -- the same two
    protections, called in the same order, by way of
    ``observability.store.protect_offload_observation`` rather than by a second
-   implementation that would drift from the first (``ido-zlm``). The toggle is
+   implementation that would drift from the first. The toggle is
    ``FW_OFFLOAD_EVIDENCE_REDACTION``: ``on`` (the DEFAULT, and what an
    unconfigured deployment gets) or ``off``, with an unrecognised value warned
    about and treated as the default, exactly as the preservation mode below is.
    The mechanism lives in ``observation_offloading.archive``; the policy is
    written here so it is read together with the retention above.
 
-   WHEN it happens is an explicit owner decision (``ido-6sc``) and it is not
-   at the write. Nothing is redacted while a turn is IN FLIGHT, and in flight
+   WHEN it happens is deliberate, and it is not at the write.
+   Nothing is redacted while a turn is IN FLIGHT, and in flight
    means the whole life of the turn -- an ask_user wait and any
    serialize/deserialize round trip into a fresh process included. ``persist``
    therefore stores what the command returned, verbatim, and the row is SEALED
@@ -49,10 +47,9 @@ age/size retention never reached the file.
    conversation summary is built from, which is what the NEXT turn's query
    refinement reads, and which never came from this file in the first place.
 
-   The owner accepted the consequence in as many words: raw bytes sit in this
-   file for the duration of a turn. The acceptance is conditional and
-   time-boxed -- it holds until someone demonstrates that redaction does not
-   affect answer quality -- and it is BOUNDED in two ways rather than open
+   The consequence, stated plainly: raw bytes sit in this file for the
+   duration of a turn. That is the cost of not changing what the agent reads
+   back mid-turn, and it is BOUNDED in two ways rather than open
    ended. A turn that completes seals its own evidence, through the two guards
    that already know a turn is over and skip a suspension
    (``WorkflowExecutionContext._reclaim_offloading_scope`` and
@@ -99,7 +96,7 @@ age/size retention never reached the file.
    refuses both whichever state it is in: the seal is a CAPTURE decision, and
    preservation governs DELETION. An experiment scope's observations are
    therefore sealed at completion exactly like a chatbot channel's, which is
-   the same thing ``ido-zlm`` did at write time and not a new policy.
+   the same protection write-time redaction gave and not a new policy.
 
    Two things the toggle does NOT change. It does not change ERASABILITY: this
    module removes a redacted row, an unsealed one and a verbatim one alike, so
@@ -433,7 +430,7 @@ def _forget_events_file(scope_ids: Iterable[str]) -> int:
     """Remove the erased scopes' lines from this run's event log, if any.
 
     ``FW_OFFLOAD_EVENTS`` is a separate plaintext sink carrying search
-    questions, model reasoning and full answers (bead ``ido-gpb``). Erasure of
+    questions, model reasoning and full answers. Erasure of
     a channel is not meaningful while that file keeps the same text in the
     clear, so the file is filtered here whenever the erasing process knows
     where it is. A line whose ``scope_id`` is absent or unrecognised is KEPT,
@@ -593,7 +590,7 @@ def forget_all_channels(
 def _sweep_unsealed_observations(
     db_path: str, *, now: Optional[datetime] = None
 ) -> int:
-    """Seal what a turn that never completed left raw; return how many (``ido-6sc``).
+    """Seal what a turn that never completed left raw; return how many.
 
     Best effort and never fatal: retention's job is to delete, and a sweep that
     cannot run must not stop it. The file is compacted afterwards when anything
@@ -640,7 +637,7 @@ def prune(
     deleted: a file that is over the cap entirely because of experiment
     evidence stays over the cap, and says so through ``over_cap``.
 
-    It also SWEEPS before it deletes (``ido-6sc``). Retention is the only thing
+    It also SWEEPS before it deletes. Retention is the only thing
     that runs against a sidecar whose processes are all long gone, so it is the
     only place that can seal an observation left raw by a turn that died before
     it completed and whose store no agent ever opens again. The sweep runs

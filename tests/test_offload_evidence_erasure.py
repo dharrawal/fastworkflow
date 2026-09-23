@@ -1,12 +1,11 @@
-"""ido-gls (F5): channel erasure and retention reach the offload sidecar.
+"""Channel erasure and retention reach the offload sidecar.
 
-Every execute response, every declared result handle, every raw source page,
-cursor token and walk verdict is persisted in
-``<observability.sqlite3>.offload-handles.sqlite3``. Before this change the
-public erasure path deleted a channel's turn from the main store and left that
-file untouched, so the channel's complete responses -- and the ``scope_json``
-naming the channel -- stayed fully recoverable, and no retention knob reached
-the file at all.
+Every execute response is persisted in
+``<observability.sqlite3>.offload-handles.sqlite3``. An erasure path that
+deleted a channel's turn from the main store and left that file untouched
+would leave the channel's complete responses -- and the ``scope_json`` naming
+the channel -- fully recoverable, with no retention knob reaching the file at
+all.
 
 Everything here runs against databases created in this test's own temporary
 directory. Nothing in this module reads or writes a store it did not create.
@@ -27,13 +26,6 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleScope,
 )
 from fastworkflow.observation_offloading.state import reset_runtime_state
-from fastworkflow.result_handles import (
-    ResultHandleSpec,
-    ResultHandleStore,
-    declare,
-    fetch_page,
-    reset_result_handle_state,
-)
 from fastworkflow.run_chatbot.server import run_forget_channel
 
 try:  # The module under test.
@@ -156,12 +148,10 @@ class EvidenceFixture(unittest.TestCase):
     """A sidecar populated through the real writers, in a temporary directory."""
 
     def setUp(self) -> None:
-        reset_result_handle_state()
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(reset_runtime_state)
-        self.addCleanup(reset_result_handle_state)
         self._restore_env: dict[str, str | None] = {}
         for name in ("FW_OFFLOAD_EVIDENCE_PRESERVATION", "FW_OFFLOAD_EVENTS"):
             self._restore_env[name] = os.environ.pop(name, None)
@@ -180,13 +170,11 @@ class EvidenceFixture(unittest.TestCase):
 
     def populate(
         self, scope: RuntimeHandleScope, marker: str, *, sidecar: str | None = None
-    ) -> str:
+    ) -> None:
         """One turn's worth of evidence, written by the production writers.
 
-        An archived observation, its recorded subject, a navigation entry, a
-        declaration, a fetched raw page, a cursor, a filtered cursor tag and a
-        walk verdict -- one row in each of the tables a turn can reach.
-        Returns the cursor the page printed.
+        An archived observation, its recorded subject and a context entry --
+        one row in each of the tables a turn can still reach.
         """
         path = sidecar or self.sidecar
         text = (
@@ -213,25 +201,6 @@ class EvidenceFixture(unittest.TestCase):
             text=text,
             text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
-        store = ResultHandleStore(path)
-        declare(
-            ResultHandleSpec(
-                kind="fixture", summary=marker, items=rows(marker),
-                total=30, page_size=10,
-            ),
-            scope=scope, selected_store=store, alias="O1",
-        )
-        page = fetch_page(
-            "O1", scope=scope, selected_store=store, budget_bytes=400
-        )
-        store.cursor_tag(scope, alias="O1", query_scope="name:cooper")
-        store.put_walk_terminal(
-            scope, alias="O1", query_scope="", terminal_batch_index=3,
-            complete=True, distinct_uids=30,
-            stop_reason="empty_page",
-        )
-        self.assertIsNotNone(page.next_cursor)
-        return str(page.next_cursor)
 
     def seed_turn(self, scope: RuntimeHandleScope) -> None:
         """The main-store turn record that names the same channel."""
@@ -259,7 +228,7 @@ class EvidenceFixture(unittest.TestCase):
             for table, column in KNOWN_EVIDENCE_TABLES.items():
                 # A table this revision does not create is simply absent, which
                 # is what keeps these cases runnable against the revision each
-                # table arrived in (``observation_seal_state`` is ido-6sc's).
+                # table arrived in (``observation_seal_state`` is the newest).
                 if table not in present:
                     continue
                 clause = " WHERE scope_id=?" if scope_id else ""
@@ -269,9 +238,8 @@ class EvidenceFixture(unittest.TestCase):
                 )
             conn.commit()
 
-    def assert_readable(self, scope: RuntimeHandleScope, marker: str, cursor: str):
+    def assert_readable(self, scope: RuntimeHandleScope, marker: str):
         """This scope's evidence is still there and still usable."""
-        reset_result_handle_state()
         archive = RuntimeHandleArchive(self.sidecar)
         recovered = archive.get(scope, "O1")
         self.assertIsNotNone(recovered)
@@ -281,13 +249,6 @@ class EvidenceFixture(unittest.TestCase):
         # the handle of the instance it opened.
         self.assertEqual(archive.get_subject(scope, "O1"), "Fixture " + marker)
         self.assertEqual(len(archive.list_context_entries(scope)), 1)
-        reopened = ResultHandleStore(self.sidecar)
-        self.assertIsNotNone(reopened.get_declaration(scope, "O1"))
-        page = fetch_page(
-            "O1", cursor, scope=scope, selected_store=reopened, budget_bytes=400
-        )
-        self.assertTrue(page.rows)
-        self.assertTrue(all(marker in row for row in page.rows))
 
     def assert_erased(self, scope: RuntimeHandleScope, marker: str):
         """Nothing of this scope is left anywhere in the file."""
@@ -296,9 +257,6 @@ class EvidenceFixture(unittest.TestCase):
             counts(self.sidecar, scope.scope_id),
         )
         self.assertIsNone(RuntimeHandleArchive(self.sidecar).get(scope, "O1"))
-        self.assertIsNone(
-            ResultHandleStore(self.sidecar).get_declaration(scope, "O1")
-        )
         with open(self.sidecar, "rb") as handle:
             blob = handle.read()
         self.assertNotIn(marker.encode("utf-8"), blob)
@@ -312,7 +270,7 @@ class ChannelErasureTests(EvidenceFixture):
         erased = chatbot_scope("erase")
         kept = chatbot_scope("keep", turn="turn-2")
         self.populate(erased, "confidential-erase")
-        kept_cursor = self.populate(kept, "confidential-keep")
+        self.populate(kept, "confidential-keep")
         self.seed_turn(erased)
         self.seed_turn(kept)
         before = counts(self.sidecar, erased.scope_id)
@@ -329,7 +287,7 @@ class ChannelErasureTests(EvidenceFixture):
         # The claim first, in the terms a deletion request is made in: none of
         # this channel's evidence is left anywhere in the file.
         self.assert_erased(erased, "confidential-erase")
-        self.assert_readable(kept, "confidential-keep", kept_cursor)
+        self.assert_readable(kept, "confidential-keep")
         self.assertEqual(deleted["turns"], 1)
         self.assertEqual(deleted["offload_scopes"], 1)
         self.assertEqual(deleted["offload_preserved_scopes"], 0)
@@ -368,14 +326,15 @@ class ChannelErasureTests(EvidenceFixture):
         self.assertEqual(
             set(discovered), set(KNOWN_EVIDENCE_TABLES) & known_present
         )
-        # (fix-iq53.2.9, F5a) `result_handle_walks` under its post-rename name.
-        # The point of the assertion is unchanged: a table this module has never
-        # heard of is discovered by its `scope_id` column, and the rename is a
-        # small live demonstration of exactly that -- erasure.py was not edited
-        # for it.
-        self.assertIn("result_handle_walk_terminals", discovered)
+        # The six `result_handle_*` tables went with the result-handle package
+        # and are simply absent now; `KNOWN_EVIDENCE_TABLES` is intersected with
+        # what the revision created, so their entries sit idle. Discovery is
+        # unchanged, which is what `result_handle_future` below demonstrates:
+        # a table this module has never heard of is found by its `scope_id`
+        # column, and erasure.py was not edited for the removal either.
+        self.assertIn("observation_subjects", discovered)
         self.assertEqual(
-            discovered["result_handle_walk_terminals"]["timestamp"], "recorded_at")
+            discovered["observation_subjects"]["timestamp"], "recorded_at")
 
         deleted = erasure.forget_channel(self.sidecar, "erase")
 
@@ -415,7 +374,7 @@ class PreservationTests(EvidenceFixture):
 
     def test_an_experiment_run_survives_a_forget_aimed_at_another_channel(self):
         experiment = experiment_scope("measured")
-        cursor = self.populate(experiment, "experiment-evidence")
+        self.populate(experiment, "experiment-evidence")
         self.populate(chatbot_scope("erase", turn="turn-2"), "confidential-erase")
         self.seed_turn(experiment)
         self.seed_turn(chatbot_scope("erase", turn="turn-2"))
@@ -431,25 +390,25 @@ class PreservationTests(EvidenceFixture):
             ),
             counts(self.sidecar, experiment.scope_id),
         )
-        self.assert_readable(experiment, "experiment-evidence", cursor)
+        self.assert_readable(experiment, "experiment-evidence")
 
     def test_an_experiment_run_survives_a_forget_of_its_own_channel(self):
         experiment = experiment_scope("measured")
-        cursor = self.populate(experiment, "experiment-evidence")
+        self.populate(experiment, "experiment-evidence")
         self.seed_turn(experiment)
 
         deleted = run_forget_channel(self.db_path, "measured")
 
         # The main store's turn record goes -- that erasure is unchanged and is
         # the operator's to ask for -- but the measurement's evidence does not.
-        self.assert_readable(experiment, "experiment-evidence", cursor)
+        self.assert_readable(experiment, "experiment-evidence")
         self.assertEqual(deleted["turns"], 1)
         self.assertEqual(deleted["offload_scopes"], 0)
         self.assertEqual(deleted["offload_preserved_scopes"], 1)
 
     def test_an_experiment_run_survives_a_retention_pass(self):
         experiment = experiment_scope("measured")
-        cursor = self.populate(experiment, "experiment-evidence")
+        self.populate(experiment, "experiment-evidence")
         chatbot = chatbot_scope("chat", turn="turn-2")
         self.populate(chatbot, "confidential-chat")
         self.age_rows(400)
@@ -459,7 +418,7 @@ class PreservationTests(EvidenceFixture):
         )
 
         self.assert_erased(chatbot, "confidential-chat")
-        self.assert_readable(experiment, "experiment-evidence", cursor)
+        self.assert_readable(experiment, "experiment-evidence")
         self.assertEqual(deleted["offload_preserved_scopes"], 1)
         self.assertEqual(deleted["offload_scopes"], 1)
         # Over the cap and staying there: the bytes left are preserved.
@@ -471,7 +430,6 @@ class PreservationTests(EvidenceFixture):
         self.populate(scope, "unclassifiable")
         with sqlite3.connect(self.sidecar) as conn:
             conn.execute("UPDATE observation_offload_handles SET scope_json='{'")
-            conn.execute("UPDATE result_handle_declarations SET scope_json='{'")
             conn.commit()
         self.age_rows(400)
 
@@ -492,7 +450,7 @@ class PreservationTests(EvidenceFixture):
     @needs_erasure_module
     def test_preserve_all_mode_stops_erasure_and_retention_entirely(self):
         scope = chatbot_scope("erase")
-        cursor = self.populate(scope, "confidential-erase")
+        self.populate(scope, "confidential-erase")
         self.age_rows(400)
         os.environ["FW_OFFLOAD_EVIDENCE_PRESERVATION"] = erasure.PRESERVE_ALL
 
@@ -505,12 +463,12 @@ class PreservationTests(EvidenceFixture):
             ],
             1,
         )
-        self.assert_readable(scope, "confidential-erase", cursor)
+        self.assert_readable(scope, "confidential-erase")
 
     @needs_erasure_module
     def test_the_sentinel_file_preserves_a_whole_store(self):
         scope = chatbot_scope("erase")
-        cursor = self.populate(scope, "confidential-erase")
+        self.populate(scope, "confidential-erase")
         self.age_rows(400)
         open(erasure.preserve_sentinel_path(self.sidecar), "w").close()
 
@@ -523,7 +481,7 @@ class PreservationTests(EvidenceFixture):
             ],
             1,
         )
-        self.assert_readable(scope, "confidential-erase", cursor)
+        self.assert_readable(scope, "confidential-erase")
 
     @needs_erasure_module
     def test_preserve_none_lets_an_operator_erase_experiment_evidence(self):
@@ -549,7 +507,7 @@ class RetentionTests(EvidenceFixture):
         old = chatbot_scope("chat", turn="turn-old")
         recent = chatbot_scope("chat", turn="turn-recent")
         self.populate(old, "confidential-old")
-        recent_cursor = self.populate(recent, "confidential-recent")
+        self.populate(recent, "confidential-recent")
         self.age_rows(400, scope_id=old.scope_id)
 
         deleted = obs.ObservabilityStore(self.db_path).prune(
@@ -557,7 +515,7 @@ class RetentionTests(EvidenceFixture):
         )
 
         self.assert_erased(old, "confidential-old")
-        self.assert_readable(recent, "confidential-recent", recent_cursor)
+        self.assert_readable(recent, "confidential-recent")
         self.assertEqual(deleted["offload_scopes"], 1)
         self.assertEqual(deleted["offload_size_scopes"], 0)
         for table in KNOWN_EVIDENCE_TABLES:

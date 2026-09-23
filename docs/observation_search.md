@@ -53,8 +53,8 @@ reports `estimated_tokens` beside the new `offload_saving_bytes`.
 ~4 KB of ASCII), which asked how big an observation was rather than how much
 residency replacing it would buy. Every listing page between ~1.3 KB and 4 KB
 stayed resident for a whole turn although its label costs a few hundred bytes.
-Replayed over the eleven saved result-search attempts (606 execute observations,
-`ido-986.14.6`), the new rule makes 80 more observations eligible — 1,272 to
+Replayed over eleven saved benchmark attempts (606 execute observations), the
+new rule makes 80 more observations eligible — 1,272 to
 3,555 B of listing pages and portraits — makes **none** ineligible, and would
 have changed 73 actual offload decisions, always by offloading something that had
 stayed resident. End-of-turn packed bytes fall by 1.7–26.8 KB per attempt, and no
@@ -79,7 +79,7 @@ label or the archive uses for the same observation. Non-execute tool outputs
 (`search_memory`, `ask_user`, `what_can_i_do`, `intent_misunderstood`) get no
 handle: there is nothing to search inside them.
 
-### The context instance the command ran in (`ido-8ps.13`)
+### The context instance the command ran in
 
 When the command ran inside a non-root command context, the line also names that
 context and, where the workflow declares one, that context's instance identity:
@@ -94,8 +94,8 @@ the instance it belongs to: those permission rows do not repeat the account uid,
 and the only thing tying them to Alan Cooper is that the previous step entered
 his account. The link lives in the ORDER of the commands, so a reader that is not
 allowed to use history — a `search_memory` answer, answer-time rehydration, the
-extract step, a human scrolling a store — cannot recover it. 12 of the 14
-unresolved rows in the `ido-8ps.10` cell had exactly this cause.
+extract step, a human scrolling a store — cannot recover it. In the benchmark
+run that motivated the line, 12 of its 14 unresolved rows had exactly this cause.
 
 **The context is the one the command RAN IN, not the one it entered.** It is
 captured at dispatch (`CommandExecutor._remember_execute_context`), before the
@@ -116,7 +116,8 @@ declares neither prints its NAME alone, and an object that carries no identity
 yields no identity: nothing is invented to fill the gap, for the reason
 `tracing.context_handle` gives for refusing to mint an `instance_key` — a guess
 that looks concrete is worse than an honest absence. The root context prints no
-clause at all, so a root-context line is byte-for-byte the A1 line above.
+clause at all, so a root-context line is byte-for-byte the plain handle line
+shown earlier.
 
 `context_clause` is the one place the clause is made printable. It removes
 parentheses and newlines and caps the name at 60 and the label at 80 characters,
@@ -127,8 +128,9 @@ the clause cost — the line is presentation and reaches neither the step span
 (closed with the raw tool return) nor the archive, so the event is the only place
 it can be measured.
 
-This is not behind a flag. It is an extension of A1, which is not behind a flag
-either, and gating presentation would mean two shapes of printed observation to
+This is not behind a flag. It is an extension of the canonical handle line,
+which is not behind a flag either, and gating presentation would mean two
+shapes of printed observation to
 reason about for a change whose whole cost is ~40 bytes per observation.
 
 `annotate_execute_observations` writes the line during the ReAct
@@ -147,26 +149,26 @@ the printed text — is what the archive stores, what its `text_sha256` covers,
 what the offload label describes, and what the authored-output lookup matches
 against the action log. Digests of observation text therefore stay comparable
 with observations recorded before handles were printed, and `search_memory`
-answers from the unmodified command output. Offload eligibility, the minimum
+answers from the unmodified command response — from a bounded leading prefix of
+it when the whole response does not fit the search model's budget, with the
+truncation disclosed to the model. Offload eligibility, the minimum
 saving and the savings rule are likewise evaluated on the response alone, so
 printing a handle can never be what makes an offload look profitable — a
 response that saves 1,023 B stays inline even though the printed text is ~34 B
 longer.
 
-**The clause is persisted, so the subject survives the process** (`ido-dhw`).
+**The clause is persisted, so the subject survives the process.**
 The clause was captured at dispatch into a turn-scoped process map and nothing
 else, so a turn resumed in another process had no subject for any of its
-observations: the rehydrated handle line lost its clause, a page of an old
-listing lost the clause of the handle that declared it, the attribution check
-could not say whose evidence a listing was, and the auto-navigation registry
-could not resolve an `O` handle the same turn had printed. `record_context_clause`
-now writes through to an `observation_subjects` row in the sidecar, keyed by
+observations: the rehydrated handle line lost its clause, and a reader that had
+only the resumed process could not say whose evidence a stored listing was.
+`record_context_clause` now writes through to an `observation_subjects` row in
+the sidecar, keyed by
 `(scope_id, alias)`, and `context_clause_of` reads through to it when the map
 misses and refills the map from what it finds — the bounded runtime cache is
-REBUILT from the durable record rather than kept a second way. The navigation
-registry gets the same treatment in `observation_context_entries`, which stores
-the contract rule 3 rebuilds an entry from: the context, the entering command,
-its parameter values, the alias and the contract's REQUIRED parameter names.
+REBUILT from the durable record rather than kept a second way. A second table,
+`observation_context_entries`, records the same way which command entered the
+context an observation was produced in, and its parameter values.
 
 Both tables are created on open with `CREATE TABLE IF NOT EXISTS`, so an
 existing sidecar gains them the first time new code opens it and no migration
@@ -178,7 +180,7 @@ existed simply has no entry, which reads back as UNRECORDED — the state every
 reader already handles — and never as a guessed subject. `reclaim_scope` drops
 both process-local halves and neither row: residency, never evidence.
 
-**The subject is handed to `search_memory` beside the evidence** (`ido-kmm`).
+**The subject is handed to `search_memory` beside the evidence.**
 Because the archived text is the raw response, a stored `list_permissions` page
 is a table of permission rows with nothing in it saying whose permissions they
 are, and the search model is instructed to use only the observation it is given
@@ -194,17 +196,9 @@ paid for out of the same `search_observation_max_bytes` budget the evidence is
 cut to (`evidence_max_bytes`), because the bound exists to fit the search
 model's window and the whole input is what the provider measures.
 
-**Handles a command can page.** The same `O` alias identifies a stored, pageable
-copy of a listing when the producing command declares one: see
-[Result handles](result_handles.md). Search answers questions inside one
-observation's text; a result handle returns the listing's own rows, a page at a
-time or filtered by a literal, and can continue the query against the backend
-beyond the rows the command materialised. Both are reached with the alias
-printed on the observation.
-
-**At answer time both can be read back whole.** The extract step has no tools, so
-a label or a bounded page is all the evidence it has unless something puts the
-text back. Flag-gated answer-time rehydration does exactly that, on the
+**At answer time an offloaded observation is read back whole.** The extract step
+has no tools, so an offload label is all the evidence it has unless something
+puts the text back. Answer-time rehydration does exactly that, on the
 extractor's own copy of the trajectory and under a byte budget: see
 [Answer-time rehydration](answer_rehydration.md).
 
@@ -337,8 +331,8 @@ The answered search event gains `answer_bounded`, `answer_utf8_bytes`,
 `observation_utf8_bytes` and, when bounded, `answer_shown_utf8_bytes`,
 `answer_omitted_utf8_bytes`, `answer_archive_key` and `answer_sha256`.
 
-The bound is a tail guard, not a saving. Measured over the saved
-`h1-control` (n=3), A1+A2 smoke and `ido-5uv` stores, the largest answer in 27
+The bound is a tail guard, not a saving. Measured over the saved benchmark
+stores, the largest of 27 recorded answers
 was 1,855 B — 60% of the budget — peak completion usage was 790 of 2,048 tokens,
 and the `completion_limit` branch has never been taken. Search answers held
 2.1–7.4% of end-of-turn packed bytes and 0.0–6.8% at peak, behind execute
@@ -355,7 +349,10 @@ directly.)
 
 ## Configuration
 
-Set the search model independently of the main agent:
+Setting the search model independently of the main agent is recommended but not
+required: when `LLM_OBSERVATION_SEARCH` is unset, search runs on `LLM_AGENT`
+and the credential configured for it, and the evidence budget below is then
+sized from the agent model's window instead.
 
 ```dotenv
 # fastworkflow.env
@@ -368,7 +365,7 @@ LITELLM_API_KEY_OBSERVATION_SEARCH=<provider API key>
 ```
 
 The standard `get_lm` routing rules also support `litellm_proxy/` routes and
-provider ambient credentials. No fallback to the main agent model is performed.
+provider ambient credentials.
 The search uses temperature 0, a 2,048-token completion limit, a 120-second
 request timeout and one provider retry. `FW_LM_CACHE=0` disables response caching
 for independent benchmark calls.
@@ -377,7 +374,7 @@ Compaction budgets are derived from ONE input — the model's context window —
 in `fastworkflow/context_budget.py`; see
 [`docs/context_budget.md`](context_budget.md) for the input, its resolution
 order and the whole table. The values below are what a 131,072-token window
-(`cerebras/gpt-oss-120b`, the accepted stack's main agent model) produces. Each
+(`cerebras/gpt-oss-120b`, the reference main agent model) produces. Each
 name remains as a **tuning override**, optional, and falls back to the derived
 budget on a value that is not a valid integer or is below its minimum:
 
@@ -393,7 +390,7 @@ Observation offloading itself has no switch: `build_tool_agent` always returns a
 replan bound is the module constant
 `observation_offloading.continuation.MAX_FORCED_REPLANS` (2, therefore 3
 segments). `FW_OBSERVATION_OFFLOADING`, `FW_MAX_FORCED_REPLANS` and
-`FW_OFFLOAD_HANDLE_ARCHIVE` were removed in `ido-pyw.1`; the handle archive now
+`FW_OFFLOAD_HANDLE_ARCHIVE` were removed in 3.4.0; the observation archive now
 always lives beside the workflow's own observability database.
 `FW_OFFLOAD_EVENTS` remains, and is a destination rather than a switch: the
 events are always recorded in process, and it says where a copy is appended on
@@ -432,7 +429,7 @@ it is never reported as evidence that an entity is absent.
 This search supplies evidence; it does not by itself guarantee that the main
 agent's final conclusion is correct.
 
-### The read is bounded too (`ido-3vp`)
+### The read is bounded too
 
 The observation handed to the search model **is** paged, and to that model's own
 window rather than the agent's: `search_observation_max_bytes()` resolves
@@ -461,6 +458,12 @@ from byte 0, so the same observation answers from the same bytes however the
 question is phrased — the opposite of the bounded-*answer* case above, where
 re-asking is the right move. Only the producing command changes the bytes.
 
+The search model is told the same thing, in band with the evidence: when the
+observation was cut, a one-line `[TRUNCATED: …]` notice is appended to the text
+it receives, saying how many further bytes exist and that nothing missing from
+the prefix may be reported as absent. So the model never reads a prefix of a
+list as the whole list.
+
 When the provider refuses even the bounded prompt, the outcome is typed rather
 than generic: `is_context_window_error` matches `ContextWindowExceededError` on
 the exception's class chain, or the providers' wordings as a fallback, and the
@@ -474,6 +477,87 @@ The search event carries `observation_bytes`, `observation_sent_bytes`,
 `observation_bounded`, `observation_max_bytes` and `evidence_max_bytes`, so the
 share of searches answered from a prefix is measurable rather than inferred.
 
+## Retention, redaction and known limits
+
+Offloading writes evidence to disk and bounds several things by bytes. What
+follows is the contract as it ships, including the places where it is looser
+than a one-line summary would suggest.
+
+**Where the evidence lives.** Every execute response is persisted in a sidecar
+SQLite file beside the workflow's observability database, named after it with a
+`.offload-handles.sqlite3` suffix. The rows written *during* a turn hold the raw
+command responses, byte for byte, because every reader inside the turn — the
+trajectory, `search_memory`, answer-time rehydration, and those same reads after
+a resume — has to see what the command actually returned.
+
+**Sealing happens after the turn, not when it returns.** Sealing rewrites a
+scope's stored responses through the credential scrub and the capture policy's
+default profile: it redacts, it does not truncate. It runs at the first
+opportunity once the turn is genuinely over — when the next turn starts, or when
+the session closes — so there is a window in which raw bytes sit in the file. If
+the process dies inside that window, the next process to open the sidecar sweeps
+whatever is still raw.
+
+**The two side tables are not sealed.** The recorded subject clauses
+(`observation_subjects`) and context entries (`observation_context_entries`) are
+written in the clear and stay that way. They hold a context name, an instance
+label, a command name and its parameter values rather than command output, so if
+your parameter values can carry anything sensitive, treat these two tables as
+unredacted.
+
+**Pruning runs once per process start, when observability is on.** The sidecar is
+pruned on the same age horizon and size cap as the observability store beside it,
+and that prune is triggered when the trace sink is installed. A long-lived
+process does not prune again while it runs.
+
+**A program that embeds the library with observability off owns its own
+pruning.** The sidecar is not created lazily on first use — it is opened or
+created when the agent is constructed — so it exists and grows whether or not a
+trace sink was installed. With no sink there is nothing to trigger a prune, so
+the file accumulates every turn's responses for the life of the deployment until
+something outside fastWorkflow removes it.
+
+**Worst-case agent work in one turn.** A turn runs at most three segments of 25
+decisions each, plus the two continuation-planner calls that open the second and
+third segment: 75 tool-or-finish decisions and two extra model calls before the
+turn is forced to answer. Size provider spend and request timeouts against that
+ceiling rather than against a typical turn.
+
+**A garbled model reply after a tool has run fails the turn.** When the provider
+returns a reply the adapter cannot parse, the call is retried only while the turn
+has executed nothing. Once any observation exists the turn fails instead, because
+replaying the trajectory would re-run commands that already ran.
+
+**The continuation byte measure reports overage, it never enforces it.** The
+measure that decides when a segment is over its trajectory target counts
+observation bytes only, so the framing around them and the thought and tool
+fields are outside the number. The prompt can therefore run a few hundred bytes
+over the target, and the runtime records the overage rather than trimming to fit.
+
+**The rehydration control note is added after the budget.** When rehydration
+stops at the 250,000-byte extraction budget, the line naming the observations it
+could not put back is appended afterwards rather than reserved inside it. It
+costs a few hundred bytes at most, and it is worth more than the evidence those
+bytes would have bought.
+
+**The bounded-evidence notice is added after the evidence budget.** On the same
+terms: when the observation handed to the search model was cut to its byte bound,
+the one-line notice saying so is appended after the bound. The model input can
+therefore exceed the evidence budget by roughly two hundred bytes.
+
+**After a restart, one search answer can come back over its bound.** Bounding an
+answer requires archiving the complete text first, under a key numbered by a
+per-scope counter that lives in process memory. A turn resumed in a fresh process
+restarts that counter, so the write can collide with a key the earlier process
+already used; the archive refuses it, and an answer that cannot be archived is
+returned inline whole rather than cut — past the 3,072-byte presentation bound.
+
+**An evicted suspended session keeps a little memory until the process exits.**
+When the session manager evicts a suspended session, the per-session bookkeeping
+on the offload path is not freed with it. Both parts are capped — the hot
+observation cache by bytes, the in-process event buffer at 2,000 events — so the
+residue is small and bounded per session, but it is held until the process exits.
+
 ## Validation
 
 `MinimumOffloadSaving` covers the 1 KB rule: savings of exactly 1,023 / 1,024 /
@@ -481,7 +565,7 @@ share of searches answered from a prefix is measurable rather than inferred.
 bytes of output, two command arguments, one offload), an authored description
 lengthening both label and decision, a 3 KB listing page older than the protected
 five offloaded when over target, a 1.2 KB result kept, short facts untouched, the
-recency five protected before any label is built, A1's alias line excluded from
+recency five protected before any label is built, the printed alias line excluded from
 the measured saving, the eager archive holding both the kept and the offloaded
 observation, search answers still never offloaded, the environment override in
 both directions with bad values falling back, and the replan skeleton applying
@@ -519,4 +603,3 @@ FW_TEST_OBSERVATION_SEARCH_LIVE=1 python -m pytest \
 
 Configure the search model and credentials before enabling provider tests.
 Without the opt-in, deterministic integration checks run and paid cases skip.
-The IDO epic `ido-5uv` records a fixed-evidence and single-task benchmark comparison.

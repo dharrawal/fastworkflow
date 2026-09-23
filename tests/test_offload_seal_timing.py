@@ -1,19 +1,17 @@
-"""ido-6sc: nothing is redacted while a turn is in flight; the seal is at the end.
+"""Nothing is redacted while a turn is in flight; the seal is at the end.
 
-``ido-zlm`` made the evidence sidecar redact what it stored, at the write. The
-owner's decision here moves WHEN, not WHETHER: with redaction on, a turn's
-stored observations are written VERBATIM and sealed into their redacted form
-only when the turn is genuinely over. In flight means the whole life of the
-turn, explicitly including an ask_user wait and any serialize/deserialize round
-trip, so every read an agent can make during its own turn returns raw -- the
-live trajectory, ``search_memory``, rehydration, and those same reads after a
-resume in a fresh process.
+Redaction decides WHETHER the evidence sidecar scrubs what it stored; the seal
+decides WHEN. With redaction on, a turn's stored observations are written
+VERBATIM and sealed into their redacted form only when the turn is genuinely
+over. In flight means the whole life of the turn, explicitly including an
+ask_user wait and any serialize/deserialize round trip, so every read an agent
+can make during its own turn returns raw -- the live trajectory,
+``search_memory``, rehydration, and those same reads after a resume in a fresh
+process.
 
-The owner accepted, in as many words, that raw bytes sit on disk for the
-duration of a turn, conditionally and until someone demonstrates that redaction
-does not affect answer quality. Two things make that acceptance bounded rather
-than open-ended, and both are under test here: a completing turn seals its own
-evidence, and a turn whose process DIED is swept.
+The cost of that design is raw bytes on disk for the duration of a turn. Two
+things keep it bounded rather than open-ended, and both are under test here: a
+completing turn seals its own evidence, and a turn whose process DIED is swept.
 
 The claims are made in BYTES wherever a leak or a degradation is the thing
 being denied, on ``test_offload_capture_redaction``'s rule: a row read back
@@ -57,20 +55,18 @@ from fastworkflow.observation_offloading.state import (
     reset_runtime_state,
     stored_handles,
 )
-from fastworkflow.result_handles import (
+from fastworkflow.observation_offloading.state import (
     current_execute_alias,
     current_scope,
-    reset_result_handle_state,
 )
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
-# Read off the module, not imported, for the reason the ido-zlm cases do it:
-# a regression check has to be RUNNABLE against the revision that had the
-# defect. On ``be0f281`` these names are absent, the shims below answer for
-# them, and the cases FAIL on their assertions -- a credential absent from a
-# mid-turn file, a redacted read inside a live turn -- rather than erroring on
-# an import.
+# Read off the module rather than imported, for the reason the redaction cases
+# do it: a regression check has to be RUNNABLE against a revision that lacks the
+# fix. Where these names are absent the shims below answer for them, and the
+# cases FAIL on their assertions -- a credential absent from a mid-turn file, a
+# redacted read inside a live turn -- rather than erroring on an import.
 SEAL_PENDING = getattr(archive_module, "SEAL_PENDING", "pending")
 SEAL_SEALED = getattr(archive_module, "SEAL_SEALED", "sealed")
 SEAL_NOT_REQUIRED = getattr(archive_module, "SEAL_NOT_REQUIRED", "not_required")
@@ -197,7 +193,7 @@ class InFlightTests(SealFixture):
     """While the turn is running, every read is the raw response."""
 
     def test_a_mid_turn_row_is_the_raw_response_on_disk(self) -> None:
-        """The owner's accepted cost, asserted rather than assumed."""
+        """The in-flight cost of the design, asserted rather than assumed."""
         text = response_with_credential()
         archive, stored = self.persist(text)
         scope = chatbot_scope()
@@ -326,10 +322,10 @@ class FidelityRecordTests(SealFixture):
 
     @needs_the_seal
     def test_a_sidecar_written_before_this_change_opens_and_reads(self) -> None:
-        """Requirement 7: additive state created on open, no migration.
+        """Additive state is created on open; there is no migration step.
 
-        The file is created with exactly ido-zlm's four tables and a row in
-        each shape that revision wrote, then opened by this one.
+        The file is created with only the four tables and row shapes an
+        older sidecar wrote, then opened by the current code.
         """
         scope = chatbot_scope()
         text = "an older revision's row\n"
@@ -492,7 +488,7 @@ class DigestsAcrossASealTests(SealFixture):
 
     @needs_the_seal
     def test_the_raw_digest_is_never_written_beside_sealed_bytes(self) -> None:
-        """ido-zlm's confirmation-oracle refusal, kept across the seal.
+        """The refusal to leave a confirmation oracle, kept across the seal.
 
         While the row is pending its own ``text_sha256`` covers the raw bytes
         that are sitting right beside it, so it tells an attacker nothing they
@@ -717,7 +713,6 @@ class LiveTurnFixture(unittest.TestCase):
     workflow_path = str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
 
     def setUp(self) -> None:
-        reset_result_handle_state()
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
         self._restore_env: dict[str, str | None] = {}
@@ -736,7 +731,6 @@ class LiveTurnFixture(unittest.TestCase):
                 workflow.close()
             except Exception:  # noqa: BLE001
                 pass
-        reset_result_handle_state()
         reset_runtime_state()
         os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         for name, value in self._restore_env.items():
@@ -863,7 +857,7 @@ class TurnCompletionSealsTests(LiveTurnFixture):
         self.assertEqual(stored_handles(scope), {})
 
     def test_the_awaiting_user_guard_skips_the_seal(self) -> None:
-        """The first half of the ido-1ew guard, reused verbatim."""
+        """A turn waiting on the user is not over, so its evidence is not sealed."""
         ctx, workflow, agent = self.make_session(channel="susp", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "one"}),
                             ("ask_user", {"question": "continue?"})])
@@ -947,7 +941,6 @@ class SuspensionRoundTripTests(LiveTurnFixture):
         ctx.pop_active_workflow()
         ctx.close()
         # As close to a fresh process as one interpreter allows.
-        reset_result_handle_state()
         reset_runtime_state()
         self.assertEqual(stored_handles(scope), {})
 

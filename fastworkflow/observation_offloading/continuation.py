@@ -78,7 +78,7 @@ def replan_trajectory_skeleton(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Label every eligible observation, then inline newest execute slots until the bound.
 
-    Eligibility is the same rule compaction uses (ido-986.14.6): the label must
+    Eligibility is the same rule compaction uses: the label must
     free at least ``min_offload_saving_bytes``. A skeleton is the one place the
     agent cannot ask for anything back before it plans, so replacing a 300 B
     fact with a 400 B pointer to it was always a bad trade; a label merely
@@ -232,19 +232,18 @@ class StructuredContinuationReAct(fastWorkflowReAct):
     def bind_scope(self) -> RuntimeHandleScope | None:
         """Resolve the scope for the turn that is starting; reclaim the one it replaces.
 
-        ido-1ew. Binding a different scope is this agent saying the previous
-        turn is over, which makes it the earliest honest moment to release that
-        turn's process-local state -- not just its hot payloads, which is all
-        this used to drop, but its archive registry, context clauses, handle
-        rows, cursor tokens and navigation entries too. Everything released is
-        still on disk; only residency goes.
+        Binding a different scope is this agent saying the previous turn is
+        over, which makes it the earliest honest moment to release that turn's
+        process-local state: its hot payloads, its archive registry and its
+        context clauses. Everything released is still on disk; only residency
+        goes.
 
         A suspension is the one thing that is not over, so a still-suspended
         agent reclaims nothing. ``forward`` clears the suspension before it gets
         here, so the guard is for a caller that binds a scope by hand.
 
-        ido-6sc. The same guard now also decides when the previous turn's
-        stored evidence is SEALED into its redacted form, because "the agent
+        The same guard also decides when the previous turn's stored evidence
+        is SEALED into its redacted form, because "the agent
         has bound the next turn" is the strongest statement this process can
         make that the previous one is finished -- its summary is recorded, its
         answer is delivered, and no read of it can still be part of it. The
@@ -270,7 +269,17 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             and previous != scope
             and getattr(self, "_suspended", None) is None
         ):
-            runtime.finish_scope(previous)
+            try:
+                runtime.finish_scope(previous)
+            except Exception as exc:  # noqa: BLE001
+                # Same shape as the sibling in
+                # WorkflowExecutionContext._reclaim_offloading_scope: sealing and
+                # reclaiming the PREVIOUS turn's scope must not abort the turn
+                # that is starting.
+                logger.debug(
+                    "bind_scope: could not seal or reclaim the previous "
+                    f"offloading scope ({type(exc).__name__}: {exc})"
+                )
         self.continuation_scope = scope
         self.continuation_scope_id = scope.scope_id
         runtime.bind_scope(scope)

@@ -1,10 +1,10 @@
-"""ido-1ew: the offloading runtime's process-global state is bounded and reclaimed.
+"""The offloading runtime's process-global state is bounded and reclaimed.
 
-The registries here are all keyed by turn scope, and nothing in production ever
-released one. A long-lived server therefore held every search question, every
-piece of reasoning, every full answer and every cached row of every turn it had
-ever run, for as long as the process lived -- outside whatever retention its
-sessions were configured for.
+The registries here are all keyed by turn scope. If nothing released them, a
+long-lived server would hold every search question, every piece of reasoning,
+every full answer and every cached row of every turn it had ever run, for as
+long as the process lived -- outside whatever retention its sessions were
+configured for.
 
 Nothing in this module calls a reset helper before it measures. That is the
 point: the reclamation under test has to be reached by the production lifecycle
@@ -27,14 +27,10 @@ from pathlib import Path
 import dspy
 
 import fastworkflow
-from fastworkflow.agent_runtime import build_turn_runtime
-from fastworkflow import auto_navigation, result_handles, tracing
+from fastworkflow import tracing
 from fastworkflow.observation_offloading import state as offload_state
 from fastworkflow.observation_offloading.agent import build_tool_agent
-from fastworkflow.observation_offloading.archive import (
-    RuntimeHandleArchive,
-    RuntimeHandleScope,
-)
+from fastworkflow.observation_offloading.archive import RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import printed_alias
 from fastworkflow.observation_offloading.state import (
     context_clause_of,
@@ -44,17 +40,10 @@ from fastworkflow.observation_offloading.state import (
     reset_runtime_state,
     snapshot_events,
 )
-from fastworkflow.result_handles import (
-    ResultHandleSpec,
-    ResultHandleStore,
-    SourceDescriptor,
+from fastworkflow.observation_offloading.state import (
     current_execute_alias,
     current_scope,
-    declare,
-    fetch_page,
-    reset_result_handle_state,
 )
-from fastworkflow.result_handles import paging as result_handles
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -74,7 +63,6 @@ class OffloadStateFixture(unittest.TestCase):
         final_answer: str = dspy.OutputField()
 
     def setUp(self) -> None:
-        reset_result_handle_state()
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
         os.environ["FASTWORKFLOW_STATE_ROOT"] = os.path.join(self.temp.name, "state")
@@ -90,7 +78,6 @@ class OffloadStateFixture(unittest.TestCase):
                 workflow.close()
             except Exception:  # noqa: BLE001
                 pass
-        reset_result_handle_state()
         reset_runtime_state()
         os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         os.environ.pop(offload_state.EVENT_BUFFER_MAX_ENV, None)
@@ -116,16 +103,6 @@ class OffloadStateFixture(unittest.TestCase):
             record_context_clause(scope, alias, "Fixture " + command)
             self.dispatches.append({"command": command, "dispatch_alias": alias})
             rows = rows_for(command)
-            declare(
-                ResultHandleSpec(kind="fixture", summary=command, items=rows,
-                                 total=len(rows), source_complete=True),
-                source=SourceDescriptor(
-                    resolver="offline-never-called",
-                    state={"view": "fixture", "params": {"subject": command}}),
-            )
-            auto_navigation.record_context_entry(
-                scope.scope_id, context="Fixture", command_name=command, alias=alias
-            )
             return "\n".join(rows)
 
         def ask_user(question: str) -> str:
@@ -167,18 +144,11 @@ class OffloadStateFixture(unittest.TestCase):
             "context_clauses": len(offload_state._context_clauses),
             "hot_observations": len(offload_state._handles),
             "search_answers": len(offload_state._search_answers),
-            "hot_walks": len(result_handles._hot),
-            "cursor_tokens": len(result_handles._cursor_tokens),
-            "pages_served": len(result_handles._pages_served),
-            "local_sequence": len(result_handles._local_sequence),
-            "stores": len(result_handles._stores),
-            "navigation_entries": len(auto_navigation._entries),
         }
 
     def scope_counts(self, scope: RuntimeHandleScope) -> dict[str, int]:
         """What one scope holds, across every registry keyed by it."""
         prefix = "%s:" % scope.scope_id
-        namespace = "%s@" % scope.scope_id
         return {
             "archived": sum(1 for key in offload_state._archived
                             if key.startswith(prefix)),
@@ -186,24 +156,16 @@ class OffloadStateFixture(unittest.TestCase):
                                    if key.startswith(prefix)),
             "hot_observations": sum(1 for key in offload_state._handles
                                     if key.startswith(prefix)),
-            "hot_walks": sum(1 for key in result_handles._hot
-                             if key.startswith(prefix)),
-            "cursor_tokens": sum(1 for key in result_handles._cursor_tokens
-                                 if key.startswith(namespace)),
-            "pages_served": sum(1 for key in result_handles._pages_served
-                                if key.startswith(namespace)),
             "events": sum(1 for item in snapshot_events()
                           if str(item.get("scope_id") or "") == scope.scope_id),
-            "navigation_entries": len(auto_navigation.context_entries(scope.scope_id)),
         }
 
     def run_finished_turn(self, ctx, agent, command: str):
-        """One turn that reaches finish, with a page served out of its handle."""
+        """One turn that reaches finish."""
         self.script(agent, [("execute_workflow_query", {"command": command}),
                             ("finish", {})])
         with tracing.host_scope(ctx):
             prediction = agent.forward(user_query="fixture")
-            fetch_page("O1", budget_bytes=512)
         return prediction
 
 
@@ -275,71 +237,13 @@ class CompletedSessionReclamationTests(OffloadStateFixture):
         self.assertEqual(self.scope_counts(done_scope),
                          dict.fromkeys(self.scope_counts(done_scope), 0))
         self.assertEqual(self.scope_counts(live_scope), live_before)
-        # Still usable, not merely still counted: the handle pages again.
-        live_workflow_ctx = live_ctx
-        with tracing.host_scope(live_workflow_ctx):
-            page = fetch_page("O1", budget_bytes=512)
-        self.assertTrue(page.rows)
-        self.assertTrue(all("live" in row for row in page.rows))
+        # Still usable, not merely still counted: the clause still reads back.
         self.assertEqual(context_clause_of(live_scope, "O1"), "Fixture live")
         self.close_session(live_ctx, live_workflow)
 
-    def test_two_built_agents_resolve_their_runtime_bindings_independently(self) -> None:
-        """Host switching uses each built agent's scope, store, and archive."""
-        first_ctx, first_workflow, first_agent = self.make_session(
-            channel="owner-a", turn="turn-a"
-        )
-        second_ctx, second_workflow, second_agent = self.make_session(
-            channel="owner-b", turn="turn-b"
-        )
-        first_scope = RuntimeHandleScope(
-            store_identity="wf", channel_id="owner-a", experiment_id="",
-            task_id="", attempt=0, turn_key="turn-a",
-        )
-        second_scope = RuntimeHandleScope(
-            store_identity="wf", channel_id="owner-b", experiment_id="",
-            task_id="", attempt=0, turn_key="turn-b",
-        )
-        first_archive = RuntimeHandleArchive(os.path.join(self.temp.name, "a.sqlite3"))
-        second_archive = RuntimeHandleArchive(os.path.join(self.temp.name, "b.sqlite3"))
-        for agent, scope, archive in (
-            (first_agent, first_scope, first_archive),
-            (second_agent, second_scope, second_archive),
-        ):
-            agent.observation_archive = archive
-            agent.continuation_scope = scope
-            agent.continuation_scope_id = scope.scope_id
-            agent.turn_runtime = build_turn_runtime(scope, archive=archive)
-
-        for ctx, scope, archive, label in (
-            (first_ctx, first_scope, first_archive, "first"),
-            (second_ctx, second_scope, second_archive, "second"),
-        ):
-            with tracing.host_scope(ctx):
-                self.assertEqual(current_scope(), scope)
-                self.assertEqual(result_handles.store().db_path, archive.db_path)
-                auto_navigation.record_context_entry(
-                    scope.scope_id,
-                    context="Account",
-                    command_name="open_account",
-                    parameters={"name": label},
-                    scope=scope,
-                )
-                auto_navigation.forget_scope(scope.scope_id)
-                restored = auto_navigation.context_entries(scope.scope_id)
-                self.assertEqual(restored[0].parameters["name"], label)
-
-        first_ctx._awaiting_user = False
-        self.close_session(first_ctx, first_workflow)
-        with tracing.host_scope(second_ctx):
-            auto_navigation.forget_scope(second_scope.scope_id)
-            restored = auto_navigation.context_entries(second_scope.scope_id)
-            self.assertEqual(restored[0].parameters["name"], "second")
-            self.assertEqual(result_handles.store().db_path, second_archive.db_path)
-        self.close_session(second_ctx, second_workflow)
 
     def test_a_suspended_turn_survives_its_sessions_close_and_still_resumes(self) -> None:
-        """A suspension is state to keep, not state to reclaim (ido-7qd guard)."""
+        """A suspension is state to keep, not state to reclaim."""
         ctx, workflow, agent = self.make_session(channel="susp", turn="turn-susp")
         self.script(agent, [("execute_workflow_query", {"command": "first"}),
                             ("execute_workflow_query", {"command": "second"}),
@@ -370,34 +274,17 @@ class CompletedSessionReclamationTests(OffloadStateFixture):
         self.assertEqual(printed_alias(resumed.trajectory["observation_3"]), "O3")
         self.assertEqual(context_clause_of(scope, "O1"), "Fixture first")
         self.assertEqual(context_clause_of(scope, "O3"), "Fixture third")
-        with tracing.host_scope(ctx):
-            page = fetch_page("O2", budget_bytes=512)
-        self.assertTrue(all("second" in row for row in page.rows))
+        self.assertEqual(context_clause_of(scope, "O2"), "Fixture second")
 
         ctx._awaiting_user = False
         self.close_session(ctx, workflow)
         self.assertEqual(self.scope_counts(scope),
                          dict.fromkeys(self.scope_counts(scope), 0))
 
-    def test_a_reclaimed_turn_is_still_readable_from_its_store(self) -> None:
-        """Residency, never evidence: the rows outlive the caches that held them."""
-        ctx, workflow, agent = self.make_session(channel="durable", turn="turn-1")
-        self.run_finished_turn(ctx, agent, "kept")
-        scope = agent.continuation_scope
-        archive_path = agent.observation_archive.db_path
-        self.close_session(ctx, workflow)
-
-        reopened = ResultHandleStore(archive_path)
-        declarations = reopened.list_declarations(scope)
-        self.assertEqual([row["alias"] for row in declarations], ["O1"])
-        page = fetch_page("O1", scope=scope, selected_store=reopened, budget_bytes=512)
-        self.assertTrue(all("kept" in row for row in page.rows))
-        recovered = RuntimeHandleArchive(archive_path).get(scope, "O1")
-        self.assertIn("kept", recovered["text"])
 
 
 class EventBufferBoundTests(unittest.TestCase):
-    """The in-memory event log is a ring, not a ledger (ido-1ew)."""
+    """The in-memory event log is a ring, not a ledger."""
 
     def setUp(self) -> None:
         reset_runtime_state()
@@ -431,80 +318,15 @@ class EventBufferBoundTests(unittest.TestCase):
                          offload_state.DEFAULT_EVENT_BUFFER_MAX)
 
 
-class StoreOwnershipTests(unittest.TestCase):
-    """A per-path store goes when its LAST owning scope is released (ido-1ew)."""
-
-    def setUp(self) -> None:
-        reset_result_handle_state()
-        reset_runtime_state()
-        self.temp = tempfile.TemporaryDirectory()
-
-    def tearDown(self) -> None:
-        reset_result_handle_state()
-        reset_runtime_state()
-        self.temp.cleanup()
-
-    def scope(self, turn: str) -> RuntimeHandleScope:
-        return RuntimeHandleScope(store_identity="store", channel_id="channel",
-                                  experiment_id="exp", task_id="task", attempt=1,
-                                  turn_key=turn)
-
-    def declare_into(self, store: ResultHandleStore, scope: RuntimeHandleScope) -> None:
-        declare(
-            ResultHandleSpec(kind="fixture", summary="rows", items=rows_for("r"),
-                             total=30, source_complete=True),
-            scope=scope, selected_store=store, alias="O1",
-        )
-        fetch_page("O1", scope=scope, selected_store=store, budget_bytes=512)
-
-    def test_a_shared_store_survives_until_its_last_scope_is_reclaimed(self) -> None:
-        path = os.path.join(self.temp.name, "shared.sqlite3")
-        store = ResultHandleStore(path)
-        result_handles._stores[store.db_path] = store
-        first, second = self.scope("turn-1"), self.scope("turn-2")
-        self.declare_into(store, first)
-        self.declare_into(store, second)
-        self.assertEqual(result_handles._store_scopes[store.db_path],
-                         {first.scope_id, second.scope_id})
-
-        reclaim_scope(first)
-        self.assertIn(store.db_path, result_handles._stores)
-        self.assertEqual(result_handles._store_scopes[store.db_path],
-                         {second.scope_id})
-        # The other scope's rows are untouched by the first one's release.
-        page = fetch_page("O1", scope=second, selected_store=store, budget_bytes=512)
-        self.assertTrue(page.rows)
-
-        reclaim_scope(second)
-        self.assertNotIn(store.db_path, result_handles._stores)
-        self.assertNotIn(store.db_path, result_handles._store_scopes)
-
-    def test_reopening_a_dropped_store_reads_every_row_back(self) -> None:
-        """Dropping a store closes nothing: a store is a path, not a connection."""
-        path = os.path.join(self.temp.name, "reopen.sqlite3")
-        store = ResultHandleStore(path)
-        result_handles._stores[store.db_path] = store
-        scope = self.scope("turn-1")
-        self.declare_into(store, scope)
-        reclaim_scope(scope)
-        self.assertNotIn(store.db_path, result_handles._stores)
-
-        reopened = ResultHandleStore(path)
-        self.assertEqual([row["alias"] for row in reopened.list_declarations(scope)],
-                         ["O1"])
-        page = fetch_page("O1", scope=scope, selected_store=reopened, budget_bytes=512)
-        self.assertTrue(page.rows)
 
 
 class ReclaimScopeIsNotAGlobalResetTests(unittest.TestCase):
     """The review is explicit that a global reset is the wrong answer."""
 
     def setUp(self) -> None:
-        reset_result_handle_state()
         reset_runtime_state()
 
     def tearDown(self) -> None:
-        reset_result_handle_state()
         reset_runtime_state()
 
     def scope(self, turn: str) -> RuntimeHandleScope:
@@ -520,9 +342,6 @@ class ReclaimScopeIsNotAGlobalResetTests(unittest.TestCase):
             offload_state.remember_handle(
                 scope, {"alias": "O1", "text": "payload", "text_sha256": "d" * 64})
             offload_state.next_search_answer_sequence(scope)
-            auto_navigation.record_context_entry(
-                scope.scope_id, scope=scope, context="Fixture",
-                command_name="c", alias="O1")
             record_event({"kind": "fixture", "scope_id": scope.scope_id})
 
         reclaim_scope(gone)
@@ -535,18 +354,15 @@ class ReclaimScopeIsNotAGlobalResetTests(unittest.TestCase):
         # survival of those rows is asserted straight after.
         self.assertNotIn(
             offload_state.handle_key(gone, "O1"), offload_state._context_clauses)
-        self.assertEqual(auto_navigation._entries.get(gone.scope_id), None)
         self.assertIsNone(offload_state.archived_digest(gone, "O1"))
         self.assertEqual(offload_state.stored_handles(gone), {})
         self.assertEqual(offload_state.next_search_answer_sequence(gone), 1)
 
         self.assertEqual(context_clause_of(gone, "O1"), "Fixture gone")
-        self.assertEqual(len(auto_navigation.context_entries(gone.scope_id)), 1)
 
         self.assertEqual(context_clause_of(kept, "O1"), "Fixture kept")
         self.assertEqual(offload_state.archived_digest(kept, "O1"), "d" * 64)
         self.assertEqual(sorted(offload_state.stored_handles(kept)), ["O1"])
-        self.assertEqual(len(auto_navigation.context_entries(kept.scope_id)), 1)
         self.assertEqual(
             [item["scope_id"] for item in snapshot_events()
              if item["kind"] == "fixture"],

@@ -5,17 +5,14 @@ Releases before 3.4.0 were announced in their merge-commit subjects
 with `git tag` and `git log --first-parent main`. This file starts at 3.4.0; it
 does not backfill them.
 
-## 3.4.0 — result search
+## 3.4.0 — observation offloading and search
 
-**Observation offloading and the answer-time behaviours become the framework's
+**Observation offloading and answer-time rehydration become the framework's
 behaviour for every workflow.** They are no longer modes a deployment opts into:
-there is no `FW_OBSERVATION_OFFLOADING`, no `FW_AUTO_NAVIGATION`, no
-`FW_ANSWER_REHYDRATION`, no `FW_ANSWER_COVERAGE`. A fastWorkflow tool agent
-compacts its trajectory, keeps every observation reachable, navigates on a
-declaration, and answers over evidence rather than pointers.
-
-Full notes, migration and the experiment lineage:
-[`docs/releases/3.4.0-result-search.md`](docs/releases/3.4.0-result-search.md).
+there is no `FW_OBSERVATION_OFFLOADING` and no `FW_ANSWER_REHYDRATION`. A
+fastWorkflow tool agent compacts its trajectory, keeps every observation
+reachable, and answers over the evidence behind its labels rather than over the
+labels themselves.
 
 ### Added
 
@@ -23,73 +20,26 @@ Full notes, migration and the experiment lineage:
   `O{n}` aliases on every execute observation, an eager SQLite archive, a packed
   trajectory target with offload labels, `search_memory` over one stored
   observation, and segmented continuation with forced replans.
-- **Result handles** (`fastworkflow.result_handles`): one alias per listing,
-  immutable stored pages, serialisable source descriptors, short cursor tokens,
-  bounded page observations, literal filters and page references in artifacts.
-  The source-adapter boundary (`fix-iq53.2`) ships settled and generic: the
-  framework owns identity, storage, presentation and the decision of when and
-  how often to call out; the workflow owns ordering, filters, snapshots, the
-  opaque continuation state, the origin rule and every completeness judgment.
-  - `SourceDescriptor` is six generic fields — `resolver`, `uid_field`,
-    `label_fields`, `batch_size`, `filter_columns`, `state` — where an earlier
-    draft had fourteen. `view`, `params`, `role`, `extra`, `ordering`,
-    `timeslot`, `start_offset`, `materialized` and `count_only` live in
-    `state`, which the package carries verbatim and never interprets, and the
-    constructor rules that policed an ordering and a snapshot pin went with the
-    fields they policed. `filter_columns` deliberately stays a list of names
-    rather than a boolean, because the page header prints them and a complete
-    zero names the fields it searched.
-  - **Two callback shapes replace one overloaded request.** `SourceRequest`
-    (`descriptor`, `continuation`, `limit`, `contains`) asks for one batch and
-    is charged against the per-fetch purse. `TerminalRequest` (`descriptor`,
-    `continuation`, `contains`, `distinct_uids`) is issued once when a walk
-    reaches its end, is never charged, and is the only callback that may decide
-    completeness. There is no `count_only` mode flag and no `batches_read`.
-  - **An empty batch terminates the walk regardless of any continuation
-    offered**, and a batch response may not claim completeness. A batch that
-    returns rows and offers no resume point also ends the walk, after those
-    rows.
-  - One new `incomplete_reason`, `completeness_not_claimed`: the walk reached
-    its end and the adapter decided nothing, so the question is owed again next
-    fetch rather than answered by the framework. The framework never upgrades
-    an unclaimed walk to complete.
-  - Storage is `result_handle_batches`, keyed on a framework-allocated
-    `batch_index` rather than one backend's `start_offset`, with a
-    `continuation_json` column, and `result_handle_walk_terminals`, one column
-    lighter. Renames and not `ALTER`s, so a store written before the change
-    still parses and is never written to again.
-    `ResultHandleStore.open_readonly` opens a historical store without marking
-    it — see the artifact policy in
-    [`docs/result_handles.md`](docs/result_handles.md).
-  - The work profile is pinned rather than promised: at most nine callbacks and
-    one terminal per fetch, the terminal always last, and zero terminals on a
-    capped walk, measured by `tests/callback_trace.py` over nine walk shapes.
-- **Auto-navigation** (`fastworkflow.auto_navigation`): deterministic two-step
-  dispatch on a known command name a foreign context owns, driven by an
-  `enter_command` declaration on the context callback class, with a blocking
-  clarification when the entry command needs a parameter. `fastworkflow train`
-  reports the entry-contract check.
 - **Context-instance line** (`fastworkflow.context_identity`): every execute
-  observation names the context instance the command ran in.
+  observation names the context instance the command ran in, so a listing
+  produced inside a context is still attributable to that instance by a reader
+  that cannot use the order of the commands.
 - **Answer-time rehydration** (`fastworkflow.answer_rehydration`): the extract
-  call reads the evidence behind labels, bounded listings and pages.
-- **Coverage statement, roster nudge and evidence sentence**
-  (`fastworkflow.answer_coverage`): the extractor is told what the run never
-  retrieved; a `finish` action that never opened a named person of the request
-  goes back to the loop once; and the block states, per subject, which other
-  named items of the request that subject's own observations contain.
-- **Attribution check** (`fastworkflow.answer_attribution`): a deterministic
-  offline instrument for scoring an answer against the evidence per subject.
+  call is given its own copy of the trajectory with the evidence behind offload
+  labels put back, under a byte budget, so the answer is written over evidence
+  rather than over pointers.
+- **Finish reminder**: a `finish` action that never opened a named item of the
+  request goes back to the loop once, and only while iterations remain.
 - **Context budgets** (`fastworkflow.context_budget`): one input — the model's
   context window — and every byte budget derived from it as a fixed fraction.
   `budget_provenance()` returns the input, its source and every budget.
 
 ### Changed
 
-- **R1 known-name guard**: a known command name is never answered by a context
+- **Known-name guard**: a known command name is never answered by a context
   that does not own it; the declining prediction carries a hint naming where the
   command lives.
-- **R3 threshold separation**: `write_ambiguity_thresholds` is the single writer
+- **Threshold separation**: `write_ambiguity_thresholds` is the single writer
   for both ambiguity files and establishes a non-empty ambiguity band where the
   artifacts are produced, with `TIER_AMBIGUITY_MIN_SEPARATION` and
   `SINGLE_LABEL_RESOLUTION_FLOOR`.
@@ -101,22 +51,45 @@ Full notes, migration and the experiment lineage:
   because current Bedrock Claude models reject both together and every
   generation call was a hard `BadRequestError`.
 - `fw.nlu.intent` span contract v2 → v3.
+- `fw.command.execute` span contract v2 → v3: the four auto-navigation
+  attributes are gone with the two-step dispatch that wrote them.
+- **Intent `signal_version`** no longer carries a threshold-semantics segment.
+  It now reads `intent-classifier/<artifact version>/...`, so a version string
+  identifies the artifact behind a signal and nothing else.
 
 ### Fixed
 
-- **`ido-8ps.29`**: a result-handle page fetched under a different context was
-  stamped with that context's subject clause. The clause now follows the
-  handle's declaring subject, and both the evidence sentence and the attribution
-  check inherit it.
-- **`ido-8ps.30`**: `react.py` never passed `report.unavailable` to
-  `answer_coverage.post_check`, so the attempted-vs-never-attempted split
-  recorded `unavailable_total = 0` in every run.
+- A malformed model reply that arrives after a tool has already run now fails
+  the turn instead of silently re-running the whole trajectory. The re-run could
+  repeat the side effects of the commands already executed and leave the
+  archived evidence out of step with the answer.
+- A known command name followed by a newline or a tab is now recognised by the
+  known-name guard and by the owning context's exact match, not only when the
+  name is followed by a space.
+- A failure while sealing or releasing the previous turn's evidence no longer
+  aborts the turn that is starting.
 
 ### Removed
 
-`FW_OBSERVATION_OFFLOADING`, `FW_AUTO_NAVIGATION`,
-`FW_AUTO_NAVIGATION_CANDIDATE_STEPS`, `FW_AUTO_NAVIGATION_CANDIDATE_MAX`,
-`FW_ANSWER_REHYDRATION`, `FW_ANSWER_COVERAGE`, `FW_ROSTER_NUDGE`,
-`FW_ANSWER_EVIDENCE`, `FW_EAGER_ARTIFACT_VALIDATION`,
-`FW_OFFLOAD_HANDLE_ARCHIVE`, `FW_MAX_FORCED_REPLANS`, `FW_OBS_MAX_ATTR_BYTES`.
-See the release notes for what replaces each one.
+`FW_OBSERVATION_OFFLOADING`, `FW_ANSWER_REHYDRATION`, `FW_OFFLOAD_HANDLE_ARCHIVE`,
+`FW_EAGER_ARTIFACT_VALIDATION`, `FW_MAX_FORCED_REPLANS`, `FW_OBS_MAX_ATTR_BYTES`.
+
+### Migration
+
+- `LLM_OBSERVATION_SEARCH` is the recommended setting for the model that answers
+  `search_memory`. When it is unset, search runs on `LLM_AGENT`, which also
+  fixes the budget the evidence is cut to, since that budget is sized from the
+  search model's own context window.
+- `LITELLM_API_KEY_OBSERVATION_SEARCH` is the recommended credential for that
+  role. When it is unset, search uses the credential configured for `LLM_AGENT`.
+
+### Known limits
+
+Offloading and search ship with documented limits rather than silent ones: where
+the observation sidecar lives and when its rows are sealed, which pruning a
+program that embeds the library with observability off has to do itself, the
+worst-case agent work one turn can cost, and several places where a disclosure
+line can push a bounded input a few hundred bytes past the budget it reports.
+They are listed in
+[Retention, redaction and known limits](docs/observation_search.md#retention-redaction-and-known-limits);
+read that section before sizing a deployment or writing a retention policy.

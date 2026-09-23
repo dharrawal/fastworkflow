@@ -75,6 +75,7 @@ from fastworkflow.observation_offloading.search import (
     bounded_evidence,
     search_answer_max_bytes_from_env,
     search_memory,
+    evidence_for_search_model,
     evidence_max_bytes,
     search_observation_max_bytes,
     text_page,
@@ -473,11 +474,11 @@ class StructuredContinuation(unittest.TestCase):
         self.assertNotIn("x" * 1000, captured["trajectory_skeleton"])
 
     def test_segment_total_reports_the_replans_actually_allowed(self) -> None:
-        """Ultrareview normal finding: the artifact and events said "of 3"
-        while the agent's own `max_forced_replans` gated a different number of
-        segments. ido-pyw.1 made the bound a constant; the attribute is still
-        what `total_segments` and the replan text have to agree with, so the
-        agent is built with a different one and both are checked."""
+        """The artifact and events once said "of 3" while the agent's own
+        `max_forced_replans` gated a different number of segments. The bound
+        is a module constant now, but the attribute is still what
+        `total_segments` and the replan text have to agree with, so the agent
+        is built with a different one and both are checked."""
         class ScriptedAgent(StructuredContinuationReAct):
             def _run_loop(self, trajectory, idx, input_args, max_iters, exception_count):
                 self.segment_calls.append(max_iters)
@@ -576,7 +577,7 @@ class _ManifestTraceSink:
 
 
 class ManifestAgainstRealSteps(unittest.TestCase):
-    """ido-sll: the manifest's alias and residency evidence on the normal path.
+    """The manifest's alias and residency evidence on the normal path.
 
     No model is called. The tool is a local function and only the reasoning
     call is scripted; the loop, the ``fw.agent.step`` span, the compaction
@@ -678,8 +679,8 @@ class ManifestAgainstRealSteps(unittest.TestCase):
 
         The observation stays inline (one execute step is recency-protected),
         so the manifest sees the annotated slot while the step recorded the raw
-        return. Before ido-sll this row reported ``alias=null`` and the step's
-        own unchanged evidence came back ``mismatched``.
+        return. Without the normalisation this row reports ``alias=null`` and
+        the step's own unchanged evidence comes back ``mismatched``.
         """
         response = "holder uid Alan Cooper\n" + ("permission row\n" * 12)
         digest, trajectory = self._one_execute_step(response)
@@ -704,7 +705,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         )
 
     def test_a_header_shaped_response_keeps_our_alias_and_stays_resident(self) -> None:
-        """ido-cku made this shape possible; the manifest must read it our way.
+        """Quoting a header-shaped response is legal; the manifest must read it our way.
 
         The response's own first line is a handle line naming another ordinal.
         The writer quotes it under the handle line for the step's real ordinal,
@@ -764,12 +765,12 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         self.assertEqual(classify_against_steps(manifest, {0: digest})["resident"], [0])
 
     def test_a_rehydrated_listing_carrying_its_stored_rows_is_not_claimed_resident(self) -> None:
-        """The other rehydration really does change the evidence, and is still mismatched.
+        """Evidence that really did change is still mismatched.
 
-        ``answer_rehydration`` (b) appends the rows behind a result handle to
-        the observation's own text. That is more than the step returned, so
-        ``mismatched`` is the honest answer -- what ido-sll fixed is the case
-        where nothing but our header had changed.
+        A slot whose text has grown rows beyond what the step returned is more
+        than the step's own bytes, so ``mismatched`` is the honest answer. The
+        normalisation only covers the case where nothing but our header had
+        changed.
         """
         response = "page 1 of holders\n" + ("row\n" * 5)
         digest, _trajectory = self._one_execute_step(response)
@@ -804,8 +805,8 @@ class ManifestAgainstRealSteps(unittest.TestCase):
 
         Non-execute tools are never annotated, and recordings predating the
         handle line are not either. ``canonical_response`` returns such a slot
-        unchanged, so the two digests agree and residency is decided exactly as
-        it was before ido-sll.
+        unchanged, so the two digests agree and residency is decided from the
+        slot's own bytes.
         """
         text = "what_can_i_do listed 4 commands"
         manifest = self._manifest({0: text})
@@ -819,7 +820,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
 
 
 class PageBoundaries(unittest.TestCase):
-    """Review finding: text_page handed back a non-newline end that the next call rejected."""
+    """text_page must not hand back a non-newline end that the next call rejects."""
 
     def setUp(self) -> None:
         reset_runtime_state()
@@ -1220,14 +1221,13 @@ class AgentConstruction(unittest.TestCase):
         return command
 
     def test_the_agent_is_a_continuation_agent_with_search_memory(self) -> None:
-        """ido-pyw.1: no setting reaches this; it is what build_tool_agent does."""
+        """No setting reaches this; it is what build_tool_agent does."""
         agent = build_tool_agent(
             SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
         )
         self.assertIsInstance(agent, StructuredContinuationReAct)
         self.assertEqual(set(agent.tools), {"noop_tool", "search_memory", "finish"})
         self.assertEqual(agent.max_iters, 3)
-        self.assertFalse(agent.coverage_instructions_enabled)
         self.assertTrue(agent.finish_reminders_enabled)
         installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
         self.assertEqual(len(installed), 1)
@@ -1252,8 +1252,8 @@ class AgentConstruction(unittest.TestCase):
         self.assertEqual(capped["trajectory_manifest"]["observation_count"], 1)
 
     def test_the_replan_bound_is_the_module_constant(self) -> None:
-        """ido-pyw.1: FW_MAX_FORCED_REPLANS is gone, and the agent the framework
-        builds carries the constant -- 2 forced replans, 3 segments."""
+        """There is no FW_MAX_FORCED_REPLANS setting: the agent the framework
+        builds carries the module constant -- 2 forced replans, 3 segments."""
         agent = build_tool_agent(
             SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
         )
@@ -1264,7 +1264,7 @@ class AgentConstruction(unittest.TestCase):
         self.assertEqual(installed[0]["max_forced_replans"], 2)
 
     def test_evaluation_control_overrides_are_recorded_unambiguously(self) -> None:
-        self._set_env("FW_EVAL_COVERAGE_INSTRUCTIONS", "0")
+        self._set_env("FW_EVAL_FINISH_REMINDERS", "0")
         agent = build_tool_agent(
             SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
         )
@@ -1273,14 +1273,12 @@ class AgentConstruction(unittest.TestCase):
             if event["kind"] == "evaluation_controls"
         ]
         self.assertEqual(len(events), 1)
-        self.assertFalse(events[0]["coverage_instructions_enabled"])
-        self.assertTrue(events[0]["finish_reminders_enabled"])
+        self.assertFalse(events[0]["finish_reminders_enabled"])
         self.assertEqual(
             events[0]["overrides"],
-            {"FW_EVAL_COVERAGE_INSTRUCTIONS": "0"},
+            {"FW_EVAL_FINISH_REMINDERS": "0"},
         )
-        self.assertFalse(agent.coverage_instructions_enabled)
-        self.assertTrue(agent.finish_reminders_enabled)
+        self.assertFalse(agent.finish_reminders_enabled)
 
 
 class PlannerFailure(unittest.TestCase):
@@ -1315,12 +1313,12 @@ class PlannerFailure(unittest.TestCase):
 
 
 class PrintedObservationHandles(unittest.TestCase):
-    """A1 (ido-986.14.9): the canonical O alias is printed on every execute result.
+    """The canonical O alias is printed on every execute result.
 
-    The control runs recorded the agent asking search_memory for ReAct step
-    numbers (O48 for O42, O50 for O42, O59 for O49) because an alias was only
-    ever visible on an offload label. These checks pin the printed identifier to
-    exactly what execute_ordinals assigns, and keep archived text free of it.
+    When an alias was only ever visible on an offload label, agents asked
+    search_memory for ReAct step numbers instead of aliases and got the wrong
+    observation back. These checks pin the printed identifier to exactly what
+    execute_ordinals assigns, and keep archived text free of it.
     """
 
     def setUp(self) -> None:
@@ -1474,7 +1472,7 @@ class PrintedObservationHandles(unittest.TestCase):
         row = self.archive.get(self.scope, seen_inline)
         self.assertIsNotNone(row)
         # Archived text is the original response: no alias line, so its digest
-        # is comparable with observations recorded before A1.
+        # is comparable with observations recorded before aliases were printed.
         self.assertEqual(row["text"], large)
         self.assertEqual(
             row["text_sha256"], hashlib.sha256(large.encode("utf-8")).hexdigest()
@@ -1590,7 +1588,7 @@ class PrintedObservationHandles(unittest.TestCase):
 
 
 class EagerObservationArchive(unittest.TestCase):
-    """A2 (ido-986.14.8): every execute observation is durable when its step ends.
+    """Every execute observation is durable when its step ends.
 
     Before this, only an observation compaction chose to replace was persisted,
     so an alias the run had just printed resolved to "no matching offloaded
@@ -1706,9 +1704,13 @@ class EagerObservationArchive(unittest.TestCase):
         # the same read inline and offloaded, which is asserted below.
         self.assertEqual(
             inline["observation"],
-            bounded_evidence(large, evidence_max_bytes(inline["subject"]))["text"],
+            evidence_for_search_model(
+                bounded_evidence(large, evidence_max_bytes(inline["subject"]))),
         )
-        self.assertTrue(large.startswith(inline["observation"]))
+        # The evidence is still a prefix of the text; only the disclosure that
+        # says so follows it.
+        self.assertTrue(large.startswith(
+            inline["observation"].partition("\n[TRUNCATED:")[0]))
         self.assertTrue(inline["event"]["still_inline"])
         self.assertEqual(inline["event"]["tier"], "hot")
         self.assertEqual(inline["event"]["text_sha256"], inline_row["text_sha256"])
@@ -1748,8 +1750,9 @@ class EagerObservationArchive(unittest.TestCase):
             restarted["observation"],
             # ido-kmm: the subject travels beside the evidence and is paid for
             # out of the same budget, so the evidence is the read that fits
-            # beneath it.
-            bounded_evidence(big, evidence_max_bytes(restarted["subject"]))["text"],
+            # beneath it. DOC-5: a cut read also carries its own disclosure.
+            evidence_for_search_model(
+                bounded_evidence(big, evidence_max_bytes(restarted["subject"]))),
         )
         self.assertEqual(restarted["event"]["tier"], "sqlite")
 
@@ -1895,7 +1898,7 @@ class EagerObservationArchive(unittest.TestCase):
 
 
 class SpoofedObservationHeaders(unittest.TestCase):
-    """ido-cku: a command response may not name a handle, however it is shaped.
+    """A command response may not name a handle, however it is shaped.
 
     The alias came off the first line of the response when there was one, so a
     backend that opened with "Observation O7 (execute_workflow_query)" filed
@@ -2081,16 +2084,16 @@ class SpoofedObservationHeaders(unittest.TestCase):
 
 
 class BoundedSearchAnswers(unittest.TestCase):
-    """A3 (ido-986.14.10): search output has a presentation bound.
+    """Search output has a presentation bound.
 
     A ``search_memory`` answer is model output capped only by the 2,048-token
     completion limit (~8 KB). It is a non-execute observation, so compaction
     never offloads it and the replan skeleton carries it into every later
     segment in full: whatever it costs, it costs for the rest of the turn.
 
-    The offline measurement over the h1-control (n=3), A1+A2 smoke and ido-5uv
-    stores found no recorded answer above 1,855 B and none at the completion
-    limit, so this bound is a tail guard rather than a saving: under budget the
+    Measured over recorded stores, no answer came back above 1,855 B and none
+    reached the completion limit, so this bound is a tail guard rather than a
+    saving: under budget the
     observation is byte-identical to the unbounded one these tests also assert.
     Over budget, the answer is archived whole first, the observation is cut at a
     line boundary, and it says it is incomplete.
@@ -2171,7 +2174,7 @@ class BoundedSearchAnswers(unittest.TestCase):
         self.assertEqual(event["observation_utf8_bytes"], len(observation.encode("utf-8")))
 
     def test_every_recorded_answer_size_stays_under_the_bound(self) -> None:
-        # The largest answer in h1-control/a12-smoke/ido-5uv was 1,855 bytes.
+        # The largest answer across the recorded stores was 1,855 bytes.
         for size in (27, 355, 649, 1855):
             with self.subTest(size=size):
                 observation = self.search("x" * size)
@@ -2283,7 +2286,7 @@ class BoundedSearchAnswers(unittest.TestCase):
         )
 
     def test_the_answer_record_is_not_an_o_alias_and_is_not_searchable(self) -> None:
-        """A1's rule: the O namespace is execute ordinals, nothing else."""
+        """The O namespace is execute ordinals, nothing else."""
         observation = self.search(self.rows(400))
         key = self.archive_key_from(observation)
         self.assertTrue(is_search_answer_key(key))
@@ -2309,7 +2312,7 @@ class BoundedSearchAnswers(unittest.TestCase):
                          "persistence_failed_complete_answer_retained")
         self.assertEqual(refused[0]["alias"], "O5")
 
-    # -- interplay with A1 and A2 ---------------------------------------------
+    # -- interplay with printed aliases and eager archiving --------------------
 
     def test_a_bounded_search_observation_gets_no_alias_and_is_not_archived(self) -> None:
         bounded = self.search(self.rows(400))
@@ -2322,13 +2325,13 @@ class BoundedSearchAnswers(unittest.TestCase):
         }
         before = [(row["alias"], row["text_sha256"]) for row in self.archive.list(self.scope)]
         compact_trajectory(trajectory, scope=self.scope, selected_archive=self.archive)
-        # A1: no O alias line is printed on a non-execute observation.
+        # No O alias line is printed on a non-execute observation.
         self.assertEqual(trajectory["observation_1"], bounded)
         self.assertIsNone(printed_alias(bounded))
         self.assertEqual(strip_alias_line(bounded), bounded)
         self.assertFalse(is_offload_label(bounded))
         self.assertEqual(printed_alias(trajectory["observation_0"]), "O1")
-        # A2: eager archiving still covers execute observations only.
+        # Eager archiving still covers execute observations only.
         after = [(row["alias"], row["text_sha256"]) for row in self.archive.list(self.scope)]
         self.assertEqual(sorted(a for a, _ in after),
                          sorted([a for a, _ in before] + ["O1"]))
@@ -2363,7 +2366,7 @@ class BoundedSearchAnswers(unittest.TestCase):
 
 
 class MinimumOffloadSaving(unittest.TestCase):
-    """ido-986.14.6: eligibility is what the swap saves, not how big the text is.
+    """Eligibility is what the swap saves, not how big the text is.
 
     The old floor asked whether an observation was over 1,000 estimated tokens
     (~4 KB of ASCII). It therefore kept every 1.3-4 KB listing page resident for
@@ -2628,10 +2631,10 @@ class MinimumOffloadSaving(unittest.TestCase):
         self.assertEqual([by_alias[a]["action"] for a in ("O1", "O2")],
                          ["offloaded", "offloaded"])
 
-    # -- interaction with A1, A2, A3 ---------------------------------------
+    # -- interaction with aliases, eager archiving and bounded search ------
 
     def test_the_printed_alias_line_is_excluded_from_the_measured_saving(self) -> None:
-        """A1's line is ~34 B: counting it would flip this observation."""
+        """The printed alias line is ~34 B: counting it would flip this observation."""
         body = self.body_saving(1_023)
         trajectory, decision = self.decide(body)
         printed = trajectory["observation_0"]
@@ -2643,7 +2646,7 @@ class MinimumOffloadSaving(unittest.TestCase):
         self.assertEqual(decision["action"], "kept")
 
     def test_the_eager_archive_is_unaffected_by_the_rule(self) -> None:
-        """A2: availability is unconditional; the rule only moves residency."""
+        """Availability is unconditional; the rule only moves residency."""
         kept = self.body_saving(1_023)
         trajectory = self.one_step(kept)
         trajectory["tool_name_1"] = "execute_workflow_query"
@@ -2661,7 +2664,7 @@ class MinimumOffloadSaving(unittest.TestCase):
         self.assertFalse(observation_inline(self.scope, "O2"))
 
     def test_search_memory_observations_are_still_never_offloaded(self) -> None:
-        """A3 bounds search output; compaction still only ever touches executes."""
+        """Search output is bounded separately; compaction only ever touches executes."""
         answer = "answer line\n" + "a" * 5_000
         trajectory = self._page_trajectory(self.body_saving(4_096))
         trajectory["tool_name_6"] = "search_memory"

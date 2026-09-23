@@ -1,10 +1,12 @@
 """One input -- the model's context window -- and every byte budget derived from it.
 
-``ido-pyw.1``. Before this module the framework carried seven independent byte
+Before this module the framework carried seven independent byte
 knobs (``FW_TRAJECTORY_MAX_BYTES``, ``FW_ANSWER_REHYDRATION_MAX_BYTES``,
 ``FW_RESULT_PAGE_MAX_BYTES``, ``FW_SEARCH_ANSWER_MAX_BYTES``,
 ``FW_OFFLOAD_HOT_MAX_BYTES``, ``FW_RESULT_HANDLE_HOT_MAX_BYTES``,
-``FW_OFFLOAD_MIN_SAVING_BYTES``), each with a constant of its own. Every one of
+``FW_OFFLOAD_MIN_SAVING_BYTES``), each with a constant of its own. The two
+result-handle budgets are gone with the result-handle package; the history is
+kept because it is what the fractions below were derived against. Every one of
 them answers the same question -- how much of the model's context window may
 this thing occupy -- so every one of them is now a fixed FRACTION of ONE input
 and none of them has to be set to move a workflow to a bigger or smaller model.
@@ -16,7 +18,7 @@ The input, in this order:
    ``max_input_tokens`` for the model named by ``LLM_AGENT`` -- so a workflow
    that changes models changes its budgets by changing its model.
 3. the documented fallback, ``REFERENCE_WINDOW_TOKENS`` (131,072), which is the
-   window the accepted stack was measured at.
+   window the current values were calibrated against.
 
 The conversion from tokens to bytes happens exactly once, here:
 ``BYTES_PER_TOKEN = 4``. It is a presentation constant, not a tokenizer: these
@@ -25,12 +27,12 @@ measured runs sat at. Nothing else in the framework converts tokens to bytes.
 
 Calibration. The fractions are pinned so that the reference window -- 131,072
 tokens, which is what ``litellm`` reports as ``max_input_tokens`` for
-``cerebras/gpt-oss-120b``, the main agent model of every accepted result-search
-run -- reproduces the accepted stack's values EXACTLY: 28,000 packed-trajectory
-target, 250,000 rehydration bytes, 3,072 bytes for a result page and for a
-search answer, 262,144 bytes for each hot cache and 1,024 bytes of minimum
-offload saving. ``tests/test_context_budget.py`` asserts that identity, so a
-change to a fraction that would move a measured value fails the suite.
+``cerebras/gpt-oss-120b`` -- reproduces the previously hand-set values EXACTLY:
+28,000 packed-trajectory target, 250,000 rehydration bytes, 3,072 bytes for a
+result page and for a search answer, 262,144 bytes for each hot cache and 1,024
+bytes of minimum offload saving. ``tests/test_context_budget.py`` asserts that
+identity, so a change to a fraction that would move one of those values fails
+the suite.
 
 Overrides. Each budget keeps its ``FW_*_MAX_BYTES`` name as a TUNING override,
 for the case where one budget has to move without moving the others. They are
@@ -95,8 +97,8 @@ def env_value(name: str) -> str:
     consults ``os.environ``, so a variable exported into the process but absent
     from the env file would read as the default. Both are checked, file first --
     which is also what makes an override written into a workflow's own
-    ``fastworkflow.env`` take effect, where the pre-``ido-pyw.1`` readers saw
-    only ``os.environ``.
+    ``fastworkflow.env`` take effect, where the per-knob readers this module
+    replaced saw only ``os.environ``.
     """
     value = None
     try:
@@ -133,7 +135,7 @@ class BudgetSpec:
 
     @property
     def reference_bytes(self) -> int:
-        """The value at the reference window -- the accepted stack's pinned value."""
+        """The value at the reference window -- this budget's pinned calibration value."""
         return self.bytes_for(REFERENCE_WINDOW_TOKENS)
 
     def bytes_for(self, window_tokens: int) -> int:
@@ -166,16 +168,6 @@ ANSWER_REHYDRATION = BudgetSpec(
     what="answer-time rehydration budget for the extract call",
 )
 
-#: One result-handle page observation, header line included.
-#: 3,072 / 524,288 at the reference window.
-RESULT_PAGE = BudgetSpec(
-    name="result_page_max_bytes",
-    fraction=Fraction(3, 512),
-    override_env="FW_RESULT_PAGE_MAX_BYTES",
-    floor=512,
-    what="one result-handle page observation",
-)
-
 #: One ``search_memory`` answer observation, header and bounded marking
 #: included. The same share as a page, because it occupies the prompt the same
 #: way. 3,072 / 524,288 at the reference window.
@@ -199,15 +191,6 @@ OFFLOAD_HOT = BudgetSpec(
     what="process-local hot cache of offloaded observations",
 )
 
-#: The process-local cache of result-handle rows, on the same reasoning and the
-#: same share. 262,144 / 524,288 at the reference window.
-RESULT_HANDLE_HOT = BudgetSpec(
-    name="result_handle_hot_max_bytes",
-    fraction=Fraction(1, 2),
-    override_env="FW_RESULT_HANDLE_HOT_MAX_BYTES",
-    floor=0,
-    what="process-local hot cache of result-handle rows",
-)
 
 #: The minimum trajectory saving an offload has to buy to be worth doing --
 #: a threshold ON the trajectory, so it scales with it.
@@ -225,10 +208,8 @@ OFFLOAD_MIN_SAVING = BudgetSpec(
 BUDGETS: tuple[BudgetSpec, ...] = (
     TRAJECTORY,
     ANSWER_REHYDRATION,
-    RESULT_PAGE,
     SEARCH_ANSWER,
     OFFLOAD_HOT,
-    RESULT_HANDLE_HOT,
     OFFLOAD_MIN_SAVING,
 )
 
@@ -237,10 +218,8 @@ BUDGETS: tuple[BudgetSpec, ...] = (
 #: THE REFERENCE WINDOW and nothing reads them to decide anything at runtime.
 REFERENCE_TRAJECTORY_MAX_BYTES = TRAJECTORY.reference_bytes            # 28,000
 REFERENCE_ANSWER_REHYDRATION_MAX_BYTES = ANSWER_REHYDRATION.reference_bytes  # 250,000
-REFERENCE_RESULT_PAGE_MAX_BYTES = RESULT_PAGE.reference_bytes          # 3,072
 REFERENCE_SEARCH_ANSWER_MAX_BYTES = SEARCH_ANSWER.reference_bytes      # 3,072
 REFERENCE_OFFLOAD_HOT_MAX_BYTES = OFFLOAD_HOT.reference_bytes          # 262,144
-REFERENCE_RESULT_HANDLE_HOT_MAX_BYTES = RESULT_HANDLE_HOT.reference_bytes  # 262,144
 REFERENCE_OFFLOAD_MIN_SAVING_BYTES = OFFLOAD_MIN_SAVING.reference_bytes  # 1,024
 
 
@@ -318,10 +297,16 @@ def reset_cache() -> None:
 # Reading a budget
 # ---------------------------------------------------------------------------
 
-def budget_bytes(spec: BudgetSpec) -> int:
-    """*spec* at the resolved window, unless its tuning override says otherwise."""
+def budget_bytes(spec: BudgetSpec, window_tokens: Optional[int] = None) -> int:
+    """*spec* at the resolved window, unless its tuning override says otherwise.
+
+    *window_tokens* names a window other than the agent's, for the one budget
+    that is cut from a different model's: pass it and the derivation, override
+    parsing, floor and warnings stay stated here once.
+    """
     raw = env_value(spec.override_env)
-    derived = spec.bytes_for(context_window_tokens()[0])
+    derived = spec.bytes_for(
+        context_window_tokens()[0] if window_tokens is None else window_tokens)
     if not raw:
         return derived
     try:
@@ -349,20 +334,12 @@ def answer_rehydration_max_bytes() -> int:
     return budget_bytes(ANSWER_REHYDRATION)
 
 
-def result_page_max_bytes() -> int:
-    return budget_bytes(RESULT_PAGE)
-
-
 def search_answer_max_bytes() -> int:
     return budget_bytes(SEARCH_ANSWER)
 
 
 def offload_hot_max_bytes() -> int:
     return budget_bytes(OFFLOAD_HOT)
-
-
-def result_handle_hot_max_bytes() -> int:
-    return budget_bytes(RESULT_HANDLE_HOT)
 
 
 def offload_min_saving_bytes() -> int:
@@ -412,14 +389,10 @@ __all__ = [
     "REFERENCE_ANSWER_REHYDRATION_MAX_BYTES",
     "REFERENCE_OFFLOAD_HOT_MAX_BYTES",
     "REFERENCE_OFFLOAD_MIN_SAVING_BYTES",
-    "REFERENCE_RESULT_HANDLE_HOT_MAX_BYTES",
-    "REFERENCE_RESULT_PAGE_MAX_BYTES",
     "REFERENCE_SEARCH_ANSWER_MAX_BYTES",
     "REFERENCE_TRAJECTORY_MAX_BYTES",
     "REFERENCE_WINDOW_BYTES",
     "REFERENCE_WINDOW_TOKENS",
-    "RESULT_HANDLE_HOT",
-    "RESULT_PAGE",
     "SEARCH_ANSWER",
     "SOURCE_FALLBACK",
     "SOURCE_MODEL_METADATA",
@@ -433,8 +406,6 @@ __all__ = [
     "offload_hot_max_bytes",
     "offload_min_saving_bytes",
     "reset_cache",
-    "result_handle_hot_max_bytes",
-    "result_page_max_bytes",
     "search_answer_max_bytes",
     "trajectory_max_bytes",
 ]

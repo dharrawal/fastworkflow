@@ -116,7 +116,7 @@ class WorkflowExecutionContext:
         Args:
             session_key: Stable id (e.g. channel_id) for cme/app workflow persistence.
                          When omitted, cme uses an ephemeral uuid (CLI one-off sessions).
-            mirror_action_log_to_file: DEPRECATED no-op (Phase 7 [R25]). The cwd
+            mirror_action_log_to_file: DEPRECATED no-op. The cwd
                          action.jsonl debug mirror was retired; use the in-process
                          ``action_log`` property (live) or the observability DB
                          (post-mortem) instead. Kept one release for external
@@ -125,7 +125,7 @@ class WorkflowExecutionContext:
                          agent turn (Topology A / CLI only).
             trace_sink: Observability sink for boundary spans and turn records
                          (observability design §3.1). Defaults to a no-op sink;
-                         reached via this context, never the transport queues [R28].
+                         reached via this context, never the transport queues.
         """
         self._session_key = session_key
         self._run_as_agent = run_as_agent
@@ -258,10 +258,10 @@ class WorkflowExecutionContext:
         task_id: Optional[str] = None,
         attempt: Optional[int] = None,
     ) -> None:
-        """Bind channel/conversation identity BEFORE the turn [R1].
+        """Bind channel/conversation identity BEFORE the turn.
 
         The embedder owns identity: FastAPI binds its channel_id, the CLI a
-        synthetic ``cli:<session-start>`` channel [R17]. Stamped onto every
+        synthetic ``cli:<session-start>`` channel. Stamped onto every
         span and TurnResult this context produces. A None argument leaves
         the corresponding binding unchanged (conversation ids rotate without
         re-binding the channel).
@@ -269,7 +269,7 @@ class WorkflowExecutionContext:
         ``embedder_owns_conversations=True`` (additive) disables the WEC's
         own conversation self-minting for this context. FastAPI passes it:
         its minting chokepoint carries the legacy-store floor and syncs it
-        back (ruling C2), so a WEC self-mint on its degraded path would mint
+        back, so a WEC self-mint on its degraded path would mint
         a floor-less id that can alias a legacy conversation and split the
         session across two ids once the chokepoint's own mint succeeds.
         """
@@ -335,7 +335,7 @@ class WorkflowExecutionContext:
         task_id: Optional[str],
         attempt: Optional[int],
     ) -> None:
-        """Validate and bind the experiment triple (`fix-bn1` `[XR17]`).
+        """Validate and bind the experiment triple.
 
         All three or none. A turn labelled with an experiment but no task
         belongs to an experiment and to no task: it contributes to a numerator
@@ -346,7 +346,7 @@ class WorkflowExecutionContext:
         SQLite's INTEGER is a type AFFINITY, not a constraint -- a string bound
         to it that cannot be losslessly converted is stored as TEXT -- so the
         column's declared type protects nothing on its own. This is what makes
-        `attempt` safe to leave unpoliced (`[XR7]`).
+        `attempt` safe to leave otherwise unpoliced.
         """
         resolved = self._validate_experiment_labels(
             experiment_id if experiment_id is not None else self._experiment_id,
@@ -459,10 +459,10 @@ class WorkflowExecutionContext:
     # ------------------------------------------------------------------
 
     def _begin_turn(self, user_message: str) -> None:
-        """Atomic turn start [A30]: reset accumulator, mint key, stamp started_at.
+        """Atomic turn start: reset accumulator, mint key, stamp started_at.
 
         Never called while awaiting_user — a message during suspension is the
-        resume answer and continues the same logical turn [A30.2].
+        resume answer and continues the same logical turn.
         """
         self.assert_experiment_claim_current()
         self._ensure_observability_conversation()
@@ -530,13 +530,13 @@ class WorkflowExecutionContext:
         fastworkflow.turn.warn_on_unserializable_artifacts(command_output)
 
     def append_ask_user_entry(self, question: str) -> fastworkflow.CommandOutput:
-        """Append an unanswered ask_user exchange entry [A7] and return it.
+        """Append an unanswered ask_user exchange entry and return it.
 
         Role inversion: command_parameters holds the agent's question; the
         response holds the user's answer ("" + success=False while unanswered).
 
         Also opens the fw.ask_user human-wait span (deterministic id per
-        attempt [R6]; emitted at open so the wait is visible while the turn
+        attempt; emitted at open so the wait is visible while the turn
         is suspended). Both topologies funnel through here: Topology A via
         _ask_user_tool, Topology B via _note_agent_suspension.
         """
@@ -573,13 +573,13 @@ class WorkflowExecutionContext:
     def complete_ask_user_entry(self, answer: str) -> None:
         """Fill the last unanswered ask_user entry with the user's answer.
 
-        duration_ms is the user's think time [A38]. No-op when there is no
+        duration_ms is the user's think time. No-op when there is no
         unanswered ask_user entry.
 
         Closes the matching fw.ask_user span. The span is rebuilt from the
         entry rather than held in memory, so the close is an idempotent upsert
         that also works when the answer arrives in a different process than
-        the question ([R6]).
+        the question.
         """
         for index in range(len(self._turn_outputs) - 1, -1, -1):
             entry = self._turn_outputs[index]
@@ -601,7 +601,7 @@ class WorkflowExecutionContext:
     def _close_ask_user_span(
         self, entry_index: int, entry: fastworkflow.CommandOutput, answer: str
     ) -> None:
-        """Emit the closed fw.ask_user span for a just-answered entry [R6]."""
+        """Emit the closed fw.ask_user span for a just-answered entry."""
         if not self._turn_key or tracing.get_sink(self) is None:
             return
         attempt = sum(
@@ -1224,15 +1224,15 @@ class WorkflowExecutionContext:
             return False
 
     def _reclaim_offloading_scope(self) -> None:
-        """Seal and release this session's offloading state (``ido-1ew``, ``ido-6sc``).
+        """Seal and release this session's offloading state.
 
         ``close`` is the one production signal that a session is over in this
         process: the fleet's session cache calls it when it retires or removes a
         channel, and an embedder calls it when its session ends. Until this, the
         offloading runtime's per-scope registries -- the archive memo, the
-        context clauses, the hot observations, the result-handle rows, the
-        cursor tokens, the navigation entries and the turn's diagnostic events
-        -- only ever grew, for the lifetime of the process.
+        context clauses, the hot observations, the navigation entries and the
+        turn's diagnostic events -- only ever grew, for the lifetime of the
+        process.
 
         Two turns are NOT reclaimed. A turn suspended on ask_user is still
         resumable: its scope is the one the resume writes and reads handles
@@ -1242,8 +1242,8 @@ class WorkflowExecutionContext:
         count are the agent's own memory, they die with it, and a resume
         rebuilds them from the suspension payload.
 
-        ido-6sc added the other half of "this turn is over" to the same guard.
-        Redaction of the evidence sidecar is no longer a write-time transform:
+        The same guard carries the other half of "this turn is over".
+        Redaction of the evidence sidecar is not a write-time transform:
         a turn's stored observations are written verbatim and SEALED into their
         redacted form when the turn completes, so that nothing an agent can
         read during its own turn is ever degraded. The two conditions below are
@@ -1315,7 +1315,7 @@ class WorkflowExecutionContext:
         Execute one user message synchronously and return the public TurnOutput.
 
         Shares dispatch with _execute_message(); additionally captures every
-        command execution of the logical turn (including ask_user exchanges) [A22]. The
+        command execution of the logical turn (including ask_user exchanges). The
         full internal TurnResult is built and projected onto the slim public
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
@@ -1517,8 +1517,8 @@ class WorkflowExecutionContext:
         safe_* wrappers swallow sink failures).
 
         On AWAITING_USER the root span is updated in place (still open) and
-        the record is emitted so the suspended turn is visible ([R2]); the
-        terminal finalize closes the same deterministic span id ([R6]) —
+        the record is emitted so the suspended turn is visible; the
+        terminal finalize closes the same deterministic span id —
         including after a cross-process resume, where the in-memory span
         object is rebuilt from the restored accumulator.
         """
@@ -1639,7 +1639,7 @@ class WorkflowExecutionContext:
         Execute one direct action synchronously and return the public TurnOutput.
 
         Mirror of process_turn() for the direct-action path: same dispatch as
-        process_action() (each direct action is its own logical turn [A30]),
+        process_action() (each direct action is its own logical turn),
         additionally building the full internal TurnResult and projecting it onto
         the slim public TurnOutput. This lets callers (e.g. the run_fastapi_mcp
         turn registry) store exactly one result type across both the message and
@@ -1766,7 +1766,7 @@ class WorkflowExecutionContext:
         through, so it is where the executor phase is recorded: fw.agent.execute
         wraps the whole loop (retries included), and ``host_scope`` binds this
         context so ReAct's per-iteration fw.agent.step spans — several frames
-        down, with no reference to the WEC — reach the same sink ([R28]).
+        down, with no reference to the WEC — reach the same sink.
         """
         from dspy.utils.exceptions import AdapterParseError
 
@@ -1793,6 +1793,14 @@ class WorkflowExecutionContext:
                             result = agent_call()
                     except AdapterParseError:
                         if attempt == max_retries - 1:
+                            raise
+                        # A tool already ran: its side effects and its archived
+                        # evidence rows exist under this turn's keys, which a
+                        # retry would reuse. A resumed turn always qualifies,
+                        # because resume writes the observation key first.
+                        mirror = getattr(
+                            self._workflow_tool_agent, "current_trajectory", None) or {}
+                        if any(str(key).startswith("observation_") for key in mirror):
                             raise
                         continue
                     tracing.end_span(
@@ -1973,9 +1981,9 @@ class WorkflowExecutionContext:
     # owe §12.1.1's shared capture, so the projection lives here once rather than
     # being written twice and drifting. Everything below is additive recording:
     # no fastWorkflow control flow reads a context handle or a consequence class,
-    # which is EXP-003's exit criterion and arch §17.3's stop condition.
+    # which arch §17.3 requires.
     #
-    # Amendment (fix-ajv.8): "here" is now `tracing`, because workflow_agent.py
+    # "Here" is in fact `tracing`, because workflow_agent.py
     # opens the same span from a third site and owes the same record. These two
     # methods stay as the WEC-shaped entry points — they supply the app-workflow
     # fallback that the free functions cannot know about — but the projection

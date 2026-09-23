@@ -122,8 +122,8 @@ def _apply(raw: Mapping[str, Any], capped: MutableMapping[str, Any]) -> None:
 def observation_row(key: str, text: str) -> dict[str, Any]:
     """One observation slot of the prompt, described without carrying it.
 
-    Two digests, because the slot and the evidence are not the same bytes
-    (``ido-sll``). ``sha256`` is the PROMPT SLOT exactly as the model received
+    Two digests, because the slot and the evidence are not the same bytes.
+    ``sha256`` is the PROMPT SLOT exactly as the model received
     it, header and all, and is what a reader has to hash to prove what was
     sent. ``response_sha256`` is the command response inside that slot --
     ``canonical_response`` takes the offloading package's handle line and its
@@ -236,7 +236,7 @@ def classify_against_steps(
     ``step_sha256_by_index`` is the digest of the RAW tool return from
     ``fw.agent.step`` -- recorded before the completion hook prints the handle
     line -- so residency is decided against the response inside the slot, not
-    against the annotated slot (``ido-sll``).
+    against the annotated slot.
 
     ``mismatched`` therefore means the evidence genuinely differs, and it still
     can: a rehydrated listing carries its own response plus the stored rows

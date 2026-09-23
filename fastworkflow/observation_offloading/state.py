@@ -52,8 +52,7 @@ _events: list[dict[str, Any]] = []
 _event_log_failures: set[str] = set()
 _event_cap_warnings: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
-#: One archive object per sidecar FILE, on ``result_handles.store``'s pattern
-#: and for the same reason (ido-pg2): two spellings of one path must be one
+#: One archive object per sidecar FILE (ido-pg2): two spellings of one path must be one
 #: object, and a caller that holds only a store path must be able to reach the
 #: durable subject rows in the same file without re-creating the schema on
 #: every call.
@@ -124,8 +123,6 @@ def durable_archive(selected_archive: Any = None) -> Any:
     if selected_archive is not None:
         return selected_archive
     try:
-        from fastworkflow.result_handles.paging import _current_agent
-
         found = getattr(_current_agent(), "observation_archive", None)
         if found is not None:
             return found
@@ -173,7 +170,7 @@ COLD_RESTART_TABLES = ("observation_subjects", "observation_context_entries")
 def clear_default_cold_records(*tables: str) -> None:
     """Empty the PROCESS-DEFAULT sidecar's cold-restart tables.
 
-    The durable half of a process-local reset (``ido-dhw``). Subject clauses and
+    The durable half of a process-local reset. Subject clauses and
     navigation entries are now read THROUGH to the sidecar when the in-memory
     registry misses, so a reset that cleared only memory would be answered from
     disk by the very rows it meant to drop. Every caller that never named an
@@ -248,6 +245,111 @@ def handle_key(scope: RuntimeHandleScope, alias: str) -> str:
 
 def default_scope() -> RuntimeHandleScope:
     return _default_scope
+
+
+# ---------------------------------------------------------------------------
+# Identity: scope and the canonical execute alias
+# ---------------------------------------------------------------------------
+
+
+def _current_agent() -> Any:
+    """The ReAct agent running this command, when there is one."""
+    from fastworkflow import tracing
+
+    host = tracing.current_host()
+    if host is None:
+        return None
+    agent = getattr(host, "workflow_tool_agent", None)
+    if agent is None:
+        core = getattr(host, "_core", None)
+        agent = getattr(core, "workflow_tool_agent", None)
+    return agent
+
+
+def current_scope() -> RuntimeHandleScope:
+    """The scope a handle declared right now belongs to.
+
+    The live agent's turn runtime first, when it has one: ``TurnRuntime`` is the
+    component that binds a turn to its scope, so its answer is the scope this
+    turn's observations are archived under, and a handle filed anywhere else
+    would be a handle the same turn could not read back. The agent's own
+    ``continuation_scope`` is the same answer for an agent built without a
+    runtime, and is consulted next. Then the trace host (a command running
+    outside the ReAct loop), then the process default.
+    """
+    from fastworkflow import tracing
+
+    agent = _current_agent()
+    runtime = getattr(agent, "turn_runtime", None)
+    runtime_scope = getattr(runtime, "scope", None)
+    if isinstance(runtime_scope, RuntimeHandleScope):
+        return runtime_scope
+    scope = getattr(agent, "continuation_scope", None)
+    if isinstance(scope, RuntimeHandleScope):
+        return scope
+    host = tracing.current_host()
+    if host is not None:
+        try:
+            return scope_for_host(host)
+        except Exception:  # noqa: BLE001
+            logger.debug("could not resolve a host scope", exc_info=True)
+    return default_scope()
+
+
+def current_execute_alias(agent: Any = None) -> Optional[str]:
+    """The ``O`` alias of the execute step this command is running inside.
+
+    ReAct writes ``tool_name_{idx}`` before it calls the tool and
+    ``observation_{idx}`` after it returns, so during a command the in-flight
+    step is the last one with no observation. Which step is in flight is read
+    from ``current_trajectory``; what that step is CALLED is read from the
+    agent's ``execute_ordinal_by_step`` ledger, which numbered it just before
+    dispatch and is the same ledger ``annotate_execute_observations`` is given
+    when the step completes.
+
+    Counting ``current_trajectory`` instead is only right when the mirror holds
+    the whole turn. A process that imported a suspension has an empty mirror and
+    a resumed trajectory with N executes already in it, so the first command
+    after the resume would declare and stamp O1 while its observation printed
+    O(N+1) -- a collision against the real O1, or a printed handle nothing had
+    declared. The ledger is restored with the suspension, so both sides read one
+    number.
+
+    The count stands in only for an agent with no ledger (a duck-typed host, a
+    plain ReAct), where the mirror is the whole turn by construction.
+
+    ``None`` when there is no agent step in flight: a direct user command, a
+    non-execute tool, or offloading turned off. There is no agent-visible
+    namespace in that case, so there is no alias to be wrong about.
+    """
+    agent = agent if agent is not None else _current_agent()
+    trajectory = getattr(agent, "current_trajectory", None)
+    if not isinstance(trajectory, Mapping) or not trajectory:
+        return None
+    indexes = [
+        int(key.removeprefix("tool_name_"))
+        for key in trajectory
+        if key.startswith("tool_name_") and key.removeprefix("tool_name_").isdigit()
+    ]
+    if not indexes:
+        return None
+    latest = max(indexes)
+    if str(trajectory.get(f"tool_name_{latest}") or "") != "execute_workflow_query":
+        return None
+    if f"observation_{latest}" in trajectory:
+        # The step already completed; this call is not inside it.
+        return None
+    ledger = getattr(agent, "execute_ordinal_by_step", None)
+    if isinstance(ledger, Mapping) and latest in ledger:
+        ordinal = int(ledger[latest])
+    else:
+        ordinal = sum(
+            1
+            for index in indexes
+            if str(trajectory.get(f"tool_name_{index}") or "")
+            == "execute_workflow_query"
+        )
+    return f"O{ordinal}" if ordinal else None
 
 
 def record_event(event: Mapping[str, Any]) -> None:
@@ -352,7 +454,7 @@ def record_context_clause(
     *,
     selected_archive: Any = None,
 ) -> None:
-    """Remember the context an execute step's command RAN IN (``ido-8ps.13``).
+    """Remember the context an execute step's command RAN IN.
 
     Written at dispatch, from the context handle taken BEFORE the command
     executes, because that is the fact the observation is evidence about: a
@@ -364,7 +466,7 @@ def record_context_clause(
     An empty clause is stored as an empty clause: "this ran at the root" is a
     fact, and it must not read as "nothing was captured".
 
-    ``ido-dhw`` (F3): it is also written THROUGH to the sidecar, because this
+    It is also written THROUGH to the sidecar, because this
     map is turn-scoped process memory and the subject of an observation has to
     outlive the process that saw it. The durable write is best effort on the
     same terms as everything else on this path -- a sidecar that cannot be
@@ -401,7 +503,7 @@ def context_clause_of(
 ) -> Optional[str]:
     """The recorded clause for *alias*, ``""`` at the root, None if unrecorded.
 
-    Process memory first, then the sidecar (``ido-dhw``, F3). The second tier is
+    Process memory first, then the sidecar. The second tier is
     what makes a subject survive a restart: a rehydrated label, a cross-context
     page stamp, the attribution check and observation search all read the
     subject through here, and in a process that only imported a suspension the
@@ -436,14 +538,14 @@ def forget_context_clause(
 ) -> None:
     """Drop the clause recorded for *alias*, so it reads as UNRECORDED again.
 
-    ``ido-8ps.29``. The dispatch-time stamp is a good default and a bad answer
-    for one kind of step: a page of a result handle declared somewhere else. If
+    The dispatch-time stamp is a good default and a bad answer for a step whose
+    real subject was declared somewhere else. If
     the declaring subject turns out to be unknown, "no subject recorded" is the
     truth and the context the agent happened to be standing in is not -- and
     "unrecorded" is a state every reader already handles, where a wrong clause
     is one every reader believes.
 
-    The durable row goes with it (``ido-dhw``): a correction that only reached
+    The durable row goes with it: a correction that only reached
     process memory would be undone by the next restart, which is the failure
     mode this whole pair exists to prevent.
     """
@@ -461,13 +563,13 @@ def forget_context_clause(
 def seal_scope(
     scope: RuntimeHandleScope, *, selected_archive: Any = None
 ) -> dict[str, Any]:
-    """Seal one FINISHED turn's stored evidence into its redacted form (``ido-6sc``).
+    """Seal one FINISHED turn's stored evidence into its redacted form.
 
-    The owner's decision made redaction a turn-COMPLETION step rather than a
+    Redaction is a turn-COMPLETION step rather than a
     write-time transform: nothing is redacted while a turn is in flight, and in
     flight is the whole life of the turn, an ask_user wait and every
-    serialize/deserialize round trip included. This is the moment the rest of
-    that decision is paid for.
+    serialize/deserialize round trip included. This is the moment that deferral
+    is paid for.
 
     It deliberately runs only through the runtime owner's two finished-turn
     paths, immediately before aggregate release. That is not a coincidence: it is the
@@ -535,8 +637,8 @@ def release_scope(scope: "RuntimeHandleScope | str") -> None:
     Residency, never evidence: the archive and the result-handle tables keep
     every row, so a scope reclaimed here is still fully readable from disk --
     which is exactly what the cold-resume path already does in a process that
-    never saw the turn at all. That now includes the subject clauses and the
-    navigation entries dropped below (``ido-dhw``): both tiers are dropped from
+    never saw the turn at all. That includes the subject clauses and the
+    navigation entries dropped below: both tiers are dropped from
     memory and neither row is deleted, so a later read of a reclaimed scope
     rebuilds from the sidecar rather than answering "unrecorded".
 
@@ -553,7 +655,7 @@ def release_scope(scope: "RuntimeHandleScope | str") -> None:
     because a suspension is state that must outlive the process, not state to
     reclaim.
 
-    ``seal_scope`` runs immediately before this at both of them (``ido-6sc``),
+    ``seal_scope`` runs immediately before this at both of them,
     on the strength of those same two guards: the earliest honest moment to
     release a turn's residency is also the earliest honest moment to redact its
     evidence, and one notion of "over" serves both.
@@ -580,8 +682,8 @@ def reset_observation_state() -> None:
     which calls each component's reset hook. Stored SQLite rows are untouched:
     this resets residency, never evidence.
 
-    The PROCESS-DEFAULT sidecar's durable subject and navigation rows go too
-    (ido-dhw). That file is ``fw-offload-handles-<pid>.sqlite3`` in the temp
+    The PROCESS-DEFAULT sidecar's durable subject and navigation rows go too.
+    That file is ``fw-offload-handles-<pid>.sqlite3`` in the temp
     directory -- process-local by construction, named after this process, and
     shared by every caller that never passed an archive of its own, all of whom
     also share one ``default_scope``. Leaving those two tables behind would let

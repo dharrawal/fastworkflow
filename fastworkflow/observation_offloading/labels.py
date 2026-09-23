@@ -77,8 +77,8 @@ def alias_line(alias: str, context: str = "") -> str:
 
     ``context`` is the clause from ``context_clause`` -- the context the command
     RAN IN and, where the workflow declares one, that context's instance
-    identity (``ido-8ps.13``). It is empty at the root context, and the line is
-    then byte-for-byte what A1 printed.
+    identity. It is empty at the root context, and the line is then
+    byte-for-byte the bare alias line.
     """
     clause = _clipped(context, MAX_CONTEXT_NAME_CHARS + MAX_INSTANCE_LABEL_CHARS + 1)
     suffix = f", in {clause}" if clause else ""
@@ -106,7 +106,7 @@ def _escape_depth(text: str) -> int | None:
 
 
 def escape_response(text: str) -> str:
-    """*text* made safe to print underneath a handle line (``ido-cku``).
+    """*text* made safe to print underneath a handle line.
 
     A command response whose own first line is shaped like a handle line or an
     offload label would otherwise be read back as one: the framework would
@@ -168,12 +168,12 @@ def observation_alias(text: str) -> tuple[str | None, str | None]:
     The two shapes this module prints are the only two an alias can come from:
     the handle line ``annotated_observation`` puts above a resident response,
     and the offload label that replaces a response entirely. Readers that knew
-    only the label reported no alias at all for the normal, inline case
-    (``ido-sll``), which is every execute observation since the handle line
-    became unconditional.
+    only the label reported no alias at all for the normal, inline case,
+    which is every execute observation since the handle line became
+    unconditional.
 
-    Both reads are anchored at byte zero and agree with the writer: after
-    ``ido-cku`` our line is always the FIRST line of an annotated observation,
+    Both reads are anchored at byte zero and agree with the writer: our line
+    is always the FIRST line of an annotated observation,
     and a response whose own first line has either shape is printed under it
     behind ``RESPONSE_ESCAPE`` -- which neither ``ALIAS_LINE_RE`` nor
     ``LABEL_RE`` matches. So a backend's text can never be read as an alias
@@ -194,8 +194,8 @@ def canonical_response(text: str) -> str | None:
 
     The counterpart of ``observation_alias`` for evidence rather than naming:
     what a digest of this observation has to be taken over for it to be
-    comparable with the raw tool return recorded on ``fw.agent.step``
-    (``ido-sll``). Our handle line and the escape underneath it are
+    comparable with the raw tool return recorded on ``fw.agent.step``.
+    Our handle line and the escape underneath it are
     presentation added after that record was closed, so both come off.
 
     ``None`` for an offload label, which holds no response at all -- its bytes
@@ -212,7 +212,7 @@ def strip_alias_line(text: str) -> str:
 
     The inverse of ``annotated_observation``: the presentation line goes, and
     the escape that protected a response of the same shape is undone, so what
-    comes back is the command response byte for byte (``ido-cku``). A response
+    comes back is the command response byte for byte. A response
     that was never annotated, or one carrying a line somebody else printed, is
     returned untouched -- ``unescape_response`` only ever runs on the text that
     stood under a line this module wrote.

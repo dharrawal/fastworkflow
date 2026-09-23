@@ -17,10 +17,7 @@ from fastworkflow.utils.dspy_logger import DSPyForward
 logger = logging.getLogger(__name__)
 
 # Temporary disable-only controls retained for controlled runs and provenance.
-# Historical four-arm reproduction uses its pinned revisions. Coverage
-# instructions are now off in production, and this is not a product re-enable
-# switch.
-EVAL_COVERAGE_INSTRUCTIONS_ENV = "FW_EVAL_COVERAGE_INSTRUCTIONS"
+# Historical four-arm reproduction uses its pinned revisions.
 EVAL_FINISH_REMINDERS_ENV = "FW_EVAL_FINISH_REMINDERS"
 
 
@@ -90,18 +87,12 @@ class fastWorkflowReAct(Module):
         self.signature = signature = ensure_signature(signature)
         self.max_iters = max_iters
         self.iteration_counter = 0
-        self.coverage_instructions_enabled, coverage_override = _evaluation_control(
-            EVAL_COVERAGE_INSTRUCTIONS_ENV, default_enabled=False
-        )
         self.finish_reminders_enabled, reminder_override = _evaluation_control(
             EVAL_FINISH_REMINDERS_ENV
         )
         self.evaluation_control_overrides = {
             name: value
-            for name, value in (
-                (EVAL_COVERAGE_INSTRUCTIONS_ENV, coverage_override),
-                (EVAL_FINISH_REMINDERS_ENV, reminder_override),
-            )
+            for name, value in ((EVAL_FINISH_REMINDERS_ENV, reminder_override),)
             if value is not None
         }
 
@@ -475,11 +466,11 @@ class fastWorkflowReAct(Module):
     def _intercept_finish(self, trajectory, idx, input_args, max_iters) -> str:
         """The finish action's one interception point, for BOTH loops.
 
-        ``ido-dpx`` (F15). The nudge and the rule that a fired nudge REPLACES
-        this step's observation and returns control to the loop used to live
-        inline in ``_run_loop``, so ``aforward`` recognised finish and broke
-        with no nudge and no ``_roster_nudges_fired`` bookkeeping: two loops,
-        two different accepted behaviours for the same rule (``ido-8ps.27``).
+        The nudge, and the rule that a fired nudge REPLACES this step's
+        observation and returns control to the loop, used to live inline in
+        ``_run_loop`` -- so ``aforward`` recognised finish and broke with no
+        nudge and no ``_roster_nudges_fired`` bookkeeping: two loops, two
+        different behaviours for the same rule.
         The note and the trajectory writes are here; what stays with each loop
         is what only that loop has -- the sync loop's step span attributes.
 
@@ -533,7 +524,7 @@ class fastWorkflowReAct(Module):
         return dspy.Prediction(trajectory=trajectory, **extract)
 
     def _roster_nudge(self, input_args, max_iters) -> str:
-        """The bounded note, or ``""``. ``ido-8ps.27``.
+        """The bounded roster note, or ``""``.
 
         Called from ``_run_loop`` at the one place a finish action is
         recognised, before answer extraction.
@@ -589,8 +580,7 @@ class fastWorkflowReAct(Module):
     def _rehydrate_for_extract(self, trajectory):
         """``(trajectory_for_the_extractor, report, budget, scope_id)``.
 
-        ``ido-8ps.18``. It returns a COPY in which offload labels, bounded
-        listing observations and page observations carry the stored evidence
+        It returns a COPY in which offload labels carry the stored evidence
         behind them (see ``fastworkflow.answer_rehydration``). The loop's own
         trajectory is then never the object passed on, so neither rehydration nor
         a truncation of the rehydrated copy can change what the turn recorded. A
@@ -633,91 +623,7 @@ class fastWorkflowReAct(Module):
             return trajectory, None, budget, scope_id
         return rehydrated, report, budget, scope_id
 
-    def _cover_for_extract(self, trajectory, scope_id, input_args):
-        """``(trajectory_for_the_extractor, coverage_report)``.
 
-        ``ido-8ps.22`` / ``ido-8ps.23``. Runs immediately AFTER rehydration, on
-        the copy it returned, and adds exactly one key -- first, so the adapter
-        renders the coverage rule before the evidence it governs.
-
-        A failure anywhere here falls back to the plain extract call: an answer
-        without a coverage statement is the status quo, and no answer is worse
-        than either.
-        """
-        from fastworkflow import answer_coverage
-        from fastworkflow.observation_offloading.state import record_event
-
-        if not getattr(self, "coverage_instructions_enabled", False):
-            return trajectory, None
-
-        try:
-            covered, report = answer_coverage.build_statement(
-                trajectory,
-                user_query=input_args.get("user_query"),
-                exhausted=bool(self._exhausted_last_run),
-                scope=getattr(self, "continuation_scope", None),
-                archive=getattr(self, "observation_archive", None),
-            )
-        except Exception as error:  # noqa: BLE001
-            logger.warning(
-                "answer coverage skipped: %s: %s", type(error).__name__, error
-            )
-            record_event(
-                {
-                    "kind": "coverage_failed",
-                    "scope_id": scope_id,
-                    "error": type(error).__name__,
-                    "detail": str(error)[:300],
-                }
-            )
-            return trajectory, None
-        record_event(
-            {"kind": "coverage_statement", "scope_id": scope_id, **report.as_event()}
-        )
-        return covered, report
-
-    def _record_coverage_post_check(self, report, prediction, scope_id):
-        """Count unavailability phrasing near the items the statement named.
-
-        Measurement only. It never edits the answer, never retries the call and
-        never fails the turn -- ``ido-8ps.22`` asked for a number, not a gate.
-        """
-        from fastworkflow import answer_coverage
-        from fastworkflow.observation_offloading.state import record_event
-
-        try:
-            answer = _final_answer_text(prediction)
-            check = answer_coverage.post_check(
-                answer,
-                report.unobserved,
-                # ido-8ps.24: the other direction, and the one that was
-                # measured as a defect - absence phrasing about an item the run
-                # DID retrieve. Measured the same way, counted separately.
-                getattr(report, "observed_named", ()) or (),
-                # ido-8ps.30: the attempted-vs-never-attempted split of
-                # `unobserved` (ido-8ps.27 (b)). `post_check`'s third
-                # positional after `observed` is `unavailable`, and it was
-                # never passed, so `unavailable_total` and the three measures
-                # beside it read 0 in every coverage_post_check event ever
-                # recorded -- including the attempts whose statement named an
-                # attempted-and-empty item. The report computes it correctly;
-                # only the measure missed it.
-                getattr(report, "unavailable", ()) or (),
-                # ido-8ps.28: per subject, the items the answer claims of it,
-                # split by whether the evidence sentence listed them.
-                evidence=getattr(report, "evidence", ()) or (),
-                items=getattr(report, "instructed_items", ()) or (),
-            )
-            record_event(
-                {
-                    "kind": "coverage_post_check",
-                    "scope_id": scope_id,
-                    "exhausted": report.exhausted,
-                    **check.as_event(),
-                }
-            )
-        except Exception:  # noqa: BLE001 - a measurement must never fail a turn
-            logger.debug("answer coverage post-check failed", exc_info=True)
 
     def _record_extract_finished(
         self, report, *, budget, scope_id, started, truncations_before
@@ -751,54 +657,42 @@ class fastWorkflowReAct(Module):
         )
 
     def _extract_prediction(self, trajectory, **input_args):
-        """The extract call, with rehydration and the coverage statement."""
+        """The extract call, with rehydration."""
         selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
-        selected, coverage = self._cover_for_extract(selected, scope_id, input_args)
-        if report is None and coverage is None:
+        if report is None:
             return self._call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
         truncations_before = getattr(self, "_truncation_count", 0)
         started = time.monotonic()
-        prediction = None
         try:
-            prediction = self._call_with_potential_trajectory_truncation(
+            return self._call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
-            return prediction
         finally:
-            if report is not None:
-                self._record_extract_finished(
-                    report, budget=budget, scope_id=scope_id, started=started,
-                    truncations_before=truncations_before,
-                )
-            if coverage is not None:
-                self._record_coverage_post_check(coverage, prediction, scope_id)
+            self._record_extract_finished(
+                report, budget=budget, scope_id=scope_id, started=started,
+                truncations_before=truncations_before,
+            )
 
     async def _async_extract_prediction(self, trajectory, **input_args):
         """``_extract_prediction`` for the async loop, same rules."""
         selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
-        selected, coverage = self._cover_for_extract(selected, scope_id, input_args)
-        if report is None and coverage is None:
+        if report is None:
             return await self._async_call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
         truncations_before = getattr(self, "_truncation_count", 0)
         started = time.monotonic()
-        prediction = None
         try:
-            prediction = await self._async_call_with_potential_trajectory_truncation(
+            return await self._async_call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
             )
-            return prediction
         finally:
-            if report is not None:
-                self._record_extract_finished(
-                    report, budget=budget, scope_id=scope_id, started=started,
-                    truncations_before=truncations_before,
-                )
-            if coverage is not None:
-                self._record_coverage_post_check(coverage, prediction, scope_id)
+            self._record_extract_finished(
+                report, budget=budget, scope_id=scope_id, started=started,
+                truncations_before=truncations_before,
+            )
 
     def _call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
         for _ in range(3):
@@ -858,33 +752,11 @@ class fastWorkflowReAct(Module):
         return trajectory
 
 
-def _final_answer_text(prediction: Any) -> str:
-    """The answer text of an extract prediction, for measurement only.
-
-    The signature's output field is ``final_answer``; a signature without one
-    falls back to every string output it has. Either way this is read to be
-    counted, never to be changed.
-    """
-    if prediction is None:
-        return ""
-    answer = getattr(prediction, "final_answer", None)
-    if isinstance(answer, str) and answer:
-        return answer
-    try:
-        values = prediction.toDict()
-    except Exception:  # noqa: BLE001
-        return ""
-    return "\n".join(
-        str(value) for key, value in values.items()
-        if key != "trajectory" and isinstance(value, str)
-    )
-
-
 def _extract_prompt_tokens() -> int | None:
     """Prompt tokens of the most recent LM call, when the history holds them.
 
-    ``ido-8ps.18`` measures the extract call because it is the single large one
-    at answer time. History can be disabled, empty, or carry no usage block, and
+    The extract call is measured because it is the single large one at answer
+    time. History can be disabled, empty, or carry no usage block, and
     none of those is an error: the measure is then simply absent.
     """
     try:

@@ -12,19 +12,19 @@ Structure:
   upserts, reads, prune, forget-channel). Writes use short-lived
   ``BEGIN IMMEDIATE`` transactions on per-call connections (house precedent:
   ``kvstore.py``; the chatbot's read layer uses per-request connections so
-  checkpointing never starves [R12]).
-- ``SQLiteTraceSink`` — the TraceSink implementation: two queues ([R13]: a
+  checkpointing never starves).
+- ``SQLiteTraceSink`` — the TraceSink implementation: two queues (a
   small turn-record/label queue with a bounded-timeout put — the only case a
   turn record may drop in v1 — and a droppable span queue bounded by
   ``FW_OBS_QUEUE_MAX``), drained by one daemon writer thread with batched
   transactions; ``close()`` (sentinel + bounded join) is wired to atexit and
-  entry-point exit paths [R7]. Writer errors/drops land in the
-  ``diagnostics`` table and are surfaced by the chatbot UI [R13].
+  entry-point exit paths. Writer errors/drops land in the
+  ``diagnostics`` table and are surfaced by the chatbot UI.
 - ``get_observability_sink()`` — process-wide factory honoring
-  ``FW_OBSERVABILITY`` ([R4]: fastWorkflow's own entry points default it ON;
+  ``FW_OBSERVABILITY`` (fastWorkflow's own entry points default it ON;
   library embedders opt in), one sink (= one writer thread) per DB path.
 
-Durability class (Phase A, [R14]): everything is best-effort; a write failure
+Durability class: everything is best-effort; a write failure
 never fails a turn. Multi-process writers are supported on local filesystems
 only (WAL constraint — the state root must not be NFS).
 """
@@ -573,7 +573,7 @@ class WriterHealthDelta(BaseModel):
 
         A writer restart inside the interval is fatal for the same reason the
         unknown is: the counters that would have named the loss died with the
-        writer that was holding them (fix-dnb).
+        writer that was holding them.
         """
         return (
             not self.incomparable
@@ -641,10 +641,10 @@ def health_delta(
     because "we could not tell" and "nothing was dropped" are the two answers an
     evidence gate must never confuse.
 
-    A snapshot pair written by two DIFFERENT writers yields `writer_restarted`
-    (fix-dnb). The subtraction is still performed and still meaningful — the row
+    A snapshot pair written by two DIFFERENT writers yields `writer_restarted`.
+    The subtraction is still performed and still meaningful — the row
     is merged monotonically now, so the counters do not go backwards — but the
-    handover itself is unmeasured: whatever the dying writer had accepted and not
+    handover itself is unmeasured: whatever the dying writer had taken in and not
     yet committed left no counter behind. Only a stamp on BOTH sides can say
     this; a snapshot with no stamp (the in-process `{}` baseline for a sink that
     appeared mid-run) is not evidence of a restart and is not reported as one.
@@ -783,7 +783,7 @@ def _protected_text(
 def protect_offload_observation(text: str) -> str:
     """Scrub-then-police one raw command response bound for the evidence sidecar.
 
-    (ido-zlm) The sidecar is not a table of this database, so it cannot ride the
+    The sidecar is not a table of this database, so it cannot ride the
     TurnResult pipeline. What it can do -- and what this function exists for --
     is call the SAME two protections in the SAME order as every other policed
     surface, instead of growing a second redactor that drifts from this one.
@@ -815,7 +815,7 @@ def protect_offload_observation(text: str) -> str:
 
 
 class IncompatibleObservabilityDB(RuntimeError):
-    """The DB was written by a newer fastWorkflow; readers refuse it [R11]."""
+    """The DB was written by a newer fastWorkflow; readers refuse it."""
 
 
 class ExperimentNotFound(KeyError):
@@ -936,7 +936,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _offload_erasure() -> Any:
-    """The offload evidence sidecar's erasure/retention module (``ido-gls``).
+    """The offload evidence sidecar's erasure/retention module.
 
     Imported on use, not at module scope: the ``observation_offloading``
     package pulls in the ReAct agent, which reaches back here, and erasure
@@ -1030,7 +1030,7 @@ class Redactor:
 def _decode_attempt_row(row: Any) -> dict[str, Any]:
     """An `experiment_attempts` row as readers see it.
 
-    `runtime_snapshot_json` (fix-qe2) is exposed decoded under
+    `runtime_snapshot_json` is exposed decoded under
     `runtime_snapshot` -- a dict, or None when the binding server recorded no
     snapshot -- so the chatbot UI and the workspace render it without parsing.
     The raw column is dropped from the projection rather than duplicated: one
@@ -1239,11 +1239,10 @@ def serialize_turn_result(
 
     - ``record_json`` holds the full internal TurnResult (post-envelope,
       post-capture-policy, pre-credential-redaction — the sink redacts the
-      serialized text) [R10].
+      serialized text).
     - Any artifact value over ``FW_OBS_INLINE_ARTIFACT_BYTES`` is replaced in
       place by a ref envelope; the artifacts table is the only value holder.
-    - ``traceback`` artifacts persist only under FW_OBS_CAPTURE_TRACEBACKS=1
-      [R20].
+    - ``traceback`` artifacts persist only under FW_OBS_CAPTURE_TRACEBACKS=1.
 
     Runs in the caller thread so the row snapshots the turn as emitted (the
     accumulator's CommandOutput objects mutate on resume).
@@ -1564,8 +1563,8 @@ class ObservabilityStore:
         """This store's capture profile, resolved once.
 
         Resolved here as well as on the sink because the sync label path
-        (`record_conversation_label`) reaches SQLite without a sink in sight —
-        that is the whole of item 5 in fix-ajv.9.
+        (`record_conversation_label`) reaches SQLite without a sink in sight,
+        so it would otherwise write under no profile at all.
         """
         policy = getattr(self, "_capture_policy", None)
         if policy is None:
@@ -1726,7 +1725,7 @@ class ObservabilityStore:
 
         The `schema_features` row is the only source. There is no
         column-sniffing fallback any more, and re-adding one would be a bug:
-        under the fresh-schema rule (fix-49m.3) every DB that reaches this
+        under the fresh-schema rule every DB that reaches this
         method is at `SCHEMA_VERSION` — both `ObservabilityStore` and
         `ReadOnlyObservabilityStore` refuse anything else up front — and such
         a DB was created from the literal `_SCHEMA_STATEMENTS` with
@@ -1972,19 +1971,20 @@ class ObservabilityStore:
         topic: Optional[str],
         summary: Optional[str],
     ) -> str:
-        """Upsert a conversation's topic/summary ([R15]; labels are mutable).
+        """Upsert a conversation's topic/summary; labels are mutable.
 
         A None topic or summary preserves the stored value, so the blank-topic
         policy — a failed generation never clobbers a good title — carries
         over from the legacy store. Topic uniquification runs inside the same
-        transaction as the write (review ruling I9: no TOCTOU across the async
-        label path; Python-side casefold, never SQLite's ASCII-only lower()).
+        transaction as the write, so there is no TOCTOU across the async
+        label path; casefold is done Python-side, never with SQLite's
+        ASCII-only lower().
 
         Returns the topic actually STORED — collision-suffixed where one was
         written, or the preserved existing title on a blank generation. A
         caller that reports or logs the label must use this rather than its own
         candidate, which is the contract the legacy store's
-        ``update_conversation_topic_summary`` established (ruling I9).
+        ``update_conversation_topic_summary`` established.
         """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -2224,7 +2224,7 @@ class ObservabilityStore:
         artifact_rows: list[dict[str, Any]],
         redactor: Redactor,
     ) -> bool:
-        """Apply the [R2] lifecycle: INSERT at first emission; one guarded
+        """Apply the turn-row lifecycle: INSERT at first emission; one guarded
         status transition to a terminal status; write-once for rows already
         terminal (identical-content retries claim idempotent success).
 
@@ -2485,7 +2485,7 @@ class ObservabilityStore:
         self, channel_id: str, conversation_id: int, max_turns: int
     ) -> list[dict[str, Any]]:
         """The newest ``max_turns`` usable turns as canonical 3-key memory
-        dicts (oldest-first), feedback joined in — the gate-1 [R3] read that
+        dicts (oldest-first), feedback joined in — the read that
         replaces the legacy ``get_conversation_window``."""
         with self._connect() as conn:
             rows = conn.execute(
@@ -2614,7 +2614,7 @@ class ObservabilityStore:
     def upsert_feedback(self, turn_key: str, feedback_json: str) -> None:
         """Upsert a turn's feedback. Credential-scrubbed, NOT policy-withheld.
 
-        fix-ajv.9 item 1, and the one of the five where the two layers disagree.
+        The one column where the two protection layers disagree.
         The scrub applies for the same reason it applies everywhere: it is
         unconditional, and `nl_feedback` is free text a user typed, which is a
         place a pasted token lands. Scrubbing serialized JSON cannot corrupt it —
@@ -2627,10 +2627,10 @@ class ObservabilityStore:
         memory of being corrected, not evidence about the agent. Under `evidence`
         a withheld value would still parse, so the agent would silently receive a
         badge dict where its feedback used to be and behave differently. That is a
-        behavior change, not a reduction in exposure, and Phase 0 does not make
+        behavior change, not a reduction in exposure, and this layer does not make
         those; it is the same call `_POLICY_EXEMPT_TURN_COLUMNS` records for
         `conversation_summary` and `conversation_traces`, and it belongs with
-        fix-cj4's conversation-memory redaction, which has to leave memory usable.
+        conversation-memory redaction generally, which has to leave memory usable.
         """
         feedback_json = self._store_redactor().redact(feedback_json)
         with self._connect() as conn:
@@ -2688,10 +2688,10 @@ class ObservabilityStore:
     ) -> None:
         """Persist one training run's metrics at publication time (Phase 6).
 
-        fix-ajv.9 item 2: BOTH layers, classified `opaque-payload`.
+        BOTH protection layers apply, classified `opaque-payload`.
 
-        Not `controlled-vocabulary`, which is what a dict of thresholds and F1
-        scores looks like from the outside. `collect_train_metrics` assembles this
+        Not `controlled-vocabulary`, which is what a dict of thresholds and
+        F1 scores looks like from the outside. `collect_train_metrics` assembles this
         by reading whatever JSON is sitting in `___command_info`, and one of those
         files carries free text: `heldout_evaluation.EscalationScore.failures`
         records the verbatim `utterance` of every case that failed, and
@@ -2738,9 +2738,9 @@ class ObservabilityStore:
     def set_diagnostic(self, conn: sqlite3.Connection, key: str, value: dict[str, Any]) -> None:
         """Upsert one diagnostics row. Credential-scrubbed, NOT policy-withheld.
 
-        fix-ajv.9 item 3. The scrub earns its place here more than anywhere else
-        on this list: `writer_health.last_error` is `repr(exc)`, and the [R20]
-        scenario that motivated the redactor in the first place is a LiteLLM
+        The scrub earns its place here more than anywhere else:
+        `writer_health.last_error` is `repr(exc)`, and the scenario that
+        motivated the redactor in the first place is a LiteLLM
         `AuthenticationError` whose body echoes the key.
 
         WHY NO CAPTURE POLICY: this table is not a record of the workload, it is
@@ -2766,8 +2766,8 @@ class ObservabilityStore:
             ),
         )
 
-    # `set_diagnostic_if_absent` lived here until fix-dnb. It was fix-485's way
-    # of keeping a baseline from clobbering a predecessor's counters, and
+    # `set_diagnostic_if_absent` used to live here. It was one way of keeping a
+    # baseline from clobbering a predecessor's counters, and
     # `merge_writer_health_row` below now does that job properly — for the
     # heartbeat and `close()` too, which is where the clobbering actually
     # happened. Leaving an insert-if-absent beside a merge would be leaving a
@@ -2776,7 +2776,7 @@ class ObservabilityStore:
     def merge_writer_health_row(
         self, conn: sqlite3.Connection, incoming: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """Persist one writer's counters through the monotone merge (fix-dnb).
+        """Persist one writer's counters through the monotone merge.
 
         The single write path for `writer_health`. `set_diagnostic` replaces,
         which is right for every other diagnostics key and wrong for this one:
@@ -2876,7 +2876,7 @@ class ObservabilityStore:
         The debug UI stamps every listed turn with things derived from its
         spans (cut-at-limit tallies, cost roll-ups, decision signals). Doing
         that through `get_spans` cost one indexed query per listed turn, so a
-        rail refresh of 500 turns paid 500 round trips (fix-tk5). This answers
+        rail refresh of 500 turns paid 500 round trips. This answers
         the same rows for a whole page in a bounded number of queries.
 
         Rows have exactly `get_spans`'s shape and per-turn order (`start_ns`,
@@ -3523,7 +3523,7 @@ class ObservabilityStore:
     ) -> dict[str, Any]:
         """Consume a bootstrap and reserve its labelled conversation atomically.
 
-        ``runtime_snapshot`` (fix-qe2) is the claiming server's credential-free
+        ``runtime_snapshot`` is the claiming server's credential-free
         ``runtime_readiness_snapshot``, stored verbatim as JSON on the attempt
         row so the record says which configuration served it. None is stored
         as NULL: an attempt whose server could not be described is a real
@@ -3861,7 +3861,7 @@ class ObservabilityStore:
             conn.commit()
 
     def begin_workspace_seal(self, experiment_id: str) -> str:
-        """Stamp the terminal status a seal is about to freeze. fix-tcg.
+        """Stamp the terminal status a seal is about to freeze.
 
         Runs BEFORE `archive_to`, and it has to. The archive is a byte-immutable
         snapshot: whatever the source row says at the instant of the snapshot is
@@ -3928,7 +3928,7 @@ class ObservabilityStore:
         the source DB or its committed WAL — and because a file cannot contain
         its own digest, which is why the digest lives on the source row and in
         the manifest while the STATUS lives in the archive too
-        (`begin_workspace_seal`, fix-tcg).
+        (`begin_workspace_seal`).
         """
         if not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
             raise ValueError("sha256 must be a lowercase 64-character digest")
@@ -4976,8 +4976,8 @@ class ObservabilityStore:
     ) -> float:
         """How often this task's pass^k verdict would flip if NOTHING changed.
 
-        The question `fix-bn1.7` asks -- "how many flips are attributable to
-        variance rather than the change" -- has an answer that does not require
+        "How many flips are attributable to variance rather than the change"
+        has an answer that does not require
         claiming significance, and this is it. Pool both arms' attempts for one
         task to estimate a single per-attempt pass rate p, then a flip in either
         direction has probability 2 * p^k * (1 - p^k) under the hypothesis that
@@ -5030,7 +5030,7 @@ class ObservabilityStore:
     # -- maintenance [R12] and erasure [R21] -----------------------------
 
     def db_size_bytes(self) -> int:
-        """DB file size including the -wal sidecar [R12]."""
+        """DB file size including the -wal sidecar."""
         total = 0
         for path in (self.db_path, f"{self.db_path}-wal"):
             try:
@@ -5064,7 +5064,7 @@ class ObservabilityStore:
         backup API reads one consistent transaction including committed WAL.
         Only that copied database is vacuumed into the final destination.
 
-        THE LIVE WRITER (fix-7de). Refusing outright was the wrong half of a
+        THE LIVE WRITER. Refusing outright was the wrong half of a
         true idea. The idea is that a snapshot must not be taken of a moving
         file — the digest recorded beside the archive is a claim about bytes
         that were still, and `SourceChangedDuringArchive` is what happens when
@@ -5108,12 +5108,12 @@ class ObservabilityStore:
     def _refuse_if_an_unreachable_writer_holds(self, source: str) -> None:
         """Refuse a snapshot of a store some OTHER writer is still holding.
 
-        `sink_for_db_path` only sees the sinks this process's factory minted, so
-        before fix-dnb stamped an incarnation on the writer-health row there was
-        nothing to consult about a writer living anywhere else — a server in
-        another process, or a sink built directly and never registered. Those
-        runs did not refuse; they raced, and the race surfaces as
-        `SourceChangedDuringArchive` if it is caught at all.
+        `sink_for_db_path` only sees the sinks this process's factory minted.
+        Without the incarnation stamp the writer-health row now carries, there
+        would be nothing to consult about a writer living anywhere else — a
+        server in another process, or a sink built directly and never
+        registered. Such a run would not refuse; it would race, and the race
+        surfaces as `SourceChangedDuringArchive` if it is caught at all.
 
         The stamp is only trusted where it can be checked. A row left open by a
         writer whose process is gone is a crash marker, not a live writer, and
@@ -5248,9 +5248,9 @@ class ObservabilityStore:
     ) -> dict[str, int]:
         """Bounded prune of spans/artifacts beyond the retention horizon, plus
         oldest-first eviction while over the size cap. Conversations and turn
-        records are exempt (config §5 / [R16]). Runs incremental_vacuum.
+        records are exempt (config §5). Runs incremental_vacuum.
 
-        ``include_conversationless_turns`` (operator opt-in, ruling C10) also
+        ``include_conversationless_turns`` (operator opt-in) also
         deletes conversation-less turn records (e.g. per-invocation CLI
         channels) older than the horizon, with their feedback — otherwise no
         retention knob ever reaches them.
@@ -5349,14 +5349,12 @@ class ObservabilityStore:
         return deleted
 
     def forget_channel(self, channel_id: str) -> dict[str, int]:
-        """First-class erasure [R21]: delete a channel across all tables, then
+        """First-class erasure: delete a channel across all tables, then
         checkpoint-truncate the WAL and reclaim pages.
 
-        (ido-gls) "All tables" includes the offload evidence sidecar beside
-        this database, which holds the channel's raw execute responses, its
-        declared result handles, their source pages, cursor tokens and walk
-        verdicts -- every row carrying a ``scope_json`` that names the channel
-        it came from. Erasing the turn record and leaving that file is not
+        "All tables" includes the offload evidence sidecar beside this
+        database, which holds the channel's raw execute responses -- every row
+        carrying a ``scope_json`` that names the channel it came from. Erasing the turn record and leaving that file is not
         erasure. An experiment run's evidence is preserved and reported rather
         than deleted; the chatbot channels this method exists for are not
         experiment runs.
@@ -5431,7 +5429,7 @@ class ObservabilityStore:
         survive. Keeping counters prevents a clear operation from reusing a
         conversation identity that may still be referenced outside this DB.
 
-        (ido-gls) This is the action the chatbot UI actually exposes, so it
+        This is the action the chatbot UI actually exposes, so it
         reaches the offload evidence sidecar too, for every channel at once.
         Preservation still applies per scope: an experiment run's evidence is
         not a conversation the operator is clearing, and survives.
@@ -5466,7 +5464,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
     able to open a post-mortem snapshot it does not own, and inspecting a DB
     must not mutate it. Construction raises when the file is absent/unopenable
     (``sqlite3.OperationalError``) or written by a newer build
-    (``IncompatibleObservabilityDB`` [R11]); callers degrade gracefully.
+    (``IncompatibleObservabilityDB``); callers degrade gracefully.
     """
 
     def __init__(self, db_path: str) -> None:
@@ -5515,7 +5513,7 @@ class SQLiteTraceSink:
     Never raises to callers. Turn records/labels ride a small dedicated queue
     (bounded-timeout put, then drop-with-log — the only case a turn record may
     drop in v1); spans ride a droppable queue bounded by FW_OBS_QUEUE_MAX
-    (drop-and-count) [R13].
+    (drop-and-count).
     """
 
     def __init__(self, db_path: str) -> None:
@@ -5821,21 +5819,21 @@ class SQLiteTraceSink:
         return snapshot
 
     def _publish_baseline_health(self) -> None:
-        """Publish this writer's opening counters. fix-485, amended by fix-dnb.
+        """Publish this writer's opening counters.
 
         Never lowers what is already there: an existing row belongs to an
         earlier writer over the same DB and carries the drops it recorded, so
         writing zeros over it would erase evidence rather than establish a
-        baseline. fix-485 achieved that with an insert-if-absent, which left a
+        baseline. An insert-if-absent would achieve that much, but it leaves a
         reopened store's row untouched — including the incarnation stamp, so the
-        row went on naming a writer that had already died. The monotone merge
+        row would go on naming a writer that had already died. The monotone merge
         does the same job without that side effect: the counters keep their
         floor, and the stamp names the writer that is actually running, which is
         what lets `health_delta` see a restart at all.
 
-        Best-effort like every other write on this class ([R14]): a store that
-        cannot take the row degrades to exactly the pre-fix behaviour — an
-        evidence run over it reports `incomparable`, which is the honest answer.
+        Best-effort like every other write on this class: a store that
+        cannot take the row degrades to reporting `incomparable` for an
+        evidence run over it, which is the honest answer.
         """
         with self._health_lock:
             snapshot = dict(self._health)
@@ -5897,7 +5895,7 @@ class SQLiteTraceSink:
         return done.wait(timeout)
 
     def close(self, timeout: float = 10.0) -> None:
-        """Stop signal + bounded join + final drain and commit [R7]. Idempotent.
+        """Stop signal + bounded join + final drain and commit. Idempotent.
 
         Emissions racing with close are dropped (the sink is closed); the
         writer drains everything already enqueued before exiting, so the last
@@ -5943,7 +5941,7 @@ class SQLiteTraceSink:
 
     @contextlib.contextmanager
     def quiesced(self, timeout: float = 10.0):
-        """Hold this writer still, without closing it, for a snapshot (fix-7de).
+        """Hold this writer still, without closing it, for a snapshot.
 
         Everything a snapshot has to survive, in the order it has to happen:
 
@@ -5961,7 +5959,7 @@ class SQLiteTraceSink:
            is still moving.
 
         Then the caller takes its snapshot and the writer is released. The sink
-        is never closed and no second writer is created: the [R7] one-writer
+        is never closed and no second writer is created: the one-writer
         contract is about how many threads may write, not about whether the one
         that may is currently mid-stride.
 
@@ -6264,7 +6262,7 @@ class SQLiteTraceSink:
         self.store.apply_label_txn(conn, channel_id, conversation_id, topic, summary)
 
     def _requeue_records(self, items: list) -> None:
-        """Bounded retry for turn records/labels on SQLITE_BUSY; spans drop [R8]."""
+        """Bounded retry for turn records/labels on SQLITE_BUSY; spans drop."""
         for item in items:
             kind = item[0]
             if kind == "span":
@@ -6333,7 +6331,7 @@ def get_observability_sink(
     workflow_path: str, *, entry_point: bool = True
 ) -> Optional[SQLiteTraceSink]:
     """The process-wide sink for a workflow's observability DB, or None when
-    disabled. One sink (one writer thread) per DB path; closed atexit [R7].
+    disabled. One sink (one writer thread) per DB path; closed atexit.
     Never raises — a store that cannot open degrades to no sink plus a warning.
     """
     if not observability_enabled(default_on=entry_point):
@@ -6364,7 +6362,7 @@ def existing_observability_sink(
 ) -> Optional[SQLiteTraceSink]:
     """Return this process's live sink without constructing one.
 
-    Never raises (fix-ajv.13): `evidence_run` peeks through this and must not
+    Never raises: `evidence_run` peeks through this and must not
     lose a run to a path-resolution error. None for "no live sink".
     """
     try:

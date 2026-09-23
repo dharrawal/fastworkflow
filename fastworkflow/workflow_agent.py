@@ -31,7 +31,7 @@ def _append_action_record(chat_session_obj, record: dict) -> None:
     """Append to session-scoped action log (WEC or ChatSession delegating to core).
 
     Duck-typed like _append_turn_output; no-ops gracefully if neither exposes the
-    action log. The cwd action.jsonl fallback was retired in Phase 7 [R25] — the
+    action log. The cwd action.jsonl fallback has been retired — the
     in-process log is the only sink, and the observability DB is the post-mortem
     record.
     """

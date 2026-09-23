@@ -1,4 +1,4 @@
-"""ido-pyw.1: one input, every byte budget derived from it.
+"""One input -- the model's context window -- and every byte budget derived from it.
 
 Offline only. Nothing here calls a model; the one litellm lookup the module can
 perform is exercised through a stub and through the real table read for the
@@ -6,9 +6,9 @@ calibration model, which is a local dictionary in litellm.
 
 The claim under test is the calibration identity: at the reference window --
 131,072 tokens, which is what ``litellm`` reports as ``max_input_tokens`` for
-``cerebras/gpt-oss-120b``, the main agent model of every accepted result-search
-run -- the derived budgets ARE the values the accepted stack ran with. A change
-to a fraction that would move a measured value fails here.
+``cerebras/gpt-oss-120b`` -- the derived budgets ARE the values the framework
+previously carried as individual hand-set knobs. A change to a fraction that
+would move one of those values fails here.
 """
 from __future__ import annotations
 
@@ -21,15 +21,13 @@ from fastworkflow import context_budget as cb
 
 
 class Calibration(unittest.TestCase):
-    """The accepted stack's pinned values, reproduced from the window."""
+    """The pinned calibration values, reproduced from the window."""
 
     PINNED = {
         "trajectory_max_bytes": 28_000,
         "answer_rehydration_max_bytes": 250_000,
-        "result_page_max_bytes": 3_072,
         "search_answer_max_bytes": 3_072,
         "offload_hot_max_bytes": 262_144,
-        "result_handle_hot_max_bytes": 262_144,
         "offload_min_saving_bytes": 1_024,
     }
 
@@ -190,15 +188,15 @@ class Overrides(unittest.TestCase):
     def test_an_override_wins_over_the_derived_budget(self) -> None:
         os.environ[cb.TRAJECTORY.override_env] = "12345"
         self.assertEqual(cb.trajectory_max_bytes(), 12_345)
-        self.assertEqual(cb.result_page_max_bytes(), 3_072)  # the rest unmoved
+        self.assertEqual(cb.search_answer_max_bytes(), 3_072)  # the rest unmoved
 
     def test_an_override_below_the_floor_is_refused(self) -> None:
         os.environ[cb.SEARCH_ANSWER.override_env] = "16"
         self.assertEqual(cb.search_answer_max_bytes(), 3_072)
 
     def test_an_unparseable_override_is_refused(self) -> None:
-        os.environ[cb.RESULT_PAGE.override_env] = "3k"
-        self.assertEqual(cb.result_page_max_bytes(), 3_072)
+        os.environ[cb.ANSWER_REHYDRATION.override_env] = "250k"
+        self.assertEqual(cb.answer_rehydration_max_bytes(), 250_000)
 
     def test_an_override_survives_a_change_of_window(self) -> None:
         os.environ[cb.MODEL_CONTEXT_TOKENS_ENV] = str(cb.REFERENCE_WINDOW_TOKENS * 2)
@@ -208,7 +206,7 @@ class Overrides(unittest.TestCase):
 
 
 class Provenance(unittest.TestCase):
-    """The one record a runner files (ido-pyw.2 wires it)."""
+    """The one budget-provenance record a runner files."""
 
     def setUp(self) -> None:
         cb.reset_cache()
@@ -256,27 +254,23 @@ class ModulesReadTheSameBudgets(unittest.TestCase):
     """The named defaults each module exports are the derived values."""
 
     def test_every_module_default_is_its_budget(self) -> None:
-        from fastworkflow import answer_rehydration, result_handles
+        from fastworkflow import answer_rehydration
         from fastworkflow.observation_offloading import compact, continuation, search
 
         self.assertEqual(compact.PACKED_TARGET_BYTES, 28_000)
         self.assertEqual(compact.MIN_OFFLOAD_SAVING_BYTES, 1_024)
         self.assertEqual(continuation.REPLAN_OBSERVATION_MAX_BYTES, 28_000)
         self.assertEqual(search.SEARCH_ANSWER_MAX_BYTES, 3_072)
-        self.assertEqual(result_handles.RESULT_PAGE_MAX_BYTES, 3_072)
-        self.assertEqual(result_handles.HOT_ROWS_MAX_BYTES, 262_144)
         self.assertEqual(answer_rehydration.DEFAULT_MAX_BYTES, 250_000)
 
     def test_every_module_reader_is_the_budget_function(self) -> None:
-        from fastworkflow import answer_rehydration, result_handles
+        from fastworkflow import answer_rehydration
         from fastworkflow.observation_offloading import compact, search, state
 
         self.assertEqual(compact.packed_target_bytes_from_env(), 28_000)
         self.assertEqual(compact.min_offload_saving_bytes_from_env(), 1_024)
         self.assertEqual(search.search_answer_max_bytes_from_env(), 3_072)
         self.assertEqual(state.hot_handle_max_bytes_from_env(), 262_144)
-        self.assertEqual(result_handles.page_max_bytes_from_env(), 3_072)
-        self.assertEqual(result_handles.hot_rows_max_bytes_from_env(), 262_144)
         self.assertEqual(answer_rehydration.max_bytes_from_env(), 250_000)
 
 

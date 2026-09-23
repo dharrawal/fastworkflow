@@ -510,6 +510,14 @@ fastworkflow run my_workflow/ .env passwords.env \
   --startup_command "process daily report" --keep_alive False
 ```
 
+**Long agent turns: observation offloading and `search_memory`** — A tool agent's trajectory grows with every command result, so a long turn ends up spending its context window on output it has already read. fastWorkflow archives every command result to a SQLite file beside the workflow, replaces older ones in the prompt with a short label, and gives the agent a `search_memory` tool that answers questions inside one archived result; at answer time the evidence behind the labels is put back for the extract call. This is framework behaviour, not a mode you switch on.
+
+Setting `LLM_OBSERVATION_SEARCH` and `LITELLM_API_KEY_OBSERVATION_SEARCH` to a dedicated search model is recommended but optional — when they are unset, search runs on `LLM_AGENT` and the credential configured for it.
+
+- [CHANGELOG.md](CHANGELOG.md) — what shipped, and what to change when upgrading.
+- [docs/observation_search.md](docs/observation_search.md) — the archive, the `O` namespace, `search_memory`, and the retention, redaction and known limits.
+- [docs/context_budget.md](docs/context_budget.md) — the one input every byte budget is derived from.
+
 Deep-dive articles:
 - [From functions to classes: building stateful AI agents](fastworkflow-article-2.md)
 - [Leveraging class inheritance in fastWorkflow](fastworkflow-article-3.md)

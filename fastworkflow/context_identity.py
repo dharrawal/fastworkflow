@@ -6,9 +6,8 @@ instance it belongs to: ``list_permissions`` inside ``Account`` prints
 that the previous step entered his account. The link lives in the ORDER of the
 commands, so any reader that is not allowed to use history --
 ``search_memory``, answer-time rehydration, the extract step, a human scrolling
-a store -- cannot recover it. 12 of the 14 unresolved rows in the ``ido-8ps.10``
-cell had exactly this cause, which is the measurement that produced this module
-and outlived the experiment it was measured in.
+a store -- cannot recover it. Measured on a real workflow, that missing link was
+the cause of the large majority of rows a later reader could not resolve.
 
 This module answers the one question the retrieval record was missing: *which
 context instance*. It is deliberately generic. fastWorkflow has no framework

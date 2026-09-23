@@ -1,4 +1,4 @@
-"""R3 (ido-8ps.25): the tier threshold and the tiny ambiguity threshold must not collapse.
+"""The tier threshold and the tiny ambiguity threshold must not collapse.
 
 No mocks (repo rule `.cursor/rules/testing_rules.mdc`): every test calls the real
 writer `model_pipeline_training.write_ambiguity_thresholds` and reads the real JSON
@@ -6,10 +6,10 @@ files back off disk. What is *not* rebuilt here is TinyBERT and DistilBERT -- th
 writer takes the confidence statistics the trainer measures, so the statistics are
 supplied directly and the arithmetic, the invariant and the files are the real ones.
 
-The context table below is not invented. It is the confidence statistics implied by
-IDO's published router `20260905T132341Z-a0605e`, whose 18 contexts every one had
-`tiny_ambiguous <= tier` -- 7 of them byte-identical -- which is the state that made
-the tiny tier structurally incapable of reporting an ambiguity.
+The context table below is not invented. It is the confidence statistics taken from
+a real published router, all 18 of whose contexts had `tiny_ambiguous <= tier` --
+7 of them byte-identical -- which is the state that made the tiny tier
+structurally incapable of reporting an ambiguity.
 """
 
 import json
@@ -225,8 +225,8 @@ def test_the_band_above_the_flat_cap_is_the_remaining_headroom_halved():
     ],
 )
 def test_a_tier_below_the_flat_cap_is_unchanged(tmp_path, tier, expected):
-    """Every tier under `MAX_AMBIGUITY_THRESHOLD` keeps the value it had before
-    ido-ik6, so the fix is confined to the range that used to abort training."""
+    """Every tier under `MAX_AMBIGUITY_THRESHOLD` keeps its unclamped value, so
+    the clamp is confined to the range that used to abort training."""
     assert resolvable_ambiguity_ceiling(tier) == MAX_AMBIGUITY_THRESHOLD
     tiny_amb, _large = write_ambiguity_thresholds(
         str(tmp_path / f"Tier{tier}"), tier, CONFIDENT_TINY, CONFIDENT_LARGE

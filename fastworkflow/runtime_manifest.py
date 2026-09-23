@@ -368,19 +368,18 @@ def workflow_content_entries(
     yet builds the same entry list from its pending emission instead; both feed
     ``canonical_content_hash``.
 
-    **Dot-prefixed files and directories are excluded** (fix-oxr). A leading dot
+    **Dot-prefixed files and directories are excluded.** A leading dot
     is the usual signal for "tool bookkeeping, not source", and a generator's
-    bookkeeping file is the one class of content most likely to be unstable:
-    IDO's ``.generated_manifest.json`` carried a ``generated_at`` timestamp,
-    which made this hash *time-dependent* on an IDO workflow — measured on
-    2026-08-27 as two different hashes for the same tree across a simulated
-    regeneration, precisely the property §7.1 says the hash must not have. IDO
-    removed that timestamp, but excluding the class is what stops the next
-    bookkeeping file from doing it again, and it does so without core needing to
-    know any particular workflow's filenames.
+    bookkeeping file is the one class of content most likely to be unstable: a
+    generated manifest carrying a ``generated_at`` timestamp makes this hash
+    *time-dependent*, which was measured as two different hashes for the same
+    tree across a simulated regeneration — precisely the property §7.1 says the
+    hash must not have. Excluding the class is what stops the next bookkeeping
+    file from doing it again, and it does so without core needing to know any
+    particular workflow's filenames.
 
     **Two classes are excluded at the root and only at the root** (scope rule
-    v2, bead ido-gxc): a ``benchmarks`` directory, and any file whose name
+    v2): a ``benchmarks`` directory, and any file whose name
     begins with ``RUNTIME_STORE_PREFIX``. Root-relative because both are
     conventions about what sits *beside* a workflow rather than names that mean
     the same thing wherever they appear: ``_commands/benchmarks/`` is as much
@@ -397,7 +396,7 @@ def workflow_content_entries(
     **The two scope rules agree on that tree, not by construction.** They are
     structurally different: IDO filters by a name list applied to the first path
     segment only, this filters by dot-prefix and ``FRAMEWORK_ARTIFACT_PREFIX``
-    at any depth. Measured 28 August on a synthetic tree, IDO selects and this
+    at any depth. Measured on a synthetic tree, IDO selects and this
     excludes three classes: ``_commands/Insights/x.md`` and
     ``_commands/___command_info/x.json``, where the same names nested deeper
     escape a first-segment test; any dot-prefixed file or directory, for which
@@ -405,8 +404,7 @@ def workflow_content_entries(
     ``___convo_info`` or ``___workflow_contexts``, which IDO's list omits.
     ``__pycache__`` at any depth agrees, because IDO drops its cruft names at
     every level of its walk. ``tests/test_context_runtime_manifest.py`` pins
-    each class against a transcription of IDO's filter (fix-ijf, IDO
-    counterpart ido-o1o).
+    each class against a transcription of IDO's filter.
 
     **What no test here can check.** IDO's ``fingerprint_entries`` does not walk
     a tree the way this does. It selects the generator's *pending* emission
@@ -488,8 +486,7 @@ class FingerprintVerification:
     consulted. Equal digests mean the generator's selection and this engine's
     selection produced identical bytes on this tree, which is a genuine pass
     whatever versions the two sides wrote down — and treating it as a failure
-    would be the false alarm on a healthy workflow that fix-ijf was filed to
-    avoid.
+    would be a false alarm on a healthy workflow.
     """
 
     declared: Optional[str]
@@ -1262,8 +1259,8 @@ def _metadata_key(workflow_folderpath: str) -> str:
     Cached because the lookup runs once per executed command and
     ``Path.resolve`` is a realpath syscall — measured at 14 µs, four fifths of
     the whole consequence assessment, for an answer that cannot change within a
-    process. Capture overhead is an EXP-003 stop condition (FW-NFR-005), so the
-    cheap fix is worth taking here rather than defending later.
+    process. Capture overhead is bounded by FW-NFR-005, so the cheap fix is
+    worth taking here rather than defending later.
     """
     try:
         return str(Path(workflow_folderpath).resolve())

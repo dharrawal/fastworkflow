@@ -1,34 +1,10 @@
 import fastworkflow
 from fastworkflow import Action, CommandOutput, CommandResponse, NLUPipelineStage
-from fastworkflow import auto_navigation
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 
 from ..intent_detection import CommandNamePrediction
 from ..parameter_extraction import ParameterExtraction
-
-#: The artifact key the plan travels under; owned by `auto_navigation` so the
-#: executor can read it without importing this command module.
-AUTO_NAVIGATION_ARTIFACT = auto_navigation.AUTO_NAVIGATION_ARTIFACT
-
-
-def _record_auto_navigation(decision) -> None:
-    """File the routing event for a declined KNOWN name.
-
-    Only for a name the workflow really owns: ordinary free text that no context
-    could route is not an auto-navigation opportunity, and an event per
-    unroutable sentence would bury the ones that are. Best effort -- a measure
-    must never fail a turn.
-    """
-    if not decision.owner_contexts:
-        return
-    try:
-        from fastworkflow.observation_offloading.state import record_event
-
-        record_event(decision.event())
-    except Exception:  # noqa: BLE001 - a measure must never fail a turn
-        pass
-
 
 class Signature:
     # These are the PARAMETER_EXTRACTION stage's bare-value literals. They belong
@@ -142,65 +118,6 @@ class ResponseGenerator:
             
                 if cnp_output.command_name is None:
                     if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
-                        # ido-8ps.9: the walk is exhausted, so the owning context
-                        # is genuinely unreachable from here. THIS is the only
-                        # point at which two-step dispatch may be considered --
-                        # a root ('*') command, or any name an ancestor owns, has
-                        # already been resolved by the walk above and never gets
-                        # here.
-                        #
-                        # The decision is a pure function of this utterance and
-                        # the context model (`auto_navigation.decide`); the
-                        # registry it consults answers only "what does the handle
-                        # the agent just wrote denote". Nothing below reads the
-                        # action log.
-                        decision = auto_navigation.plan(
-                            getattr(app_workflow, 'folderpath', ''),
-                            command_name=command.split(" ", 1)[0].split("(", 1)[0].lower(),
-                            utterance=command,
-                            owner_contexts=owner_contexts or [],
-                        )
-                        _record_auto_navigation(decision)
-
-                        if decision.dispatches:
-                            # The two steps run through the ordinary command
-                            # path, one at a time, in `CommandExecutor` -- the
-                            # CME cannot run them itself (it has the workflow,
-                            # not the session), and running them anywhere but
-                            # the normal step path would cost them their spans
-                            # and their observations. The plan travels as an
-                            # artifact; `invoke_command` executes it.
-                            workflow.end_command_processing()
-                            return CommandOutput(
-                                command_response=CommandResponse(
-                                    response="",
-                                    artifacts={
-                                        "command_handled": True,
-                                        AUTO_NAVIGATION_ARTIFACT: {
-                                            "rule": decision.rule,
-                                            "entered_context": decision.entered_context,
-                                            "entry_command": decision.entry_command,
-                                            "entry_utterance": decision.entry_utterance,
-                                            "original_utterance": command,
-                                            "command_name": decision.command_name,
-                                            "handle": decision.handle,
-                                        },
-                                    },
-                                )
-                            )
-
-                        if decision.kind == auto_navigation.CLARIFY:
-                            # Blocking, by the rule: the framework says what it
-                            # needs and acts only on what comes back. Candidates
-                            # are read off recent observations and LISTED -- the
-                            # decision above was made without them.
-                            routing_hint = auto_navigation.clarification_text(
-                                decision,
-                                auto_navigation.candidate_values(
-                                    auto_navigation.recent_execute_observations()
-                                ),
-                            )
-
                         # out of scope commands
                         workflow_context = workflow.context
                         workflow_context["NLU_Pipeline_Stage"] = \
@@ -218,8 +135,7 @@ class ResponseGenerator:
                         # is true and useless here, so say where it lives and how
                         # to get there. A hint only: nothing below navigates, and
                         # navigating on a guess about what was meant would change
-                        # the workflow's state on the strength of that guess
-                        # (ido-8ps.8, owner-approved scope addition).
+                        # the workflow's state on the strength of that guess.
                         if routing_hint:
                             response = command_output.command_response
                             response.response = f"{response.response}\n\n{routing_hint}"
