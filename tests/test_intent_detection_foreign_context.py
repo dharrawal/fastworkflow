@@ -522,6 +522,89 @@ def test_inventory_excludes_reserved_labels(
 
 
 # ---------------------------------------------------------------------------
+# Mixed-case command names: a context never refuses its own command
+# ---------------------------------------------------------------------------
+
+MIXED_CASE_CONTEXTS = {
+    "*": [],
+    "Child": ["Child/ListPermissions", "Child/show_metadata"],
+    "Sibling": ["Sibling/ShowHolders"],
+}
+
+
+@pytest.fixture
+def mixed_case_predictor(todolist_workflows, monkeypatch):
+    """A predictor whose app workflow reports mixed-case command names.
+
+    `command_name_dict` keeps each command's spelling while the inventory is
+    keyed lowercase; that pair is exactly what disagreed.
+    """
+    _, cme_workflow = todolist_workflows
+    predictor = CommandNamePrediction(cme_workflow)
+    app_folderpath = predictor.app_workflow_folderpath
+    real_get_definition = fastworkflow.RoutingRegistry.get_definition
+    definition = _InventoryRoutingDefinition(MIXED_CASE_CONTEXTS)
+
+    def get_definition(workflow_folderpath, *args, **kwargs):
+        if str(workflow_folderpath) == str(app_folderpath):
+            return definition
+        return real_get_definition(workflow_folderpath, *args, **kwargs)
+
+    monkeypatch.setattr(
+        fastworkflow.RoutingRegistry, "get_definition", staticmethod(get_definition)
+    )
+    return predictor
+
+
+@pytest.mark.parametrize("utterance", [
+    "ListPermissions",
+    "listpermissions",
+    "LISTPERMISSIONS <scope>all</scope>",
+])
+def test_a_mixed_case_command_resolves_in_its_own_context(
+    mixed_case_predictor, monkeypatch, setup_test_environment, utterance
+):
+    """The token is lowercased and the context's own key is not. Before the
+    fix the exact match missed and the guard named the current context as the
+    foreign owner, refusing a command that belongs here."""
+    consulted: list[str] = []
+    monkeypatch.setattr(
+        intent_detection, "CommandRouter", _refusing_router(consulted))
+    nlu_trace: dict = {}
+    result = mixed_case_predictor._predict_impl(
+        "Child", utterance, INTENT_DETECTION, nlu_trace)
+
+    assert result.command_name == "Child/ListPermissions"
+    assert result.routing_hint is None
+    assert nlu_trace["matcher_layer"] == "exact_prefix"
+    assert "known_name_foreign_context" not in nlu_trace
+    assert not consulted
+
+
+def test_a_mixed_case_command_owned_elsewhere_is_still_foreign(
+    mixed_case_predictor, monkeypatch, setup_test_environment
+):
+    monkeypatch.setattr(
+        intent_detection, "CommandRouter", _refusing_router([]))
+    nlu_trace: dict = {}
+    result = mixed_case_predictor._predict_impl(
+        "Child", "ShowHolders", INTENT_DETECTION, nlu_trace)
+
+    assert result.command_name is None
+    assert result.known_name_owner_contexts == ["Sibling"]
+    assert "Sibling context" in result.routing_hint
+
+
+def test_the_current_context_is_never_its_own_foreign_owner(ido_predictor):
+    """Defence beyond the case fold: whatever the candidate set says, the
+    context being asked is dropped from the owners it reports."""
+    assert ido_predictor.foreign_owner_contexts(
+        "show_holders", {}, "Permission") == []
+    assert ido_predictor.foreign_owner_contexts(
+        "show_holders", {}, "Identity") == ["Permission"]
+
+
+# ---------------------------------------------------------------------------
 # The hint at the end of the walk (owner-approved scope addition, 2026-09-15)
 # ---------------------------------------------------------------------------
 
@@ -546,7 +629,8 @@ class TestTheHintTextItself:
 
     def test_an_entity_context_hint_names_the_context_and_how_to_enter_it(self):
         hint = foreign_context_hint(
-            "list_permissions", ["Account"], ["open_account_by_uid <account_uid>"])
+            "list_permissions", ["Account"],
+            {"Account": ["open_account_by_uid <account_uid>"]})
         assert "'list_permissions'" in hint
         assert "Account context" in hint
         assert "open_account_by_uid <account_uid>" in hint
@@ -554,22 +638,41 @@ class TestTheHintTextItself:
     def test_a_stateless_workspace_hint_names_the_command_that_enters_it(self):
         """No uid to supply: the workspace is entered by one bare command."""
         hint = foreign_context_hint(
-            "list_findings", ["ControlsMonitor"], ["open_controls_monitor"])
+            "list_findings", ["ControlsMonitor"],
+            {"ControlsMonitor": ["open_controls_monitor"]})
         assert "ControlsMonitor context" in hint
         assert "'open_controls_monitor'" in hint
         assert "<" not in hint.split("Enter it with:")[1]
 
     def test_several_owners_are_all_named(self):
         hint = foreign_context_hint(
-            "who_has_access_to", ["Directory", "DirectoryExplorer"], [])
+            "who_has_access_to", ["Directory", "DirectoryExplorer"], {})
         assert "Directory, DirectoryExplorer contexts" in hint
+
+    def test_several_owners_each_get_their_own_entering_command(self):
+        """A merged list cannot say which command opens which context."""
+        hint = foreign_context_hint(
+            "get_properties", ["TodoItem", "TodoList", "Board"],
+            {"TodoItem": ["open_item <id>"], "TodoList": ["get_todo_list <id>"],
+             "Board": []})
+        assert "TodoItem, TodoList, Board contexts" in hint
+        assert "Enter TodoItem with: 'open_item <id>'." in hint
+        assert "Enter TodoList with: 'get_todo_list <id>'." in hint
+        assert "Enter Board with" not in hint
+        assert "Enter it with" not in hint
+
+    def test_a_shared_entering_command_is_named_beside_each_context(self):
+        hint = foreign_context_hint(
+            "show", ["A", "B"], {"A": ["open_ab"], "B": ["open_ab"]})
+        assert "Enter A with: 'open_ab'." in hint
+        assert "Enter B with: 'open_ab'." in hint
 
     def test_without_a_declaration_it_names_the_context_and_nothing_else(self):
         """Nothing in the routing definition records which command enters a
         context, and guessing one from a command's NAME would bake one
         workflow's spelling conventions into the framework. Naming the owner
         alone is the honest floor."""
-        hint = foreign_context_hint("list_permissions", ["Account"], [])
+        hint = foreign_context_hint("list_permissions", ["Account"], {})
         assert "Account context" in hint
         assert "Enter it with" not in hint
         assert "what_can_i_do" in hint
@@ -797,7 +900,8 @@ class TestTheHintReachesTheFailureMessage:
         self, monkeypatch, setup_test_environment
     ):
         hint = foreign_context_hint(
-            "list_permissions", ["Account"], ["open_account_by_uid <account_uid>"])
+            "list_permissions", ["Account"],
+            {"Account": ["open_account_by_uid <account_uid>"]})
         output, contexts_seen, actions_run, cme_workflow = self._run(
             monkeypatch, hint)
 
@@ -837,9 +941,8 @@ MISUNDERSTANDING = fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFI
 
 
 @pytest.mark.parametrize("utterance", [
-    "open_account_by_uid <account_uid>3f2a</account_uid>",
-    "list_permissions",
     "gibberish that matches nothing",
+    "list_holders <filter>Alan Cooper</filter>",
 ])
 def test_an_unmatched_clarification_reply_falls_back_to_what_can_i_do(
     ido_predictor, monkeypatch, setup_test_environment, utterance
@@ -858,6 +961,30 @@ def test_an_unmatched_clarification_reply_falls_back_to_what_can_i_do(
     assert result.command_name == "IntentDetection/what_can_i_do"
     assert result.is_cme_command is True
     assert nlu_trace["matcher_layer"] == "clarification_default"
+
+
+@pytest.mark.parametrize("utterance,owners", [
+    ("open_account_by_uid <account_uid>3f2a</account_uid>", ["DirectoryExplorer"]),
+    ("list_permissions", ["Account"]),
+])
+def test_a_foreign_name_in_the_misunderstanding_reply_is_declined_with_its_owner(
+    ido_predictor, monkeypatch, setup_test_environment, utterance, owners
+):
+    """The misunderstanding stage matches this context's full command set, so a
+    real command owned elsewhere is the same misroute there as in intent
+    detection. It used to fall to the 'what can i do?' default, which lists
+    this context's commands and never names the owner."""
+    monkeypatch.setattr(
+        intent_detection, "CommandRouter", _refusing_router([]))
+    nlu_trace: dict = {}
+    result = ido_predictor._predict_impl(
+        "Identity", utterance, MISUNDERSTANDING, nlu_trace)
+
+    assert result.command_name is None
+    assert result.known_name_owner_contexts == owners
+    assert nlu_trace["matcher_layer"] == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
+    for owner in owners:
+        assert f"{owner} context" in result.routing_hint
 
 
 # ---------------------------------------------------------------------------
@@ -946,7 +1073,32 @@ class TestTheHintPathOnARealWorkflow:
         assert stage == MISUNDERSTANDING
 
         following = CommandNamePrediction(cme_workflow).predict(
-            app_workflow.current_command_context_name, "get_properties", stage)
+            app_workflow.current_command_context_name, "none of those", stage)
         assert following.command_name == "IntentDetection/what_can_i_do"
+
+    def test_a_foreign_name_as_the_misunderstanding_reply_gets_the_hint(
+        self, workflows, monkeypatch, setup_test_environment
+    ):
+        """Free text puts the workflow in the misunderstanding stage; the reply
+        is a real command owned off the chain. The walk runs in that stage,
+        finds no owner, and the reply ends with the hint and the stage closed,
+        instead of a list of this context's commands."""
+        app_workflow, cme_workflow = workflows
+        monkeypatch.setattr(
+            intent_detection, "CommandRouter", _labelling_router("wildcard"))
+        wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke")
+        assert cme_workflow.context["NLU_Pipeline_Stage"] == MISUNDERSTANDING
+
+        monkeypatch.setattr(
+            intent_detection, "CommandRouter", _refusing_router([]))
+        output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties")
+
+        response = output.command_response.response
+        assert output.success is False
+        assert output.command_handled is True
+        assert "'get_properties' is a command of the TodoItem, TodoList contexts" in response
+        assert "Enter TodoList with: 'get_todo_list <todo_list_id>'." in response
+        assert cme_workflow.context["NLU_Pipeline_Stage"] == INTENT_DETECTION
+        assert "command" not in cme_workflow.context
 
 

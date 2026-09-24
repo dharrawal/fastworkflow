@@ -111,7 +111,14 @@ class ResponseGenerator:
                     routing_hint = routing_hint or cnp_output.routing_hint
             
                 if cnp_output.command_name is None:
-                    if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION and routing_hint:
+                    # The misunderstanding stage is included: its reply is
+                    # matched against this context's full command set, so a
+                    # real command owned elsewhere is declined there too, and
+                    # the hint ends that stage the same way.
+                    if nlu_pipeline_stage in (
+                            NLUPipelineStage.INTENT_DETECTION,
+                            NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
+                    ) and routing_hint:
                         # The name IS a command of this workflow; the walk simply
                         # never passed a context that owns it. "Nothing matched"
                         # is true and useless here, so say where it lives and how

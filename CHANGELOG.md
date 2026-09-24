@@ -42,6 +42,10 @@ labels themselves.
   response and the next message goes through ordinary intent detection, rather
   than `you_misunderstood` and its clarification stage, which only matches the
   current context's commands and so could not route the command the hint names.
+  The guard also covers a reply to `you_misunderstood`, which is matched against
+  the same full command set; the ambiguity stage, which matches a short
+  suggestion list, is still excluded. With several owners, the hint names each
+  entering command beside the context it enters.
 - **Threshold separation**: `write_ambiguity_thresholds` is the single writer
   for both ambiguity files and establishes a non-empty ambiguity band where the
   artifacts are produced, with `TIER_AMBIGUITY_MIN_SEPARATION` and
@@ -69,6 +73,11 @@ labels themselves.
 - A known command name followed by a newline or a tab is now recognised by the
   known-name guard and by the owning context's exact match, not only when the
   name is followed by a space.
+- A command whose name has capital letters is matched by its own context's
+  exact match whatever case it is typed in, and is never refused by the
+  known-name guard as belonging to another context. The guard compared a
+  lowercased name against the context's command names as spelled, so it named
+  the current context as the foreign owner.
 - A failure while sealing or releasing the previous turn's evidence no longer
   aborts the turn that is starting.
 - A reply to `you_misunderstood` that matches none of the current context's

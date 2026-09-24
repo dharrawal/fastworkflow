@@ -105,7 +105,9 @@ _UNKNOWN_MODEL_TIER = "unknown-tier"
 
 
 def foreign_context_hint(
-    command_name: str, owner_contexts: list[str], enter_commands: list[str]
+    command_name: str,
+    owner_contexts: list[str],
+    enter_commands: dict[str, list[str]],
 ) -> str:
     """What to say when a real command name reaches a context that cannot run it.
 
@@ -123,12 +125,30 @@ def foreign_context_hint(
     Generic by construction. The owning contexts come from the routing
     definition, and the entering command only from a context's own
     `enter_command` declaration -- never from the shape of a command's name.
+
+    *enter_commands* is keyed by owning context. With one owner the entering
+    commands are simply listed; with several, each is named beside the context
+    it enters, because a merged list cannot say which command opens which.
+    Owners that declare nothing are left out of the entry text, and still named
+    among the owners.
     """
     owners = ", ".join(owner_contexts)
     plural = "contexts" if len(owner_contexts) > 1 else "context"
+    declared = [
+        (context_name, enter_commands[context_name])
+        for context_name in owner_contexts
+        if enter_commands.get(context_name)
+    ]
     entry = ""
-    if enter_commands:
-        entry = " Enter it with: " + ", ".join(f"'{c}'" for c in enter_commands) + "."
+    if len(owner_contexts) == 1 and declared:
+        entry = " Enter it with: " + ", ".join(
+            f"'{c}'" for c in declared[0][1]) + "."
+    elif declared:
+        entry = "".join(
+            f" Enter {context_name} with: "
+            + ", ".join(f"'{c}'" for c in commands) + "."
+            for context_name, commands in declared
+        )
     return (
         f"'{command_name}' is a command of the {owners} {plural}, which this "
         f"context and its parents do not provide.{entry} Then run "
@@ -473,15 +493,17 @@ class CommandNamePrediction:
 
     def routing_hint_for(self, command_name: str, owner_contexts: list[str]) -> str:
         """The hint for one foreign known name, entering commands resolved."""
-        enter_commands: list[str] = []
-        for context_name in owner_contexts:
-            for command in self.enter_commands_for(context_name):
-                if command not in enter_commands:
-                    enter_commands.append(command)
+        enter_commands = {
+            context_name: self.enter_commands_for(context_name)
+            for context_name in owner_contexts
+        }
         return foreign_context_hint(command_name, owner_contexts, enter_commands)
 
     def foreign_owner_contexts(
-        self, normalized_command_name: str, command_name_dict: dict[str, str]
+        self,
+        normalized_command_name: str,
+        command_name_dict: dict[str, str],
+        command_context_name: str,
     ) -> list[str]:
         """Contexts owning *normalized_command_name*, when this one does not.
 
@@ -490,10 +512,21 @@ class CommandNamePrediction:
         context's own candidate set contains it (already matched above). A
         non-empty result is the foreign-context condition: a real command name,
         reached in a context that cannot execute it.
+
+        Compared in lowercase on both sides: the inventory is keyed on the
+        lowercased name while `command_name_dict` keeps each command's own
+        spelling, so a case-sensitive test would call a context's own
+        mixed-case command foreign. The current context is dropped from the
+        owners for the same reason -- a context may never refuse a name as
+        belonging somewhere else when the somewhere else is itself.
         """
-        if normalized_command_name in command_name_dict:
+        if normalized_command_name in {name.lower() for name in command_name_dict}:
             return []
-        return list(self.command_inventory().get(normalized_command_name, ()))
+        return [
+            context_name
+            for context_name in self.command_inventory().get(normalized_command_name, ())
+            if context_name != command_context_name
+        ]
 
     def _predict_impl(
         self,
@@ -580,15 +613,23 @@ class CommandNamePrediction:
         tentative_command_name = (
             command.split(None, 1)[0].split("(", 1)[0] if command.strip() else "")
         normalized_command_name = tentative_command_name.lower()
+        # The typed token is lowercased, but `command_name_dict` keeps each
+        # command's own spelling, so the exact match looks the token up by its
+        # lowercase form and resolves to the key as spelled.
+        exact_key = {
+            name.lower(): name for name in command_name_dict
+        }.get(normalized_command_name)
         command_name = None
-        if normalized_command_name in command_name_dict:
-            command_name = normalized_command_name
+        if exact_key is not None:
+            command_name = exact_key
             command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
             nlu_trace["matcher_layer"] = "exact_prefix"
         elif (
-            nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
+            nlu_pipeline_stage in (
+                NLUPipelineStage.INTENT_DETECTION,
+                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION)
             and (owner_contexts := self.foreign_owner_contexts(
-                normalized_command_name, command_name_dict))
+                normalized_command_name, command_name_dict, command_context_name))
         ):
             # R1 (ido-8ps.8): a known command name may not be answered by a
             # context that does not own it. The exact-name matcher above is
@@ -608,9 +649,14 @@ class CommandNamePrediction:
             # whose owner is not on this chain now reaches the routing hint
             # below instead of a lucky classifier guess -- loud instead of silent.
             #
-            # INTENT_DETECTION only: the clarification stages match against a
-            # constrained suggestion set, where "not in this context's set" is
-            # the normal case rather than a misroute.
+            # INTENT_DETECTION and INTENT_MISUNDERSTANDING_CLARIFICATION only.
+            # The ambiguity stage matches against a constrained suggestion set,
+            # where "not in this context's set" is the normal case rather than
+            # a misroute. The misunderstanding stage matches this context's
+            # full command set, the same set intent detection uses, so a real
+            # command name missing from it is the same misroute there; without
+            # the guard it fell to the 'what can i do?' default and the owner
+            # was never named.
             hint = self.routing_hint_for(normalized_command_name, owner_contexts)
             nlu_trace["matcher_layer"] = MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
             nlu_trace["known_name_foreign_context"] = True
