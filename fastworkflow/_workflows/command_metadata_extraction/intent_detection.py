@@ -110,10 +110,11 @@ def foreign_context_hint(
     """What to say when a real command name reaches a context that cannot run it.
 
     The foreign-context matcher returns None for such a name and the parent walk
-    carries it up; when no context on that chain owns it either, the walk ends at
-    `you_misunderstood`, which says only that nothing matched. That is true and
-    useless: the name IS a command, the runtime knows exactly which contexts have
-    it, and the caller is one navigation away from being able to run it.
+    carries it up; when no context on that chain owns it either, the walk used to
+    end at `you_misunderstood`, which says only that nothing matched. That is true
+    and useless: the name IS a command, the runtime knows exactly which contexts
+    have it, and the caller is one navigation away from being able to run it. The
+    CME wildcard command now returns this hint as the whole response instead.
 
     A hint, never an action: this composes text and nothing here navigates. The
     difference matters because auto-navigating on a misrouted call would change
@@ -346,10 +347,10 @@ class CommandNamePrediction:
         command_name: Optional[str] = None
         error_msg: Optional[str] = None
         is_cme_command: bool = False
-        # R1 (ido-8ps.8): set only when the first token names a command this
-        # context does not own. The walk carries them so the failure message at
-        # the end of the chain can say where the command actually lives; a
-        # resolved prediction leaves them None and nothing reads them.
+        # Set only when the first token names a command this context does not
+        # own. The walk carries the hint so the failure message at the end of
+        # the chain can say where the command actually lives; a resolved
+        # prediction leaves them None and nothing reads them.
         known_name_owner_contexts: Optional[list[str]] = None
         routing_hint: Optional[str] = None
 
@@ -538,9 +539,13 @@ class CommandNamePrediction:
             for fully_qualified_command_name in valid_command_names
         }
 
-        if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-            # what_can_i_do is special in INTENT_AMBIGUITY_CLARIFICATION
+        if nlu_pipeline_stage in (
+                NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION):
+            # what_can_i_do is special in both clarification stages
             # We will not predict, just match plain utterances with exact or fuzzy match
+            # Both stages also fall back to the plain utterance 'what can i do?'
+            # when nothing matches (below), so it must be a key in both.
             command_name_dict |= {
                 plain_utterance: 'IntentDetection/what_can_i_do'
                 for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
@@ -596,12 +601,12 @@ class CommandNamePrediction:
             # misroutes across 31 stored runs).
             #
             # None is already the signal that drives the parent-chain walk
-            # (`_commands/wildcard.py:98-106`), so returning it here carries the
+            # (`_commands/wildcard.py`), so returning it here carries the
             # call up to the context that does own the name, where the
             # deterministic matcher resolves it. Nothing below this line runs:
             # no fuzzy candidates, no embedding cache, no classifier. A name
-            # whose owner is not on this chain now reaches `you_misunderstood`
-            # instead of a lucky classifier guess -- loud instead of silent.
+            # whose owner is not on this chain now reaches the routing hint
+            # below instead of a lucky classifier guess -- loud instead of silent.
             #
             # INTENT_DETECTION only: the clarification stages match against a
             # constrained suggestion set, where "not in this context's set" is

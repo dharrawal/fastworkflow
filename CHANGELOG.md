@@ -38,7 +38,10 @@ labels themselves.
 
 - **Known-name guard**: a known command name is never answered by a context
   that does not own it; the declining prediction carries a hint naming where the
-  command lives.
+  command lives. When no context on the chain owns it, that hint is the whole
+  response and the next message goes through ordinary intent detection, rather
+  than `you_misunderstood` and its clarification stage, which only matches the
+  current context's commands and so could not route the command the hint names.
 - **Threshold separation**: `write_ambiguity_thresholds` is the single writer
   for both ambiguity files and establishes a non-empty ambiguity band where the
   artifacts are produced, with `TIER_AMBIGUITY_MIN_SEPARATION` and
@@ -68,6 +71,10 @@ labels themselves.
   name is followed by a space.
 - A failure while sealing or releasing the previous turn's evidence no longer
   aborts the turn that is starting.
+- A reply to `you_misunderstood` that matches none of the current context's
+  commands now lists what can be done there. It used to raise
+  `KeyError: 'what can i do?'`, because the fallback it substitutes was
+  registered only for the ambiguity clarification stage.
 
 ### Removed
 

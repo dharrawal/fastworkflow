@@ -14,7 +14,7 @@ The guard: after the context-scoped exact-prefix miss and BEFORE fuzzy, cache or
 classifier, the first token is tested against the workflow's FULL inventory. A
 real command name that this context does not own returns `command_name=None` at
 once, which is already the signal that drives the parent-chain walk in
-`_commands/wildcard.py:98-106`.
+`_commands/wildcard.py`.
 
 Two levels, both offline and deterministic:
 
@@ -38,11 +38,15 @@ import pytest
 
 import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
+from fastworkflow._workflows.command_metadata_extraction._commands import (
+    wildcard as wildcard_module,
+)
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT,
     CommandNamePrediction,
     foreign_context_hint,
 )
+from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 INVENTORY_FIXTURE = (
     Path(__file__).parent / "fixtures" / "multi_context_routing_inventory.json"
@@ -299,7 +303,7 @@ def test_the_walk_lands_the_bead_case_on_the_root_context(
 ):
     """`Permission -> DirectoryExplorer -> *`, the chain the misrouted call walked.
 
-    This is the loop `_commands/wildcard.py:98-106` runs: keep asking the parent
+    This is the loop `_commands/wildcard.py` runs: keep asking the parent
     while the name is None. Without the foreign-context guard it stopped at the
     first context whose classifier produced a label -- `Directory/find_permission`,
     at 0.284.
@@ -689,7 +693,7 @@ class TestTheDeclaredEnteringCommandIsRead:
 
 
 # ---------------------------------------------------------------------------
-# The hint reaches the caller: wildcard's you_misunderstood path
+# The hint reaches the caller: wildcard's end-of-walk path
 # ---------------------------------------------------------------------------
 
 class TestTheHintReachesTheFailureMessage:
@@ -697,9 +701,10 @@ class TestTheHintReachesTheFailureMessage:
 
     The CME wildcard command is driven directly with doubles for the two
     collaborators it calls out to - the predictor and the executor - because
-    what is under test is the three lines between them: keep the first hint,
-    carry it through the walk, and append it to the message the caller actually
-    reads.
+    what is under test is the lines between them: keep the first hint, carry it
+    through the walk, and make it the message the caller actually reads.
+    `TestTheHintPathOnARealWorkflow` below drives the same path with nothing
+    replaced but the classifier.
     """
 
     class _Workflow:
@@ -715,6 +720,11 @@ class TestTheHintReachesTheFailureMessage:
         @context.setter
         def context(self, value):
             self._context = value
+
+        def end_command_processing(self):
+            self._context.pop("command", None)
+            self._context["NLU_Pipeline_Stage"] = (
+                fastworkflow.NLUPipelineStage.INTENT_DETECTION)
 
     class _AppWorkflow:
         """Context objects are their own names; the chain is a list."""
@@ -758,45 +768,185 @@ class TestTheHintReachesTheFailureMessage:
         )
 
         contexts_seen: list[str] = []
+        actions_run: list[str] = []
         monkeypatch.setattr(wildcard_command, "CommandNamePrediction",
                             self._predictor_declining(hint, contexts_seen))
         monkeypatch.setattr(
             fastworkflow.Workflow, "get_command_context_name",
             staticmethod(lambda context_object: context_object))
-        monkeypatch.setattr(
-            wildcard_command.CommandExecutor, "perform_action",
-            staticmethod(lambda workflow, action: fastworkflow.CommandOutput(
+
+        def perform_action(workflow, action):
+            actions_run.append(action.command_name)
+            return fastworkflow.CommandOutput(
                 command_response=fastworkflow.CommandResponse(
                     response="I couldn't determine which available command "
                              "matches your request.",
-                    success=False))))
+                    success=False))
+
+        monkeypatch.setattr(
+            wildcard_command.CommandExecutor, "perform_action",
+            staticmethod(perform_action))
 
         app_workflow = self._AppWorkflow(["Identity", "DirectoryExplorer", "*"])
+        cme_workflow = self._Workflow(app_workflow)
         output = wildcard_command.ResponseGenerator()(
-            self._Workflow(app_workflow), "list_permissions")
-        return output, contexts_seen
+            cme_workflow, "list_permissions")
+        return output, contexts_seen, actions_run, cme_workflow
 
     def test_the_message_names_the_owner_and_how_to_get_there(
         self, monkeypatch, setup_test_environment
     ):
         hint = foreign_context_hint(
             "list_permissions", ["Account"], ["open_account_by_uid <account_uid>"])
-        output, contexts_seen = self._run(monkeypatch, hint)
+        output, contexts_seen, actions_run, cme_workflow = self._run(
+            monkeypatch, hint)
 
         response = output.command_response.response
-        assert "I couldn't determine which available command" in response
+        assert response == hint
         assert "Account context" in response
         assert "open_account_by_uid <account_uid>" in response
+        assert output.success is False
+        assert output.command_handled is True
         # The whole chain was asked before the message was composed.
         assert contexts_seen == ["Identity", "DirectoryExplorer", "*"]
+        # Not a misunderstanding: no you_misunderstood, and no clarification
+        # stage waiting to swallow the entering command the hint names.
+        assert actions_run == []
+        assert cme_workflow.context["NLU_Pipeline_Stage"] == (
+            fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+        assert "command" not in cme_workflow.context
 
     def test_a_walk_with_no_hint_is_left_exactly_as_it_was(
         self, monkeypatch, setup_test_environment
     ):
         """Free text that no context could route still gets the plain message:
         the hint is for a name the workflow owns, and nothing else."""
-        output, _ = self._run(monkeypatch, None)
+        output, _, actions_run, cme_workflow = self._run(monkeypatch, None)
         assert output.command_response.response == (
             "I couldn't determine which available command matches your request.")
+        assert actions_run == ["ErrorCorrection/you_misunderstood"]
+        assert cme_workflow.context["NLU_Pipeline_Stage"] == (
+            fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION)
+
+
+# ---------------------------------------------------------------------------
+# The reply to you_misunderstood: nothing matched is not a KeyError
+# ---------------------------------------------------------------------------
+
+MISUNDERSTANDING = fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+
+
+@pytest.mark.parametrize("utterance", [
+    "open_account_by_uid <account_uid>3f2a</account_uid>",
+    "list_permissions",
+    "gibberish that matches nothing",
+])
+def test_an_unmatched_clarification_reply_falls_back_to_what_can_i_do(
+    ido_predictor, monkeypatch, setup_test_environment, utterance
+):
+    """Both clarification stages substitute 'what can i do?' when no matcher
+    claims the reply. Only the ambiguity stage used to register that key, so in
+    the misunderstanding stage the substitution raised KeyError for any reply
+    that was not one of this context's own commands -- including a command the
+    workflow owns elsewhere."""
+    monkeypatch.setattr(
+        intent_detection, "CommandRouter", _refusing_router([]))
+    nlu_trace: dict = {}
+    result = ido_predictor._predict_impl(
+        "Identity", utterance, MISUNDERSTANDING, nlu_trace)
+
+    assert result.command_name == "IntentDetection/what_can_i_do"
+    assert result.is_cme_command is True
+    assert nlu_trace["matcher_layer"] == "clarification_default"
+
+
+# ---------------------------------------------------------------------------
+# The end of the walk on a real workflow, then the message after it
+# ---------------------------------------------------------------------------
+
+class TestTheHintPathOnARealWorkflow:
+    """The real CME wildcard command, executor and `you_misunderstood`, over a
+    copy of `tests/todo_list_workflow` whose TodoList declares its entering
+    command. Only the classifier is replaced; no LLM is called and no trained
+    model is read.
+
+    From TodoListManager the chain is `TodoListManager -> *`, and
+    `get_properties` is owned by TodoItem and TodoList, both off it.
+    """
+
+    @pytest.fixture
+    def workflows(self, tmp_path):
+        workflow_path = tmp_path / "todo_list_workflow"
+        shutil.copytree(
+            os.path.join(os.path.dirname(__file__), "todo_list_workflow"),
+            workflow_path,
+            ignore=shutil.ignore_patterns(
+                "___command_info", "___workflow_contexts", "___convo_info",
+                "__pycache__",
+            ),
+        )
+        _declare_enter_command(workflow_path, "TodoList",
+                               "get_todo_list <todo_list_id>")
+        app_workflow = fastworkflow.Workflow.create(
+            workflow_folderpath=str(workflow_path),
+            workflow_id_str=f"hint-path-{tmp_path.name}",
+        )
+        app_workflow.current_command_context = TodoListManager()
+        cme_workflow = fastworkflow.Workflow.create(
+            workflow_folderpath=fastworkflow.get_internal_workflow_path(
+                "command_metadata_extraction"
+            ),
+            parent_workflow_id=app_workflow.id,
+            workflow_context={"app_workflow": app_workflow},
+        )
+        return app_workflow, cme_workflow
+
+    def test_a_foreign_name_gets_the_hint_and_the_entering_command_then_routes(
+        self, workflows, monkeypatch, setup_test_environment
+    ):
+        app_workflow, cme_workflow = workflows
+        monkeypatch.setattr(
+            intent_detection, "CommandRouter", _refusing_router([]))
+
+        output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties")
+
+        response = output.command_response.response
+        assert output.success is False
+        assert output.command_handled is True
+        assert "'get_properties' is a command of the TodoItem, TodoList contexts" in response
+        assert "'get_todo_list <todo_list_id>'" in response
+        assert "I couldn't determine" not in response
+
+        # Doing what the hint says: the next message is the entering command,
+        # and it is routed by ordinary intent detection in this context.
+        stage = cme_workflow.context["NLU_Pipeline_Stage"]
+        assert stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
+        assert "command" not in cme_workflow.context
+        following = CommandNamePrediction(cme_workflow).predict(
+            app_workflow.current_command_context_name, "get_todo_list 1", stage)
+        assert following.command_name == "TodoListManager/get_todo_list"
+
+    def test_free_text_still_ends_at_you_misunderstood_and_a_stray_reply_is_answered(
+        self, workflows, monkeypatch, setup_test_environment
+    ):
+        """No known name, so no hint: every context's classifier escalates, the
+        walk ends at the root, and the real `you_misunderstood` runs. A reply
+        that matches nothing in the clarification stage lists the options
+        instead of raising."""
+        app_workflow, cme_workflow = workflows
+        monkeypatch.setattr(
+            intent_detection, "CommandRouter", _labelling_router("wildcard"))
+
+        output = wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke")
+
+        assert output.command_response.response.startswith(
+            "I couldn't determine which available command matches your request.")
+        assert output.command_handled is True
+        stage = cme_workflow.context["NLU_Pipeline_Stage"]
+        assert stage == MISUNDERSTANDING
+
+        following = CommandNamePrediction(cme_workflow).predict(
+            app_workflow.current_command_context_name, "get_properties", stage)
+        assert following.command_name == "IntentDetection/what_can_i_do"
 
 
