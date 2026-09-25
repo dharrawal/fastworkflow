@@ -218,9 +218,9 @@ class RuntimeHandleArchive:
         # Opening the store is what creates the evidence tables, hardens the
         # file to 0600 in a 0700 directory, and removes the legacy sidecar
         # older builds kept beside it -- whether or not a trace sink ever
-        # opened this database. It refuses a database from an incompatible
-        # build, which ``open_handle_archive`` degrades into
-        # ``UnavailableHandleArchive``.
+        # opened this database. It replaces a database from an older build
+        # and refuses one from a newer build, which ``open_handle_archive``
+        # degrades into ``UnavailableHandleArchive``.
         observability_store.ObservabilityStore(self.db_path)
         #: The one connection event writes reuse. Events are frequent and
         #: small, and opening and closing a connection per event cost more than
@@ -560,7 +560,7 @@ class UnavailableHandleArchive:
     Opening or creating the observability database can fail for reasons that
     have nothing to do with the turn about to run: a read-only state root, a
     permission bit, a path that holds something which is not a database, or a
-    database written by an incompatible build. Evidence storage is an
+    database written by a newer build. Evidence storage is an
     availability optimisation, and the surrounding design already says what a
     storage failure costs -- ``archive_execute_observations`` and
     ``compact_trajectory`` record the refusal and leave the observation inline.

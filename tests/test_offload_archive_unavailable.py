@@ -4,7 +4,7 @@ Agent construction opens or creates the workflow's observability database --
 where the offload evidence lives -- before the fail-open compaction hook is
 installed, so every failure mode of that one file -- a read-only state root, a
 permission bit, a path holding something that is not a database, a database
-from an incompatible build -- used to raise out of ``build_tool_agent`` and
+from a newer build -- used to raise out of ``build_tool_agent`` and
 abort the turn before a single step ran. The persist-before-label recovery, which exists
 precisely so that a storage failure keeps the evidence inline, never got the
 chance to run.
@@ -15,6 +15,7 @@ temporary directory, a permission bit and scripted ReAct decisions.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -54,13 +55,26 @@ def break_with_garbage(path: str) -> None:
         handle.write(NOT_A_DATABASE)
 
 
-def break_with_an_older_schema(path: str) -> None:
+def plant_an_older_schema(path: str) -> None:
     """The archive path holds a populated store from an older build."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
     try:
         conn.execute("CREATE TABLE turns (turn_key TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO turns VALUES ('older-build-turn')")
         conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def break_with_a_newer_schema(path: str) -> None:
+    """The archive path holds a store from a newer build, which is refused."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE turns (turn_key TEXT PRIMARY KEY)")
+        conn.execute("PRAGMA user_version = 999")
         conn.commit()
     finally:
         conn.close()
@@ -126,12 +140,36 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         with self.assertRaises(Exception):
             RuntimeHandleArchive(self.archive_path)
 
-    def test_a_store_from_an_incompatible_build_degrades_too(self) -> None:
-        """The store refuses an older populated DB; the archive inherits that."""
-        break_with_an_older_schema(self.archive_path)
+    def test_a_store_from_a_newer_build_degrades_too(self) -> None:
+        """The store refuses a newer DB and never touches it; the archive degrades."""
+        break_with_a_newer_schema(self.archive_path)
+        with open(self.archive_path, "rb") as handle:
+            before = handle.read()
         store = open_handle_archive(self.archive_path)
         self.assertIsInstance(store, UnavailableHandleArchive)
         self.assertIn("IncompatibleObservabilityDB", store.reason)
+        with open(self.archive_path, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_a_store_from_an_older_build_is_replaced_and_offloading_works(self) -> None:
+        """An older populated DB is recreated in place, so the archive is usable."""
+        plant_an_older_schema(self.archive_path)
+        store = open_handle_archive(self.archive_path)
+        self.assertIsInstance(store, RuntimeHandleArchive)
+        scope = RuntimeHandleScope(
+            store_identity="s", channel_id="c", experiment_id="e",
+            task_id="t", attempt=0, turn_key="k",
+        )
+        text = "holder row\n" * 50
+        store.persist(scope, alias="O1", offload_order=1, command_name="c",
+                      step_index=0, text=text,
+                      text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+        self.assertEqual(store.get(scope, "O1")["text"], text)
+        with sqlite3.connect(self.archive_path) as conn:
+            self.assertEqual(
+                conn.execute("SELECT count(*) FROM turns").fetchone()[0], 0)
+        self.assertEqual(
+            [e for e in snapshot_events() if e["kind"] == "archive_unavailable"], [])
 
     # -- the degradation -----------------------------------------------------
 

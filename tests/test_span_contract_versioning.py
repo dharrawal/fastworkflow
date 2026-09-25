@@ -857,8 +857,10 @@ def test_stamping_costs_nothing_when_nothing_is_recording(
     initialized_fastworkflow, todo_workflow_path, tmp_path
 ):
     """The stamp lives in the emit funnel, which a turn with no sink never
-    reaches — so this is additive recording rather than work every turn pays for."""
-    context = _make_ctx(todo_workflow_path, tmp_path, sink=None)
+    reaches — so this is additive recording rather than work every turn pays for.
+    The no-op sink is passed explicitly: a context given no sink at all opens
+    its workflow's own observability sink."""
+    context = _make_ctx(todo_workflow_path, tmp_path, sink=tracing.NoOpTraceSink())
     try:
         turn = context.process_action_turn(_action())
         assert turn.success

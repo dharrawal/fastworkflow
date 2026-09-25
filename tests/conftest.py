@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
+from fastworkflow.observability import store as observability_store
 
 # Add the project root to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +54,10 @@ def isolate_state_root(tmp_path_factory):
             os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         else:
             os.environ["FASTWORKFLOW_STATE_ROOT"] = previous
+        # Execution contexts open their workflow's observability sink on their
+        # own, so a test that never asked for one may still hold a writer in
+        # this root. Close those before the root is removed.
+        observability_store.close_sinks_under(str(root))
         shutil.rmtree(root, ignore_errors=True)
 
 

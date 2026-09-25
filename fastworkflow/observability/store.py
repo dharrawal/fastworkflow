@@ -58,15 +58,18 @@ from fastworkflow.utils.logging import logger
 
 # v2 (fix-42b): experiments.benchmark_id / benchmark_version /
 # benchmark_digest_sha256 live in the CREATE TABLE literal
-# only. Stores created before them are refused on open, not migrated.
+# only. Stores created before them are never migrated.
 #
 # Fresh schema (fix-49m.3): the `_SCHEMA_STATEMENTS` literal is the ONLY
-# creator of every table and column. There is no ALTER/migration path; a store
-# whose user_version is older than this constant is refused on open.
+# creator of every table and column. There is no ALTER/migration path. A
+# populated store whose user_version is older than this constant is DELETED
+# and recreated empty when the writer opens it (the store has never shipped in
+# a release, so such a file can only be a developer's local DB); the read-only
+# store refuses it and never deletes anything.
 #
 # v3 (fix-qe2): experiment_attempts.runtime_snapshot_json -- the binding
 # server's credential-free runtime snapshot, stamped at claim time. Create-time
-# column only; a v2 store is refused on open like every older one.
+# column only; a v2 store is replaced on open like every older one.
 # v4 (fix-aw5): human feedback and its evidence anchors live in this DB.
 # v5 (fix-46l.2): feedback provenance distinguishes human, coding-agent, and
 # distillation-agent annotations.
@@ -827,7 +830,20 @@ def protect_offload_observation(text: str) -> str:
 
 
 class IncompatibleObservabilityDB(RuntimeError):
-    """The DB was written by a newer fastWorkflow; readers refuse it."""
+    """The DB cannot be opened by this build.
+
+    Raised for a DB written by a newer fastWorkflow, which every reader and
+    writer refuses; by the read-only store for an older one, which it never
+    alters; and by the writer for an older one it could not delete.
+    """
+
+
+class _OlderPopulatedStore(Exception):
+    """Internal: `_ensure_schema_once` met a populated DB from an older build."""
+
+    def __init__(self, version: int) -> None:
+        super().__init__(version)
+        self.version = version
 
 
 class ExperimentNotFound(KeyError):
@@ -1378,7 +1394,7 @@ def serialize_turn_result(
 _SCHEMA_STATEMENTS = [
     # This literal is the ONLY creator of every table and column (fresh
     # schema, fix-49m.3): there is no ALTER/migration block anywhere, and a
-    # store from an older build is refused by _ensure_schema rather than
+    # store from an older build is replaced by _ensure_schema rather than
     # upgraded. experiment_id/task_id/attempt are the experiment container's
     # labels (`[XR4]`); NULL means "not part of an experiment".
     """CREATE TABLE IF NOT EXISTS conversations (
@@ -1700,6 +1716,64 @@ class ObservabilityStore:
         return conn
 
     def _ensure_schema(self) -> None:
+        """Create or open the schema; replace a populated DB from an older build.
+
+        The store has never shipped in a release, so a populated DB whose
+        ``user_version`` is below ``SCHEMA_VERSION`` can only be a developer's
+        local DB from an earlier revision. There is no migration, and refusing
+        it only degrades everything that records into it, so it is deleted --
+        with its ``-wal`` and ``-shm`` -- and a fresh store is created in its
+        place. A DB from a NEWER build is refused and never touched. When the
+        old files cannot be deleted, the older DB is refused as before.
+        """
+        try:
+            self._ensure_schema_once()
+            return
+        except _OlderPopulatedStore as older:
+            found = older.version
+        if not self._delete_older_store(found):
+            raise IncompatibleObservabilityDB(
+                f"{self.db_path} has schema v{found}; this build requires "
+                f"v{SCHEMA_VERSION}, carries no migration, and could not delete "
+                "the older store to replace it. Move or delete the file and its "
+                "-wal/-shm files to start a new store, or open it read-only with "
+                f"a v{found} build."
+            )
+        logger.warning(
+            f"Replaced observability store {self.db_path}: it had schema "
+            f"v{found} from an older build and this build requires "
+            f"v{SCHEMA_VERSION}, with no migration; its records were deleted."
+        )
+        try:
+            self._ensure_schema_once()
+        except _OlderPopulatedStore as again:
+            raise IncompatibleObservabilityDB(
+                f"{self.db_path} still has schema v{again.version} after it was "
+                f"deleted for replacement; this build requires v{SCHEMA_VERSION}."
+            ) from None
+
+    def _delete_older_store(self, found: int) -> bool:
+        """Delete an older-build DB so it can be recreated; ``False`` if it cannot be.
+
+        The write-ahead log and shared-memory files go first and the main file
+        last: a fresh DB must never meet a stale ``-wal`` from the old one, so
+        if either companion cannot be removed the main file is left alone and
+        the caller refuses the store instead.
+        """
+        for path in (f"{self.db_path}-wal", f"{self.db_path}-shm", self.db_path):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                logger.warning(
+                    f"Could not delete {path} to replace an observability store "
+                    f"with schema v{found}: {error}"
+                )
+                return False
+        return True
+
+    def _ensure_schema_once(self) -> None:
         parent = os.path.dirname(self.db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -1718,9 +1792,9 @@ class ObservabilityStore:
             if fresh:
                 # auto_vacuum must be set at creation, before any table [R12].
                 conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
 
+            # The version is read before the journal mode is touched, so a DB
+            # this build will refuse or replace is not switched to WAL first.
             found = conn.execute("PRAGMA user_version").fetchone()[0]
             if found > SCHEMA_VERSION:
                 raise IncompatibleObservabilityDB(
@@ -1728,10 +1802,10 @@ class ObservabilityStore:
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
             if found < SCHEMA_VERSION:
-                # A populated store from an older build is refused, not
-                # migrated: every column exists only in the CREATE TABLE
-                # literal (fresh schema, fix-49m.3). A fresh file (no tables
-                # yet) proceeds.
+                # A populated store from an older build is not migrated:
+                # every column exists only in the CREATE TABLE literal (fresh
+                # schema, fix-49m.3). `_ensure_schema` replaces it, after this
+                # connection is closed. A fresh file (no tables yet) proceeds.
                 has_tables = (
                     conn.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
@@ -1739,17 +1813,9 @@ class ObservabilityStore:
                     is not None
                 )
                 if has_tables:
-                    raise IncompatibleObservabilityDB(
-                        f"{self.db_path} has schema v{found}; this build requires "
-                        f"v{SCHEMA_VERSION} and carries no migration (fresh "
-                        "observability schema, fix-49m.3; experiments."
-                        "benchmark_id, benchmark_version, benchmark_digest_sha256 "
-                        "and experiment_attempts."
-                        "runtime_snapshot_json, human_feedback.provenance and "
-                        "experiments.archived are create-time columns). Move or "
-                        "delete the file and its -wal/-shm sidecars to start a "
-                        f"new store, or open it read-only with a v{found} build."
-                    )
+                    raise _OlderPopulatedStore(found)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
             if found < SCHEMA_VERSION:
@@ -1847,8 +1913,9 @@ class ObservabilityStore:
         The `schema_features` row is the only source. There is no
         column-sniffing fallback any more, and re-adding one would be a bug:
         under the fresh-schema rule every DB that reaches this
-        method is at `SCHEMA_VERSION` — both `ObservabilityStore` and
-        `ReadOnlyObservabilityStore` refuse anything else up front — and such
+        method is at `SCHEMA_VERSION` — `ObservabilityStore` replaces an older
+        DB and refuses a newer one, `ReadOnlyObservabilityStore` refuses both —
+        and such
         a DB was created from the literal `_SCHEMA_STATEMENTS` with
         `_merge_schema_features` writing its markers in the same transaction. So the sniff could only ever re-derive what the row
         already says, and a store whose row is genuinely missing is one whose
@@ -5764,8 +5831,9 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
     layer). Never creates, migrates, or writes the file — the viewer must be
     able to open a post-mortem snapshot it does not own, and inspecting a DB
     must not mutate it. Construction raises when the file is absent/unopenable
-    (``sqlite3.OperationalError``) or written by a newer build
-    (``IncompatibleObservabilityDB``); callers degrade gracefully.
+    (``sqlite3.OperationalError``) or written by a different build, newer or
+    older (``IncompatibleObservabilityDB``); callers degrade gracefully. Unlike
+    the writer, it never replaces an older DB: it only refuses it.
     """
 
     def __init__(self, db_path: str) -> None:
@@ -5779,9 +5847,10 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
             if found < SCHEMA_VERSION:
-                # Same rule as the writable store (fresh schema, fix-49m.3):
-                # an older store is refused up front with the reason, instead
-                # of failing later on a column the reader assumes exists.
+                # No migration (fresh schema, fix-49m.3): an older store is
+                # refused up front with the reason, instead of failing later on
+                # a column the reader assumes exists. The writer replaces such
+                # a store; a reader must never delete what it inspects.
                 raise IncompatibleObservabilityDB(
                     f"{self.db_path} has schema v{found}; this build requires "
                     f"v{SCHEMA_VERSION} and carries no migration (fresh "
@@ -6701,6 +6770,28 @@ def close_all_sinks() -> None:
             sink.close()
         except Exception:
             pass
+
+
+def close_sinks_under(directory: str) -> int:
+    """Close this process's sinks whose DB lives under *directory*; return how many.
+
+    For a caller about to remove a state root it created -- a test's temporary
+    root, say -- so no writer thread is left writing into deleted files while
+    sinks for other roots stay open.
+    """
+    root = os.path.realpath(directory) + os.sep
+    with _sinks_lock:
+        doomed = [
+            path for path in _sinks
+            if os.path.realpath(path).startswith(root)
+        ]
+        sinks = [_sinks.pop(path) for path in doomed]
+    for sink in sinks:
+        try:
+            sink.close()
+        except Exception:
+            pass
+    return len(sinks)
 
 
 atexit.register(close_all_sinks)

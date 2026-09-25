@@ -20,6 +20,7 @@ import pytest
 import fastworkflow
 from fastworkflow import TurnStatus, metrics, tracing, workflow_agent
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -306,10 +307,24 @@ class TestAssistantPathEmission:
         assert len(trace_events) == 2  # AGENT_TO_WORKFLOW + WORKFLOW_TO_AGENT
         assert all(e.turn_key == turn_output.turn_key for e in trace_events)
 
-    def test_default_sink_is_no_op_and_turn_unaffected(
+    def test_default_sink_is_the_workflows_own_and_turn_unaffected(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
+        """A context given no sink records into its workflow's own DB."""
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        turn_output = ctx.process_turn("list_todos")
+        assert turn_output.success
+        assert isinstance(ctx.trace_sink, obs.SQLiteTraceSink)
+        assert ctx.trace_sink.store.db_path == fastworkflow.state_paths.observability_db(
+            todo_workflow_path
+        )
+
+    def test_an_explicit_no_op_sink_stays_no_op_and_turn_unaffected(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        ctx, _wf = _make_assistant_ctx(
+            todo_workflow_path, monkeypatch, sink=tracing.NoOpTraceSink()
+        )
         turn_output = ctx.process_turn("list_todos")
         assert turn_output.success
         assert isinstance(ctx.trace_sink, tracing.NoOpTraceSink)
@@ -985,7 +1000,10 @@ class TestDisabledObservabilityDspyCost:
         wf = fastworkflow.Workflow.create(
             todo_workflow_path, workflow_id_str=f"nosink-{uuid.uuid4().hex}"
         )
-        ctx = WorkflowExecutionContext(run_as_agent=False)  # NoOp sink
+        # Explicitly no-op: a context given no sink opens its workflow's own.
+        ctx = WorkflowExecutionContext(
+            run_as_agent=False, trace_sink=tracing.NoOpTraceSink()
+        )
         ctx.bind_app_workflow(wf)
         with dspy_logger.observe_dspy_host(ctx):
             assert dspy_logger._active_observability_host.get() is None

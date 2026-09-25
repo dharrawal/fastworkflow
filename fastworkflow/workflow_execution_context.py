@@ -36,6 +36,7 @@ import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, tracing
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
+from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
@@ -124,8 +125,12 @@ class WorkflowExecutionContext:
             generate_insights: If True, enable teacher/student distillation on each
                          agent turn (Topology A / CLI only).
             trace_sink: Observability sink for boundary spans and turn records
-                         (observability design §3.1). Defaults to a no-op sink;
-                         reached via this context, never the transport queues.
+                         (observability design §3.1), reached via this context,
+                         never the transport queues. When omitted, the context
+                         opens the app workflow's own sink when a workflow is
+                         bound (``bind_app_workflow``). A sink passed here --
+                         including an explicit ``tracing.NoOpTraceSink()``, the
+                         code-level way to record nothing -- is always kept.
         """
         self._session_key = session_key
         self._run_as_agent = run_as_agent
@@ -161,6 +166,13 @@ class WorkflowExecutionContext:
         # Observability (design §3.1): sink + identity + span bookkeeping.
         # The sink is a per-context attribute, not transport state [R28].
         self._trace_sink: tracing.TraceSink = trace_sink or tracing.NoOpTraceSink()
+        #: Whether the caller chose the sink (here or via ``set_trace_sink``).
+        #: A chosen sink is never replaced; only an automatic one follows the
+        #: bound app workflow. Tracked explicitly because a caller may choose
+        #: the no-op sink, which must stay chosen.
+        self._trace_sink_supplied: bool = trace_sink is not None
+        #: The workflow folder the automatic sink records into, when there is one.
+        self._auto_sink_folder: Optional[str] = None
         self._metrics_sink: metrics.MetricsSink = metrics.NoOpMetricsSink()
         self._channel_id: Optional[str] = None
         self._conversation_id: Optional[int] = None
@@ -238,8 +250,49 @@ class WorkflowExecutionContext:
         return self._trace_sink
 
     def set_trace_sink(self, sink: Optional[tracing.TraceSink]) -> None:
-        """Wire an observability sink (None restores the no-op default)."""
+        """Wire an observability sink chosen by the caller; it is never replaced.
+
+        ``None`` hands the choice back to the context: the sink becomes the
+        automatic one again, opened for the bound app workflow now or at the
+        next ``bind_app_workflow``. To record nothing, pass
+        ``tracing.NoOpTraceSink()``.
+        """
+        if sink is None:
+            self._trace_sink = tracing.NoOpTraceSink()
+            self._trace_sink_supplied = False
+            self._auto_sink_folder = None
+            if self._app_workflow is not None:
+                self._open_auto_sink(self._app_workflow)
+            return
+        self._trace_sink = sink
+        self._trace_sink_supplied = True
+        self._auto_sink_folder = None
+
+    def _open_auto_sink(self, workflow: fastworkflow.Workflow) -> None:
+        """Open the app workflow's observability sink for a context given none.
+
+        Recording is always on, so a context an embedder builds without a sink
+        records into the bound workflow's own DB, owner-only and pruned when
+        the sink opens, exactly as fastWorkflow's entry points do. Rebinding to
+        another workflow moves the automatic sink to that workflow's DB. The
+        internal command-metadata workflow is never a recording target.
+        ``get_observability_sink`` never raises: a store that cannot be opened
+        leaves the context on the no-op sink.
+        """
+        folder = str(getattr(workflow, "folderpath", "") or "")
+        if not folder:
+            return
+        resolved = os.path.realpath(folder)
+        internal_root = os.path.dirname(os.path.realpath(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+        ))
+        if resolved == internal_root or resolved.startswith(internal_root + os.sep):
+            return
+        if self._auto_sink_folder == resolved and tracing.get_sink(self) is not None:
+            return
+        sink = observability_store.get_observability_sink(folder)
         self._trace_sink = sink or tracing.NoOpTraceSink()
+        self._auto_sink_folder = resolved if sink is not None else None
 
     @property
     def metrics_sink(self) -> metrics.MetricsSink:
@@ -1191,9 +1244,17 @@ class WorkflowExecutionContext:
         return conversation_summary, conversation_traces
 
     def bind_app_workflow(self, workflow: fastworkflow.Workflow) -> None:
-        """Bind the app workflow for NLU (Path 1) and execution (Path 2)."""
+        """Bind the app workflow for NLU (Path 1) and execution (Path 2).
+
+        A context whose caller chose no sink opens the workflow's own sink here
+        (see ``_open_auto_sink``).
+        """
         self._app_workflow = workflow
         self._cme_workflow.context["app_workflow"] = workflow
+        # getattr: a context built through ``__new__`` without ``__init__`` has
+        # no flag, and is treated as having chosen its sink.
+        if not getattr(self, "_trace_sink_supplied", True):
+            self._open_auto_sink(workflow)
 
     def _on_app_context_change(self) -> None:
         """Context-change observer: refresh the ReAct agent's available_commands."""

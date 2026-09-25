@@ -83,8 +83,21 @@ labels themselves.
   file, 0700 directory) and pruned by `FW_OBS_RETENTION_DAYS` and
   `FW_OBS_DB_MAX_BYTES`. `get_observability_sink()` no longer takes
   `entry_point`, and returns `None` only when the store cannot be opened.
+- **An execution context opens its own sink.** A `WorkflowExecutionContext`
+  given no sink opens the bound app workflow's sink in `bind_app_workflow()`,
+  and follows a rebind to another workflow's database. A sink passed to the
+  constructor or to `set_trace_sink()` is never replaced, and an explicit
+  `tracing.NoOpTraceSink()` records nothing; `set_trace_sink(None)` returns the
+  context to its automatic sink.
 - The `search_memory` input bound has no tuning override; it is derived from the
   search model's context window only.
+- **An observability database from an older schema version is replaced, not
+  refused.** The store has not shipped in a release before, so such a file can
+  only be a local development database: opening it with the writer deletes it
+  (and its `-wal`/`-shm`) and creates a fresh store in place, with a warning
+  naming the path and both versions. A database from a newer build is still
+  refused and never touched, and the read-only viewer refuses an older one
+  without deleting it.
 
 ### Fixed
 
@@ -132,9 +145,9 @@ labels themselves.
   other turn's.
 - Recording can no longer be turned off. A program that embeds the library gets
   the same owner-only, pruned record as the entry points; to keep it elsewhere,
-  set `FASTWORKFLOW_STATE_ROOT`. A program that builds its own execution context
-  should open a sink with `get_observability_sink(workflow_path)` so the prune
-  that bounds the file runs.
+  set `FASTWORKFLOW_STATE_ROOT`. A `WorkflowExecutionContext` built without a
+  sink now records into its workflow's database on its own; pass
+  `trace_sink=tracing.NoOpTraceSink()` where a context must record nothing.
 - Readers of the old `FW_OFFLOAD_EVENTS` JSONL file should read
   `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
 - To correct the `search_memory` input bound, set `FW_MODEL_CONTEXT_TOKENS` or
@@ -144,8 +157,7 @@ labels themselves.
 
 Offloading and search ship with documented limits rather than silent ones: what
 a turn resumed in another process reads, which part of the evidence is stored
-unredacted, when pruning runs and what an embedding program must do for it to
-run, the worst-case agent work one turn can cost, and several places where a disclosure
+unredacted, when pruning runs, the worst-case agent work one turn can cost, and several places where a disclosure
 line can push a bounded input a few hundred bytes past the budget it reports.
 They are listed in
 [Retention, redaction and known limits](docs/observation_search.md#retention-redaction-and-known-limits);

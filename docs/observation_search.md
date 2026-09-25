@@ -546,11 +546,13 @@ own age horizon and size cap (`FW_OBS_RETENTION_DAYS`, `FW_OBS_DB_MAX_BYTES`),
 one whole turn at a time, and that prune is triggered when a trace sink opens
 the store. A long-lived process does not prune again while it runs.
 
-**A program that embeds the library should open a sink.** The agent's archive
-creates the database when the agent is constructed, whether or not a trace sink
-was ever opened. fastWorkflow's entry points always open one; a program that
-builds its own execution context should call `get_observability_sink(workflow_path)`
-and bind the result, or the prune that keeps the file bounded never runs.
+**A program that embeds the library gets the same record.** A
+`WorkflowExecutionContext` built without a sink opens the bound app workflow's
+own sink when `bind_app_workflow()` runs — the same sink, and so the same
+prune, fastWorkflow's entry points open — and moves it to the new workflow's
+database when it is rebound to another workflow. A sink the caller passes, to
+the constructor or to `set_trace_sink()`, is always kept; passing
+`tracing.NoOpTraceSink()` is the code-level way to record nothing.
 
 **Worst-case agent work in one turn.** A turn runs at most three segments of 25
 decisions each, plus the two continuation-planner calls that open the second and
