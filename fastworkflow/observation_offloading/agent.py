@@ -95,7 +95,7 @@ def open_handle_archive(
 ) -> Any:
     """The turn archive, or an inert stand-in and one event saying why.
 
-    Opening or creating the sidecar is the FIRST thing agent construction does
+    Opening or creating the observability database is the FIRST thing agent construction does
     that touches the disk, and it used to be the only one allowed to fail the
     turn: a read-only state root, a permission bit or a file that is not a
     database raised out of ``RuntimeHandleArchive`` and no agent was built at
@@ -185,12 +185,12 @@ def build_tool_agent(
     # it carries is the turn actually running. This one is only the fallback
     # for a step that fires before the first forward() bound a scope.
     scope = _scope_for_session(chat_session)
-    # Beside the workflow's own observability database, so the evidence a turn
-    # can be replayed from lives where the turn's record lives.
+    # In the workflow's own observability database, so the evidence a turn
+    # can be replayed from lives, and is erased, where the turn's record is.
     getter = getattr(chat_session, "get_active_workflow", None)
     active_workflow = getter() if callable(getter) else None
     workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
-    archive_path = state_paths.observability_db(workflow_path) + ".offload-handles.sqlite3"
+    archive_path = state_paths.observability_db(workflow_path)
     # An archive that cannot be opened degrades; it does not stop the agent
     # being built (ido-t5x). ``build_compacting_step`` catches compaction
     # failures, and this is the one storage failure that used to happen too

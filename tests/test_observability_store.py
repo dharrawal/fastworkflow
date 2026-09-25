@@ -835,27 +835,73 @@ class TestMaintenance:
 
 
 # ----------------------------------------------------------------------
-# Factory / FW_OBSERVABILITY gating [R4]
+# Factory: recording is always on [R4]
 # ----------------------------------------------------------------------
 
 
 class TestFactory:
-    def test_gating(self, tmp_path, monkeypatch):
+    def test_the_retired_switch_is_inert_and_every_caller_gets_a_sink(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
         workflow_path = str(tmp_path / "wf")
         os.makedirs(workflow_path, exist_ok=True)
 
         monkeypatch.setenv("FW_OBSERVABILITY", "0")
-        assert obs.get_observability_sink(workflow_path) is None
-
-        monkeypatch.delenv("FW_OBSERVABILITY", raising=False)
-        # Entry points default ON; embedders default OFF
-        assert obs.get_observability_sink(workflow_path, entry_point=False) is None
         sink = obs.get_observability_sink(workflow_path)
         try:
             assert sink is not None
-            # Cached: same sink per DB path
+            # Cached: same sink per DB path, whatever the retired switch says.
+            monkeypatch.setenv("FW_OBSERVABILITY", "off")
             assert obs.get_observability_sink(workflow_path) is sink
+            # The switch and the entry-point distinction are gone.
+            assert not hasattr(obs, "observability_enabled")
+            with pytest.raises(TypeError):
+                obs.get_observability_sink(workflow_path, entry_point=False)
+            assert "FW_OBSERVABILITY" not in obs.observability_config()
+        finally:
+            if sink is not None:
+                sink.close()
+
+    def test_an_embedder_with_the_switch_off_still_records_privately(
+        self, tmp_path, monkeypatch
+    ):
+        """A library caller, not an entry point: the sink and its DB exist anyway.
+
+        No fastWorkflow CLI or server is involved -- the embedder opens the
+        sink itself, binds it to its own execution context, and records a
+        turn. The DB is owner-only in an owner-only directory.
+        """
+        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
+        monkeypatch.setenv("FW_OBSERVABILITY", "0")
+        workflow_path = str(tmp_path / "embedded_wf")
+        os.makedirs(workflow_path, exist_ok=True)
+
+        sink = obs.get_observability_sink(workflow_path)
+        try:
+            assert sink is not None
+            ctx = WorkflowExecutionContext(run_as_agent=False)
+            ctx.set_trace_sink(sink)
+            assert tracing.get_sink(ctx) is sink
+            turn_output = fastworkflow.TurnOutput(
+                turn_key=fastworkflow.mint_turn_key(),
+                status=TurnStatus.COMPLETED,
+                answer="done",
+                command_outputs=[],
+            )
+            sink.emit_turn_record(fastworkflow.TurnResult(
+                turn_output=turn_output, channel_id="embedded-channel",
+                user_message="embedded",
+            ))
+            assert sink.flush()
+
+            db = fastworkflow.state_paths.observability_db(workflow_path)
+            assert stat.S_IMODE(os.stat(db).st_mode) == 0o600
+            assert stat.S_IMODE(os.stat(os.path.dirname(db)).st_mode) == 0o700
+            turns = _rows(db, "SELECT turn_key, channel_id FROM turns")
+            assert [(row["turn_key"], row["channel_id"]) for row in turns] == [
+                (turn_output.turn_key, "embedded-channel")
+            ]
         finally:
             if sink is not None:
                 sink.close()

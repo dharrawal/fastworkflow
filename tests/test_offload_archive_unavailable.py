@@ -1,10 +1,11 @@
 """An archive that cannot be OPENED must not fail the turn.
 
-Agent construction opens or creates the offload sidecar before the fail-open
-compaction hook is installed, so every failure mode of that one file --
-a read-only state root, a permission bit, a path holding something that is not
-a database -- used to raise out of ``build_tool_agent`` and abort the turn
-before a single step ran. The persist-before-label recovery, which exists
+Agent construction opens or creates the workflow's observability database --
+where the offload evidence lives -- before the fail-open compaction hook is
+installed, so every failure mode of that one file -- a read-only state root, a
+permission bit, a path holding something that is not a database, a database
+from an incompatible build -- used to raise out of ``build_tool_agent`` and
+abort the turn before a single step ran. The persist-before-label recovery, which exists
 precisely so that a storage failure keeps the evidence inline, never got the
 chance to run.
 
@@ -15,6 +16,7 @@ temporary directory, a permission bit and scripted ReAct decisions.
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -25,7 +27,6 @@ import dspy
 
 import fastworkflow
 from fastworkflow import state_paths, tracing
-from fastworkflow.observation_offloading import erasure
 from fastworkflow.observation_offloading.agent import (
     build_tool_agent,
     open_handle_archive,
@@ -51,6 +52,18 @@ def break_with_garbage(path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as handle:
         handle.write(NOT_A_DATABASE)
+
+
+def break_with_an_older_schema(path: str) -> None:
+    """The archive path holds a populated store from an older build."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE turns (turn_key TEXT PRIMARY KEY)")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def break_with_permissions(path: str) -> None:
@@ -80,9 +93,7 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         self.addCleanup(self.cleanup)
         self.previous_root = os.environ.get("FASTWORKFLOW_STATE_ROOT")
         os.environ["FASTWORKFLOW_STATE_ROOT"] = self.temp.name
-        self.archive_path = (
-            state_paths.observability_db("") + ".offload-handles.sqlite3"
-        )
+        self.archive_path = state_paths.observability_db("")
         os.makedirs(os.path.dirname(self.archive_path), exist_ok=True)
 
     def cleanup(self) -> None:
@@ -114,6 +125,13 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         break_with_garbage(self.archive_path)
         with self.assertRaises(Exception):
             RuntimeHandleArchive(self.archive_path)
+
+    def test_a_store_from_an_incompatible_build_degrades_too(self) -> None:
+        """The store refuses an older populated DB; the archive inherits that."""
+        break_with_an_older_schema(self.archive_path)
+        store = open_handle_archive(self.archive_path)
+        self.assertIsInstance(store, UnavailableHandleArchive)
+        self.assertIn("IncompatibleObservabilityDB", store.reason)
 
     # -- the degradation -----------------------------------------------------
 
@@ -212,14 +230,21 @@ class ArchiveInitialisationFailure(unittest.TestCase):
             os.path.abspath(self.archive_path),
         )
 
-    def test_erasure_reports_empty_for_the_sidecar_a_degraded_run_never_wrote(
+    def test_a_degraded_run_writes_no_second_evidence_file(
         self,
     ) -> None:
-        """The erasure module owns deletion and must not create what is absent."""
-        absent = os.path.join(self.temp.name, "absent.sqlite3")
-        self.assertEqual(erasure.forget_all_channels(absent), {})
-        self.assertEqual(erasure.forget_channel(absent, "chan"), {})
-        self.assertFalse(os.path.exists(absent))
+        """Degrading neither repairs the broken file nor writes evidence beside it."""
+        break_with_garbage(self.archive_path)
+        agent = build_tool_agent(
+            SimpleNamespace(), Signature, [noop_tool], max_iters=3
+        )
+        self.assertIsInstance(agent.observation_archive, UnavailableHandleArchive)
+        with open(self.archive_path, "rb") as handle:
+            self.assertEqual(handle.read(), NOT_A_DATABASE)
+        self.assertEqual(
+            sorted(os.listdir(os.path.dirname(self.archive_path))),
+            [os.path.basename(self.archive_path)],
+        )
 
 
 class InlineOnlyTurn(unittest.TestCase):
@@ -234,10 +259,7 @@ class InlineOnlyTurn(unittest.TestCase):
         self.state_root = os.path.join(self.temp.name, "state")
         os.environ["FASTWORKFLOW_STATE_ROOT"] = self.state_root
         fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": self.state_root})
-        self.archive_path = (
-            state_paths.observability_db(self.workflow_path)
-            + ".offload-handles.sqlite3"
-        )
+        self.archive_path = state_paths.observability_db(self.workflow_path)
         break_with_garbage(self.archive_path)
         self.open_sessions: list[tuple] = []
 
@@ -293,7 +315,7 @@ class InlineOnlyTurn(unittest.TestCase):
         kinds = {e["kind"] for e in snapshot_events()}
         self.assertIn("archive_unavailable", kinds)
         self.assertIn("archive_refused", kinds)
-        # The sidecar was never replaced by a database this run could write.
+        # The file was never replaced by a database this run could write.
         with open(self.archive_path, "rb") as handle:
             self.assertEqual(handle.read(), NOT_A_DATABASE)
 

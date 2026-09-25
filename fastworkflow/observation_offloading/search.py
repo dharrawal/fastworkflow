@@ -21,6 +21,7 @@ from fastworkflow.observation_offloading.state import (
     next_search_answer_sequence,
     observation_inline,
     record_event,
+    register_scope,
     stored_handles,
 )
 
@@ -58,15 +59,16 @@ SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
 #: reproduce the declared page geometry EXACTLY at the reference window:
 #: 131,072 tokens x 4 bytes/token x 3/128 = 12,288 = ``DEFAULT_PAGE_BYTES`` x
 #: ``SEARCH_MEMORY_MAX_PAGES``. Its floor is one page: below that a search could
-#: not read a single page of evidence, which is not a search.
+#: not read a single page of evidence, which is not a search. It has no tuning
+#: override: the search model's window is the only input, and
+#: ``FW_MODEL_CONTEXT_TOKENS`` is how a deployment corrects that window.
 SEARCH_OBSERVATION = context_budget.BudgetSpec(
     name="search_observation_max_bytes",
     fraction=Fraction(3, 128),
-    override_env="FW_SEARCH_OBSERVATION_MAX_BYTES",
+    override_env=None,
     floor=DEFAULT_PAGE_BYTES,
     what="one archived observation handed to the observation-search model",
 )
-SEARCH_OBSERVATION_MAX_BYTES_ENV = SEARCH_OBSERVATION.override_env
 REFERENCE_SEARCH_OBSERVATION_MAX_BYTES = SEARCH_OBSERVATION.reference_bytes  # 12,288
 
 #: The marker that types a search observation whose EVIDENCE was cut, and the
@@ -113,10 +115,9 @@ def search_window_tokens() -> tuple[int, str]:
 def search_observation_max_bytes() -> int:
     """UTF-8 bytes of one archived observation a single search call may read.
 
-    ``FW_SEARCH_OBSERVATION_MAX_BYTES`` is a tuning override on the same terms
-    as every other budget: an override below the floor is refused with a
-    warning and the derived value stands. The only thing special about this
-    budget is the window it is cut from, so that is the only thing stated here.
+    Derived like every other budget, with no tuning override. The only thing
+    special about this budget is the window it is cut from, so that is the
+    only thing stated here.
     """
     return context_budget.budget_bytes(SEARCH_OBSERVATION, search_window_tokens()[0])
 
@@ -418,7 +419,7 @@ def over_window_observation(
     that will fail identically. This is a typed outcome -- ``OVER_WINDOW_MARK``
     -- which says what was sent, that the same call cannot succeed, and the
     moves that can: a different observation for the agent, a bigger search model
-    or a lower bound for the operator.
+    or a corrected window for the operator.
     """
     scale = (f"the first {shown_bytes:,} of {total_bytes:,} UTF-8 bytes"
              if shown_bytes < total_bytes else f"all {total_bytes:,} UTF-8 bytes")
@@ -429,9 +430,9 @@ def over_window_observation(
         f"{scale}, the {max_bytes:,}-byte bound derived from that model's own context "
         f"window, and the model still refused the prompt as too long. No evidence "
         f"answer was produced. Repeating this call sends the same bytes and fails the "
-        f"same way, so do not retry it unchanged.{narrower} Operator: lower "
-        f"{SEARCH_OBSERVATION.override_env} or point {SEARCH_MODEL_ENV} at a model "
-        f"with a larger context window.]"
+        f"same way, so do not retry it unchanged.{narrower} Operator: set "
+        f"{context_budget.MODEL_CONTEXT_TOKENS_ENV} to the search model's real context "
+        f"window or point {SEARCH_MODEL_ENV} at a model with a larger one.]"
     )
 
 
@@ -628,6 +629,7 @@ def search_memory(
         raise ValueError("question must not be empty")
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
+    register_scope(selected_scope, store)
     # Every execute observation is archived when its step completes, so a
     # printed alias resolves whether its text is still inline or already a
     # label. ``still_inline`` separates the two for measurement: True means the

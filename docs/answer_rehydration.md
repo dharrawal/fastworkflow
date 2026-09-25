@@ -94,8 +94,10 @@ now takes effect.
 
 ## Events
 
-Recorded through `observation_offloading.state.record_event`, so they land in the
-same `FW_OFFLOAD_EVENTS` file every other measure does.
+Recorded through `observation_offloading.state.record_event`, so they land where
+every other offloading measure does: the in-process ring (`snapshot_events()`)
+and the `offload_events` table of the workflow's observability database, read
+with `ObservabilityStore.offload_events(kind="rehydration_finished", ...)`.
 
 | Event | Carries |
 |---|---|

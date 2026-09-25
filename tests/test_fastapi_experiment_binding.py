@@ -68,7 +68,6 @@ def binding_harness(tmp_path, monkeypatch):
 
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    monkeypatch.setenv("FW_OBSERVABILITY", "1")
     sys.argv = ["pytest", "--workflow_path", workflow_path]
     import fastworkflow.run_fastapi_mcp.__main__ as main
 

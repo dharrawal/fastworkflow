@@ -977,9 +977,9 @@ class TestDisabledObservabilityDspyCost:
     def test_observe_dspy_host_is_inert_without_a_sink(
         self, initialized_fastworkflow, todo_workflow_path
     ):
-        """FW_OBSERVABILITY=0 must cost ~nothing per LM call: with no live
-        sink the DSPy callback is never bound, so on_lm_start's per-call
-        prompt JSON projection never runs."""
+        """A host with no live sink must cost ~nothing per LM call: the DSPy
+        callback is never bound, so on_lm_start's per-call prompt JSON
+        projection never runs."""
         from fastworkflow.utils import dspy_logger
 
         wf = fastworkflow.Workflow.create(

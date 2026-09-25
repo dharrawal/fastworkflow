@@ -218,8 +218,7 @@ class SearchInputBound(unittest.TestCase):
         self.assertEqual(SEARCH_OBSERVATION.floor, DEFAULT_PAGE_BYTES)
 
     def test_the_bound_comes_from_the_search_models_own_window(self):
-        env = {'FW_MODEL_CONTEXT_TOKENS': '', 'FW_SEARCH_OBSERVATION_MAX_BYTES': '',
-               SEARCH_MODEL_ENV: 'vendor/wide-search-model'}
+        env = {'FW_MODEL_CONTEXT_TOKENS': '', SEARCH_MODEL_ENV: 'vendor/wide-search-model'}
         windows = {'vendor/wide-search-model': 4 * context_budget.REFERENCE_WINDOW_TOKENS}
         with patch.dict(os.environ, env), patch.dict('fastworkflow._env_vars', {}, clear=True), \
                 patch.object(context_budget, '_model_window_tokens', windows.get):
@@ -229,13 +228,20 @@ class SearchInputBound(unittest.TestCase):
             self.assertEqual(search_observation_max_bytes(),
                              4 * SEARCH_OBSERVATION.reference_bytes)
 
-    def test_the_tuning_override_behaves_like_every_other_budget(self):
+    def test_the_retired_tuning_override_is_inert(self):
+        # The bound has no override of its own: the search model's window is
+        # the only input, and FW_MODEL_CONTEXT_TOKENS is how it is corrected.
+        self.assertIsNone(SEARCH_OBSERVATION.override_env)
         base = {'FW_MODEL_CONTEXT_TOKENS': '', SEARCH_MODEL_ENV: ''}
-        for raw, expected in (('8192', 8192), ('10', 12_288), ('not-a-number', 12_288), ('', 12_288)):
+        for raw in ('8192', '10', 'not-a-number', ''):
             with self.subTest(raw=raw):
                 with patch.dict(os.environ, {**base, 'FW_SEARCH_OBSERVATION_MAX_BYTES': raw}), \
                         patch.dict('fastworkflow._env_vars', {}, clear=True):
-                    self.assertEqual(search_observation_max_bytes(), expected)
+                    self.assertEqual(search_observation_max_bytes(), 12_288)
+        with patch.dict(os.environ, {**base, 'FW_MODEL_CONTEXT_TOKENS': str(
+                    2 * context_budget.REFERENCE_WINDOW_TOKENS)}), \
+                patch.dict('fastworkflow._env_vars', {}, clear=True):
+            self.assertEqual(search_observation_max_bytes(), 2 * 12_288)
 
     def test_the_page_is_a_hard_byte_bound_and_a_prefix(self):
         # text_page ends just after the newline that can sit AT the budget;
@@ -336,7 +342,8 @@ class SearchInputBound(unittest.TestCase):
         self.assertNotIn('failed (ContextWindowExceededError)', result)
         self.assertIn('do not retry it unchanged', result)
         self.assertIn('Re-run show_holders', result)
-        self.assertIn('FW_SEARCH_OBSERVATION_MAX_BYTES', result)
+        self.assertIn('FW_MODEL_CONTEXT_TOKENS', result)
+        self.assertNotIn('FW_SEARCH_OBSERVATION_MAX_BYTES', result)
         self.assertIn(SEARCH_MODEL_ENV, result)
         self.assertIn(f'{search_observation_max_bytes():,}-byte bound', result)
         event = seen['event']

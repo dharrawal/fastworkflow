@@ -32,6 +32,7 @@ from fastworkflow.observation_offloading.state import (
     mark_archived,
     mark_offloaded,
     record_event,
+    register_scope,
     remember_handle,
 )
 
@@ -255,6 +256,7 @@ def archive_execute_observations(
     """
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
+    register_scope(selected_scope, store)
     if hot_handle_max_bytes is None:
         hot_handle_max_bytes = hot_handle_max_bytes_from_env()
     if executes is None:
@@ -306,14 +308,14 @@ def archive_execute_observations(
         # reads the same way whether ``search_memory`` is served from memory or
         # from SQLite after an eviction.
         #
-        # Since ido-6sc those are the SAME BYTES for the whole life of this
-        # turn, and that is the point rather than a coincidence: the archive
-        # stores the raw response and seals it only once the turn is over, so
-        # the hot copy, the row on disk and the observation still sitting in
-        # the agent's own prompt all agree while the agent can still read any
-        # of them. Reading ``stored`` rather than ``original`` is still the
-        # right call -- the archive is the authority on what it kept, and this
-        # line should not have to know when the seal happens.
+        # For the whole life of this turn in this process those are the SAME
+        # TEXT, and that is the point rather than a coincidence: the row on
+        # disk is redacted at the write, but the archive answers this process's
+        # reads of a live turn from its raw in-memory copy, so the hot copy and
+        # the observation still sitting in the agent's own prompt agree while
+        # the agent can still read either. Reading ``stored`` rather than
+        # ``original`` is still the right call -- the archive is the authority
+        # on what it serves, and this line should not have to know how.
         mark_archived(selected_scope, alias, text_sha256=digest, inline=True)
         remember_handle(
             selected_scope,
@@ -398,6 +400,7 @@ def compact_trajectory(
 
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
+    register_scope(selected_scope, store)
     if min_offload_saving_bytes is None:
         min_offload_saving_bytes = min_offload_saving_bytes_from_env()
     if packed_target_tokens is None and packed_target_bytes is None:
@@ -527,9 +530,9 @@ def compact_trajectory(
                 )
                 decisions.append(decision)
                 continue
-            # The hot cache holds what the archive kept, which for the whole
-            # life of this turn is what the command returned; see the note at
-            # the eager archiver above (ido-zlm, ido-6sc).
+            # The hot cache holds what the archive serves, which for the whole
+            # life of this turn in this process is what the command returned;
+            # see the note at the eager archiver above.
             remember_handle(
                 selected_scope,
                 {

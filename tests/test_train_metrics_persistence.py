@@ -25,10 +25,9 @@ from fastworkflow.train import metrics_persistence
 
 @pytest.fixture
 def state_root(tmp_path, monkeypatch):
-    """Real tmp state root; observability defaults ON for the train entry point."""
+    """Real tmp state root; observability recording is always on."""
     root = tmp_path / "state"
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(root))
-    monkeypatch.delenv("FW_OBSERVABILITY", raising=False)
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(root)})
     return root
 
@@ -105,11 +104,11 @@ def test_persist_is_idempotent_per_run_id(state_root, workflow_dir):
 
 
 # ---------------------------------------------------------------------------
-# (b) FW_OBSERVABILITY=0 -> no row, no error
+# (b) the retired FW_OBSERVABILITY=0 switch is inert: the row is written
 # ---------------------------------------------------------------------------
 
 
-def test_disabled_writes_nothing(state_root, workflow_dir, monkeypatch):
+def test_the_retired_switch_does_not_stop_the_row(state_root, workflow_dir, monkeypatch):
     monkeypatch.setenv("FW_OBSERVABILITY", "0")
     run_id = metrics_persistence.persist_train_run_metrics(
         workflow_dir,
@@ -117,9 +116,9 @@ def test_disabled_writes_nothing(state_root, workflow_dir, monkeypatch):
         completed_at=datetime.now(timezone.utc),
         metrics={"totals": {}},
     )
-    assert run_id is None
-    # The gate short-circuits before the store is even opened.
-    assert not os.path.exists(_db_path(workflow_dir))
+    assert run_id is not None
+    rows = ObservabilityStore(_db_path(workflow_dir)).list_train_runs()
+    assert [row["run_id"] for row in rows] == [run_id]
 
 
 # ---------------------------------------------------------------------------

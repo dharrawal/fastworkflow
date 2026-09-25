@@ -63,6 +63,28 @@ labels themselves.
 - **Intent `signal_version`** no longer carries a threshold-semantics segment.
   It now reads `intent-classifier/<artifact version>/...`, so a version string
   identifies the artifact behind a signal and nothing else.
+- **Offloading evidence lives in the observability store.** Archived
+  observations, their subjects and the offloading runtime's diagnostic events
+  are rows of `offload_evidence`, `offload_subjects` and `offload_events` in the
+  workflow's `observability.sqlite3` (feature markers `offload_evidence_v1`,
+  `offload_events_v1`; no schema-version bump). They are keyed by turn, and
+  `forget_channel`, Clear conversations and retention pruning delete them in
+  the same transactions that delete the turn record. Events are read back with
+  `ObservabilityStore.offload_events(...)`.
+- **Evidence is redacted when it is written.** With
+  `FW_OFFLOAD_EVIDENCE_REDACTION=on` (the default) responses and event text are
+  stored as the trace sink's credential scrub and capture policy leave them;
+  `off` stores them verbatim for development. The process running a turn keeps
+  the raw text of its redacted observations in memory until the turn is over,
+  so the agent's own reads stay exact; a turn resumed in another process reads
+  the redacted text.
+- **Observability recording is always on**, for fastWorkflow's entry points and
+  for programs that embed the library alike. The database is owner-only (0600
+  file, 0700 directory) and pruned by `FW_OBS_RETENTION_DAYS` and
+  `FW_OBS_DB_MAX_BYTES`. `get_observability_sink()` no longer takes
+  `entry_point`, and returns `None` only when the store cannot be opened.
+- The `search_memory` input bound has no tuning override; it is derived from the
+  search model's context window only.
 
 ### Fixed
 
@@ -78,8 +100,8 @@ labels themselves.
   known-name guard as belonging to another context. The guard compared a
   lowercased name against the context's command names as spelled, so it named
   the current context as the foreign owner.
-- A failure while sealing or releasing the previous turn's evidence no longer
-  aborts the turn that is starting.
+- A failure while releasing the previous turn's process-local evidence no
+  longer aborts the turn that is starting.
 - A reply to `you_misunderstood` that matches none of the current context's
   commands now lists what can be done there. It used to raise
   `KeyError: 'what can i do?'`, because the fallback it substitutes was
@@ -88,7 +110,10 @@ labels themselves.
 ### Removed
 
 `FW_OBSERVATION_OFFLOADING`, `FW_ANSWER_REHYDRATION`, `FW_OFFLOAD_HANDLE_ARCHIVE`,
-`FW_EAGER_ARTIFACT_VALIDATION`, `FW_MAX_FORCED_REPLANS`, `FW_OBS_MAX_ATTR_BYTES`.
+`FW_EAGER_ARTIFACT_VALIDATION`, `FW_MAX_FORCED_REPLANS`, `FW_OBS_MAX_ATTR_BYTES`,
+`FW_OBSERVABILITY`, `FW_OFFLOAD_EVENTS`, `FW_OFFLOAD_EVENT_BUFFER_MAX`,
+`FW_SEARCH_OBSERVATION_MAX_BYTES`, `FW_OFFLOAD_EVIDENCE_PRESERVATION`,
+`FW_OFFLOAD_SEAL_GRACE_SECONDS`. Setting any of them has no effect.
 
 ### Migration
 
@@ -98,13 +123,29 @@ labels themselves.
   search model's own context window.
 - `LITELLM_API_KEY_OBSERVATION_SEARCH` is the recommended credential for that
   role. When it is unset, search uses the credential configured for `LLM_AGENT`.
+- Offloading evidence now lives in `observability.sqlite3`. An evidence file
+  left by an earlier build beside it (`observability.sqlite3.offload-handles.sqlite3`,
+  its write-ahead-log files and any `.preserve` marker) is deleted the first time
+  the store opens; its contents are not migrated.
+- Experiment evidence is no longer preserved: Clear conversations, and
+  forgetting an experiment run's channel, erase its offloading evidence like any
+  other turn's.
+- Recording can no longer be turned off. A program that embeds the library gets
+  the same owner-only, pruned record as the entry points; to keep it elsewhere,
+  set `FASTWORKFLOW_STATE_ROOT`. A program that builds its own execution context
+  should open a sink with `get_observability_sink(workflow_path)` so the prune
+  that bounds the file runs.
+- Readers of the old `FW_OFFLOAD_EVENTS` JSONL file should read
+  `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
+- To correct the `search_memory` input bound, set `FW_MODEL_CONTEXT_TOKENS` or
+  point `LLM_OBSERVATION_SEARCH` at the intended model.
 
 ### Known limits
 
-Offloading and search ship with documented limits rather than silent ones: where
-the observation sidecar lives and when its rows are sealed, which pruning a
-program that embeds the library with observability off has to do itself, the
-worst-case agent work one turn can cost, and several places where a disclosure
+Offloading and search ship with documented limits rather than silent ones: what
+a turn resumed in another process reads, which part of the evidence is stored
+unredacted, when pruning runs and what an embedding program must do for it to
+run, the worst-case agent work one turn can cost, and several places where a disclosure
 line can push a bounded input a few hundred bytes past the budget it reports.
 They are listed in
 [Retention, redaction and known limits](docs/observation_search.md#retention-redaction-and-known-limits);

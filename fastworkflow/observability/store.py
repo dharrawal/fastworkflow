@@ -20,9 +20,10 @@ Structure:
   transactions; ``close()`` (sentinel + bounded join) is wired to atexit and
   entry-point exit paths. Writer errors/drops land in the
   ``diagnostics`` table and are surfaced by the chatbot UI.
-- ``get_observability_sink()`` — process-wide factory honoring
-  ``FW_OBSERVABILITY`` (fastWorkflow's own entry points default it ON;
-  library embedders opt in), one sink (= one writer thread) per DB path.
+- ``get_observability_sink()`` — process-wide factory, one sink (= one writer
+  thread) per DB path. Recording is always on, for fastWorkflow's own entry
+  points and library embedders alike: the DB is created owner-only (0600 in a
+  0700 directory) and pruned by the retention settings below.
 
 Durability class: everything is best-effort; a write failure
 never fails a turn. Multi-process writers are supported on local filesystems
@@ -52,7 +53,7 @@ from pydantic import BaseModel, ConfigDict
 
 import fastworkflow
 from fastworkflow.observability import capture_policy as capture_policy_module
-from fastworkflow import runtime_manifest, state_paths, tracing
+from fastworkflow import agent_runtime, runtime_manifest, state_paths, tracing
 from fastworkflow.utils.logging import logger
 
 # v2 (fix-42b): experiments.benchmark_id / benchmark_version /
@@ -268,6 +269,17 @@ FEATURE_EXPERIMENT_LIFECYCLE_V1 = "experiment_lifecycle_v1"
 FEATURE_EXPERIMENT_DECLARATIONS_V1 = "experiment_declarations_v1"
 FEATURE_EXPERIMENT_CLAIMS_V1 = "experiment_claims_v1"
 FEATURE_EXPERIMENT_SEALING_V1 = "experiment_sealing_v1"
+# The offload evidence tables (`offload_evidence`, `offload_subjects`): every
+# archived execute response lives in this DB, keyed by its turn, and is erased
+# and aged with that turn by the same transactions that erase the turn record.
+FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
+# The offload runtime's diagnostic events (`offload_events`): what was
+# archived, offloaded, searched and rehydrated, keyed by turn like the evidence
+# and erased and aged with it.
+FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
+# The evidence used to live in a second SQLite file beside this one, named
+# `<db>` plus this suffix. Nothing reads it any more; opening a store deletes it.
+LEGACY_OFFLOAD_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
 # Composer tabs and stored-comment labels. Existing comments already used these
 # headings (and "What did not work" as a synonym for went-wrong); reads parse
@@ -375,7 +387,6 @@ def pruning_suppressed() -> bool:
 # constant tracing.MAX_ATTR_BYTES. It is still reported below, because
 # provenance records the value in effect and that value is now fixed.
 _OBS_CONFIG_VARS: tuple[tuple[str, str], ...] = (
-    ("FW_OBSERVABILITY", "1"),
     (CAPTURE_PROFILE_VAR, _DEFAULT_CAPTURE_PROFILE),
     ("FW_OBS_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)),
     ("FW_OBS_DB_MAX_BYTES", str(_DEFAULT_DB_MAX_BYTES)),
@@ -477,11 +488,11 @@ POLICY_PATH_SPAN_CONTEXT = "span.context"
 POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
 POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
-# (ido-zlm) The sixth surface, and the only one that is not a column of this
-# database: the RAW command response the offload evidence sidecar persists.
-# `observation_offloading.archive` writes it to a file beside this one, so it
-# escaped both protections entirely -- a credential in a command response was
-# stored verbatim where the same text inside a span attribute was scrubbed.
+# (ido-zlm) The sixth surface: the RAW command response that
+# `observation_offloading.archive` persists into `offload_evidence`. It does not
+# ride the TurnResult pipeline, so without this path it escaped both
+# protections entirely -- a credential in a command response was stored
+# verbatim where the same text inside a span attribute was scrubbed.
 POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
 
 
@@ -733,11 +744,11 @@ POLICY_PATH_SPAN_CONTEXT = "span.context"
 POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
 POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
-# (ido-zlm) The sixth surface, and the only one that is not a column of this
-# database: the RAW command response the offload evidence sidecar persists.
-# `observation_offloading.archive` writes it to a file beside this one, so it
-# escaped both protections entirely -- a credential in a command response was
-# stored verbatim where the same text inside a span attribute was scrubbed.
+# (ido-zlm) The sixth surface: the RAW command response that
+# `observation_offloading.archive` persists into `offload_evidence`. It does not
+# ride the TurnResult pipeline, so without this path it escaped both
+# protections entirely -- a credential in a command response was stored
+# verbatim where the same text inside a span attribute was scrubbed.
 POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
 
 
@@ -781,14 +792,15 @@ def _protected_text(
 
 
 def protect_offload_observation(text: str) -> str:
-    """Scrub-then-police one raw command response bound for the evidence sidecar.
+    """Scrub-then-police one raw command response bound for `offload_evidence`.
 
-    The sidecar is not a table of this database, so it cannot ride the
-    TurnResult pipeline. What it can do -- and what this function exists for --
-    is call the SAME two protections in the SAME order as every other policed
-    surface, instead of growing a second redactor that drifts from this one.
+    The evidence row is written by `observation_offloading.archive`, not by the
+    TurnResult pipeline, so it cannot ride that pipeline's protections. What it
+    can do -- and what this function exists for -- is call the SAME two
+    protections in the SAME order as every other policed surface, instead of
+    growing a second redactor that drifts from this one.
     `observation_offloading.archive.persist` passes the response text through
-    here and stores whatever comes back.
+    here at write time and stores whatever comes back.
 
     `opaque-payload`, for the reason `failure_reason` carries that
     classification: a command response is whatever a workflow's command chose to
@@ -801,7 +813,7 @@ def protect_offload_observation(text: str) -> str:
     `POLICY_PATH_OFFLOAD_OBSERVATION` in a `CaptureFieldPolicy`, which is what
     these path constants exist for.
 
-    Returns TEXT, always, like `_protected_text`: the sidecar stores UTF-8 bytes,
+    Returns TEXT, always, like `_protected_text`: the evidence row stores UTF-8 bytes,
     and a withheld response is stored as its serialized badge -- size, digest and
     class -- never as silence.
     """
@@ -933,19 +945,6 @@ def _env_int(name: str, default: int) -> int:
         return int(_env(name, str(default)))
     except ValueError:
         return default
-
-
-def _offload_erasure() -> Any:
-    """The offload evidence sidecar's erasure/retention module.
-
-    Imported on use, not at module scope: the ``observation_offloading``
-    package pulls in the ReAct agent, which reaches back here, and erasure
-    runs only from ``prune``, ``forget_channel`` and ``clear_conversations``
-    -- never while this module is being imported.
-    """
-    from fastworkflow.observation_offloading import erasure
-
-    return erasure
 
 
 def _utcnow_iso() -> str:
@@ -1531,7 +1530,126 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_experiment_attempts_channel ON experiment_attempts(channel_id)",
     "CREATE INDEX IF NOT EXISTS idx_experiment_declarations_experiment ON experiment_attempt_declarations(experiment_id)",
     "CREATE INDEX IF NOT EXISTS idx_experiment_claims_channel ON experiment_attempt_claims(channel_id, state)",
+    # Offload evidence (FEATURE_OFFLOAD_EVIDENCE_V1). Additive: a store created
+    # before these existed gains them on its next open, and an older build
+    # ignores tables it does not know. One row per archived observation of one
+    # turn, holding the bytes as stored (redacted at write time unless
+    # `redaction` says `off`) and the capture record that produced them.
+    # `channel_id` is carried beside `turn_key`, as on `spans`/`artifacts`,
+    # because a turn with no bound turn key is keyed by its channel id and
+    # never appears in `turns`: erasure by channel reaches it through this
+    # column. `scope_id` is the in-process scope digest, stored only so an
+    # erasure can drop the process caches of that scope.
+    """CREATE TABLE IF NOT EXISTS offload_evidence (
+        turn_key TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        offload_order INTEGER NOT NULL,
+        command_name TEXT NOT NULL,
+        step_index INTEGER NOT NULL,
+        text_utf8 BLOB NOT NULL,
+        text_sha256 TEXT NOT NULL,
+        capture_policy_version TEXT NOT NULL,
+        capture_profile TEXT NOT NULL,
+        redaction TEXT NOT NULL,
+        redacted INTEGER NOT NULL,
+        raw_utf8_bytes INTEGER NOT NULL,
+        persisted_at TEXT NOT NULL,
+        PRIMARY KEY (turn_key, alias))""",
+    # The context an observation is evidence about. Its own table because a
+    # subject is recorded at DISPATCH, before the step completes and its
+    # evidence row is written, and survives on its own when that write is
+    # refused.
+    """CREATE TABLE IF NOT EXISTS offload_subjects (
+        turn_key TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        context_clause TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY (turn_key, alias))""",
+    "CREATE INDEX IF NOT EXISTS idx_offload_evidence_channel ON offload_evidence(channel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_offload_evidence_age ON offload_evidence(persisted_at)",
+    "CREATE INDEX IF NOT EXISTS idx_offload_subjects_channel ON offload_subjects(channel_id)",
+    # Offload events (FEATURE_OFFLOAD_EVENTS_V1), additive like the evidence
+    # tables above. One row per diagnostic event the offload runtime records:
+    # search questions, model reasoning and answers among them, so
+    # `event_json` is written through the same protection as evidence text
+    # (`redaction` says which mode produced it). `kind` is the event's own
+    # framework-chosen label, kept as a column so a reader can filter on it.
+    """CREATE TABLE IF NOT EXISTS offload_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_key TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        event_json TEXT NOT NULL,
+        redaction TEXT NOT NULL,
+        redacted INTEGER NOT NULL,
+        recorded_at TEXT NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS idx_offload_events_turn ON offload_events(turn_key, event_id)",
+    "CREATE INDEX IF NOT EXISTS idx_offload_events_channel ON offload_events(channel_id)",
 ]
+
+# The offload tables above, named once for the erasure and retention paths,
+# each with the column that dates its rows.
+_OFFLOAD_EVIDENCE_TABLES = ("offload_evidence", "offload_subjects", "offload_events")
+_OFFLOAD_TABLE_TIMESTAMPS = {
+    "offload_evidence": "persisted_at",
+    "offload_subjects": "recorded_at",
+    "offload_events": "recorded_at",
+}
+# How many turns one retention batch drops from the offload evidence tables.
+_OFFLOAD_PRUNE_BATCH_TURNS = 25
+
+
+def _remove_legacy_offload_sidecar(db_path: str) -> list[str]:
+    """Delete the evidence file older builds kept beside this DB, if any.
+
+    The old sidecar's evidence is deliberately NOT imported: it predates
+    turn-scoped erasure and write-time redaction, so it is removed together
+    with its WAL files and the ``.preserve`` sentinel that used to exempt it.
+    Best effort and never fatal -- a file that cannot be removed is logged
+    and the store opens anyway. Returns the paths that were removed.
+    """
+    sidecar = f"{db_path}{LEGACY_OFFLOAD_SIDECAR_SUFFIX}"
+    removed: list[str] = []
+    for path in (sidecar, f"{sidecar}-wal", f"{sidecar}-shm", f"{sidecar}.preserve"):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            logger.warning(
+                f"could not remove legacy offload evidence file {path}: {error}"
+            )
+            continue
+        removed.append(path)
+    if removed:
+        logger.info(
+            f"removed legacy offload evidence sidecar beside {db_path}: "
+            f"{', '.join(removed)}"
+        )
+    return removed
+
+
+def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """The offload evidence tables this DB actually has.
+
+    Every store this build opens with its schema ensured has both; a DB opened
+    without that step (``open_for_annotation``) may predate them, and erasure
+    must not fail on a table that was never there to hold anything.
+    """
+    marks = ",".join("?" for _ in _OFFLOAD_EVIDENCE_TABLES)
+    found = {
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT name FROM sqlite_master WHERE type='table' AND name IN ({marks})",
+            _OFFLOAD_EVIDENCE_TABLES,
+        ).fetchall()
+    }
+    return tuple(table for table in _OFFLOAD_EVIDENCE_TABLES if table in found)
 
 
 class ObservabilityStore:
@@ -1655,6 +1773,8 @@ class ObservabilityStore:
                     FEATURE_EXPERIMENT_DECLARATIONS_V1,
                     FEATURE_EXPERIMENT_CLAIMS_V1,
                     FEATURE_EXPERIMENT_SEALING_V1,
+                    FEATURE_OFFLOAD_EVIDENCE_V1,
+                    FEATURE_OFFLOAD_EVENTS_V1,
                 ],
             )
             conn.execute(
@@ -1690,11 +1810,12 @@ class ObservabilityStore:
             conn.close()
         try:
             os.chmod(self.db_path, 0o600)  # [R4]
-            wal = f"{self.db_path}-wal"
-            if os.path.exists(wal):
-                os.chmod(wal, 0o600)
+            for companion in (f"{self.db_path}-wal", f"{self.db_path}-shm"):
+                if os.path.exists(companion):
+                    os.chmod(companion, 0o600)
         except OSError:
             pass
+        _remove_legacy_offload_sidecar(self.db_path)
 
     @staticmethod
     def _merge_schema_features(
@@ -5248,7 +5369,8 @@ class ObservabilityStore:
     ) -> dict[str, int]:
         """Bounded prune of spans/artifacts beyond the retention horizon, plus
         oldest-first eviction while over the size cap. Conversations and turn
-        records are exempt (config §5). Runs incremental_vacuum.
+        records are exempt (config §5). Offload evidence is pruned by the same
+        horizon and cap, one whole turn at a time. Runs incremental_vacuum.
 
         ``include_conversationless_turns`` (operator opt-in) also
         deletes conversation-less turn records (e.g. per-invocation CLI
@@ -5265,12 +5387,23 @@ class ObservabilityStore:
         horizon_ns = int(
             (time.time() - retention_days * 86_400) * 1_000_000_000
         )
-        horizon_key = datetime.fromtimestamp(
+        horizon_moment = datetime.fromtimestamp(
             max(0.0, time.time() - retention_days * 86_400), tz=timezone.utc
-        ).strftime("%Y%m%dT%H%M%S")
-        deleted = {"spans": 0, "artifacts": 0}
+        )
+        horizon_key = horizon_moment.strftime("%Y%m%dT%H%M%S")
+        # Offload evidence is stamped in this format (see
+        # `observation_offloading.archive`), so the horizon compares as text.
+        horizon_evidence = horizon_moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+        deleted = {
+            "spans": 0, "artifacts": 0,
+            **{table: 0 for table in _OFFLOAD_EVIDENCE_TABLES},
+        }
+        erased_scopes: set[str] = set()
 
         with self._connect() as conn:
+            # As in `forget_channel`: retention deletes evidence text, and a
+            # deleted cell must not survive in a page that still holds others.
+            conn.execute("PRAGMA secure_delete=ON")
             for _ in range(_PRUNE_MAX_BATCHES):
                 conn.execute("BEGIN IMMEDIATE")
                 spans_cur = conn.execute(
@@ -5285,10 +5418,22 @@ class ObservabilityStore:
                     (horizon_key, _PRUNE_BATCH_ROWS),
                 )
                 deleted["artifacts"] += artifacts_cur.rowcount
+                # Offload evidence is aged by its TURN, like artifacts, so a
+                # turn's observations go whole. A turn's age is its earliest
+                # evidence write rather than its key, because a turn with no
+                # bound turn key is keyed by its channel id, which does not
+                # sort by time.
+                aged_turns = self._offload_turns_in_txn(
+                    conn, before=horizon_evidence, limit=_OFFLOAD_PRUNE_BATCH_TURNS
+                )
+                self._delete_offload_turns_in_txn(
+                    conn, aged_turns, deleted, erased_scopes
+                )
                 conn.commit()
                 if (
                     spans_cur.rowcount < _PRUNE_BATCH_ROWS
                     and artifacts_cur.rowcount < _PRUNE_BATCH_ROWS
+                    and len(aged_turns) < _OFFLOAD_PRUNE_BATCH_TURNS
                 ):
                     break
 
@@ -5309,12 +5454,18 @@ class ObservabilityStore:
                         conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
                         conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
+                    self._delete_offload_turns_in_txn(
+                        conn, keys, deleted, erased_scopes
+                    )
                     conn.commit()
                     deleted["conversationless_turns"] += len(keys)
                     if len(keys) < _PRUNE_BATCH_ROWS:
                         break
 
-            # Size-cap eviction, oldest spans first (turn keys sort by time).
+            # Size-cap eviction, oldest spans first (turn keys sort by time),
+            # and the oldest offload evidence turns beside them: the evidence
+            # shares this file, so it shares this cap. Each batch vacuums, so
+            # the next measurement sees the pages the deletes freed.
             for _ in range(_PRUNE_MAX_BATCHES):
                 if self.db_size_bytes() <= max_bytes:
                     break
@@ -5324,43 +5475,168 @@ class ObservabilityStore:
                     "(SELECT span_id FROM spans ORDER BY start_ns LIMIT ?)",
                     (_PRUNE_BATCH_ROWS,),
                 )
+                oldest_turns = self._offload_turns_in_txn(
+                    conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS
+                )
+                self._delete_offload_turns_in_txn(
+                    conn, oldest_turns, deleted, erased_scopes
+                )
                 conn.commit()
-                if cur.rowcount == 0:
+                if cur.rowcount == 0 and not oldest_turns:
                     break
+                # Fetched to completion: each step of this pragma frees one page.
+                conn.execute("PRAGMA incremental_vacuum").fetchall()
+                conn.commit()
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
+            # Fold the deletes back into the main file now, so the evidence
+            # they removed does not wait there for the next checkpoint.
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-        # (ido-gls) The same horizon and the same cap now reach the offload
-        # evidence sidecar beside this file. Retention that stopped at the
-        # main store meant every execute response this workflow ever produced
-        # outlived, for ever, the turn record that named it. Experiment runs
-        # are preserved: see ``observation_offloading.erasure`` for the mode
-        # and the signal it reads.
-        erasure = _offload_erasure()
-        offload = erasure.prune(
-            erasure.sidecar_path(self.db_path),
-            retention_days=retention_days,
-            max_bytes=max_bytes,
-        )
-        for key, value in offload.items():
-            deleted[f"offload_{key}"] = value
+        if erased_scopes:
+            deleted["offload_scopes_released"] = agent_runtime.reclaim_erased_scopes(
+                erased_scopes
+            )
         return deleted
+
+    @staticmethod
+    def _offload_turns_in_txn(
+        conn: sqlite3.Connection, *, before: Optional[str], limit: int
+    ) -> list[str]:
+        """The oldest offload-evidence turns, optionally only those begun before *before*.
+
+        A turn's age is the earliest timestamp on any of its evidence,
+        subject or event rows -- when the turn began -- so a turn is always
+        dropped whole and never leaves a subject or an event whose evidence is
+        gone.
+        """
+        tables = _present_offload_tables(conn)
+        if not tables:
+            return []
+        having = "HAVING MIN(at) < ?" if before is not None else ""
+        params: list[Any] = [before] if before is not None else []
+        params.append(limit)
+        dated = " UNION ALL ".join(
+            f"SELECT turn_key, {_OFFLOAD_TABLE_TIMESTAMPS[table]} AS at FROM {table}"
+            for table in tables
+        )
+        return [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT turn_key FROM ({dated}) GROUP BY turn_key {having} "
+                "ORDER BY MIN(at), turn_key LIMIT ?",
+                params,
+            ).fetchall()
+        ]
+
+    @staticmethod
+    def _delete_offload_turns_in_txn(
+        conn: sqlite3.Connection,
+        turn_keys: list[str],
+        deleted: dict[str, int],
+        erased_scopes: set[str],
+    ) -> None:
+        """Delete these turns' offload evidence, tallying rows and scopes."""
+        tables = _present_offload_tables(conn)
+        for chunk in _chunked(list(turn_keys)):
+            marks = ",".join("?" for _ in chunk)
+            for table in tables:
+                erased_scopes.update(
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT DISTINCT scope_id FROM {table} "
+                        f"WHERE turn_key IN ({marks})",
+                        chunk,
+                    ).fetchall()
+                )
+                deleted[table] = deleted.get(table, 0) + conn.execute(
+                    f"DELETE FROM {table} WHERE turn_key IN ({marks})", chunk
+                ).rowcount
+
+    def offload_events(
+        self,
+        *,
+        turn_key: Optional[str] = None,
+        channel_id: Optional[str] = None,
+        scope_id: Optional[str] = None,
+        kind: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """The offload runtime's recorded events, oldest first.
+
+        Every filter given must match. Each item carries the row's keys and
+        capture record beside ``event_text``, the event as it was stored --
+        the JSON the runtime recorded, with redaction applied when
+        ``redaction`` is ``on`` -- and ``event``, that text parsed, or ``None``
+        when it does not parse as a JSON object. Under a capture profile that
+        withholds the event, ``event`` is the withholding badge rather than the
+        recorded dictionary. A DB that predates the table reads as having no
+        events.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("turn_key", turn_key), ("channel_id", channel_id),
+            ("scope_id", scope_id), ("kind", kind),
+        ):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                params.append(str(value))
+        query = (
+            "SELECT event_id, turn_key, channel_id, scope_id, kind, event_json, "
+            "redaction, redacted, recorded_at FROM offload_events"
+        )
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY event_id"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
+        with contextlib.closing(self._connect()) as conn:
+            if "offload_events" not in _present_offload_tables(conn):
+                return []
+            rows = conn.execute(query, params).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            text = str(row["event_json"])
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            events.append({
+                "event_id": int(row["event_id"]),
+                "turn_key": str(row["turn_key"]),
+                "channel_id": str(row["channel_id"]),
+                "scope_id": str(row["scope_id"]),
+                "kind": str(row["kind"]),
+                "event": parsed if isinstance(parsed, dict) else None,
+                "event_text": text,
+                "redaction": str(row["redaction"]),
+                "redacted": bool(row["redacted"]),
+                "recorded_at": str(row["recorded_at"]),
+            })
+        return events
 
     def forget_channel(self, channel_id: str) -> dict[str, int]:
         """First-class erasure: delete a channel across all tables, then
         checkpoint-truncate the WAL and reclaim pages.
 
-        "All tables" includes the offload evidence sidecar beside this
-        database, which holds the channel's raw execute responses -- every row
-        carrying a ``scope_json`` that names the channel it came from. Erasing the turn record and leaving that file is not
-        erasure. An experiment run's evidence is preserved and reported rather
-        than deleted; the chatbot channels this method exists for are not
-        experiment runs.
+        "All tables" includes the offload evidence tables, which hold the
+        channel's archived execute responses. They are deleted in the same
+        transaction as the turn records, by channel and by the channel's turn
+        keys, whether or not a turn belonged to an experiment run. After the
+        commit, the process-local caches of the erased turns are dropped too
+        (``offload_scopes_released`` counts the scopes released).
         """
         deleted: dict[str, int] = {}
+        erased_scopes: set[str] = set()
         with self._connect() as conn:
+            # Deleted cells are zeroed rather than left in the free space of
+            # pages that still hold other rows, so erased evidence text does
+            # not survive in the file beside the rows that were kept.
+            conn.execute("PRAGMA secure_delete=ON")
             conn.execute("BEGIN IMMEDIATE")
             touched_experiments = [
                 row[0]
@@ -5385,6 +5661,20 @@ class ObservabilityStore:
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
                 (channel_id, channel_id),
             ).rowcount
+            for table in _present_offload_tables(conn):
+                erased_scopes.update(
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT DISTINCT scope_id FROM {table} WHERE channel_id=? "
+                        "OR turn_key IN (SELECT turn_key FROM turns WHERE channel_id=?)",
+                        (channel_id, channel_id),
+                    ).fetchall()
+                )
+                deleted[table] = conn.execute(
+                    f"DELETE FROM {table} WHERE channel_id=? OR turn_key IN "
+                    "(SELECT turn_key FROM turns WHERE channel_id=?)",
+                    (channel_id, channel_id),
+                ).rowcount
             deleted["turns"] = conn.execute(
                 "DELETE FROM turns WHERE channel_id=?", (channel_id,)
             ).rowcount
@@ -5414,12 +5704,9 @@ class ObservabilityStore:
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
 
-        erasure = _offload_erasure()
-        offload = erasure.forget_channel(
-            erasure.sidecar_path(self.db_path), channel_id
+        deleted["offload_scopes_released"] = agent_runtime.reclaim_erased_scopes(
+            erased_scopes
         )
-        for key, value in offload.items():
-            deleted[f"offload_{key}"] = value
         return deleted
 
     def clear_conversations(self) -> dict[str, int]:
@@ -5429,13 +5716,17 @@ class ObservabilityStore:
         survive. Keeping counters prevents a clear operation from reusing a
         conversation identity that may still be referenced outside this DB.
 
-        This is the action the chatbot UI actually exposes, so it
-        reaches the offload evidence sidecar too, for every channel at once.
-        Preservation still applies per scope: an experiment run's evidence is
-        not a conversation the operator is clearing, and survives.
+        This is the action the chatbot UI actually exposes, so it deletes
+        every offload evidence row too, in the same transaction -- experiment
+        runs' evidence included, as their experiment records are.
         """
         deleted: dict[str, int] = {}
+        erased_scopes: set[str] = set()
         with self._connect() as conn:
+            # Deleted cells are zeroed rather than left in the free space of
+            # pages that still hold other rows, so erased evidence text does
+            # not survive in the file beside the rows that were kept.
+            conn.execute("PRAGMA secure_delete=ON")
             conn.execute("BEGIN IMMEDIATE")
             for table in (
                 "experiment_evidence_runs",
@@ -5444,17 +5735,27 @@ class ObservabilityStore:
                 "experiments",
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
-            for table in ("feedback", "spans", "artifacts", "turns", "conversations"):
+            offload_tables = _present_offload_tables(conn)
+            for table in offload_tables:
+                erased_scopes.update(
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT DISTINCT scope_id FROM {table}"
+                    ).fetchall()
+                )
+            for table in (
+                "feedback", "spans", "artifacts", *offload_tables,
+                "turns", "conversations",
+            ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
 
-        erasure = _offload_erasure()
-        offload = erasure.forget_all_channels(erasure.sidecar_path(self.db_path))
-        for key, value in offload.items():
-            deleted[f"offload_{key}"] = value
+        deleted["offload_scopes_released"] = agent_runtime.reclaim_erased_scopes(
+            erased_scopes
+        )
         return deleted
 
 
@@ -6320,22 +6621,13 @@ _sinks_lock = threading.Lock()
 _sinks: dict[str, SQLiteTraceSink] = {}
 
 
-def observability_enabled(default_on: bool) -> bool:
-    """FW_OBSERVABILITY master switch. fastWorkflow's own entry points pass
-    default_on=True; library embedders get the sink only with FW_OBSERVABILITY=1."""
-    value = _env("FW_OBSERVABILITY", "1" if default_on else "0")
-    return value not in ("0", "false", "False", "no", "off")
+def get_observability_sink(workflow_path: str) -> Optional[SQLiteTraceSink]:
+    """The process-wide sink for a workflow's observability DB.
 
-
-def get_observability_sink(
-    workflow_path: str, *, entry_point: bool = True
-) -> Optional[SQLiteTraceSink]:
-    """The process-wide sink for a workflow's observability DB, or None when
-    disabled. One sink (one writer thread) per DB path; closed atexit.
-    Never raises — a store that cannot open degrades to no sink plus a warning.
+    One sink (one writer thread) per DB path; closed atexit. There is no switch:
+    every caller gets a sink. Never raises — a store that cannot open degrades
+    to ``None`` plus a warning, and that is the only way to get ``None``.
     """
-    if not observability_enabled(default_on=entry_point):
-        return None
     try:
         db_path = state_paths.observability_db(workflow_path)
         with _sinks_lock:

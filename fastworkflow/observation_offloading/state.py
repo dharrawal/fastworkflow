@@ -1,19 +1,19 @@
-"""Process-local hot cache and optional event log."""
+"""Process-local hot cache and the offload event log."""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
 import tempfile
 import threading
 from contextlib import closing
-from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
+    clear_live_raw,
+    release_live_raw,
 )
 
 from fastworkflow import context_budget
@@ -22,21 +22,16 @@ from fastworkflow import context_budget
 #: fraction of the model's window (``context_budget.OFFLOAD_HOT``).
 HOT_HANDLE_MAX_BYTES = context_budget.REFERENCE_OFFLOAD_HOT_MAX_BYTES
 HOT_HANDLE_MAX_BYTES_ENV = context_budget.OFFLOAD_HOT.override_env
-#: The diagnostic event log. A DESTINATION, not a feature switch: the events are
-#: always recorded in process (``snapshot_events``), and this says where a copy
-#: is appended for a run that wants one on disk. It is what the evaluation
-#: harness reads every offloading, coverage and search measure out of.
-EVENTS_ENV = "FW_OFFLOAD_EVENTS"
 #: How many diagnostic events the process keeps in memory. The in-process log is
-#: a RING, not a ledger: the durable copy is the ``FW_OFFLOAD_EVENTS`` file, and
+#: a RING, not a ledger: the durable copy is the ``offload_events`` table of the
+#: turn's observability database (``ObservabilityStore.offload_events``), and
 #: what stays in memory is only what a live turn (or a test) reads back through
 #: ``snapshot_events``. Unbounded it grew with lifetime traffic and held search
 #: questions, reasoning and full answers long after the turns that produced them
 #: had ended (ido-1ew). A scope's own events go the moment the scope is
 #: reclaimed; this cap is the backstop for the events no scope owns and for a
 #: single turn that talks more than the whole process should remember.
-EVENT_BUFFER_MAX_ENV = "FW_OFFLOAD_EVENT_BUFFER_MAX"
-DEFAULT_EVENT_BUFFER_MAX = 2000
+EVENT_BUFFER_MAX = 2000
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +44,17 @@ _search_answers: dict[str, int] = {}
 #: the alias line is printed. Turn-scoped like everything else here.
 _context_clauses: dict[str, str] = {}
 _events: list[dict[str, Any]] = []
-_event_log_failures: set[str] = set()
-_event_cap_warnings: set[str] = set()
+#: Database paths an event write has already failed against, so each failure
+#: is logged once rather than once per event.
+_event_write_failures: set[str] = set()
+#: ``scope_id -> (scope, archive)``: how a recorded event, which names only its
+#: scope id, finds the turn it belongs to and the database it is stored in.
+#: The archive is ``None`` for a scope seen without one; its events then go to
+#: ``durable_archive()``. Reads and writes are single dictionary operations,
+#: which are atomic, so this is safe to touch while ``_lock`` is held.
+_routes: dict[str, tuple[RuntimeHandleScope, Any]] = {}
 _default_archive: Optional[RuntimeHandleArchive] = None
-#: One archive object per sidecar FILE (ido-pg2): two spellings of one path must be one
+#: One archive object per database FILE (ido-pg2): two spellings of one path must be one
 #: object, and a caller that holds only a store path must be able to reach the
 #: durable subject rows in the same file without re-creating the schema on
 #: every call.
@@ -67,36 +69,16 @@ _default_scope = RuntimeHandleScope(
 )
 
 
-def event_buffer_max_from_env() -> int:
-    """How many events this process keeps in memory. ``0`` is not allowed."""
-    raw = os.environ.get(EVENT_BUFFER_MAX_ENV, "").strip()
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value > 0:
-            return value
-        if raw not in _event_cap_warnings:
-            _event_cap_warnings.add(raw)
-            logger.warning(
-                "ignoring %s=%s: expected a positive integer",
-                EVENT_BUFFER_MAX_ENV, raw,
-            )
-    return DEFAULT_EVENT_BUFFER_MAX
-
-
 def hot_handle_max_bytes_from_env() -> int:
     """The hot-cache cap for this run. See ``fastworkflow.context_budget``."""
     return context_budget.offload_hot_max_bytes()
 
 
 def archive_for_path(db_path: str) -> RuntimeHandleArchive:
-    """The archive object for one sidecar file, created once per path.
+    """The archive object for one observability database, created once per path.
 
-    ``ResultHandleStore`` and ``RuntimeHandleArchive`` are two views of the same
-    file by construction, so a caller holding one can reach the other's tables
-    here instead of opening a second connection per call.
+    A caller holding only the database path reaches the evidence and subject
+    tables here instead of re-opening the store per call.
     """
     key = os.path.abspath(os.path.expanduser(str(db_path)))
     with _lock:
@@ -109,11 +91,11 @@ def archive_for_path(db_path: str) -> RuntimeHandleArchive:
 
 
 def durable_archive(selected_archive: Any = None) -> Any:
-    """Where this call's DURABLE subject and navigation records belong.
+    """Where this call's DURABLE subject records belong.
 
     The caller's archive when it named one; otherwise the archive the running
     agent writes its observations to, so a turn's subject metadata lands in the
-    same sidecar as the observations it describes; otherwise the process
+    same database as the observations it describes; otherwise the process
     default, which is what every other write in this module falls back to.
 
     Never raises: durability of presentation metadata must not be able to fail a
@@ -149,36 +131,39 @@ def archive() -> RuntimeHandleArchive:
 
 
 def default_archive_path() -> str:
-    """Where the per-process fallback sidecar lives.
+    """Where the per-process fallback observability database lives.
 
-    Named after the pid and in the temp directory, so it is process-local by
-    construction. Spelled once, because ``clear_default_cold_records`` has to
-    be able to reach the file whether or not this process has instantiated the
-    archive object for it.
+    Named after the pid and in its own directory under the temp directory, so
+    it is process-local by construction and the store's 0700 hardening applies
+    to a directory this process created rather than to the temp directory
+    itself. Spelled once, because ``clear_default_cold_records`` has to be able
+    to reach the file whether or not this process has instantiated the archive
+    object for it.
     """
     return os.path.join(
-        tempfile.gettempdir(), f"fw-offload-handles-{os.getpid()}.sqlite3"
+        tempfile.gettempdir(), f"fw-offload-{os.getpid()}", "observability.sqlite3"
     )
 
 
-#: The tables that exist so a turn can be read back after a restart
-#: (``ido-dhw``). They are the only two whose rows a process-local reset has to
-#: reach: everything else in the sidecar is evidence a reset never owned.
-COLD_RESTART_TABLES = ("observation_subjects", "observation_context_entries")
+#: The table that exists so a turn can be read back after a restart
+#: (``ido-dhw``). It is the only one whose rows a process-local reset has to
+#: reach: everything else in the database is evidence a reset never owned.
+COLD_RESTART_TABLES = ("offload_subjects",)
 
 
 def clear_default_cold_records(*tables: str) -> None:
-    """Empty the PROCESS-DEFAULT sidecar's cold-restart tables.
+    """Empty the PROCESS-DEFAULT database's cold-restart tables.
 
-    The durable half of a process-local reset. Subject clauses and
-    navigation entries are now read THROUGH to the sidecar when the in-memory
-    registry misses, so a reset that cleared only memory would be answered from
-    disk by the very rows it meant to drop. Every caller that never named an
-    archive of its own shares this one file AND one ``default_scope``, so those
-    rows are exactly the state the reset owns.
+    The durable half of a process-local reset. Subject clauses are read
+    THROUGH to the database when the in-memory registry misses, so a reset
+    that cleared only memory would be answered from disk by the very rows it
+    meant to drop. Every caller that never named an archive of its own shares
+    this one file AND one ``default_scope``, so those rows are exactly the
+    state the reset owns.
 
     No archive a CALLER named is touched, and nothing but these tables is:
-    a real sidecar holds real turns, and this is not an erasure path.
+    a real observability database holds real turns, and this is not an
+    erasure path.
     """
     wanted = tables or COLD_RESTART_TABLES
     path = default_archive_path()
@@ -197,7 +182,7 @@ def clear_default_cold_records(*tables: str) -> None:
                     conn.execute(f'DELETE FROM "{table}"')
             conn.commit()
     except Exception:  # noqa: BLE001 - a reset must not fail on a temp file
-        logger.debug("could not clear the default sidecar's cold-restart records",
+        logger.debug("could not clear the default database's cold-restart records",
                      exc_info=True)
 
 
@@ -240,7 +225,21 @@ def scope_for_host(host: Any) -> RuntimeHandleScope:
 
 
 def handle_key(scope: RuntimeHandleScope, alias: str) -> str:
+    _routes.setdefault(scope.scope_id, (scope, None))
     return f"{scope.scope_id}:{alias}"
+
+
+def register_scope(scope: RuntimeHandleScope, archive: Any = None) -> None:
+    """Remember where *scope*'s events are stored.
+
+    Called by the turn runtime, which knows both the scope and its archive,
+    and by the archivers for a scope they write to. A later call without an
+    archive never forgets one an earlier call named.
+    """
+    if archive is None:
+        _routes.setdefault(scope.scope_id, (scope, None))
+    else:
+        _routes[scope.scope_id] = (scope, archive)
 
 
 def default_scope() -> RuntimeHandleScope:
@@ -353,11 +352,20 @@ def current_execute_alias(agent: Any = None) -> Optional[str]:
 
 
 def record_event(event: Mapping[str, Any]) -> None:
-    """Append to the in-memory log and, when configured, the event file.
+    """Append to the in-memory log and store a copy in the observability DB.
 
-    The file write is best effort: offloading is an optimisation, so a full
-    disk or a revoked permission on the event log must not abort the agent
-    step that produced the event. The first failure per path is logged.
+    The durable copy is a row of ``offload_events`` in the database that holds
+    the event's turn, written through the same redaction as evidence
+    (``RuntimeHandleArchive.persist_event``). It is best effort: offloading is
+    an optimisation, so a locked, full or unwritable database must not abort,
+    or noticeably delay, the agent step that produced the event. The write
+    waits briefly for the lock, a failure drops the durable copy, and the first
+    failure per database is logged.
+
+    An event names its scope by id. One whose scope this process has never
+    seen -- or has already released -- cannot be placed in a turn, so it is
+    kept in memory only; an event with no scope id belongs to the current
+    scope.
     """
     item = dict(event)
     with _lock:
@@ -365,27 +373,39 @@ def record_event(event: Mapping[str, Any]) -> None:
         # The ring closes here, inside the same lock that appended, so two
         # threads recording at once cannot both skip the trim. A list is kept
         # rather than a deque because callers read this buffer as a list.
-        overflow = len(_events) - event_buffer_max_from_env()
+        overflow = len(_events) - EVENT_BUFFER_MAX
         if overflow > 0:
             del _events[:overflow]
-        path = os.environ.get(EVENTS_ENV, "").strip()
-        if not path:
+    _persist_event(item)
+
+
+def _persist_event(item: dict[str, Any]) -> None:
+    try:
+        scope_id = item.get("scope_id")
+        if scope_id:
+            route = _routes.get(str(scope_id))
+            if route is None:
+                return
+        else:
+            scope = current_scope()
+            route = _routes.get(scope.scope_id) or (scope, None)
+        scope, routed = route
+        store = routed if routed is not None else durable_archive()
+        if store is None:
             return
-        try:
-            dest = Path(path)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with dest.open("a", encoding="utf-8") as handle:
-                handle.write(
-                    json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
-                    + "\n"
-                )
-        except (OSError, TypeError, ValueError) as error:
-            if path not in _event_log_failures:
-                _event_log_failures.add(path)
-                logger.warning(
-                    "observation offloading could not append to %s=%s: %s",
-                    EVENTS_ENV, path, error,
-                )
+    except Exception:  # noqa: BLE001 - an event must never fail a turn
+        logger.debug("could not place an offload event", exc_info=True)
+        return
+    try:
+        store.persist_event(scope, item)
+    except Exception as error:  # noqa: BLE001 - an event must never fail a turn
+        path = str(getattr(store, "db_path", ""))
+        if path not in _event_write_failures:
+            _event_write_failures.add(path)
+            logger.warning(
+                "observation offloading could not store an event in %s: %s: %s",
+                path, type(error).__name__, error,
+            )
 
 
 def snapshot_events() -> list[dict[str, Any]]:
@@ -466,10 +486,10 @@ def record_context_clause(
     An empty clause is stored as an empty clause: "this ran at the root" is a
     fact, and it must not read as "nothing was captured".
 
-    It is also written THROUGH to the sidecar, because this
+    It is also written THROUGH to the archive, because this
     map is turn-scoped process memory and the subject of an observation has to
     outlive the process that saw it. The durable write is best effort on the
-    same terms as everything else on this path -- a sidecar that cannot be
+    same terms as everything else on this path -- an archive that cannot be
     written keeps the observation and loses only its cold-restart subject, and
     says so in the event log rather than failing the command.
     """
@@ -503,7 +523,7 @@ def context_clause_of(
 ) -> Optional[str]:
     """The recorded clause for *alias*, ``""`` at the root, None if unrecorded.
 
-    Process memory first, then the sidecar. The second tier is
+    Process memory first, then the archive. The second tier is
     what makes a subject survive a restart: a rehydrated label, a cross-context
     page stamp, the attribution check and observation search all read the
     subject through here, and in a process that only imported a suspension the
@@ -511,8 +531,7 @@ def context_clause_of(
     -- the bounded runtime cache is REBUILT from the durable record rather than
     kept a second way -- so the read is paid for once per alias per process.
 
-    ``None`` still means UNRECORDED, and it is what an alias stamped before this
-    table existed reads as. Nothing here ever invents a subject.
+    ``None`` still means UNRECORDED. Nothing here ever invents a subject.
     """
     key = handle_key(scope, alias)
     with _lock:
@@ -523,7 +542,7 @@ def context_clause_of(
         return None
     try:
         clause = store.get_subject(scope, alias)
-    except Exception:  # noqa: BLE001 - an unreadable sidecar is an unrecorded one
+    except Exception:  # noqa: BLE001 - an unreadable archive is an unrecorded one
         logger.debug("could not read the stored subject of %s", alias, exc_info=True)
         return None
     if clause is None:
@@ -560,87 +579,18 @@ def forget_context_clause(
         logger.debug("could not drop the stored subject of %s", alias, exc_info=True)
 
 
-def seal_scope(
-    scope: RuntimeHandleScope, *, selected_archive: Any = None
-) -> dict[str, Any]:
-    """Seal one FINISHED turn's stored evidence into its redacted form.
-
-    Redaction is a turn-COMPLETION step rather than a
-    write-time transform: nothing is redacted while a turn is in flight, and in
-    flight is the whole life of the turn, an ask_user wait and every
-    serialize/deserialize round trip included. This is the moment that deferral
-    is paid for.
-
-    It deliberately runs only through the runtime owner's two finished-turn
-    paths, immediately before aggregate release. That is not a coincidence: it is the
-    requirement: the guards those callers already carry --
-    ``WorkflowExecutionContext._reclaim_offloading_scope`` returning early when
-    ``self._awaiting_user`` or ``agent.export_suspended() is not None``, and
-    ``StructuredContinuationReAct.bind_scope`` skipping while ``self._suspended
-    is not None`` -- already mean exactly "this turn is not finished", which is
-    the property a seal needs. Inventing a second notion of over would be
-    inventing a second way to be wrong about a suspension.
-
-    Both callers also run strictly LATER than the turn's summary. The
-    conversation summary that feeds the next turn's query refinement is
-    produced inside ``WorkflowExecutionContext._finalize_agent_output``, out of
-    the in-memory ``_action_log`` whose ``response`` was captured at execution
-    time and is never read back from this archive -- so the summary sees raw
-    text by ordering, and the ordering is pinned by a test.
-
-    The scope's hot observations go with the seal. They hold the raw copy, the
-    turn that could read it is over, and leaving them would mean memory and
-    disk disagreeing for a scope nobody may read again. ``reclaim_scope`` drops
-    them anyway at both callers; doing it here too is what makes a seal reached
-    any other way -- the sweep, a test -- leave nothing raw behind in process.
-
-    Never raises. Failing to seal is a fidelity and exposure problem to report,
-    never a reason to fail a session close or the turn that is starting.
-    """
-    store = durable_archive(selected_archive)
-    if store is None:
-        return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
-                "errors": ["no_archive"]}
-    try:
-        result = store.seal_scope(scope)
-    except Exception as error:  # noqa: BLE001 - a seal must not fail a turn
-        record_event(
-            {
-                "kind": "seal_refused",
-                "scope_id": scope.scope_id,
-                "error": type(error).__name__,
-            }
-        )
-        logger.warning(
-            "could not seal the evidence of scope %s: %s", scope.scope_id, error
-        )
-        return {"sealed": 0, "redacted": 0, "failed": 0, "aliases": [],
-                "errors": [type(error).__name__]}
-    clear_hot_handles(scope)
-    if result.get("sealed") or result.get("failed"):
-        record_event(
-            {
-                "kind": "observations_sealed",
-                "scope_id": scope.scope_id,
-                "sealed": int(result.get("sealed") or 0),
-                "redacted": int(result.get("redacted") or 0),
-                "failed": int(result.get("failed") or 0),
-                "aliases": list(result.get("aliases") or ()),
-            }
-        )
-    return result
-
-
 def release_scope(scope: "RuntimeHandleScope | str") -> None:
     """Drop this component's process-local cache for one finished scope.
 
-    Residency, never evidence: the archive and the result-handle tables keep
-    every row, so a scope reclaimed here is still fully readable from disk --
-    which is exactly what the cold-resume path already does in a process that
-    never saw the turn at all. That includes the subject clauses and the
-    navigation entries dropped below: both tiers are dropped from
-    memory and neither row is deleted, so a later read of a reclaimed scope
-    rebuilds from the sidecar rather than answering "unrecorded".
+    Residency, never evidence: the archive keeps every row, so a scope
+    reclaimed here is still readable from disk -- which is exactly what the
+    cold-resume path already does in a process that never saw the turn at all.
+    That includes the subject clauses dropped below: they are dropped from
+    memory and no row is deleted, so a later read of a reclaimed scope
+    rebuilds from the archive rather than answering "unrecorded". What a
+    reclaimed scope reads from disk is the STORED text: the raw copies of its
+    redacted observations are released here too, so after this point the
+    process reads what any other process would.
 
     This is deliberately NOT a global reset. Everything the offloading runtime
     remembers is keyed by ``scope_id``, so one turn's state can be released
@@ -655,10 +605,8 @@ def release_scope(scope: "RuntimeHandleScope | str") -> None:
     because a suspension is state that must outlive the process, not state to
     reclaim.
 
-    ``seal_scope`` runs immediately before this at both of them,
-    on the strength of those same two guards: the earliest honest moment to
-    release a turn's residency is also the earliest honest moment to redact its
-    evidence, and one notion of "over" serves both.
+    An erasure reaches here too, through ``agent_runtime.reclaim_erased_scopes``,
+    after the rows are already gone.
     """
     scope_id = scope if isinstance(scope, str) else scope.scope_id
     prefix = f"{scope_id}:"
@@ -667,6 +615,8 @@ def release_scope(scope: "RuntimeHandleScope | str") -> None:
             for key in [key for key in registry if key.startswith(prefix)]:
                 del registry[key]
         _search_answers.pop(scope_id, None)
+        _routes.pop(scope_id, None)
+        release_live_raw(scope_id)
         kept = [
             item for item in _events
             if str(item.get("scope_id") or "") != scope_id
@@ -682,14 +632,14 @@ def reset_observation_state() -> None:
     which calls each component's reset hook. Stored SQLite rows are untouched:
     this resets residency, never evidence.
 
-    The PROCESS-DEFAULT sidecar's durable subject and navigation rows go too.
-    That file is ``fw-offload-handles-<pid>.sqlite3`` in the temp
-    directory -- process-local by construction, named after this process, and
-    shared by every caller that never passed an archive of its own, all of whom
-    also share one ``default_scope``. Leaving those two tables behind would let
-    a reset process read back the subject and the navigation entries of the
-    state it just dropped. Nothing else in the file is touched, and no archive a
-    CALLER named is touched at all: those are real sidecars holding real turns.
+    The PROCESS-DEFAULT database's durable subject rows go too. That file is
+    ``fw-offload-<pid>/observability.sqlite3`` in the temp directory --
+    process-local by construction, named after this process, and shared by
+    every caller that never passed an archive of its own, all of whom also
+    share one ``default_scope``. Leaving that table behind would let a reset
+    process read back the subjects of the state it just dropped. Nothing else
+    in the file is touched, and no archive a CALLER named is touched at all:
+    those are real observability databases holding real turns.
     """
     global _default_archive
     with _lock:
@@ -698,9 +648,11 @@ def reset_observation_state() -> None:
         _search_answers.clear()
         _context_clauses.clear()
         _events.clear()
-        _event_log_failures.clear()
+        _event_write_failures.clear()
+        _routes.clear()
         _default_archive = None
         _archives_by_path.clear()
+    clear_live_raw()
     clear_default_cold_records()
 
 

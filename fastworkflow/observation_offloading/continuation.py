@@ -242,13 +242,12 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         agent reclaims nothing. ``forward`` clears the suspension before it gets
         here, so the guard is for a caller that binds a scope by hand.
 
-        The same guard also decides when the previous turn's stored evidence
-        is SEALED into its redacted form, because "the agent
-        has bound the next turn" is the strongest statement this process can
-        make that the previous one is finished -- its summary is recorded, its
-        answer is delivered, and no read of it can still be part of it. The
-        seal runs before the reclaim so it still has the scope's hot copies to
-        drop, and both are skipped for a suspension by the one condition below.
+        That release includes the raw in-flight copies of the previous turn's
+        redacted evidence, because "the agent has bound the next turn" is the
+        strongest statement this process can make that the previous one is
+        finished -- its summary is recorded, its answer is delivered, and no
+        read of it can still be part of it. A suspension keeps them, by the one
+        condition below.
         """
         factory = getattr(self, "_scope_factory", None)
         if factory is None:
@@ -273,11 +272,11 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                 runtime.finish_scope(previous)
             except Exception as exc:  # noqa: BLE001
                 # Same shape as the sibling in
-                # WorkflowExecutionContext._reclaim_offloading_scope: sealing and
-                # reclaiming the PREVIOUS turn's scope must not abort the turn
-                # that is starting.
+                # WorkflowExecutionContext._reclaim_offloading_scope: reclaiming
+                # the PREVIOUS turn's scope must not abort the turn that is
+                # starting.
                 logger.debug(
-                    "bind_scope: could not seal or reclaim the previous "
+                    "bind_scope: could not reclaim the previous "
                     f"offloading scope ({type(exc).__name__}: {exc})"
                 )
         self.continuation_scope = scope

@@ -45,7 +45,6 @@ from fastworkflow.observability.evidence_run import (
 @pytest.fixture
 def workflow_path(tmp_path, monkeypatch) -> str:
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
-    monkeypatch.setenv("FW_OBSERVABILITY", "1")
     fastworkflow.init({})
     path = tmp_path / "wf"
     path.mkdir(parents=True, exist_ok=True)
@@ -447,18 +446,20 @@ def test_the_run_record_is_serializable(workflow_path, tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_disabled_observability_is_reported_as_a_problem(tmp_path, monkeypatch):
-    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
+def test_the_retired_observability_switch_is_inert(workflow_path, monkeypatch):
+    """Setting the old master switch off neither disables recording nor adds a problem."""
     monkeypatch.setenv("FW_OBSERVABILITY", "0")
-    fastworkflow.init({})
-    path = tmp_path / "wf"
-    path.mkdir(parents=True, exist_ok=True)
+    sink = obs.get_observability_sink(workflow_path)
+    assert sink is not None
+    with evidence_run(
+        workflow_path, run_id="run-switch-off", dspy_history_enabled=True
+    ) as run:
+        sink.emit_turn_record(_turn())
 
-    with evidence_run(str(path), run_id="run-off") as run:
-        pass
-
-    assert run.valid is False
-    assert any("observability is disabled" in problem for problem in run.problems())
+    assert run.valid, run.problems()
+    assert not any("disabled" in problem for problem in run.problems())
+    assert run.provenance.enabled is True
+    assert "FW_OBSERVABILITY" not in run.provenance.config
 
 
 def test_dspy_history_off_is_reported_as_a_problem(workflow_path):

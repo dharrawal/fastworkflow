@@ -122,12 +122,13 @@ class BudgetSpec:
 
     ``fraction`` is an exact rational, so ``reference_bytes`` is reproduced
     without a rounding step and a window twice the size gives a budget exactly
-    twice the size.
+    twice the size. ``override_env`` is ``None`` for a budget with no tuning
+    override, which is always the derived value.
     """
 
     name: str
     fraction: Fraction
-    override_env: str
+    override_env: Optional[str]
     floor: int
     #: What this budget is for, one line, for the documentation table and the
     #: provenance record.
@@ -304,7 +305,7 @@ def budget_bytes(spec: BudgetSpec, window_tokens: Optional[int] = None) -> int:
     that is cut from a different model's: pass it and the derivation, override
     parsing, floor and warnings stay stated here once.
     """
-    raw = env_value(spec.override_env)
+    raw = env_value(spec.override_env) if spec.override_env else ""
     derived = spec.bytes_for(
         context_window_tokens()[0] if window_tokens is None else window_tokens)
     if not raw:

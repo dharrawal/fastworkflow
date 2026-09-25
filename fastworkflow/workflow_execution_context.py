@@ -1224,15 +1224,15 @@ class WorkflowExecutionContext:
             return False
 
     def _reclaim_offloading_scope(self) -> None:
-        """Seal and release this session's offloading state.
+        """Release this session's offloading state.
 
         ``close`` is the one production signal that a session is over in this
         process: the fleet's session cache calls it when it retires or removes a
         channel, and an embedder calls it when its session ends. Until this, the
         offloading runtime's per-scope registries -- the archive memo, the
-        context clauses, the hot observations, the navigation entries and the
-        turn's diagnostic events -- only ever grew, for the lifetime of the
-        process.
+        context clauses, the hot observations, the raw in-flight copies of
+        redacted evidence and the turn's diagnostic events -- only ever grew,
+        for the lifetime of the process.
 
         Two turns are NOT reclaimed. A turn suspended on ask_user is still
         resumable: its scope is the one the resume writes and reads handles
@@ -1242,32 +1242,23 @@ class WorkflowExecutionContext:
         count are the agent's own memory, they die with it, and a resume
         rebuilds them from the suspension payload.
 
-        The same guard carries the other half of "this turn is over".
-        Redaction of the evidence sidecar is not a write-time transform:
-        a turn's stored observations are written verbatim and SEALED into their
-        redacted form when the turn completes, so that nothing an agent can
-        read during its own turn is ever degraded. The two conditions below are
-        exactly the notion of "not finished" a seal needs, and they are reused
-        rather than restated -- a suspended turn is not sealed, for the same
-        reason and by the same test as it is not reclaimed.
+        Evidence is redacted when it is written, and this process keeps the
+        raw text of redacted observations only while their turn is live, so
+        its own reads stay exact. Releasing the scope is what ends that: after
+        it, a read of the turn's evidence returns the stored text. A suspended
+        turn keeps its raw copies, by the same test as it keeps the rest.
 
-        This runs strictly after the turn's conversation summary, which
-        ``_finalize_agent_output`` produced out of ``_action_log`` before the
-        turn ever returned. That ordering is what keeps the summary fed to the
-        NEXT turn's query refinement accurate, and it is pinned by a test
-        rather than left to be noticed.
-
-        Best effort by construction: failing to seal or to reclaim memory must
-        never turn a session close into an error the caller has to handle.
+        Best effort by construction: failing to reclaim memory must never turn
+        a session close into an error the caller has to handle.
         """
         # getattr, not plain attribute access: ``close`` is reachable on a
         # context built through ``__new__`` without ``__init__`` -- the
         # context-change listener test constructs one exactly that way -- so
         # neither attribute is guaranteed to exist. A context with no agent has
-        # no scope to seal or reclaim, which is the same answer as an agent
-        # with no scope. A context that cannot say whether it is awaiting the
-        # user is assumed to be mid-turn, because declining to seal costs a
-        # deferred seal while sealing early would redact a live turn.
+        # no scope to reclaim, which is the same answer as an agent with no
+        # scope. A context that cannot say whether it is awaiting the user is
+        # assumed to be mid-turn, because declining to reclaim costs memory
+        # while reclaiming early would take a live turn's raw evidence copies.
         agent = getattr(self, "_workflow_tool_agent", None)
         scope = getattr(agent, "continuation_scope", None)
         if scope is None:
@@ -1286,7 +1277,7 @@ class WorkflowExecutionContext:
             runtime.finish_scope(scope)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
-                "WorkflowExecutionContext.close: could not seal or reclaim "
+                "WorkflowExecutionContext.close: could not reclaim "
                 f"offloading state ({type(exc).__name__}: {exc})"
             )
 
@@ -1608,9 +1599,10 @@ class WorkflowExecutionContext:
         if tracing.get_sink(self) is None and isinstance(
             self._metrics_sink, metrics.NoOpMetricsSink
         ):
-            # Observability fully off: nothing consumes the TurnResult, so
-            # skip building it — this path runs after EVERY CLI turn and must
-            # cost ~nothing when FW_OBSERVABILITY=0.
+            # No sink and no metrics sink (a store that could not be opened,
+            # or a host built without either): nothing consumes the
+            # TurnResult, so skip building it — this path runs after EVERY
+            # turn and must cost ~nothing when there is nowhere to send it.
             return
         self._build_turn_result(command_output)
 

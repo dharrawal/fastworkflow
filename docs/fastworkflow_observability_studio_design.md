@@ -13,6 +13,17 @@ Prior art this document implements/reconciles: `docs/turn_result_design_final.md
 Where this document conflicts with `turn_result_design_final.md`, that spec's
 decisions stand unless a §9 ruling explicitly supersedes them with rationale.
 
+> Errata (2026-09-24): the capture default of `[R4]` (§3 "File posture and
+> capture default", the `FW_OBSERVABILITY` row of the configuration table, and
+> the R4 entry of the decision log) is superseded in 3.4.0. `FW_OBSERVABILITY`
+> was removed: recording is always on, for fastWorkflow's entry points and
+> library embedders alike. The 0700 directory / 0600 file posture and automatic
+> pruning are unchanged. The opt-in for embedders stopped protecting anything
+> once observation offloading began writing command responses to disk
+> regardless of the switch. Offloading evidence, subjects and events now live in
+> this same DB and are erased and pruned with their turn; see
+> `docs/observation_search.md`, "Retention, redaction and known limits".
+
 ---
 
 ## 0. Origin: the problem

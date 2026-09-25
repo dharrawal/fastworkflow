@@ -35,6 +35,16 @@
 > chatbot's confirmed Clear-conversations action plus automatic
 > startup pruning (see the parent design doc's §3.2/§3.4 amendments).
 
+> Errata (2026-09-24): the `FW_OBSERVABILITY` master switch was removed in 3.4.0.
+> Recording is always on, for fastWorkflow's entry points and library embedders
+> alike, so the "`FW_OBSERVABILITY=0` … no conversation persistence" bullet in
+> the status block above no longer describes a reachable state: a server now
+> lacks conversation persistence only when its observability store cannot be
+> opened. The same release moved observation-offloading evidence into this DB
+> (`offload_evidence`, `offload_subjects`, `offload_events`), erased and pruned
+> with its turn; see `docs/observation_search.md`, "Retention, redaction and
+> known limits".
+
 Status: **REVISED after adversarial review round 1** (two independent lenses,
 22 findings; rulings in §6 — where §6 conflicts with §2/§3, §6 wins).
 Implementation may begin per the amended design. Rulings were made

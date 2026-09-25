@@ -3664,22 +3664,12 @@ def run_forget_channel(
     dual-write period lasts — without this, "forgotten" conversations remain
     fully readable in the legacy store.
 
-    ``forget_channel`` erases the offload evidence sidecar that sits
-    beside ``db_path``. This entry point adds the one thing the store cannot
-    know: when the caller names a ``workflow_path``, the workflow's CANONICAL
-    sidecar is swept too, so a caller that opened the database by some other
-    spelling of its path still erases the file the agent actually writes.
-    Experiment-run evidence is preserved in both, by the mode documented in
-    ``fastworkflow.observation_offloading.erasure``.
+    The channel's offload evidence -- the archived execute responses its
+    turns produced -- lives in the same database and is erased by
+    ``forget_channel`` in the same transaction as its turn records, experiment
+    runs included; there is no second evidence file to sweep.
     """
     deleted = ObservabilityStore(db_path).forget_channel(channel_id)
-    if workflow_path:
-        from fastworkflow.observation_offloading import erasure
-
-        canonical = erasure.sidecar_path(state_paths.observability_db(workflow_path))
-        if canonical != erasure.sidecar_path(os.path.abspath(db_path)):
-            for key, value in erasure.forget_channel(canonical, channel_id).items():
-                deleted[f"workflow_offload_{key}"] = value
     if workflow_path and channel_id == os.path.basename(channel_id):
         legacy_db = os.path.join(
             state_paths.conversations_dir(workflow_path), f"{channel_id}.sqlite3"
@@ -3698,19 +3688,13 @@ def run_forget_channel(
 def run_clear_conversations(db_path: str, workflow_path: str = "") -> dict[str, int]:
     """Erase all conversation/turn observability for one workflow.
 
-    Including the offload evidence sidecar, which holds the raw
-    execute responses of the conversations being cleared. Experiment-run
-    evidence is preserved: clearing the chatbot's conversations is not an
-    instruction to destroy a measurement.
+    Including every offload evidence row -- the archived execute responses
+    of the conversations being cleared, and of experiment runs, whose
+    experiment records are cleared too. ``clear_conversations`` deletes them
+    in the same transaction as the turn records.
     """
     deleted = ObservabilityStore(db_path).clear_conversations()
     if workflow_path:
-        from fastworkflow.observation_offloading import erasure
-
-        canonical = erasure.sidecar_path(state_paths.observability_db(workflow_path))
-        if canonical != erasure.sidecar_path(os.path.abspath(db_path)):
-            for key, value in erasure.forget_all_channels(canonical).items():
-                deleted[f"workflow_offload_{key}"] = value
         legacy_dir = state_paths.conversations_dir(workflow_path)
         removed = 0
         try:

@@ -345,9 +345,9 @@ DEFAULT_EXCLUDED_ROOT_TREES: frozenset[str] = frozenset({
 # under the workflow root, named here rather than left to the suffix rule.
 # Nothing it writes today carries a content suffix, so this exclusion changes no
 # selection on any tree that exists - and that is the argument for stating it:
-# ``observability.sqlite3``, its ``-wal`` and ``-shm`` sidecars and
-# ``observability.sqlite3.offload-handles.sqlite3`` are one store under several
-# names, and an exclusion that holds only "in practice" is the same latent
+# ``observability.sqlite3``, its ``-wal`` and ``-shm`` sidecars and the legacy
+# ``observability.sqlite3.offload-handles.sqlite3`` older builds wrote (removed
+# when a store next opens) are one store under several names, and an exclusion that holds only "in practice" is the same latent
 # divergence in a smaller box, waiting for the first sidecar somebody writes as
 # JSON. Matched as a name prefix, and at the root only, for that reason.
 RUNTIME_STORE_PREFIX = "observability.sqlite3"

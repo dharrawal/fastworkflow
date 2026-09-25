@@ -344,7 +344,6 @@ def _log_memory_bounds() -> None:
 
         logger.info(
             "observability capture regime: "
-            f"enabled={_obs.observability_enabled(default_on=True)}, "
             f"profile={_obs.observability_config()[_obs.CAPTURE_PROFILE_VAR]}, "
             f"pruning_suppressed={_obs.pruning_suppressed()} "
             f"({_obs.SUPPRESS_PRUNE_VAR}="
@@ -916,7 +915,9 @@ async def readiness_probe(
         content["observability"] = {
             "config": _obs.observability_config(),
             "pruning_suppressed": _obs.pruning_suppressed(),
-            "enabled": _obs.observability_enabled(default_on=True),
+            # Recording has no switch; this says whether the server holds a
+            # live writer, which is false only when its store could not open.
+            "enabled": _obs.existing_observability_sink(ARGS.workflow_path) is not None,
         }
 
     if runtime:

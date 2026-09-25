@@ -58,9 +58,9 @@ after it.
 bound on the observation handed to the search model is sized from the *search*
 model's context window (`LLM_OBSERVATION_SEARCH`, or `LLM_AGENT` when that is
 unset), because it exists to fit that model's prompt rather than the agent's.
-It is resolved separately, it has its own tuning override
-(`FW_SEARCH_OBSERVATION_MAX_BYTES`), and `budget_provenance()` does not report
-it — a provenance record carrying a number derived from a different window
+It is resolved separately, it has no tuning override of its own (correct the
+window with `FW_MODEL_CONTEXT_TOKENS` instead), and `budget_provenance()` does
+not report it — a provenance record carrying a number derived from a different window
 would be wrong more often than it was useful. See
 [`docs/observation_search.md`](observation_search.md) for how it is resolved.
 

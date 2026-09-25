@@ -28,6 +28,7 @@ import dspy
 
 import fastworkflow
 from fastworkflow import tracing
+from fastworkflow.observation_offloading import archive as archive_module
 from fastworkflow.observation_offloading import state as offload_state
 from fastworkflow.observation_offloading.agent import build_tool_agent
 from fastworkflow.observation_offloading.archive import RuntimeHandleScope
@@ -48,9 +49,15 @@ from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
+#: A credential shape the store's ``Redactor`` recognises, so every listing
+#: below is redacted when it is archived and its raw text is held in memory for
+#: the live turn -- one more per-scope registry that must be released.
+SK_TOKEN = "sk-livekey1234567890abcdef"
+
+
 def rows_for(command: str, count: int = 30) -> list[str]:
     return ["%s-%03d  fixture row %d %s" % (command, index, index, "x" * 32)
-            for index in range(count)]
+            for index in range(count)] + ["api_key: " + SK_TOKEN]
 
 
 class OffloadStateFixture(unittest.TestCase):
@@ -80,7 +87,6 @@ class OffloadStateFixture(unittest.TestCase):
                 pass
         reset_runtime_state()
         os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
-        os.environ.pop(offload_state.EVENT_BUFFER_MAX_ENV, None)
         self.temp.cleanup()
 
     # -- session construction ------------------------------------------------
@@ -144,6 +150,7 @@ class OffloadStateFixture(unittest.TestCase):
             "context_clauses": len(offload_state._context_clauses),
             "hot_observations": len(offload_state._handles),
             "search_answers": len(offload_state._search_answers),
+            "raw_copies": len(archive_module._live_raw),
         }
 
     def scope_counts(self, scope: RuntimeHandleScope) -> dict[str, int]:
@@ -158,6 +165,7 @@ class OffloadStateFixture(unittest.TestCase):
                                     if key.startswith(prefix)),
             "events": sum(1 for item in snapshot_events()
                           if str(item.get("scope_id") or "") == scope.scope_id),
+            "raw_copies": len(archive_module._live_raw.get(scope.scope_id, {})),
         }
 
     def run_finished_turn(self, ctx, agent, command: str):
@@ -185,6 +193,7 @@ class CompletedSessionReclamationTests(OffloadStateFixture):
             # The turn really did fill the registries before it was closed.
             self.assertGreater(self.scope_counts(scope)["archived"], 0)
             self.assertGreater(self.scope_counts(scope)["events"], 0)
+            self.assertGreater(self.scope_counts(scope)["raw_copies"], 0)
             self.close_session(ctx, workflow)
             growth.append(self.counts())
 
@@ -284,38 +293,60 @@ class CompletedSessionReclamationTests(OffloadStateFixture):
 
 
 class EventBufferBoundTests(unittest.TestCase):
-    """The in-memory event log is a ring, not a ledger."""
+    """The in-memory event log is a ring, not a ledger, with a fixed bound."""
+
+    #: The retired setting that used to size the ring, named so the case that
+    #: proves it is inert can set it.
+    RETIRED_CAP_ENV = "FW_OFFLOAD_EVENT_BUFFER_MAX"
 
     def setUp(self) -> None:
         reset_runtime_state()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.scope = RuntimeHandleScope(
+            store_identity="store", channel_id="ring", experiment_id="unbound",
+            task_id="unbound", attempt=0, turn_key="ring-turn")
+        self.route()
+
+    def route(self) -> None:
+        """Events without a scope are stored in the process-default database;
+        an explicit scope routed to an archive in this test's own directory
+        keeps every durable copy here."""
+        offload_state.register_scope(
+            self.scope, offload_state.archive_for_path(
+                os.path.join(self.temp.name, "observability.sqlite3")))
 
     def tearDown(self) -> None:
-        os.environ.pop(offload_state.EVENT_BUFFER_MAX_ENV, None)
+        os.environ.pop(self.RETIRED_CAP_ENV, None)
         reset_runtime_state()
 
+    def fill(self, count: int) -> None:
+        for index in range(count):
+            record_event({"kind": "fixture", "scope_id": self.scope.scope_id,
+                          "n": index})
+
     def test_the_buffer_stops_at_the_cap_and_keeps_the_newest(self) -> None:
-        os.environ[offload_state.EVENT_BUFFER_MAX_ENV] = "25"
-        for index in range(500):
-            record_event({"kind": "fixture", "n": index})
+        cap = offload_state.EVENT_BUFFER_MAX
+        self.fill(cap + 25)
         events = snapshot_events()
-        self.assertEqual(len(events), 25)
-        self.assertEqual([item["n"] for item in events], list(range(475, 500)))
+        self.assertEqual(len(events), cap)
+        self.assertEqual([item["n"] for item in events], list(range(25, cap + 25)))
 
-    def test_the_default_cap_bounds_a_process_with_no_configuration(self) -> None:
-        self.assertNotIn(offload_state.EVENT_BUFFER_MAX_ENV, os.environ)
-        cap = offload_state.event_buffer_max_from_env()
-        self.assertEqual(cap, offload_state.DEFAULT_EVENT_BUFFER_MAX)
-        for index in range(cap + 200):
-            record_event({"kind": "fixture", "n": index})
-        self.assertEqual(len(snapshot_events()), cap)
+    def test_the_cap_is_a_module_constant(self) -> None:
+        self.assertEqual(offload_state.EVENT_BUFFER_MAX, 2000)
+        for retired in ("event_buffer_max_from_env", "EVENT_BUFFER_MAX_ENV",
+                        "DEFAULT_EVENT_BUFFER_MAX"):
+            with self.subTest(name=retired):
+                self.assertFalse(hasattr(offload_state, retired))
 
-    def test_a_nonsense_cap_falls_back_to_the_default(self) -> None:
-        os.environ[offload_state.EVENT_BUFFER_MAX_ENV] = "0"
-        self.assertEqual(offload_state.event_buffer_max_from_env(),
-                         offload_state.DEFAULT_EVENT_BUFFER_MAX)
-        os.environ[offload_state.EVENT_BUFFER_MAX_ENV] = "not-a-number"
-        self.assertEqual(offload_state.event_buffer_max_from_env(),
-                         offload_state.DEFAULT_EVENT_BUFFER_MAX)
+    def test_the_retired_cap_setting_is_inert(self) -> None:
+        for raw in ("25", "0", "not-a-number"):
+            with self.subTest(raw=raw):
+                reset_runtime_state()
+                self.route()
+                os.environ[self.RETIRED_CAP_ENV] = raw
+                self.fill(100)
+                self.assertEqual(len(snapshot_events()), 100)
 
 
 
@@ -346,12 +377,12 @@ class ReclaimScopeIsNotAGlobalResetTests(unittest.TestCase):
 
         reclaim_scope(gone)
 
-        # RESIDENCY, never evidence. Since ido-dhw the clause and the entry
-        # registry have a durable tier, so what reclamation releases is the
-        # process-local copy -- read through the private maps, because the
-        # public readers deliberately rebuild from the sidecar and would answer
-        # from disk, which is the cold-resume path working as designed. The
-        # survival of those rows is asserted straight after.
+        # RESIDENCY, never evidence. Since ido-dhw the clause has a durable
+        # tier, so what reclamation releases is the process-local copy -- read
+        # through the private maps, because the public readers deliberately
+        # rebuild from the archive and would answer from disk, which is the
+        # cold-resume path working as designed. The survival of that row is
+        # asserted straight after.
         self.assertNotIn(
             offload_state.handle_key(gone, "O1"), offload_state._context_clauses)
         self.assertIsNone(offload_state.archived_digest(gone, "O1"))

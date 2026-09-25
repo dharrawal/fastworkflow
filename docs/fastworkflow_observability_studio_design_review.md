@@ -12,6 +12,14 @@ accepted finding.
 
 Severity index: **5 critical** (R1–R5), **20 major** (R6–R25), **3 minor** (R26–R28).
 
+> Errata (2026-09-24): R4's resolution direction ("default ON only when the
+> operator invoked the framework directly … opt-in for library embedders") was
+> reversed in 3.4.0 by an owner decision. `FW_OBSERVABILITY` was removed and
+> recording is always on, embedders included; the 0700/0600 posture R4 asked for
+> stands. The opt-in had stopped keeping command output off disk once
+> observation offloading persisted responses regardless of it. The finding below
+> is kept as written, as the record of the review.
+
 ---
 
 ## Critical

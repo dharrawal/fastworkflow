@@ -87,6 +87,7 @@ from fastworkflow.observation_offloading.state import (
     hot_payload_bytes,
     observation_inline,
     record_event,
+    register_scope,
     remember_handle,
     reset_runtime_state,
     snapshot_events,
@@ -1177,12 +1178,12 @@ class HookIsolation(unittest.TestCase):
         )
         self.assertEqual(decisions[0]["action"], "offloaded")
 
-    def test_unwritable_event_log_does_not_raise(self) -> None:
-        blocker = Path(self.tempdir.name) / "not-a-directory"
-        blocker.write_text("occupied", encoding="utf-8")
-        self._set_env("FW_OFFLOAD_EVENTS", str(blocker / "events.jsonl"))
-        record_event({"kind": "probe"})
-        record_event({"kind": "probe-again"})
+    def test_unwritable_event_store_does_not_raise(self) -> None:
+        # A real SQLite failure: the event database path names a directory.
+        self.archive.db_path = self.tempdir.name
+        register_scope(self.scope, self.archive)
+        record_event({"kind": "probe", "scope_id": self.scope.scope_id})
+        record_event({"kind": "probe-again", "scope_id": self.scope.scope_id})
         self.assertEqual(
             [e["kind"] for e in snapshot_events()], ["probe", "probe-again"]
         )

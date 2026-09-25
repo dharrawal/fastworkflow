@@ -162,23 +162,19 @@ The clause was captured at dispatch into a turn-scoped process map and nothing
 else, so a turn resumed in another process had no subject for any of its
 observations: the rehydrated handle line lost its clause, and a reader that had
 only the resumed process could not say whose evidence a stored listing was.
-`record_context_clause` now writes through to an `observation_subjects` row in
-the sidecar, keyed by
-`(scope_id, alias)`, and `context_clause_of` reads through to it when the map
-misses and refills the map from what it finds — the bounded runtime cache is
-REBUILT from the durable record rather than kept a second way. A second table,
-`observation_context_entries`, records the same way which command entered the
-context an observation was produced in, and its parameter values.
+`record_context_clause` now writes through to an `offload_subjects` row in the
+workflow's observability database, keyed by `(turn_key, alias)`, and
+`context_clause_of` reads through to it when the map misses and refills the map
+from what it finds — the bounded runtime cache is REBUILT from the durable
+record rather than kept a second way.
 
-Both tables are created on open with `CREATE TABLE IF NOT EXISTS`, so an
-existing sidecar gains them the first time new code opens it and no migration
-runs. Both carry `scope_id` and `scope_json`, so
-[evidence erasure](../fastworkflow/observation_offloading/erasure.py) discovers
-them structurally and erases them with their channel, and preserves them for an
-experiment run, without being told they exist. A row written before the tables
-existed simply has no entry, which reads back as UNRECORDED — the state every
-reader already handles — and never as a guessed subject. `reclaim_scope` drops
-both process-local halves and neither row: residency, never evidence.
+The table is part of the observability store's schema (see *Retention,
+redaction and known limits*), carries the turn's `channel_id` beside its
+`turn_key`, and is erased and pruned with the turn by the store's own
+transactions, like the evidence it describes. An alias nobody stamped has no
+row, which reads back as UNRECORDED — the state every reader already handles —
+and never as a guessed subject. `reclaim_scope` drops the process-local copy
+and never the row: residency, never evidence.
 
 **The subject is handed to `search_memory` beside the evidence.**
 Because the archived text is the raw response, a stored `list_permissions` page
@@ -390,11 +386,17 @@ Observation offloading itself has no switch: `build_tool_agent` always returns a
 replan bound is the module constant
 `observation_offloading.continuation.MAX_FORCED_REPLANS` (2, therefore 3
 segments). `FW_OBSERVATION_OFFLOADING`, `FW_MAX_FORCED_REPLANS` and
-`FW_OFFLOAD_HANDLE_ARCHIVE` were removed in 3.4.0; the observation archive now
-always lives beside the workflow's own observability database.
-`FW_OFFLOAD_EVENTS` remains, and is a destination rather than a switch: the
-events are always recorded in process, and it says where a copy is appended on
-disk.
+`FW_OFFLOAD_HANDLE_ARCHIVE` were removed in 3.4.0; the observation archive
+always lives in the workflow's own observability database. So do the
+offloading runtime's diagnostic events: they are kept in process in a ring of
+the newest 2,000 (`snapshot_events()`) and stored as rows of `offload_events`,
+read back with `ObservabilityStore.offload_events(turn_key=..., channel_id=...,
+kind=...)`. `FW_OFFLOAD_EVENTS`, `FW_OFFLOAD_EVENT_BUFFER_MAX` and
+`FW_SEARCH_OBSERVATION_MAX_BYTES` were removed in 3.4.0 as well; setting them
+has no effect.
+
+The one setting that remains is `FW_OFFLOAD_EVIDENCE_REDACTION`: `on` (the
+default) or `off`. See *Retention, redaction and known limits*.
 
 ## Tool behavior
 
@@ -436,8 +438,9 @@ window rather than the agent's: `search_observation_max_bytes()` resolves
 `LLM_OBSERVATION_SEARCH`'s context window and takes 3/128 of it as bytes, which
 is 12,288 B at the 131,072-token reference window — exactly the declared
 geometry of `DEFAULT_PAGE_BYTES` (4,096) x `SEARCH_MEMORY_MAX_PAGES` (3) — with
-a floor of one page and `FW_SEARCH_OBSERVATION_MAX_BYTES` as the tuning
-override. The subject metadata is paid for out of that same budget, so nothing
+a floor of one page. It has no tuning override: the search model's window is
+the only input, and `FW_MODEL_CONTEXT_TOKENS` is how a deployment corrects that
+window. The subject metadata is paid for out of that same budget, so nothing
 travelling to the model escapes the bound the model's window imposes. Without
 it, an execute observation archived at full size (measured at 440,000 B) was
 re-sent whole on every search of it.
@@ -468,8 +471,9 @@ When the provider refuses even the bounded prompt, the outcome is typed rather
 than generic: `is_context_window_error` matches `ContextWindowExceededError` on
 the exception's class chain, or the providers' wordings as a fallback, and the
 observation opens with `[search_memory INPUT OVER WINDOW:` — what was sent, that
-the retry cannot succeed, the agent's move, and the operator's
-(`FW_SEARCH_OBSERVATION_MAX_BYTES`, or a larger `LLM_OBSERVATION_SEARCH` model).
+the retry cannot succeed, the agent's move, and the operator's (set
+`FW_MODEL_CONTEXT_TOKENS` to the search model's real window, or use a larger
+`LLM_OBSERVATION_SEARCH` model).
 The provider message itself is inspected, never printed: it can carry payload or
 credentials.
 
@@ -483,39 +487,70 @@ Offloading writes evidence to disk and bounds several things by bytes. What
 follows is the contract as it ships, including the places where it is looser
 than a one-line summary would suggest.
 
-**Where the evidence lives.** Every execute response is persisted in a sidecar
-SQLite file beside the workflow's observability database, named after it with a
-`.offload-handles.sqlite3` suffix. The rows written *during* a turn hold the raw
-command responses, byte for byte, because every reader inside the turn — the
-trajectory, `search_memory`, answer-time rehydration, and those same reads after
-a resume — has to see what the command actually returned.
+**Where the evidence lives.** In the workflow's own observability database,
+`<FASTWORKFLOW_STATE_ROOT>/workflows/<workflow-id>/observability.sqlite3`, the
+same file as its turn records and spans. Three tables, added to the store's
+schema with feature markers (`offload_evidence_v1`, `offload_events_v1`)
+rather than a schema-version bump:
 
-**Sealing happens after the turn, not when it returns.** Sealing rewrites a
-scope's stored responses through the credential scrub and the capture policy's
-default profile: it redacts, it does not truncate. It runs at the first
-opportunity once the turn is genuinely over — when the next turn starts, or when
-the session closes — so there is a window in which raw bytes sit in the file. If
-the process dies inside that window, the next process to open the sidecar sweeps
-whatever is still raw.
+- `offload_evidence` — one row per archived observation (and per archived
+  search answer): the stored bytes, their digest, and the capture record that
+  produced them (policy version, profile, redaction mode, whether the stored
+  bytes differ from what the command returned, and the raw byte count);
+- `offload_subjects` — the context each observation is evidence about;
+- `offload_events` — the offloading runtime's diagnostic events.
 
-**The two side tables are not sealed.** The recorded subject clauses
-(`observation_subjects`) and context entries (`observation_context_entries`) are
-written in the clear and stay that way. They hold a context name, an instance
-label, a command name and its parameter values rather than command output, so if
-your parameter values can carry anything sensitive, treat these two tables as
+Every row is keyed by the TURN that produced it and carries that turn's
+`channel_id`, like a span or an artifact. The database is created owner-only
+(the file `0600`, its directory `0700`) whichever code path opens it first, and
+no setting turns recording off, for fastWorkflow's own entry points and for
+programs that embed the library alike.
+
+**Evidence lives and dies with its turn.** `forget_channel`, Clear
+conversations and retention pruning delete a turn's evidence, subjects and
+events in the same transactions that delete its turn record, and drop the
+process-local copies that could still serve them. There is no preservation
+mode: an experiment run's evidence is erased by a Clear or by forgetting its
+channel, exactly like a chatbot conversation's.
+
+**Redaction happens when the evidence is written.** With
+`FW_OFFLOAD_EVIDENCE_REDACTION=on` — the default — a command response is stored
+as the trace sink's credential scrub and capture policy leave it: it redacts, it
+does not truncate. Event text is protected the same way, because events carry
+search questions, reasoning and answers. `off` stores responses and events
+verbatim, and each row says which mode produced it. That is the developer
+setting, for reproducing exactly what the agent read.
+
+Redacting at the write would change what the agent reads back mid-turn, so the
+process that wrote a redacted row also keeps its raw text in memory while the
+turn is live, and every read that process makes during the turn — the
+trajectory, `search_memory`, answer-time rehydration — is exact. That memory is
+released when the turn is over: when the agent starts the next turn, or when the
+session closes. A suspended turn keeps it. A turn resumed in a *different*
+process has no such memory and reads the stored, redacted text; that is the
+accepted cost of never writing raw bytes to disk.
+
+**Subject clauses are not redacted.** `offload_subjects` holds a context name
+and an instance label rather than command output, and is stored in the clear.
+If your context labels can carry anything sensitive, treat that table as
 unredacted.
 
-**Pruning runs once per process start, when observability is on.** The sidecar is
-pruned on the same age horizon and size cap as the observability store beside it,
-and that prune is triggered when the trace sink is installed. A long-lived
-process does not prune again while it runs.
+**Older evidence files are deleted, not imported.** Earlier builds kept the
+evidence in a separate file beside the database, named with an
+`.offload-handles.sqlite3` suffix. Opening the store deletes that file, its
+write-ahead-log files and any `.preserve` marker beside it; nothing in it is
+carried over.
 
-**A program that embeds the library with observability off owns its own
-pruning.** The sidecar is not created lazily on first use — it is opened or
-created when the agent is constructed — so it exists and grows whether or not a
-trace sink was installed. With no sink there is nothing to trigger a prune, so
-the file accumulates every turn's responses for the life of the deployment until
-something outside fastWorkflow removes it.
+**Pruning runs once per process start.** The evidence is pruned on the store's
+own age horizon and size cap (`FW_OBS_RETENTION_DAYS`, `FW_OBS_DB_MAX_BYTES`),
+one whole turn at a time, and that prune is triggered when a trace sink opens
+the store. A long-lived process does not prune again while it runs.
+
+**A program that embeds the library should open a sink.** The agent's archive
+creates the database when the agent is constructed, whether or not a trace sink
+was ever opened. fastWorkflow's entry points always open one; a program that
+builds its own execution context should call `get_observability_sink(workflow_path)`
+and bind the result, or the prune that keeps the file bounded never runs.
 
 **Worst-case agent work in one turn.** A turn runs at most three segments of 25
 decisions each, plus the two continuation-planner calls that open the second and

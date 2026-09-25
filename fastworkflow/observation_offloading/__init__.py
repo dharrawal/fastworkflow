@@ -14,15 +14,10 @@ from fastworkflow.observation_offloading.agent import (
     open_handle_archive,
 )
 from fastworkflow.observation_offloading.archive import (
-    SEAL_NOT_REQUIRED,
-    SEAL_PENDING,
-    SEAL_SEALED,
-    SEAL_UNKNOWN,
     PersistenceError,
     RuntimeHandleArchive,
     RuntimeHandleScope,
     UnavailableHandleArchive,
-    seal_grace_seconds,
 )
 from fastworkflow.observation_offloading.compact import (
     MIN_OFFLOAD_SAVING_BYTES,
@@ -74,12 +69,10 @@ from fastworkflow.observation_offloading.state import (
     clear_hot_handles,
     context_clause_of,
     durable_archive,
-    event_buffer_max_from_env,
     forget_context_clause,
     hot_payload_bytes,
     observation_inline,
     record_context_clause,
-    seal_scope,
     stored_handles,
 )
 
@@ -114,7 +107,6 @@ __all__ = [
     "clear_hot_handles",
     "compact_trajectory",
     "escape_response",
-    "event_buffer_max_from_env",
     "execute_ordinals",
     "hot_payload_bytes",
     "install_span_policy",
@@ -128,12 +120,6 @@ __all__ = [
     "printed_alias",
     "printed_context",
     "reclaim_scope",
-    "seal_scope",
-    "seal_grace_seconds",
-    "SEAL_PENDING",
-    "SEAL_SEALED",
-    "SEAL_NOT_REQUIRED",
-    "SEAL_UNKNOWN",
     "replan_trajectory_skeleton",
     "reset_runtime_state",
     "search_answer_key",

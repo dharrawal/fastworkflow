@@ -1,27 +1,28 @@
-"""Nothing is redacted while a turn is in flight; the seal is at the end.
+"""Evidence is redacted when it is written; only memory holds the raw text.
 
-Redaction decides WHETHER the evidence sidecar scrubs what it stored; the seal
-decides WHEN. With redaction on, a turn's stored observations are written
-VERBATIM and sealed into their redacted form only when the turn is genuinely
-over. In flight means the whole life of the turn, explicitly including an
-ask_user wait and any serialize/deserialize round trip, so every read an agent
-can make during its own turn returns raw -- the live trajectory,
-``search_memory``, rehydration, and those same reads after a resume in a fresh
-process.
+With ``FW_OFFLOAD_EVIDENCE_REDACTION`` on (the default), what reaches the
+observability database is what the store's scrub-and-capture pipeline makes of
+a command response, from the very first write. Redacting at the write would
+change what the agent reads back mid-turn, so the process that wrote a redacted
+row also keeps its RAW text in memory for as long as the turn is live, and
+every read that process makes during the turn -- the hot cache,
+``search_memory``, answer rehydration -- is exact. That memory is released at
+the moments the runtime already decides a turn is over: the agent binding the
+next turn, and the execution context being closed. A suspended turn keeps it.
+A turn resumed in a DIFFERENT process has no such memory and reads the stored,
+redacted text; that is the accepted cost.
 
-The cost of that design is raw bytes on disk for the duration of a turn. Two
-things keep it bounded rather than open-ended, and both are under test here: a
-completing turn seals its own evidence, and a turn whose process DIED is swept.
+There is no seal, no ledger of raw rows, and no crash sweep any more: a
+process that dies mid-turn leaves nothing raw on disk, because nothing raw was
+ever written there.
 
-The claims are made in BYTES wherever a leak or a degradation is the thing
-being denied, on ``test_offload_capture_redaction``'s rule: a row read back
-through the archive's API proves what the API returns, and the file is what a
-stolen disk is about. Every scan opens the database (and its journal, if any)
-and searches the raw bytes.
+The claims are made in BYTES wherever a leak is the thing being denied: a row
+read back through the archive's API proves what the API returns, and the file
+is what a stolen disk is about. Every scan opens the database and its
+write-ahead log and searches the raw bytes.
 
 Everything runs against databases and workflows created in this test's own
-temporary directory. Nothing here reads or writes a store it did not create.
-No model, no backend, no network.
+temporary directory. No model, no backend, no network.
 """
 from __future__ import annotations
 
@@ -32,7 +33,6 @@ import sqlite3
 import tempfile
 import unittest
 import uuid
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import dspy
@@ -40,8 +40,8 @@ import dspy
 import fastworkflow
 from fastworkflow import tracing
 from fastworkflow.answer_rehydration import archived_observation
+from fastworkflow.observability import store as obs
 from fastworkflow.observation_offloading import archive as archive_module
-from fastworkflow.observation_offloading import erasure
 from fastworkflow.observation_offloading import state as offload_state
 from fastworkflow.observation_offloading.agent import build_tool_agent
 from fastworkflow.observation_offloading.archive import (
@@ -62,28 +62,14 @@ from fastworkflow.observation_offloading.state import (
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
-# Read off the module rather than imported, for the reason the redaction cases
-# do it: a regression check has to be RUNNABLE against a revision that lacks the
-# fix. Where these names are absent the shims below answer for them, and the
-# cases FAIL on their assertions -- a credential absent from a mid-turn file, a
-# redacted read inside a live turn -- rather than erroring on an import.
-SEAL_PENDING = getattr(archive_module, "SEAL_PENDING", "pending")
-SEAL_SEALED = getattr(archive_module, "SEAL_SEALED", "sealed")
-SEAL_NOT_REQUIRED = getattr(archive_module, "SEAL_NOT_REQUIRED", "not_required")
-SEAL_UNKNOWN = getattr(archive_module, "SEAL_UNKNOWN", "unknown")
-SEAL_GRACE_ENV = getattr(
-    archive_module, "SEAL_GRACE_ENV", "FW_OFFLOAD_SEAL_GRACE_SECONDS"
-)
 REDACTION_ENV = archive_module.REDACTION_ENV
 REDACTION_ON = archive_module.REDACTION_ON
 REDACTION_OFF = archive_module.REDACTION_OFF
+#: The retired crash-sweep setting, named so the case that proves it is inert
+#: can set it.
+RETIRED_SEAL_GRACE_ENV = "FW_OFFLOAD_SEAL_GRACE_SECONDS"
+LEGACY_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 
-needs_the_seal = unittest.skipIf(
-    not hasattr(archive_module, "SEAL_PENDING"),
-    "the turn-completion seal is not in this revision",
-)
-
-SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 #: A credential shape ``Redactor._SECRET_PATTERNS`` recognises with no help
 #: from the environment.
 SK_TOKEN = "sk-livekey1234567890abcdef"
@@ -100,22 +86,6 @@ def response_with_credential(command: str = "sync") -> str:
     )
 
 
-def seal_scope(archive, scope):
-    """Complete the turn. ``None`` on a revision with no seal."""
-    sealer = getattr(archive, "seal_scope", None)
-    return None if sealer is None else sealer(scope)
-
-
-def seal_state(archive, scope, alias: str) -> str:
-    reader = getattr(archive, "seal_state", None)
-    return SEAL_UNKNOWN if reader is None else reader(scope, alias)
-
-
-def sweep(archive, **kwargs):
-    sweeper = getattr(archive, "sweep_unsealed", None)
-    return None if sweeper is None else sweeper(**kwargs)
-
-
 def chatbot_scope(channel: str = "chat", turn: str = "turn-1") -> RuntimeHandleScope:
     return RuntimeHandleScope(
         store_identity="store", channel_id=channel, experiment_id="unbound",
@@ -130,8 +100,18 @@ def experiment_scope(channel: str = "exp", turn: str = "turn-1") -> RuntimeHandl
     )
 
 
-class SealFixture(unittest.TestCase):
-    """A sidecar in a temporary directory, and a clean configuration."""
+def file_bytes(db_path: str) -> bytes:
+    """Every byte the database occupies, write-ahead log included."""
+    blob = b""
+    for suffix in ("", "-wal", "-journal"):
+        if os.path.exists(db_path + suffix):
+            with open(db_path + suffix, "rb") as handle:
+                blob += handle.read()
+    return blob
+
+
+class EvidenceFixture(unittest.TestCase):
+    """An observability database in a temporary directory, clean configuration."""
 
     def setUp(self) -> None:
         reset_runtime_state()
@@ -140,18 +120,14 @@ class SealFixture(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
         for name in (
-            REDACTION_ENV, SEAL_GRACE_ENV, "FW_OBS_CAPTURE_PROFILE",
-            "FW_OFFLOAD_EVIDENCE_PRESERVATION", "FW_OFFLOAD_EVENTS",
+            REDACTION_ENV, RETIRED_SEAL_GRACE_ENV, "FW_OBS_CAPTURE_PROFILE",
+            "FW_OFFLOAD_EVIDENCE_PRESERVATION",
         ):
             self._restore_env[name] = os.environ.pop(name, None)
         self.addCleanup(self._restore_environment)
-        for name in ("_warned_redaction", "_warned_grace"):
-            warned = getattr(archive_module, name, None)
-            if warned is not None:
-                warned.clear()
-                self.addCleanup(warned.clear)
+        archive_module._warned_redaction.clear()
+        self.addCleanup(archive_module._warned_redaction.clear)
         self.db_path = os.path.join(self.temp.name, "observability.sqlite3")
-        self.sidecar = self.db_path + SIDECAR_SUFFIX
 
     def _restore_environment(self) -> None:
         for name, value in self._restore_env.items():
@@ -162,20 +138,13 @@ class SealFixture(unittest.TestCase):
 
     # -- helpers ---------------------------------------------------------
 
-    def file_bytes(self, path: str | None = None) -> bytes:
-        """Every byte the sidecar occupies, journal included."""
-        blob = b""
-        base = path or self.sidecar
-        for suffix in ("", "-wal", "-journal"):
-            if os.path.exists(base + suffix):
-                with open(base + suffix, "rb") as handle:
-                    blob += handle.read()
-        return blob
+    def file_bytes(self) -> bytes:
+        return file_bytes(self.db_path)
 
     def persist(self, text: str, *, scope=None, alias: str = "O1", order: int = 1,
                 archive=None):
         scope = scope or chatbot_scope()
-        target = archive or RuntimeHandleArchive(self.sidecar)
+        target = archive or RuntimeHandleArchive(self.db_path)
         stored = target.persist(
             scope, alias=alias, offload_order=order,
             command_name="execute_workflow_query", step_index=order,
@@ -184,280 +153,204 @@ class SealFixture(unittest.TestCase):
         return target, stored
 
 
-# ---------------------------------------------------------------------------
-# Requirement 1 and 5: what "over" means, and the toggle
-# ---------------------------------------------------------------------------
+class WriteTimeRedactionTests(EvidenceFixture):
+    """The file is redacted from the first write; the live turn still reads raw."""
 
+    def test_a_mid_turn_row_is_already_redacted_on_disk(self) -> None:
+        text = response_with_credential()
+        archive, stored = self.persist(text)
+        scope = chatbot_scope()
 
-class InFlightTests(SealFixture):
-    """While the turn is running, every read is the raw response."""
+        # The live turn reads exactly what the command returned...
+        self.assertEqual(stored["text"], text)
+        self.assertEqual(archive.get(scope, "O1")["text"], text)
+        self.assertEqual(archive.list(scope)[0]["text"], text)
+        # ...while the file never held the credential, not even mid-turn.
+        blob = self.file_bytes()
+        self.assertNotIn(SK_TOKEN.encode("ascii"), blob)
+        self.assertIn(b"rows: 3 users synchronised", blob)
 
-    def test_a_mid_turn_row_is_the_raw_response_on_disk(self) -> None:
-        """The in-flight cost of the design, asserted rather than assumed."""
+    def test_the_raw_copy_is_released_with_the_turn(self) -> None:
+        text = response_with_credential()
+        archive, _ = self.persist(text)
+        scope = chatbot_scope()
+
+        offload_state.reclaim_scope(scope)
+
+        stored = archive.get(scope, "O1")
+        self.assertIn(REDACTED, stored["text"])
+        self.assertNotIn(SK_TOKEN, stored["text"])
+        # Everything that was not a secret survives, which is what keeps a
+        # redacted archive worth reading.
+        self.assertIn("rows: 3 users synchronised", stored["text"])
+        self.assertEqual(
+            stored["text_sha256"],
+            hashlib.sha256(stored["text"].encode("utf-8")).hexdigest(),
+        )
+        # Releasing twice is harmless.
+        offload_state.reclaim_scope(scope)
+        self.assertEqual(archive.get(scope, "O1")["text"], stored["text"])
+
+    def test_releasing_one_turn_keeps_the_turn_beside_it_exact(self) -> None:
+        """One turn finishing must not degrade the turn running beside it."""
+        mine = chatbot_scope("mine", "turn-1")
+        theirs = chatbot_scope("theirs", "turn-2")
+        archive, _ = self.persist(response_with_credential(), scope=mine)
+        self.persist(response_with_credential(), scope=theirs, archive=archive)
+
+        offload_state.reclaim_scope(mine)
+
+        self.assertIn(REDACTED, archive.get(mine, "O1")["text"])
+        self.assertEqual(archive.get(theirs, "O1")["text"],
+                         response_with_credential())
+
+    def test_redaction_off_keeps_no_raw_copy_and_stores_verbatim(self) -> None:
+        """Off means never redact, so there is nothing for memory to shadow."""
+        os.environ[REDACTION_ENV] = REDACTION_OFF
         text = response_with_credential()
         archive, stored = self.persist(text)
         scope = chatbot_scope()
 
         self.assertEqual(stored["text"], text)
-        self.assertEqual(archive.get(scope, "O1")["text"], text)
+        self.assertNotIn(scope.scope_id, archive_module._live_raw)
         self.assertIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
-
-    def test_the_seal_is_what_redacts_and_it_is_idempotent(self) -> None:
-        text = response_with_credential()
-        archive, _ = self.persist(text)
-        scope = chatbot_scope()
-
-        first = seal_scope(archive, scope)
-        self.assertEqual(first["sealed"], 1)
-        self.assertEqual(first["redacted"], 1)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_SEALED)
-        self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        self.assertIn(REDACTED, archive.get(scope, "O1")["text"])
-        # Everything that was not a secret survives, which is what keeps a
-        # sealed archive worth reading.
-        self.assertIn("rows: 3 users synchronised", archive.get(scope, "O1")["text"])
-
-        again = seal_scope(archive, scope)
-        self.assertEqual(again["sealed"], 0)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_SEALED)
-
-    def test_a_seal_only_touches_the_scope_it_names(self) -> None:
-        """One turn completing must not redact the turn running beside it."""
-        mine = chatbot_scope("mine", "turn-1")
-        theirs = chatbot_scope("theirs", "turn-1")
-        archive, _ = self.persist(response_with_credential(), scope=mine)
-        self.persist(response_with_credential(), scope=theirs, archive=archive)
-
-        seal_scope(archive, mine)
-
-        self.assertIn(REDACTED, archive.get(mine, "O1")["text"])
-        self.assertEqual(archive.get(theirs, "O1")["text"],
-                         response_with_credential())
-        self.assertEqual(seal_state(archive, theirs, "O1"), SEAL_PENDING)
-
-    @needs_the_seal
-    def test_redaction_off_owes_no_seal_and_never_redacts(self) -> None:
-        """Requirement 5: off still means never redact."""
-        os.environ[REDACTION_ENV] = REDACTION_OFF
-        text = response_with_credential()
-        archive, stored = self.persist(text)
-        scope = chatbot_scope()
-
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_NOT_REQUIRED)
-        result = seal_scope(archive, scope)
-        self.assertEqual(result["sealed"], 0)
-        self.assertEqual(archive.get(scope, "O1")["text"], text)
-        self.assertIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        # And the sweep leaves it alone too, whatever its age.
-        with sqlite3.connect(self.sidecar) as conn:
-            conn.execute("UPDATE observation_seal_state SET opened_at=?, owner_id=?",
-                         ("2000-01-01T00:00:00Z", "pid-dead"))
-            conn.commit()
-        sweep(archive)
+        offload_state.reclaim_scope(scope)
         self.assertEqual(archive.get(scope, "O1")["text"], text)
 
-
-# ---------------------------------------------------------------------------
-# Requirement 6 and 7: the four states, erasure, retention, preservation
-# ---------------------------------------------------------------------------
-
-
-class FidelityRecordTests(SealFixture):
-    """A reader can tell an unsealed row from a sealed one, and both from a
-    row that never held a secret."""
-
-    @needs_the_seal
-    def test_the_four_states_are_distinguishable(self) -> None:
+    def test_a_fresh_archive_with_no_raw_copy_reads_the_redacted_text(self) -> None:
+        """What another process reads: the stored bytes, nothing from memory."""
+        text = response_with_credential()
+        self.persist(text)
         scope = chatbot_scope()
-        archive = RuntimeHandleArchive(self.sidecar)
-        # pending: raw on disk, seal owed.
+        # A different process never saw the write, so it holds no raw copy.
+        archive_module.clear_live_raw()
+
+        other = RuntimeHandleArchive(self.db_path)
+        stored = other.get(scope, "O1")
+        self.assertIn(REDACTED, stored["text"])
+        self.assertNotIn(SK_TOKEN, stored["text"])
+        self.assertEqual(other.list(scope)[0]["text"], stored["text"])
+
+
+class FidelityRecordTests(EvidenceFixture):
+    """The capture record lives on the evidence row and describes its bytes."""
+
+    def test_redacted_verbatim_and_clean_rows_are_distinguishable(self) -> None:
+        scope = chatbot_scope()
+        archive = RuntimeHandleArchive(self.db_path)
         self.persist(response_with_credential(), scope=scope, alias="O1",
                      archive=archive)
-        # not_required: the toggle was off at the write.
         os.environ[REDACTION_ENV] = REDACTION_OFF
-        self.persist("nothing secret here\n", scope=scope, alias="O2", order=2,
-                     archive=archive)
-        os.environ.pop(REDACTION_ENV)
-        # unknown: a row written before the seal ledger existed.
-        legacy = "a row from an older revision\n"
-        with sqlite3.connect(self.sidecar) as conn:
-            conn.execute(
-                "INSERT INTO observation_offload_handles ("
-                "scope_id, scope_json, alias, offload_order, command_name, "
-                "step_index, text_utf8, text_sha256, persisted_at"
-                ") VALUES (?,?,?,?,?,?,?,?,?)",
-                (scope.scope_id, "{}", "O3", 3, "execute_workflow_query", 3,
-                 legacy.encode("utf-8"),
-                 hashlib.sha256(legacy.encode("utf-8")).hexdigest(),
-                 "2026-01-01T00:00:00Z"),
-            )
-            conn.commit()
-
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
-        self.assertEqual(seal_state(archive, scope, "O2"), SEAL_NOT_REQUIRED)
-        self.assertEqual(seal_state(archive, scope, "O3"), SEAL_UNKNOWN)
-        # A pending row says redacted=False because nothing has RUN, not
-        # because there was nothing to find. The seal is what settles that.
-        self.assertFalse(archive.capture_record(scope, "O1")["redacted"])
-        self.assertEqual(
-            archive.capture_record(scope, "O1")["seal_state"], SEAL_PENDING
-        )
-        seal_scope(archive, scope)
-        sealed = archive.capture_record(scope, "O1")
-        self.assertEqual(sealed["seal_state"], SEAL_SEALED)
-        self.assertTrue(sealed["redacted"])
-        self.assertTrue(sealed["sealed_at"])
-        # The row that never held a secret is sealed and says redacted=False,
-        # which is the distinction the fidelity table exists for.
-        self.persist("no secret at all\n", scope=scope, alias="O4", order=4,
-                     archive=archive)
-        seal_scope(archive, scope)
-        clean = archive.capture_record(scope, "O4")
-        self.assertEqual(clean["seal_state"], SEAL_SEALED)
-        self.assertFalse(clean["redacted"])
-        # And nothing rewrote the row the ledger knows nothing about.
-        self.assertEqual(archive.get(scope, "O3")["text"], legacy)
-        self.assertIsNone(archive.capture_record(scope, "O3"))
-
-    @needs_the_seal
-    def test_a_sidecar_written_before_this_change_opens_and_reads(self) -> None:
-        """Additive state is created on open; there is no migration step.
-
-        The file is created with only the four tables and row shapes an
-        older sidecar wrote, then opened by the current code.
-        """
-        scope = chatbot_scope()
-        text = "an older revision's row\n"
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        with sqlite3.connect(self.sidecar) as conn:
-            conn.execute(
-                "CREATE TABLE observation_offload_handles ("
-                "scope_id TEXT NOT NULL, scope_json TEXT NOT NULL, "
-                "alias TEXT NOT NULL, offload_order INTEGER NOT NULL, "
-                "command_name TEXT NOT NULL, step_index INTEGER NOT NULL, "
-                "text_utf8 BLOB NOT NULL, text_sha256 TEXT NOT NULL, "
-                "persisted_at TEXT NOT NULL, PRIMARY KEY (scope_id, alias))"
-            )
-            conn.execute(
-                "INSERT INTO observation_offload_handles VALUES (?,?,?,?,?,?,?,?,?)",
-                (scope.scope_id, json.dumps({"channel_id": "chat"}), "O1", 1,
-                 "execute_workflow_query", 1, text.encode("utf-8"), digest,
-                 "2026-02-01T00:00:00Z"),
-            )
-            conn.commit()
-
-        archive = RuntimeHandleArchive(self.sidecar)
-
-        self.assertEqual(archive.get(scope, "O1")["text"], text)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_UNKNOWN)
-        self.assertIsNone(archive.capture_record(scope, "O1"))
-        # Sealing the scope leaves it alone -- nothing is owed on a row whose
-        # bytes were already final when it was written.
-        self.assertEqual(seal_scope(archive, scope)["sealed"], 0)
-        self.assertEqual(archive.get(scope, "O1")["text"], text)
-        # And a new row in the same file gets the new ledger.
         self.persist(response_with_credential(), scope=scope, alias="O2", order=2,
                      archive=archive)
-        self.assertEqual(seal_state(archive, scope, "O2"), SEAL_PENDING)
+        os.environ.pop(REDACTION_ENV)
+        self.persist("no secret at all\n", scope=scope, alias="O3", order=3,
+                     archive=archive)
+
+        redacted = archive.capture_record(scope, "O1")
+        verbatim = archive.capture_record(scope, "O2")
+        clean = archive.capture_record(scope, "O3")
+        self.assertEqual((redacted["redaction"], redacted["redacted"]),
+                         (REDACTION_ON, True))
+        self.assertEqual((verbatim["redaction"], verbatim["redacted"]),
+                         (REDACTION_OFF, False))
+        self.assertEqual((clean["redaction"], clean["redacted"]),
+                         (REDACTION_ON, False))
+        self.assertEqual(verbatim["capture_profile"], "")
+        self.assertEqual(redacted["capture_profile"], "debug")
+        self.assertIsNone(archive.capture_record(scope, "O404"))
+
+    def test_there_are_no_side_tables_for_seal_or_capture_state(self) -> None:
+        """One evidence row per observation; the old ledgers are not created."""
+        self.persist(response_with_credential())
+        with sqlite3.connect(self.db_path) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            columns = {row[1] for row in conn.execute(
+                "PRAGMA table_info(offload_evidence)")}
+        for retired in ("observation_seal_state", "observation_capture_policy",
+                        "observation_context_entries", "observation_offload_handles"):
+            with self.subTest(table=retired):
+                self.assertNotIn(retired, tables)
+        self.assertTrue({"capture_policy_version", "capture_profile", "redaction",
+                         "redacted", "raw_utf8_bytes"} <= columns)
+        self.assertFalse({"seal_state", "owner_id", "sealed_at"} & columns)
 
 
-class ErasureAndRetentionTests(SealFixture):
-    """Requirement 6: both work on sealed and unsealed rows alike."""
+class ErasureAndRetentionTests(EvidenceFixture):
+    """A live turn's evidence is erased like any other, raw copy included."""
 
-    def test_a_channel_is_erased_in_either_state(self) -> None:
-        for state, do_seal in (("unsealed", False), ("sealed", True)):
-            with self.subTest(state=state):
-                sidecar = os.path.join(self.temp.name, f"{state}.sqlite3")
+    def test_a_channel_is_erased_with_or_without_a_raw_copy_in_memory(self) -> None:
+        for moment, release in (("live", False), ("finished", True)):
+            with self.subTest(moment=moment):
+                reset_runtime_state()
+                db_path = os.path.join(self.temp.name, f"{moment}.sqlite3")
                 scope = chatbot_scope("erase")
-                archive = RuntimeHandleArchive(sidecar)
+                archive = RuntimeHandleArchive(db_path)
                 self.persist(response_with_credential(), scope=scope,
                              archive=archive)
-                if do_seal:
-                    seal_scope(archive, scope)
+                if release:
+                    offload_state.reclaim_scope(scope)
 
-                deleted = erasure.forget_channel(sidecar, "erase")
+                deleted = obs.ObservabilityStore(db_path).forget_channel("erase")
 
-                self.assertEqual(deleted["observation_offload_handles"], 1)
-                # Discovered structurally, with no name in the erasure module.
-                self.assertEqual(deleted.get("observation_seal_state", 0), 1)
+                self.assertEqual(deleted["offload_evidence"], 1)
                 self.assertIsNone(archive.get(scope, "O1"))
-                blob = self.file_bytes(sidecar)
+                self.assertNotIn(scope.scope_id, archive_module._live_raw)
+                blob = file_bytes(db_path)
                 self.assertNotIn(b"okta-prod", blob)
                 self.assertNotIn(SK_TOKEN.encode("ascii"), blob)
 
-    def test_retention_prunes_a_scope_in_either_state(self) -> None:
-        for state, do_seal in (("unsealed", False), ("sealed", True)):
-            with self.subTest(state=state):
-                sidecar = os.path.join(self.temp.name, f"prune-{state}.sqlite3")
+    def test_retention_prunes_a_turn_with_or_without_a_raw_copy(self) -> None:
+        for moment, release in (("live", False), ("finished", True)):
+            with self.subTest(moment=moment):
+                reset_runtime_state()
+                db_path = os.path.join(self.temp.name, f"prune-{moment}.sqlite3")
                 scope = chatbot_scope("old")
-                archive = RuntimeHandleArchive(sidecar)
+                archive = RuntimeHandleArchive(db_path)
                 self.persist(response_with_credential(), scope=scope,
                              archive=archive)
-                if do_seal:
-                    seal_scope(archive, scope)
-                with sqlite3.connect(sidecar) as conn:
-                    for table, column in (
-                        ("observation_offload_handles", "persisted_at"),
-                        ("observation_capture_policy", "recorded_at"),
-                        ("observation_seal_state", "opened_at"),
-                    ):
-                        try:
-                            conn.execute(f'UPDATE "{table}" SET "{column}"=?',
-                                         ("2000-01-01T00:00:00Z",))
-                        except sqlite3.OperationalError:
-                            pass
+                if release:
+                    offload_state.reclaim_scope(scope)
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute("UPDATE offload_evidence SET persisted_at=?",
+                                 ("2000-01-01T00:00:00Z",))
                     conn.commit()
 
-                deleted = erasure.prune(sidecar, retention_days=30,
-                                        max_bytes=1_000_000_000)
+                deleted = obs.ObservabilityStore(db_path).prune(
+                    retention_days=30, max_bytes=1_000_000_000)
 
-                self.assertEqual(deleted["scopes"], 1)
+                self.assertEqual(deleted["offload_evidence"], 1)
                 self.assertIsNone(archive.get(scope, "O1"))
+                self.assertNotIn(scope.scope_id, archive_module._live_raw)
 
-    def test_a_preserved_experiment_scope_survives_in_either_state(self) -> None:
-        for state, do_seal in (("unsealed", False), ("sealed", True)):
-            with self.subTest(state=state):
-                sidecar = os.path.join(self.temp.name, f"keep-{state}.sqlite3")
-                kept = experiment_scope("exp-channel")
-                erasable = chatbot_scope("chat-channel", turn="turn-2")
-                archive = RuntimeHandleArchive(sidecar)
-                self.persist(response_with_credential(), scope=kept,
-                             archive=archive)
-                self.persist(response_with_credential(), scope=erasable,
-                             archive=archive)
-                if do_seal:
-                    seal_scope(archive, kept)
-                    seal_scope(archive, erasable)
+    def test_an_experiment_turn_is_erased_too(self) -> None:
+        erased = experiment_scope("exp-channel")
+        also = chatbot_scope("chat-channel", turn="turn-2")
+        archive, _ = self.persist(response_with_credential(), scope=erased)
+        self.persist(response_with_credential(), scope=also, archive=archive)
 
-                deleted = erasure.forget_all_channels(sidecar)
+        deleted = obs.ObservabilityStore(self.db_path).clear_conversations()
 
-                self.assertEqual(deleted["preserved_scopes"], 1)
-                self.assertIsNotNone(archive.get(kept, "O1"))
-                self.assertIsNone(archive.get(erasable, "O1"))
+        self.assertEqual(deleted["offload_evidence"], 2)
+        self.assertIsNone(archive.get(erased, "O1"))
+        self.assertIsNone(archive.get(also, "O1"))
 
 
-# ---------------------------------------------------------------------------
-# Requirement 4: the digests, across a seal
-# ---------------------------------------------------------------------------
+class DigestTests(EvidenceFixture):
+    """The caller's digest, the stored digest, and idempotence after release."""
 
+    def test_the_archiver_is_idempotent_after_the_turn_is_released(self) -> None:
+        """A re-persist once the raw copy is gone is a readback, not a collision.
 
-class DigestsAcrossASealTests(SealFixture):
-    """Three digests, three meanings, and idempotence survives the rewrite."""
-
-    @needs_the_seal
-    def test_the_archiver_is_idempotent_across_a_seal(self) -> None:
-        """A re-persist of a sealed alias is a readback, not a collision.
-
-        The in-process memo that normally makes the archiver skip a step it has
-        already written is dropped with the turn's residency, so a process that
-        re-visits a sealed scope reaches ``persist`` with the RAW digest of text
-        whose stored row now covers SEALED bytes. That has to be recognised as
-        the same observation, and it is re-derived rather than looked up: no raw
-        digest is persisted beside the sealed bytes.
+        The in-process memo that makes the archiver skip a step it already
+        wrote is dropped with the turn, so a process that revisits the scope
+        reaches ``persist`` with the RAW digest of text whose row holds the
+        redacted bytes. The archive recognises it by redacting the candidate
+        the same way and comparing stored digests; no raw digest is persisted.
         """
         scope = chatbot_scope()
-        archive = RuntimeHandleArchive(self.sidecar)
+        archive = RuntimeHandleArchive(self.db_path)
         text = response_with_credential()
         trajectory = {
             "thought_0": "look",
@@ -467,57 +360,44 @@ class DigestsAcrossASealTests(SealFixture):
         }
         archive_execute_observations(trajectory, scope=scope,
                                      selected_archive=archive)
-        seal_scope(archive, scope)
-        sealed = archive.get(scope, "O1")
-        # Exactly what a session close or the next turn's bind leaves behind.
         offload_state.reclaim_scope(scope)
+        stored = archive.get(scope, "O1")
+        archive_module.clear_live_raw()
 
         again = archive_execute_observations(trajectory, scope=scope,
                                              selected_archive=archive)
 
-        # No refusal was recorded, the row was not rewritten, and the alias is
-        # readable from the archive that holds it.
         self.assertEqual([row["alias"] for row in again], ["O1"])
-        self.assertEqual(archive.get(scope, "O1")["text"], sealed["text"])
-        self.assertEqual(archive.get(scope, "O1")["text_sha256"],
-                         sealed["text_sha256"])
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_SEALED)
+        refused = [event for event in offload_state.snapshot_events()
+                   if event["kind"] == "archive_refused"]
+        self.assertEqual(refused, [])
+        # The row was not rewritten...
+        with sqlite3.connect(self.db_path) as conn:
+            (digest,) = conn.execute(
+                "SELECT text_sha256 FROM offload_evidence").fetchone()
+        self.assertEqual(digest, stored["text_sha256"])
+        # ...and this process, which holds the raw text again, reads it again.
+        self.assertEqual(stored_handles(scope)["O1"]["text"], text)
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        # And the hot copy the second pass cached is what the archive kept.
-        self.assertEqual(stored_handles(scope)["O1"]["text"], sealed["text"])
 
-    @needs_the_seal
-    def test_the_raw_digest_is_never_written_beside_sealed_bytes(self) -> None:
-        """The refusal to leave a confirmation oracle, kept across the seal.
-
-        While the row is pending its own ``text_sha256`` covers the raw bytes
-        that are sitting right beside it, so it tells an attacker nothing they
-        cannot already read. Once sealed, that digest must be gone from the
-        file: a digest of unredacted text stored next to the redaction is a
-        confirmation oracle for the credential the redaction just removed.
-        """
+    def test_the_raw_digest_is_never_written_to_the_file(self) -> None:
+        """A digest of the unredacted text beside the redaction is an oracle."""
         scope = chatbot_scope()
         text = response_with_credential()
         raw_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        archive, _ = self.persist(text, scope=scope)
+        archive, stored = self.persist(text, scope=scope)
 
-        self.assertIn(raw_digest.encode("ascii"), self.file_bytes())
-        seal_scope(archive, scope)
-
+        # The live turn is handed the raw digest with the raw text...
+        self.assertEqual(stored["text_sha256"], raw_digest)
+        # ...and the file holds neither.
         blob = self.file_bytes()
         self.assertNotIn(raw_digest.encode("ascii"), blob)
         self.assertNotIn(SK_TOKEN.encode("ascii"), blob)
-        stored = archive.get(scope, "O1")
-        self.assertEqual(
-            stored["text_sha256"],
-            hashlib.sha256(stored["text"].encode("utf-8")).hexdigest(),
-        )
 
-    @needs_the_seal
-    def test_a_different_text_is_still_refused_after_a_seal(self) -> None:
+    def test_a_different_text_is_still_refused_after_release(self) -> None:
         scope = chatbot_scope()
         archive, _ = self.persist(response_with_credential(), scope=scope)
-        seal_scope(archive, scope)
+        offload_state.reclaim_scope(scope)
         other = "a completely different observation with no secret\n"
         with self.assertRaises(PersistenceError):
             archive.persist(
@@ -527,173 +407,101 @@ class DigestsAcrossASealTests(SealFixture):
                 text_sha256=hashlib.sha256(other.encode("utf-8")).hexdigest(),
             )
 
-    @needs_the_seal
-    def test_a_sealed_row_still_reads_back_through_its_own_digest(self) -> None:
-        """``_decode_row`` verifies every read, so a seal that left the digest
-        behind would turn every later read into a permanent failure."""
+    def test_a_redacted_row_reads_back_through_its_own_digest(self) -> None:
+        """``_decode_row`` verifies every read against the stored bytes."""
         scope = chatbot_scope()
-        archive, _ = self.persist(response_with_credential(), scope=scope)
-        seal_scope(archive, scope)
-        reopened = RuntimeHandleArchive(self.sidecar)
+        self.persist(response_with_credential(), scope=scope)
+        archive_module.clear_live_raw()
+        reopened = RuntimeHandleArchive(self.db_path)
         self.assertIsNotNone(reopened.get(scope, "O1"))
         self.assertEqual(len(reopened.list(scope)), 1)
 
 
-# ---------------------------------------------------------------------------
-# Requirement 3: the crash sweep
-# ---------------------------------------------------------------------------
+class NoSealLifecycleTests(EvidenceFixture):
+    """What the crash sweep existed for cannot happen any more."""
 
-
-class CrashSweepTests(SealFixture):
-    """A process that dies mid-turn must not leave raw bytes forever."""
-
-    def age_the_row(self, *, owner: str = "pid-dead-1234", seconds: int = 7_200,
-                    sidecar: str | None = None) -> None:
-        """Rewrite the seal row as one a DIFFERENT, now-dead process opened."""
-        stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        with sqlite3.connect(sidecar or self.sidecar) as conn:
-            conn.execute(
-                "UPDATE observation_seal_state SET owner_id=?, opened_at=?",
-                (owner, stamp),
-            )
-            conn.commit()
-
-    @needs_the_seal
-    def test_a_row_a_dead_process_left_raw_is_sealed_when_the_file_reopens(self) -> None:
-        """The acceptance case: opening the sidecar is the recovery trigger."""
-        scope = chatbot_scope()
-        archive, _ = self.persist(response_with_credential(), scope=scope)
-        self.age_the_row(seconds=2 * 86_400)
-        self.assertIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-
-        # Exactly what the next process to run a turn against this store does.
-        reopened = RuntimeHandleArchive(self.sidecar)
-
-        self.assertEqual(seal_state(reopened, scope, "O1"), SEAL_SEALED)
-        self.assertIn(REDACTED, reopened.get(scope, "O1")["text"])
+    def test_a_process_that_died_mid_turn_left_nothing_raw_on_disk(self) -> None:
+        self.persist(response_with_credential())
+        # The process dies: its memory is gone and nobody releases anything.
+        archive_module.clear_live_raw()
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        self.assertTrue(reopened.capture_record(scope, "O1")["redacted"])
+        stored = RuntimeHandleArchive(self.db_path).get(chatbot_scope(), "O1")
+        self.assertIn(REDACTED, stored["text"])
 
-    @needs_the_seal
-    def test_the_sweep_never_touches_a_row_this_process_opened(self) -> None:
-        """The guard that makes the sweep unable to reach a LIVE turn."""
-        scope = chatbot_scope()
-        archive, _ = self.persist(response_with_credential(), scope=scope)
-        # Old enough for the horizon, but still owned by this process, which is
-        # what a turn that has been running a long time looks like.
-        self.age_the_row(owner=archive_module.owner_id(), seconds=5 * 86_400)
+    def test_opening_the_database_again_rewrites_no_row(self) -> None:
+        self.persist(response_with_credential())
+        with sqlite3.connect(self.db_path) as conn:
+            before = conn.execute(
+                "SELECT text_utf8, text_sha256, persisted_at FROM offload_evidence"
+            ).fetchall()
 
-        result = sweep(archive)
+        RuntimeHandleArchive(self.db_path)
 
-        self.assertEqual(result["sealed"], 0)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
-        self.assertEqual(archive.get(scope, "O1")["text"],
-                         response_with_credential())
+        with sqlite3.connect(self.db_path) as conn:
+            after = conn.execute(
+                "SELECT text_utf8, text_sha256, persisted_at FROM offload_evidence"
+            ).fetchall()
+        self.assertEqual(before, after)
 
-    @needs_the_seal
-    def test_the_sweep_leaves_a_row_inside_the_grace_window_alone(self) -> None:
-        """A turn in another live process is not a crashed one."""
-        scope = chatbot_scope()
-        archive, _ = self.persist(response_with_credential(), scope=scope)
-        self.age_the_row(seconds=60)  # a minute old, default horizon is a day
-
-        result = sweep(archive)
-
-        self.assertEqual(result["sealed"], 0)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
-
-    @needs_the_seal
-    def test_the_horizon_is_configurable_and_the_sweep_can_be_turned_off(self) -> None:
-        self.assertEqual(archive_module.seal_grace_seconds(),
-                         archive_module.DEFAULT_SEAL_GRACE_SECONDS)
-        self.assertEqual(archive_module.seal_grace_seconds("30"), 30)
-        self.assertIsNone(archive_module.seal_grace_seconds("off"))
-        # A typo warns once and falls back to the default rather than either
-        # disabling the sweep or sealing everything.
-        with self.assertLogs(archive_module.logger, level="WARNING") as logs:
-            self.assertEqual(archive_module.seal_grace_seconds("sometimes"),
-                             archive_module.DEFAULT_SEAL_GRACE_SECONDS)
-        self.assertIn(SEAL_GRACE_ENV, "\n".join(logs.output))
-
-        scope = chatbot_scope()
-        archive, _ = self.persist(response_with_credential(), scope=scope)
-        self.age_the_row(seconds=5 * 86_400)
-        os.environ[SEAL_GRACE_ENV] = "off"
-        self.assertEqual(sweep(archive)["sealed"], 0)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
-        os.environ[SEAL_GRACE_ENV] = "3600"
-        self.assertEqual(sweep(archive)["sealed"], 1)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_SEALED)
-
-    @needs_the_seal
-    def test_retention_sweeps_a_store_whose_processes_are_all_gone(self) -> None:
-        """The second trigger: the only job that visits an abandoned store.
-
-        The scope is young enough that retention deletes nothing, so the only
-        thing that can remove the credential from the file is the sweep.
-        """
-        scope = chatbot_scope()
-        archive, _ = self.persist(response_with_credential(), scope=scope)
-        self.age_the_row(seconds=3 * 86_400)
-        os.environ[SEAL_GRACE_ENV] = "3600"
-        self.assertIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-
-        result = erasure.prune(self.sidecar, retention_days=3650,
-                               max_bytes=1_000_000_000)
-
-        self.assertEqual(result["scopes"], 0)
-        self.assertEqual(result["sealed_by_sweep"], 1)
-        self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        self.assertIsNotNone(archive.get(scope, "O1"))
-
-    @needs_the_seal
-    def test_retention_sweeps_a_preserved_file_too(self) -> None:
-        """Sealing is a CAPTURE decision; preservation governs DELETION.
-
-        A preserved evaluation corpus must not keep a crashed turn's credential
-        forever just because its rows may not be deleted.
-        """
-        scope = experiment_scope("exp-channel")
-        archive, _ = self.persist(response_with_credential(), scope=scope)
-        self.age_the_row(seconds=3 * 86_400)
-        os.environ[SEAL_GRACE_ENV] = "3600"
-        Path(erasure.preserve_sentinel_path(self.sidecar)).write_text("keep")
-
-        result = erasure.prune(self.sidecar, retention_days=0,
-                               max_bytes=1)
-
-        self.assertEqual(result["file_preserved"], 1)
-        self.assertEqual(result["sealed_by_sweep"], 1)
-        self.assertIsNotNone(archive.get(scope, "O1"))
+    def test_the_retired_grace_setting_changes_nothing(self) -> None:
+        os.environ[RETIRED_SEAL_GRACE_ENV] = "0"
+        text = response_with_credential()
+        archive, stored = self.persist(text)
+        RuntimeHandleArchive(self.db_path)
+        self.assertEqual(archive.get(chatbot_scope(), "O1")["text"], text)
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
 
-    @needs_the_seal
-    def test_a_row_with_no_seal_ledger_entry_is_never_swept(self) -> None:
-        """Requirement 7 again: a pre-change row owes nothing and is left alone."""
-        scope = chatbot_scope()
-        text = "an older revision's row, already final\n"
-        archive = RuntimeHandleArchive(self.sidecar)
-        with sqlite3.connect(self.sidecar) as conn:
-            conn.execute(
-                "INSERT INTO observation_offload_handles ("
-                "scope_id, scope_json, alias, offload_order, command_name, "
-                "step_index, text_utf8, text_sha256, persisted_at"
-                ") VALUES (?,?,?,?,?,?,?,?,?)",
-                (scope.scope_id, "{}", "O1", 1, "execute_workflow_query", 1,
-                 text.encode("utf-8"),
-                 hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                 "2020-01-01T00:00:00Z"),
-            )
-            conn.commit()
+    def test_the_seal_and_sweep_surface_is_gone(self) -> None:
+        for owner, names in (
+            (archive_module, ("seal_grace_seconds", "owner_id", "SEAL_GRACE_ENV",
+                              "SEAL_PENDING", "UNKNOWN_CAPTURE_RECORD")),
+            (archive_module.RuntimeHandleArchive,
+             ("seal_scope", "sweep_unsealed", "seal_state", "pending_aliases",
+              "compact", "list_subjects", "put_context_entry",
+              "list_context_entries")),
+            (archive_module.UnavailableHandleArchive,
+             ("seal_scope", "sweep_unsealed", "seal_state", "list_subjects",
+              "put_context_entry", "list_context_entries")),
+            (offload_state, ("seal_scope",)),
+        ):
+            for name in names:
+                with self.subTest(owner=getattr(owner, "__name__", owner), name=name):
+                    self.assertFalse(hasattr(owner, name))
 
-        self.assertEqual(sweep(archive)["sealed"], 0)
-        self.assertEqual(archive.get(scope, "O1")["text"], text)
+    def test_retention_deletes_but_never_rewrites_a_recent_turn(self) -> None:
+        self.persist(response_with_credential())
+        with sqlite3.connect(self.db_path) as conn:
+            before = conn.execute("SELECT text_utf8 FROM offload_evidence").fetchall()
+
+        deleted = obs.ObservabilityStore(self.db_path).prune(
+            retention_days=30, max_bytes=1_000_000_000)
+
+        self.assertEqual(deleted["offload_evidence"], 0)
+        with sqlite3.connect(self.db_path) as conn:
+            after = conn.execute("SELECT text_utf8 FROM offload_evidence").fetchall()
+        self.assertEqual(before, after)
+
+    def test_a_legacy_preserve_sentinel_is_removed_with_its_sidecar(self) -> None:
+        sidecar = self.db_path + LEGACY_SIDECAR_SUFFIX
+        for path in (sidecar, sidecar + ".preserve"):
+            with open(path, "wb") as handle:
+                handle.write(b"legacy")
+
+        RuntimeHandleArchive(self.db_path)
+
+        self.assertFalse(os.path.exists(sidecar))
+        self.assertFalse(os.path.exists(sidecar + ".preserve"))
+
+    def test_no_raw_row_ledger_is_created(self) -> None:
+        self.persist(response_with_credential())
+        with sqlite3.connect(self.db_path) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertNotIn("observation_seal_state", tables)
 
 
 # ---------------------------------------------------------------------------
-# Requirements 1 and 2: the production lifecycle, with a real session
+# The production lifecycle, with a real session
 # ---------------------------------------------------------------------------
 
 
@@ -706,8 +514,8 @@ class LiveTurnFixture(unittest.TestCase):
     """A real session: a workflow, an execution context and a built tool agent.
 
     Modelled on ``test_offload_state_reclamation``'s fixture, and for the same
-    reason: the seal under test has to be reached by the production lifecycle,
-    because a seal only a test can trigger is not the fix.
+    reason: the release under test has to be reached by the production
+    lifecycle, because a release only a test can trigger is not the fix.
     """
 
     workflow_path = str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
@@ -716,8 +524,7 @@ class LiveTurnFixture(unittest.TestCase):
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
         self._restore_env: dict[str, str | None] = {}
-        for name in (REDACTION_ENV, SEAL_GRACE_ENV, "FW_OBS_CAPTURE_PROFILE",
-                     "FW_OFFLOAD_EVENTS"):
+        for name in (REDACTION_ENV, "FW_OBS_CAPTURE_PROFILE"):
             self._restore_env[name] = os.environ.pop(name, None)
         os.environ["FASTWORKFLOW_STATE_ROOT"] = os.path.join(self.temp.name, "state")
         fastworkflow.init({"FASTWORKFLOW_STATE_ROOT":
@@ -801,25 +608,34 @@ class LiveTurnFixture(unittest.TestCase):
         for path, text in reads.items():
             with self.subTest(path=path, moment=where):
                 self.assertIsNotNone(text, f"{path} read nothing {where}")
-                self.assertIn(SK_TOKEN, text,
-                              f"{path} was degraded {where}")
+                self.assertIn(SK_TOKEN, text, f"{path} was degraded {where}")
                 self.assertNotIn(REDACTED, text)
 
+    def assert_stored_text(self, agent, scope, alias: str = "O1") -> None:
+        """What a reader with no raw copy gets: the redacted row."""
+        row = agent.observation_archive.get(scope, alias)
+        self.assertIsNotNone(row)
+        self.assertIn(REDACTED, row["text"])
+        self.assertNotIn(SK_TOKEN, row["text"])
 
-class TurnCompletionSealsTests(LiveTurnFixture):
-    """Requirement 1: the seal reuses the existing notion of "over"."""
+    def assert_disk_is_redacted(self, agent) -> None:
+        self.assertNotIn(SK_TOKEN.encode("ascii"),
+                         file_bytes(agent.observation_archive.db_path))
 
-    def test_binding_the_next_scope_seals_the_previous_turn(self) -> None:
+
+class TurnCompletionReleasesTests(LiveTurnFixture):
+    """The raw copies follow the runtime's existing notion of "over"."""
+
+    def test_binding_the_next_scope_releases_the_previous_turns_raw_copy(self) -> None:
         ctx, workflow, agent = self.make_session(channel="chan", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "first"}),
                             ("finish", {})])
         with tracing.host_scope(ctx):
             agent.forward(user_query="fixture")
         first = agent.continuation_scope
-        archive = agent.observation_archive
-        # Mid-turn, every read is raw and the file says so.
+        # Mid-turn, every read is raw and the file is not.
         self.assert_all_raw(self.reads(agent, first), "during the turn")
-        self.assertEqual(seal_state(archive, first, "O1"), SEAL_PENDING)
+        self.assert_disk_is_redacted(agent)
 
         # The agent binding the NEXT turn is it saying the previous one is over.
         ctx._turn_key = "turn-2"
@@ -830,34 +646,29 @@ class TurnCompletionSealsTests(LiveTurnFixture):
         second = agent.continuation_scope
 
         self.assertNotEqual(first, second)
-        self.assertEqual(seal_state(archive, first, "O1"), SEAL_SEALED)
-        self.assertIn(REDACTED, archive.get(first, "O1")["text"])
+        self.assert_stored_text(agent, first)
         # And the turn that is actually running kept its raw evidence.
         self.assert_all_raw(self.reads(agent, second), "in the second turn")
-        self.assertEqual(seal_state(archive, second, "O1"), SEAL_PENDING)
+        self.assert_disk_is_redacted(agent)
 
-    def test_closing_the_session_seals_the_turn(self) -> None:
+    def test_closing_the_session_releases_the_turns_raw_copy(self) -> None:
         ctx, workflow, agent = self.make_session(channel="closed", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "only"}),
                             ("finish", {})])
         with tracing.host_scope(ctx):
             agent.forward(user_query="fixture")
         scope = agent.continuation_scope
-        path = agent.observation_archive.db_path
-        self.assertEqual(seal_state(agent.observation_archive, scope, "O1"),
-                         SEAL_PENDING)
+        self.assert_all_raw(self.reads(agent, scope), "during the turn")
 
         self.close_session(ctx, workflow)
 
-        reopened = RuntimeHandleArchive(path)
-        self.assertEqual(seal_state(reopened, scope, "O1"), SEAL_SEALED)
-        self.assertIn(REDACTED, reopened.get(scope, "O1")["text"])
-        # The hot copy went with it, so memory cannot serve raw text for a
-        # turn whose disk copy is sealed.
+        self.assert_stored_text(agent, scope)
+        self.assertNotIn(scope.scope_id, archive_module._live_raw)
+        # The hot copy went too, so memory cannot serve raw text for the turn.
         self.assertEqual(stored_handles(scope), {})
 
-    def test_the_awaiting_user_guard_skips_the_seal(self) -> None:
-        """A turn waiting on the user is not over, so its evidence is not sealed."""
+    def test_the_awaiting_user_guard_keeps_the_raw_copy(self) -> None:
+        """A turn waiting on the user is not over, so its reads stay exact."""
         ctx, workflow, agent = self.make_session(channel="susp", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "one"}),
                             ("ask_user", {"question": "continue?"})])
@@ -865,16 +676,15 @@ class TurnCompletionSealsTests(LiveTurnFixture):
             prediction = agent.forward(user_query="fixture")
         self.assertTrue(prediction.suspended)
         scope = agent.continuation_scope
-        archive = agent.observation_archive
 
         ctx._awaiting_user = True
         ctx.pop_active_workflow()
         ctx.close()
 
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
         self.assert_all_raw(self.reads(agent, scope), "after a suspended close")
+        self.assert_disk_is_redacted(agent)
 
-    def test_an_exported_suspension_skips_the_seal(self) -> None:
+    def test_an_exported_suspension_keeps_the_raw_copy(self) -> None:
         """The second half of the guard: ``export_suspended() is not None``."""
         ctx, workflow, agent = self.make_session(channel="susp2", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "one"}),
@@ -882,7 +692,6 @@ class TurnCompletionSealsTests(LiveTurnFixture):
         with tracing.host_scope(ctx):
             agent.forward(user_query="fixture")
         scope = agent.continuation_scope
-        archive = agent.observation_archive
         self.assertIsNotNone(agent.export_suspended())
 
         # _awaiting_user was never set -- only the agent knows it is suspended.
@@ -890,17 +699,17 @@ class TurnCompletionSealsTests(LiveTurnFixture):
         ctx.pop_active_workflow()
         ctx.close()
 
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
+        self.assertIn(scope.scope_id, archive_module._live_raw)
+        self.assertIn(SK_TOKEN, agent.observation_archive.get(scope, "O1")["text"])
 
-    def test_the_bind_scope_guard_skips_a_still_suspended_agent(self) -> None:
-        """``bind_scope`` is skipped while ``self._suspended is not None``."""
+    def test_the_bind_scope_guard_keeps_a_still_suspended_agents_raw_copy(self) -> None:
+        """``bind_scope`` releases nothing while ``self._suspended is not None``."""
         ctx, workflow, agent = self.make_session(channel="susp3", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "one"}),
                             ("ask_user", {"question": "continue?"})])
         with tracing.host_scope(ctx):
             agent.forward(user_query="fixture")
         scope = agent.continuation_scope
-        archive = agent.observation_archive
         self.assertIsNotNone(agent._suspended)
 
         # A caller binding a scope by hand over a still-suspended agent.
@@ -909,21 +718,22 @@ class TurnCompletionSealsTests(LiveTurnFixture):
             agent.bind_scope()
 
         self.assertNotEqual(agent.continuation_scope, scope)
-        self.assertEqual(seal_state(archive, scope, "O1"), SEAL_PENDING)
+        self.assertIn(SK_TOKEN, agent.observation_archive.get(scope, "O1")["text"])
 
 
 class SuspensionRoundTripTests(LiveTurnFixture):
-    """Requirement 2: a suspended turn is never sealed, across a round trip."""
+    """A suspension resumed in the same process, and in a fresh one."""
 
-    def test_a_suspension_survives_serialization_and_still_reads_raw(self) -> None:
-        """The acceptance case for the owner's "including ask_user waits and
-        serialization/deserialization" clause.
+    def test_a_suspension_resumed_in_a_fresh_process_reads_the_stored_text(self) -> None:
+        """The accepted cost of redacting at the write, pinned rather than implied.
 
         The turn suspends, its payload goes through ``json.dumps``/``loads``
         exactly as a session state file carries it, the session is CLOSED (the
-        eviction), every process-local registry is emptied so nothing below can
-        be answered out of memory, and a FRESH agent imports it and resumes.
-        Both reads of the same alias must still be the raw response.
+        eviction), and every process-local registry is emptied -- as close to
+        a fresh process as one interpreter allows. That process has no raw
+        copy, so the archive answers with the stored, redacted text. Once the
+        resumed turn's own compaction re-archives the observations its
+        trajectory still holds, this process holds their raw text again.
         """
         ctx, workflow, agent = self.make_session(channel="rt", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "first"}),
@@ -940,36 +750,28 @@ class SuspensionRoundTripTests(LiveTurnFixture):
         ctx._awaiting_user = True
         ctx.pop_active_workflow()
         ctx.close()
-        # As close to a fresh process as one interpreter allows.
         reset_runtime_state()
         self.assertEqual(stored_handles(scope), {})
 
         ctx2, workflow2, agent2 = self.make_session(channel="rt", turn="turn-1")
         agent2.import_suspended(blob)
+        self.assertEqual(agent2.continuation_scope, scope)
+        self.assertEqual(agent2.observation_archive.db_path, path)
+        for alias in ("O1", "O2"):
+            self.assert_stored_text(agent2, scope, alias)
+
         self.script(agent2, [("execute_workflow_query", {"command": "third"}),
                              ("finish", {})])
         with tracing.host_scope(ctx2):
             resumed = agent2.resume("go on")
 
-        self.assertEqual(agent2.continuation_scope, scope)
-        self.assertEqual(agent2.observation_archive.db_path, path)
-        for alias in ("O1", "O2", "O3"):
-            self.assert_all_raw(self.reads(agent2, scope, alias),
-                                f"after the round trip ({alias})")
         self.assertIn(SK_TOKEN, resumed.trajectory["observation_3"])
-        # Nothing was sealed by the round trip, and nothing was sealed by the
-        # resume either: the turn is only now finishing.
-        for alias in ("O1", "O2", "O3"):
-            self.assertEqual(
-                seal_state(agent2.observation_archive, scope, alias),
-                SEAL_PENDING,
-            )
+        self.assert_all_raw(self.reads(agent2, scope, "O3"), "after the resume")
+        self.assert_disk_is_redacted(agent2)
 
         self.close_session(ctx2, workflow2)
-        reopened = RuntimeHandleArchive(path)
         for alias in ("O1", "O2", "O3"):
-            self.assertEqual(seal_state(reopened, scope, alias), SEAL_SEALED)
-            self.assertIn(REDACTED, reopened.get(scope, alias)["text"])
+            self.assert_stored_text(agent2, scope, alias)
 
 
 # ---------------------------------------------------------------------------
@@ -977,16 +779,15 @@ class SuspensionRoundTripTests(LiveTurnFixture):
 # ---------------------------------------------------------------------------
 
 
-class SummaryOrderingTests(LiveTurnFixture):
-    """The summary fed to the next turn must be built from RAW text.
+class SummaryTests(LiveTurnFixture):
+    """The summary fed to the next turn is built from RAW text.
 
     ``_finalize_agent_output`` summarises ``self._action_log``, whose
     ``response`` is the command's ``response_text`` captured at execution time
-    and never read back from the evidence sidecar, and the summary it produces
+    and never read back from the evidence tables, and the summary it produces
     is what ``_refine_user_query`` feeds the LLM that refines the next turn's
-    query. So the requirement is met by ORDERING and by SOURCE, and both are
-    pinned here: if anyone later routes the action log through the capture
-    pipeline, or moves the seal earlier than the summary, these fail loudly.
+    query. If anyone later routes the action log through the capture pipeline,
+    these fail loudly.
     """
 
     def finalize(self, ctx, agent, scope):
@@ -998,10 +799,11 @@ class SummaryOrderingTests(LiveTurnFixture):
             seen["user_query"] = user_query
             seen["workflow_actions"] = json.loads(json.dumps(workflow_actions))
             seen["final_agent_response"] = final_agent_response
-            # What the archive held AT THE MOMENT the summary was produced.
+            # What the archive served, and what the file held, AT THE MOMENT
+            # the summary was produced.
             row = archive.get(scope, "O1")
             seen["archive_text_at_summary_time"] = None if row is None else row["text"]
-            seen["seal_state_at_summary_time"] = seal_state(archive, scope, "O1")
+            seen["file_at_summary_time"] = file_bytes(archive.db_path)
             return "a summary mentioning the api key", json.dumps({"seen": True})
 
         ctx._extract_conversation_summary = spy
@@ -1044,15 +846,13 @@ class SummaryOrderingTests(LiveTurnFixture):
         # runtime, which is the other way this could regress.
         self.assertIn(SK_TOKEN, ctx.action_log[0]["response"])
 
-    def test_the_seal_happens_after_the_summary(self) -> None:
-        """Move the seal earlier and this breaks; that is its whole job."""
+    def test_at_summary_time_the_file_is_redacted_and_the_turn_reads_raw(self) -> None:
         ctx, workflow, agent = self.make_session(channel="order", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "show"}),
                             ("finish", {})])
         with tracing.host_scope(ctx):
             agent.forward(user_query="fixture")
         scope = agent.continuation_scope
-        path = agent.observation_archive.db_path
         ctx.append_action_log({
             "command": "show_connector",
             "command_name": "show_connector",
@@ -1062,14 +862,11 @@ class SummaryOrderingTests(LiveTurnFixture):
 
         seen, _ = self.finalize(ctx, agent, scope)
 
-        # At summary time the evidence was still raw and still unsealed.
-        self.assertEqual(seen["seal_state_at_summary_time"], SEAL_PENDING)
         self.assertIn(SK_TOKEN, seen["archive_text_at_summary_time"])
-        # Only the session close, which is strictly later, seals it.
+        self.assertNotIn(SK_TOKEN.encode("ascii"), seen["file_at_summary_time"])
+        # Only the session close, which is strictly later, ends the raw reads.
         self.close_session(ctx, workflow)
-        reopened = RuntimeHandleArchive(path)
-        self.assertEqual(seal_state(reopened, scope, "O1"), SEAL_SEALED)
-        self.assertIn(REDACTED, reopened.get(scope, "O1")["text"])
+        self.assert_stored_text(agent, scope)
 
 
 if __name__ == "__main__":  # pragma: no cover
