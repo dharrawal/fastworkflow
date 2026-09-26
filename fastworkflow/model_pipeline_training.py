@@ -413,17 +413,32 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
 # Moving the cap changes how loudly a very confident tier reports ambiguity; moving
 # the tier would silently re-route traffic between the two models.
 #
+# CERTAIN TIER — a tier threshold of exactly 1.0 is reachable too: float32 softmax
+# rounds the top probability to 1.0 once the logit gap passes about 17, so a context
+# whose correct held-out rows all saturate has a successful mean of exactly 1.0, and
+# that is the top point of the sweep. At that tier the tiny model keeps only
+# predictions whose confidence is exactly 1.0, where every other label has zero mass.
+# No ambiguity threshold can sit above 1.0 and still be satisfiable, and none is
+# needed, so the separation invariant is waived there and the flat cap is written.
+#
 # FLOOR — `SINGLE_LABEL_RESOLUTION_FLOOR = 0.5` is the point at which the model
 # stops putting more posterior mass on the winning label than on everything else
 # combined. Below it a "confident" single label is not supported by the model's own
 # distribution, so the runtime must show candidates instead. It is applied to the
 # large tier as well, because the rule is about single-label resolution, not about
-# which tier produced it. The cost is deliberate: more ambiguity turns and more
-# DistilBERT calls, traded for the silent misroutes this band makes loud.
+# which tier produced it. The cost is deliberate: more ambiguity turns, traded for
+# the silent misroutes this band makes loud. DistilBERT usage does not change,
+# because escalation reads only the tier threshold, which none of this moves.
 # ---------------------------------------------------------------------------
 TIER_AMBIGUITY_MIN_SEPARATION = 0.05
 SINGLE_LABEL_RESOLUTION_FLOOR = 0.5
 MAX_AMBIGUITY_THRESHOLD = 0.99
+CERTAIN_TIER_THRESHOLD = 1.0
+
+
+def keeps_only_certain_predictions(tier_threshold) -> bool:
+    """Whether *tier_threshold* leaves the tiny tier only confidence-1.0 predictions."""
+    return tier_threshold is not None and float(tier_threshold) == CERTAIN_TIER_THRESHOLD
 
 
 def resolvable_ambiguity_ceiling(tier_threshold) -> float:
@@ -435,12 +450,14 @@ def resolvable_ambiguity_ceiling(tier_threshold) -> float:
     sit at or under the tier and collapse the pair, so the ceiling becomes the midpoint
     of the remaining headroom, `(tier + 1) / 2`. That is strictly above any tier below
     1.0 and strictly below 1.0, so both the separation invariant and resolvability
-    survive. A tier at or above 1.0 is not something any sweep over softmax
-    probabilities can produce; the ceiling then falls at or below it and
-    `write_ambiguity_thresholds` raises, which is the intended treatment of a
-    genuinely collapsed pair.
+    survive. A tier of exactly 1.0 is what a float32-saturated sweep produces; it
+    keeps the flat cap, because `(1 + 1) / 2` would be an unsatisfiable 1.0 and the
+    only predictions that tier keeps are certain ones. A tier above 1.0 is not
+    something any sweep over softmax probabilities can produce; the ceiling then falls
+    at or below it and `write_ambiguity_thresholds` raises, which is the intended
+    treatment of a genuinely collapsed pair.
     """
-    if tier_threshold is None:
+    if tier_threshold is None or keeps_only_certain_predictions(tier_threshold):
         return MAX_AMBIGUITY_THRESHOLD
     tier = float(tier_threshold)
     # `tier != tier` is the NaN test: a NaN tier keeps the flat cap it has always had
@@ -492,16 +509,21 @@ def write_ambiguity_thresholds(
     Raises `ValueError` rather than publishing a collapsed pair: a collapsed pair
     makes "confident" structurally unfalsifiable at that tier, and because nothing
     downstream notices, it can sit unnoticed in a published artifact set. The guard
-    is reserved for a pair no legitimate sweep could produce — a tier threshold at
-    or above certainty, or a margin computation that stopped separating. A tier threshold the sweep
+    is reserved for a pair no legitimate sweep could produce — a tier threshold
+    above certainty, or a margin computation that stopped separating. A tier threshold the sweep
     can actually pick, including one at or above `MAX_AMBIGUITY_THRESHOLD`, is always
     published, because aborting `train()` for the whole workflow is a far worse answer
-    to a well separated context than a narrow ambiguity band is.
+    to a well separated context than a narrow ambiguity band is. That includes a tier
+    of exactly 1.0, which keeps only certain predictions and so needs no band.
     """
     tiny_ambiguous_threshold = separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats)
     large_ambiguous_threshold = floored_large_ambiguous_threshold(large_stats)
 
-    if tier_threshold is not None and tiny_ambiguous_threshold <= tier_threshold:
+    if (
+        tier_threshold is not None
+        and not keeps_only_certain_predictions(tier_threshold)
+        and tiny_ambiguous_threshold <= tier_threshold
+    ):
         raise ValueError(
             f"tiny ambiguity threshold {tiny_ambiguous_threshold} does not sit above "
             f"tier threshold {tier_threshold}: the tiny tier could never report an "

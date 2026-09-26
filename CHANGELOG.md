@@ -48,7 +48,9 @@ labels themselves.
 - **Threshold separation**: `write_ambiguity_thresholds` is the single writer
   for both ambiguity files and establishes a non-empty ambiguity band where the
   artifacts are produced, with `TIER_AMBIGUITY_MIN_SEPARATION` and
-  `SINGLE_LABEL_RESOLUTION_FLOOR`.
+  `SINGLE_LABEL_RESOLUTION_FLOOR`. A tier threshold of exactly 1.0, which a
+  float32-saturated sweep can pick, publishes the flat 0.99 cap instead of
+  aborting the workflow's training run.
 - **Workflow fingerprint scope rule v2**: a root `benchmarks/` tree and the
   runtime observability store leave `workflow_content_entries`.
   `WORKFLOW_SCOPE_RULE_VERSION` 1 → 2, so a v1 declaration reads as

@@ -15,6 +15,7 @@ structurally incapable of reporting an ambiguity.
 import json
 import os
 
+import numpy as np
 import pytest
 
 from fastworkflow.model_pipeline_training import (
@@ -22,6 +23,7 @@ from fastworkflow.model_pipeline_training import (
     SINGLE_LABEL_RESOLUTION_FLOOR,
     TIER_AMBIGUITY_MIN_SEPARATION,
     floored_large_ambiguous_threshold,
+    keeps_only_certain_predictions,
     resolvable_ambiguity_ceiling,
     separated_tiny_ambiguous_threshold,
     write_ambiguity_thresholds,
@@ -234,12 +236,51 @@ def test_a_tier_below_the_flat_cap_is_unchanged(tmp_path, tier, expected):
     assert tiny_amb == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("tier", [1.0, 1.5])
+@pytest.mark.parametrize("tier", [1.5, 2.0])
 def test_a_genuinely_collapsed_pair_still_refuses_to_publish(tmp_path, tier):
-    """A tier threshold at or above certainty is not something a sweep over softmax
+    """A tier threshold above certainty is not something a sweep over softmax
     probabilities can return: nothing can sit above it and still be reachable, so the
     writer must keep refusing rather than publish an unsatisfiable pair."""
     ctx_dir = tmp_path / f"Collapsed{tier}"
     with pytest.raises(ValueError, match="never report an ambiguity"):
         write_ambiguity_thresholds(str(ctx_dir), tier, CONFIDENT_TINY, CONFIDENT_LARGE)
     assert not os.path.exists(ctx_dir / "tiny_ambiguous_threshold.json")
+
+
+# ---------------------------------------------------------------------------
+# A float32-saturated sweep picks a tier of exactly 1.0.
+#
+# float32 softmax rounds the top probability to 1.0 once the logit gap passes about
+# 17, so a context whose correct held-out rows all saturate has a successful mean of
+# np.float32(1.0), and that is the last point of the sweep. Refusing that pair raised
+# inside `train()`'s per-context loop and discarded the whole workflow's run.
+# ---------------------------------------------------------------------------
+SATURATED_TINY = _stats(np.float32(0.6), np.mean([np.float32(1.0)] * 50))
+
+
+@pytest.mark.parametrize("tier", [1.0, np.float32(1.0)])
+def test_a_saturated_tier_of_exactly_one_publishes_the_flat_cap(tmp_path, tier):
+    """At tier 1.0 the tiny tier keeps only certain predictions, so no band is needed:
+    the writer publishes the flat cap instead of an unsatisfiable 1.0 or a refusal."""
+    assert SATURATED_TINY['successful']['mean'] == 1.0
+    ctx_dir = tmp_path / f"Saturated{type(tier).__name__}"
+    tiny_amb, large_amb = write_ambiguity_thresholds(
+        str(ctx_dir), tier, SATURATED_TINY, CONFIDENT_LARGE
+    )
+
+    assert tiny_amb == MAX_AMBIGUITY_THRESHOLD
+    assert json.load(open(ctx_dir / "tiny_ambiguous_threshold.json"))[
+        'confidence_threshold'
+    ] == MAX_AMBIGUITY_THRESHOLD
+    assert large_amb >= SINGLE_LABEL_RESOLUTION_FLOOR
+    # A kept prediction (confidence exactly 1.0) still resolves to a single label.
+    assert 1.0 > tiny_amb
+
+
+def test_the_ceiling_at_exactly_one_is_the_flat_cap_not_certainty():
+    """`(1 + 1) / 2` would be 1.0, which `confidence > threshold` can never satisfy."""
+    assert resolvable_ambiguity_ceiling(1.0) == MAX_AMBIGUITY_THRESHOLD
+    assert resolvable_ambiguity_ceiling(np.float32(1.0)) == MAX_AMBIGUITY_THRESHOLD
+    assert keeps_only_certain_predictions(1.0)
+    assert not keeps_only_certain_predictions(0.9999)
+    assert not keeps_only_certain_predictions(None)
