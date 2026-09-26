@@ -61,6 +61,9 @@ labels themselves.
 - `fw.nlu.intent` span contract v2 → v3.
 - `fw.command.execute` span contract v2 → v3: the four auto-navigation
   attributes are gone with the two-step dispatch that wrote them.
+- The aggregate span-contract version is 5. Version 4's note named
+  auto-navigation keys that `SPAN_CONTRACTS` does not contain; 5 is the number
+  that matches those contracts.
 - **Intent `signal_version`** no longer carries a threshold-semantics segment.
   It now reads `intent-classifier/<artifact version>/...`, so a version string
   identifies the artifact behind a signal and nothing else.

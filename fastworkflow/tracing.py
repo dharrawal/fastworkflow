@@ -208,11 +208,16 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # (workflow_agent.py, previously the only unmigrated one); and fw.nlu.intent's
 # `classifier` attribute gained `topk_scores`.
 #
-# v4: routing. fw.nlu.intent gained R1's known-name refusal keys (ido-8ps.8,
-# declared here for the first time -- the emitter has written them since
-# c976964) and the auto-navigation flag; fw.command.execute gained the four keys
-# an auto-navigated step carries (ido-8ps.9).
-SPAN_CONTRACT_VERSION = 4
+# v4: routing. fw.nlu.intent's known-name refusal keys were declared here.
+# The emitter had already been writing them. An intermediate draft of this
+# same number also named an auto-navigation flag and four fw.command.execute
+# keys for a composed step. Those keys did not remain in the contracts.
+#
+# v5: the aggregate moves so this number and SPAN_CONTRACTS describe the same
+# taxonomy. fw.command.execute v3 has no composed-step attributes.
+# fw.nlu.intent v3 keeps the known-name keys and does not carry
+# auto_navigation_enabled. Auto-navigation was removed.
+SPAN_CONTRACT_VERSION = 5
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -413,11 +418,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         version=1,
         attributes=frozenset({"model", "replan_trigger", "plan"}),
     ),
-    # v2: R1's known-name refusal (ido-8ps.8) has written the three
-    # `known_name_*` keys since c976964 without being declared here.
-    # v3 (ido-pyw.1): `auto_navigation_enabled` is gone with the flag it
-    # recorded -- auto-navigation is unconditional, so there is no setting for a
-    # measured run to carry.
+    # v2: the known-name refusal keys. The emitter wrote the three
+    # `known_name_*` keys before they were declared here.
+    # v3: `auto_navigation_enabled` is absent. Auto-navigation was removed, so
+    # there is no flag and no composed step for a measured run to carry.
     SPAN_NLU_INTENT: SpanContract(
         version=3,
         attributes=frozenset(

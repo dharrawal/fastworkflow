@@ -110,11 +110,10 @@ class CommandExecutor(CommandExecutorInterface):
             else None
         )
 
-        # ido-8ps.13: the context this command RAN IN, recorded against the
-        # execute step's own O alias BEFORE the command can move the context.
-        # Outside the span gate for the same reason as the line above: this is
-        # runtime presentation, not capture, and a run with tracing off must
-        # print the same observation.
+        # The context this command RAN IN, recorded against the execute step's
+        # own O alias BEFORE the command can move the context. This is runtime
+        # presentation, not capture, so it is not gated on a span: a run with
+        # tracing off must print the same observation.
         cls._remember_execute_context(chat_session)
 
         # Bound before the try so the error path can still file this dispatch's
