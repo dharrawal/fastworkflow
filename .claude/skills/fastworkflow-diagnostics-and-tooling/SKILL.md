@@ -195,8 +195,8 @@ question (candidate work item for the tau2 program).
   `utils/logging.py:104-114` (LiteLLM to CRITICAL). If you need LLM-call
   detail, raise those explicitly in your harness.
 - The v3.0 artifact-serializability deprecation warnings cannot be silenced by
-  configuration: `ido-pyw.1` removed `FW_EAGER_ARTIFACT_VALIDATION` and the
-  validator is unconditional. Fix the artifact, or filter the warning.
+  configuration: the validator is unconditional. Fix the artifact, or filter
+  the warning.
 
 ### Live CLI traces (agent mode)
 

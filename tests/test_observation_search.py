@@ -228,16 +228,14 @@ class SearchInputBound(unittest.TestCase):
             self.assertEqual(search_observation_max_bytes(),
                              4 * SEARCH_OBSERVATION.reference_bytes)
 
-    def test_the_retired_tuning_override_is_inert(self):
+    def test_the_bound_has_no_tuning_override(self):
         # The bound has no override of its own: the search model's window is
         # the only input, and FW_MODEL_CONTEXT_TOKENS is how it is corrected.
         self.assertIsNone(SEARCH_OBSERVATION.override_env)
         base = {'FW_MODEL_CONTEXT_TOKENS': '', SEARCH_MODEL_ENV: ''}
-        for raw in ('8192', '10', 'not-a-number', ''):
-            with self.subTest(raw=raw):
-                with patch.dict(os.environ, {**base, 'FW_SEARCH_OBSERVATION_MAX_BYTES': raw}), \
-                        patch.dict('fastworkflow._env_vars', {}, clear=True):
-                    self.assertEqual(search_observation_max_bytes(), 12_288)
+        with patch.dict(os.environ, base), \
+                patch.dict('fastworkflow._env_vars', {}, clear=True):
+            self.assertEqual(search_observation_max_bytes(), 12_288)
         with patch.dict(os.environ, {**base, 'FW_MODEL_CONTEXT_TOKENS': str(
                     2 * context_budget.REFERENCE_WINDOW_TOKENS)}), \
                 patch.dict('fastworkflow._env_vars', {}, clear=True):
@@ -343,7 +341,6 @@ class SearchInputBound(unittest.TestCase):
         self.assertIn('do not retry it unchanged', result)
         self.assertIn('Re-run show_holders', result)
         self.assertIn('FW_MODEL_CONTEXT_TOKENS', result)
-        self.assertNotIn('FW_SEARCH_OBSERVATION_MAX_BYTES', result)
         self.assertIn(SEARCH_MODEL_ENV, result)
         self.assertIn(f'{search_observation_max_bytes():,}-byte bound', result)
         event = seen['event']

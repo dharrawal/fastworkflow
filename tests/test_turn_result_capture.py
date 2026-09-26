@@ -682,9 +682,9 @@ class TestArtifactValidation:
     def test_a_serializable_output_warns_about_nothing(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
-        """There is no FW_EAGER_ARTIFACT_VALIDATION switch: validation is what
-        `append_turn_output` does. What is left to pin is that it is quiet on
-        artifacts it can serialize, and that the output is appended either way."""
+        """Validation is what `append_turn_output` always does. What is left to
+        pin is that it is quiet on artifacts it can serialize, and that the
+        output is appended either way."""
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
         good = CommandOutput(
             command_name="good_cmd",

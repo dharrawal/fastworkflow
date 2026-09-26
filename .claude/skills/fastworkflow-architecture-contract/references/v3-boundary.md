@@ -61,8 +61,7 @@ Big-bang cutover, mixed fleets forbidden:
 ## Config inventory already reserved (spec §12)
 
 Defaults were chosen so a 2.20→2.21 upgrade needs ZERO config changes. Names reserved by
-the spec (none of them is consumed in code today; `FW_EAGER_ARTIFACT_VALIDATION` was the
-last one and `ido-pyw.1` removed it, making the validator unconditional):
+the spec (none of them is consumed in code today; the artifact validator is unconditional):
 `FW_ARTIFACT_OFFLOAD_THRESHOLD_BYTES=4096`, `FW_MAX_INLINE_ARTIFACT_BYTES=10485760`,
 `FW_MAX_TURN_ARTIFACT_BLOBS=64` / `FW_MAX_TURN_ARTIFACT_BYTES=52428800`,
 `FW_MAX_TRAJECTORY_BYTES=262144`, `FW_PENDING_TURN_TTL_SECONDS=604800`,

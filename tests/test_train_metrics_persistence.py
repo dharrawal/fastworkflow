@@ -104,25 +104,7 @@ def test_persist_is_idempotent_per_run_id(state_root, workflow_dir):
 
 
 # ---------------------------------------------------------------------------
-# (b) the retired FW_OBSERVABILITY=0 switch is inert: the row is written
-# ---------------------------------------------------------------------------
-
-
-def test_the_retired_switch_does_not_stop_the_row(state_root, workflow_dir, monkeypatch):
-    monkeypatch.setenv("FW_OBSERVABILITY", "0")
-    run_id = metrics_persistence.persist_train_run_metrics(
-        workflow_dir,
-        started_at=datetime.now(timezone.utc),
-        completed_at=datetime.now(timezone.utc),
-        metrics={"totals": {}},
-    )
-    assert run_id is not None
-    rows = ObservabilityStore(_db_path(workflow_dir)).list_train_runs()
-    assert [row["run_id"] for row in rows] == [run_id]
-
-
-# ---------------------------------------------------------------------------
-# (c) broken DB -> warns and returns None without raising
+# (b) broken DB -> warns and returns None without raising
 # ---------------------------------------------------------------------------
 
 
@@ -152,7 +134,7 @@ def test_broken_db_warns_and_returns_none(state_root, workflow_dir, caplog):
 
 
 # ---------------------------------------------------------------------------
-# (d) collect_train_metrics against a fixture ___command_info layout
+# (c) collect_train_metrics against a fixture ___command_info layout
 # ---------------------------------------------------------------------------
 
 

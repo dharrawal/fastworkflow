@@ -891,32 +891,25 @@ class TestMaintenance:
 
 
 class TestFactory:
-    def test_the_retired_switch_is_inert_and_every_caller_gets_a_sink(
-        self, tmp_path, monkeypatch
-    ):
+    def test_every_caller_gets_one_cached_sink(self, tmp_path, monkeypatch):
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
         workflow_path = str(tmp_path / "wf")
         os.makedirs(workflow_path, exist_ok=True)
 
-        monkeypatch.setenv("FW_OBSERVABILITY", "0")
         sink = obs.get_observability_sink(workflow_path)
         try:
             assert sink is not None
-            # Cached: same sink per DB path, whatever the retired switch says.
-            monkeypatch.setenv("FW_OBSERVABILITY", "off")
+            # Cached: same sink per DB path.
             assert obs.get_observability_sink(workflow_path) is sink
-            # The switch and the entry-point distinction are gone.
+            # The entry-point distinction is gone.
             assert not hasattr(obs, "observability_enabled")
             with pytest.raises(TypeError):
                 obs.get_observability_sink(workflow_path, entry_point=False)
-            assert "FW_OBSERVABILITY" not in obs.observability_config()
         finally:
             if sink is not None:
                 sink.close()
 
-    def test_an_embedder_with_the_switch_off_still_records_privately(
-        self, tmp_path, monkeypatch
-    ):
+    def test_an_embedder_records_privately(self, tmp_path, monkeypatch):
         """A library caller, not an entry point: the sink and its DB exist anyway.
 
         No fastWorkflow CLI or server is involved -- the embedder opens the
@@ -924,7 +917,6 @@ class TestFactory:
         turn. The DB is owner-only in an owner-only directory.
         """
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
-        monkeypatch.setenv("FW_OBSERVABILITY", "0")
         workflow_path = str(tmp_path / "embedded_wf")
         os.makedirs(workflow_path, exist_ok=True)
 

@@ -425,8 +425,8 @@ def _claim_registered_attempt(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                "experiment bootstrap requires enabled observability and an "
-                "installed experiment-claim store"
+                "experiment bootstrap requires the observability store, "
+                "which could not be opened"
             ),
         )
 

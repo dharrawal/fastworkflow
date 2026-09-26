@@ -1100,7 +1100,7 @@ def _turn_json_response(execn, channel_id: str) -> JSONResponse:
 # ============================================================================
 
 def _observability_store():
-    """This workflow's ObservabilityStore, or None when observability is off.
+    """This workflow's ObservabilityStore, or None when the store could not be opened.
 
     Reuses the process-wide sink (one writer per DB path) that the channel
     runtimes already attach (``_create_channel_runtime``), so reads go against

@@ -295,10 +295,6 @@ class CompletedSessionReclamationTests(OffloadStateFixture):
 class EventBufferBoundTests(unittest.TestCase):
     """The in-memory event log is a ring, not a ledger, with a fixed bound."""
 
-    #: The retired setting that used to size the ring, named so the case that
-    #: proves it is inert can set it.
-    RETIRED_CAP_ENV = "FW_OFFLOAD_EVENT_BUFFER_MAX"
-
     def setUp(self) -> None:
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
@@ -317,7 +313,6 @@ class EventBufferBoundTests(unittest.TestCase):
                 os.path.join(self.temp.name, "observability.sqlite3")))
 
     def tearDown(self) -> None:
-        os.environ.pop(self.RETIRED_CAP_ENV, None)
         reset_runtime_state()
 
     def fill(self, count: int) -> None:
@@ -338,15 +333,6 @@ class EventBufferBoundTests(unittest.TestCase):
                         "DEFAULT_EVENT_BUFFER_MAX"):
             with self.subTest(name=retired):
                 self.assertFalse(hasattr(offload_state, retired))
-
-    def test_the_retired_cap_setting_is_inert(self) -> None:
-        for raw in ("25", "0", "not-a-number"):
-            with self.subTest(raw=raw):
-                reset_runtime_state()
-                self.route()
-                os.environ[self.RETIRED_CAP_ENV] = raw
-                self.fill(100)
-                self.assertEqual(len(snapshot_events()), 100)
 
 
 

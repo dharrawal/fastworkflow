@@ -114,10 +114,7 @@ class EvidenceFixture(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(reset_runtime_state)
         self._restore_env: dict[str, str | None] = {}
-        for name in (
-            "FW_OFFLOAD_EVIDENCE_PRESERVATION",
-            archive_module.REDACTION_ENV,
-        ):
+        for name in (archive_module.REDACTION_ENV,):
             self._restore_env[name] = os.environ.pop(name, None)
         self.addCleanup(self._restore_environment)
         self.db_path = os.path.join(self.temp.name, "state", "observability.sqlite3")
@@ -386,14 +383,6 @@ class ExperimentEvidenceTests(EvidenceFixture):
 
         self.assert_erased(scope, "confidential-turn")
 
-    def test_the_preservation_setting_is_ignored(self):
-        os.environ["FW_OFFLOAD_EVIDENCE_PRESERVATION"] = "all"
-        scope = experiment_scope("exp-channel")
-        self.populate(scope, "confidential-exp")
-
-        obs.ObservabilityStore(self.db_path).forget_channel("exp-channel")
-
-        self.assert_erased(scope, "confidential-exp")
 
     def test_clear_conversations_erases_experiment_evidence(self):
         scope = experiment_scope("exp-channel")

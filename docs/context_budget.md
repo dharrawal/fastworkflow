@@ -113,8 +113,7 @@ are the derived budgets".
 
 ## What is not a context budget
 
-`FW_OBS_MAX_ATTR_BYTES` used to look like one and was not: it caps a single span
-attribute written to the **observability store**, which is a database row, not a
-model prompt, and nothing about it scales with a model's window. It is now the
-constant `fastworkflow.tracing.MAX_ATTR_BYTES` (16,384) and the observability
-provenance record still reports it, because the value in effect is now fixed.
+The per-attribute cap on span attributes written to the **observability store**
+is not one: it bounds a database row, not a model prompt, and nothing about it
+scales with a model's window. It is the constant
+`fastworkflow.tracing.MAX_ATTR_BYTES` (16,384), not a setting.

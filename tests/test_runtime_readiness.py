@@ -331,11 +331,9 @@ def test_observability_enabled_reports_whether_a_writer_is_live(tmp_path, monkey
     """The key stays in the stored snapshot; its value is now a fact, not a switch.
 
     Recording is always on, so the only thing that can differ is whether this
-    process holds a live writer for the workflow's store. The retired
-    ``FW_OBSERVABILITY`` variable has no say in it.
+    process holds a live writer for the workflow's store.
     """
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
-    monkeypatch.setenv("FW_OBSERVABILITY", "0")
     workflow = tmp_path / "wf"
     workflow.mkdir()
     assert runtime_readiness_snapshot(str(workflow))["observability_enabled"] is False

@@ -397,7 +397,6 @@ def test_provenance_records_defaults_nobody_set(workflow_path):
         "FW_OBS_DB_MAX_BYTES",
         "FW_OBS_INLINE_ARTIFACT_BYTES",
         "FW_OBS_QUEUE_MAX",
-        "FW_OBS_MAX_ATTR_BYTES",
         obs.CAPTURE_PROFILE_VAR,
     ):
         assert config.get(name), name
@@ -444,22 +443,6 @@ def test_the_run_record_is_serializable(workflow_path, tmp_path):
 # ----------------------------------------------------------------------
 # Preconditions and raising behavior
 # ----------------------------------------------------------------------
-
-
-def test_the_retired_observability_switch_is_inert(workflow_path, monkeypatch):
-    """Setting the old master switch off neither disables recording nor adds a problem."""
-    monkeypatch.setenv("FW_OBSERVABILITY", "0")
-    sink = obs.get_observability_sink(workflow_path)
-    assert sink is not None
-    with evidence_run(
-        workflow_path, run_id="run-switch-off", dspy_history_enabled=True
-    ) as run:
-        sink.emit_turn_record(_turn())
-
-    assert run.valid, run.problems()
-    assert not any("disabled" in problem for problem in run.problems())
-    assert run.provenance.enabled is True
-    assert "FW_OBSERVABILITY" not in run.provenance.config
 
 
 def test_dspy_history_off_is_reported_as_a_problem(workflow_path):

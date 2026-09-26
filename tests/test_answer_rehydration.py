@@ -105,10 +105,10 @@ class Fixture:
 class Budget(unittest.TestCase):
     """The budget: derived from the window, overridable, defended.
 
-    There is no ``FW_ANSWER_REHYDRATION`` switch; rehydration is what the
-    extract step does. What is left here is the byte budget, which is a
-    fraction of the model's context window with the old name as a tuning
-    override. ``tests/test_context_budget.py`` owns the derivation; this owns
+    Rehydration is what the extract step always does. What is left here is
+    the byte budget, which is a fraction of the model's context window with
+    ``FW_ANSWER_REHYDRATION_MAX_BYTES`` as a tuning override.
+    ``tests/test_context_budget.py`` owns the derivation; this owns
     the module's view of it.
     """
 

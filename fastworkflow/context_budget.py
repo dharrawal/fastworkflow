@@ -41,10 +41,9 @@ set it) and leaves them alone. An override below the budget's floor is refused
 with a warning and the derived value stands, exactly as the individual knobs
 behaved before.
 
-What is NOT here. ``FW_OBS_MAX_ATTR_BYTES`` used to sit in this family and does
-not belong to it: it caps one attribute value written to the observability
-STORE, which is a database row, not a model prompt. It is a constant
-(``fastworkflow.tracing.MAX_ATTR_BYTES``).
+What is NOT here. The per-attribute cap on values written to the observability
+STORE does not belong to this family: it bounds a database row, not a model
+prompt. It is a constant (``fastworkflow.tracing.MAX_ATTR_BYTES``).
 """
 from __future__ import annotations
 

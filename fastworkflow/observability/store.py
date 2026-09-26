@@ -386,9 +386,8 @@ def pruning_suppressed() -> bool:
 # nobody set, which a scan cannot see. A run whose provenance omits
 # FW_OBS_RETENTION_DAYS because it was unset is a run nobody can reproduce.
 #
-# FW_OBS_MAX_ATTR_BYTES was removed in ido-pyw.1: the per-attribute cap is the
-# constant tracing.MAX_ATTR_BYTES. It is still reported below, because
-# provenance records the value in effect and that value is now fixed.
+# The per-attribute cap is the constant tracing.MAX_ATTR_BYTES, not a setting,
+# so it has no entry here.
 _OBS_CONFIG_VARS: tuple[tuple[str, str], ...] = (
     (CAPTURE_PROFILE_VAR, _DEFAULT_CAPTURE_PROFILE),
     ("FW_OBS_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)),
@@ -404,9 +403,7 @@ _OBS_CONFIG_VARS: tuple[tuple[str, str], ...] = (
 
 def observability_config() -> dict[str, str]:
     """The FW_OBS_* values in effect, defaults included (§12.4)."""
-    config = {name: _env(name, default) for name, default in _OBS_CONFIG_VARS}
-    config["FW_OBS_MAX_ATTR_BYTES"] = str(tracing.MAX_ATTR_BYTES)
-    return config
+    return {name: _env(name, default) for name, default in _OBS_CONFIG_VARS}
 
 
 @contextlib.contextmanager

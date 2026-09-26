@@ -181,13 +181,21 @@ proxy routing. Full recipe: [references/litellm-proxy-and-local-dev.md](referenc
 | `INVALID` | none | `"INVALID"` | `parameter_extraction.py:23` (import-time) | prod | Sentinel |
 | `PARAMETER_EXTRACTION_ERROR_MSG` | none | `"Error in parameter extraction: {error}"` | `parameter_extraction.py:263`; `signatures.py:249` (lazy, cached) | prod | Must keep the `{error}` placeholder |
 | `LOG_LEVEL` | `INFO` | not templated | THREE paths: `utils/logging.py:53` (OS env at import, invalid value raises `ValueError`); `__init__.py:180-182` (dotenv, via `reconfigure_log_level`); `run_fastapi_mcp/__main__.py:1612-1617` (dotenv pre-read for uvicorn) | prod | Put it in `fastworkflow.env`; that covers paths 2 and 3. Shell export covers path 1 only |
-| ~~`FW_EAGER_ARTIFACT_VALIDATION`~~ | — | — | **removed in `ido-pyw.1` (3.4.0)** | **gone** | The unserializable-artifact validator is unconditional; it still only warns, and becomes a hard rejection in v3.0 per the `warn_on_unserializable_artifacts` docstring |
 | `FW_MODEL_CONTEXT_TOKENS` | model metadata, else 131072 | not templated | `context_budget.py` (env file first, then `os.environ`) | prod | **The one byte-budget input**: the model's context window in tokens. Every `FW_*_MAX_BYTES` budget is a fraction of it — see `docs/context_budget.md`. Unset, it is read from the `LLM_AGENT` model via `litellm.get_model_info`. |
 | `FW_TRAJECTORY_MAX_BYTES`, `FW_ANSWER_REHYDRATION_MAX_BYTES`, `FW_RESULT_PAGE_MAX_BYTES`, `FW_SEARCH_ANSWER_MAX_BYTES`, `FW_OFFLOAD_HOT_MAX_BYTES`, `FW_RESULT_HANDLE_HOT_MAX_BYTES`, `FW_OFFLOAD_MIN_SAVING_BYTES` | derived from the window | not templated | `context_budget.py` | prod | **Tuning overrides, not the interface.** Below their floor or unparseable, the derived budget stands with a warning. |
-| ~~`FW_OFFLOAD_EVENTS`~~, ~~`FW_OFFLOAD_EVENT_BUFFER_MAX`~~ | — | — | **removed (3.4.0)** | **gone** | Offloading/search/answer-time events are always recorded in process (a ring of a fixed 2,000) and durably in the `offload_events` table of the workflow's observability DB, redacted like offload evidence; read them with `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`. Setting either variable has no effect. |
-| ~~`FW_OBSERVABILITY`~~ | — | — | **removed (3.4.0)** | **gone** | Recording is always on, for fastWorkflow's entry points and library embedders alike; `get_observability_sink(workflow_path)` has no `entry_point` argument and returns `None` only when the store cannot be opened. The DB is owner-only (0600 file, 0700 dir) under `FASTWORKFLOW_STATE_ROOT` and pruned by `FW_OBS_RETENTION_DAYS` / `FW_OBS_DB_MAX_BYTES`. Setting the variable has no effect. |
-| ~~`FW_SEARCH_OBSERVATION_MAX_BYTES`~~ | — | — | **removed (3.4.0)** | **gone** | The `search_memory` input bound is derived from the search model's context window only; correct the window with `FW_MODEL_CONTEXT_TOKENS`. |
 | `PYTEST_RUNNING` | — | — | set by `tests/conftest.py:16`; **zero readers** in `fastworkflow/` | **dead** | Safe to ignore; do not build logic on it |
+
+Unconditional behaviour, with no setting to change it: observability
+recording is always on, for fastWorkflow's entry points and library embedders alike
+(`get_observability_sink(workflow_path)` returns `None` only when the store cannot be
+opened; the DB is owner-only, 0600 file / 0700 dir, under `FASTWORKFLOW_STATE_ROOT`, pruned
+by `FW_OBS_RETENTION_DAYS` / `FW_OBS_DB_MAX_BYTES`). Offloading/search/answer-time events
+are recorded in process (a ring of a fixed 2,000) and in the `offload_events` table, read
+with `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`. The
+unserializable-artifact validator always runs and only warns (a hard rejection in v3.0 per
+the `warn_on_unserializable_artifacts` docstring). The `search_memory` input bound is
+derived from the search model's context window only; correct it with
+`FW_MODEL_CONTEXT_TOKENS`.
 
 Not fastWorkflow config, despite appearances: repo-root `config.yaml` is a Dolt SQL server
 config for the beads issue tracker; repo-root `.env`, `env/.env`, `passwords/.env` are the

@@ -75,8 +75,7 @@ and the run records `rehydration_overflow`.
 
 ## There is no flag
 
-3.4.0 removed `FW_ANSWER_REHYDRATION`. Rehydration is what the extract
-step does, for every workflow: the loop keeps its compacted trajectory and the
+Rehydration is what the extract step does, for every workflow: the loop keeps its compacted trajectory and the
 writer gets the evidence behind it. A run with nothing offloaded
 rehydrates nothing and its extract call is the call it always was — the
 rule is the trajectory's content, not a setting.

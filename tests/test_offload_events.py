@@ -41,9 +41,6 @@ from fastworkflow.observation_offloading.state import (
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 REDACTION_ENV = archive_module.REDACTION_ENV
-#: The retired settings, named so the cases that prove them inert can set them.
-RETIRED_EVENTS_ENV = "FW_OFFLOAD_EVENTS"
-RETIRED_EVENT_BUFFER_ENV = "FW_OFFLOAD_EVENT_BUFFER_MAX"
 
 #: A credential shape the store's ``Redactor`` recognises with no help from
 #: the environment.
@@ -76,8 +73,7 @@ class EventFixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
-        for name in (REDACTION_ENV, RETIRED_EVENTS_ENV, RETIRED_EVENT_BUFFER_ENV,
-                     "FW_OBS_CAPTURE_PROFILE"):
+        for name in (REDACTION_ENV, "FW_OBS_CAPTURE_PROFILE"):
             self._restore_env[name] = os.environ.pop(name, None)
         self.addCleanup(self._restore_environment)
         self.db_path = os.path.join(self.temp.name, "observability.sqlite3")
@@ -192,22 +188,7 @@ class RedactionTests(EventFixture):
 
 
 class RetiredSettingsTests(EventFixture):
-    """The events file and its settings are gone, and setting them does nothing."""
-
-    def test_the_retired_events_setting_writes_no_file(self) -> None:
-        path = os.path.join(self.temp.name, "offload-events.jsonl")
-        os.environ[RETIRED_EVENTS_ENV] = path
-        record_event(self.search_event("answer"))
-        self.assertFalse(os.path.exists(path))
-        self.assertEqual(len(self.stored()), 1)
-
-    def test_the_retired_ring_setting_does_not_size_the_ring(self) -> None:
-        os.environ[RETIRED_EVENT_BUFFER_ENV] = "3"
-        for index in range(10):
-            record_event({"kind": "fixture", "scope_id": self.scope.scope_id,
-                          "n": index})
-        self.assertEqual(len(snapshot_events()), 10)
-        self.assertEqual(len(self.stored()), 10)
+    """The events file and its settings are gone."""
 
     def test_the_file_api_is_gone(self) -> None:
         for name in ("EVENTS_ENV", "forget_events_file", "EVENT_BUFFER_MAX_ENV",
@@ -230,7 +211,7 @@ class LiveTurnEventTests(unittest.TestCase):
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
         self._restore = {name: os.environ.pop(name, None)
-                         for name in (REDACTION_ENV, RETIRED_EVENTS_ENV)}
+                         for name in (REDACTION_ENV,)}
         self.state_root = os.path.join(self.temp.name, "state")
         os.environ["FASTWORKFLOW_STATE_ROOT"] = self.state_root
         fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": self.state_root})

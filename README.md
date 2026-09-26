@@ -663,7 +663,7 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 
 | Variable | Purpose | When needed | Default |
 |:---|:---|:---|:---|
-| `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints, function caches, and the always-on observability record) | Optional | `~/.local/state/fastworkflow` |
+| `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints, function caches, and the always-on observability record — for `run`/`run_fastapi_mcp`/`run_chatbot` and library embedders alike, an owner-only (`0600` file, `0700` directory) SQLite database at `workflows/<workflow-id>/observability.sqlite3`, pruned automatically by `FW_OBS_RETENTION_DAYS` and `FW_OBS_DB_MAX_BYTES`) | Optional | `~/.local/state/fastworkflow` |
 | `FASTWORKFLOW_WORKFLOW_ID` | Overrides the per-workflow state namespace (defaults to the workflow folder name) | Optional | *workflow folder name* |
 | `LOG_LEVEL` | Log level (`DEBUG`…`CRITICAL`) | Optional | `INFO` |
 | `LLM_SYNDATA_GEN` | Model for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
@@ -675,7 +675,6 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 | `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
 | `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
 | `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |
-| ~~`FW_OBSERVABILITY`~~ | Removed; setting it has no effect. The observability record is always kept — for `run`/`run_fastapi_mcp`/`run_chatbot` and library embedders alike — as an owner-only (`0600` file, `0700` directory) SQLite database at `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/observability.sqlite3`, pruned automatically by the two settings below | — | — |
 | `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup) drops spans/artifacts (turn records are exempt) | Optional | `30` |
 | `FW_OBS_DB_MAX_BYTES` | Size cap; the automatic prune evicts oldest spans first while over it | Optional | `1073741824` (1 GiB) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |

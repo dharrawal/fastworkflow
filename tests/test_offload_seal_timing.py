@@ -65,9 +65,6 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 REDACTION_ENV = archive_module.REDACTION_ENV
 REDACTION_ON = archive_module.REDACTION_ON
 REDACTION_OFF = archive_module.REDACTION_OFF
-#: The retired crash-sweep setting, named so the case that proves it is inert
-#: can set it.
-RETIRED_SEAL_GRACE_ENV = "FW_OFFLOAD_SEAL_GRACE_SECONDS"
 LEGACY_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 
 #: A credential shape ``Redactor._SECRET_PATTERNS`` recognises with no help
@@ -119,10 +116,7 @@ class EvidenceFixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
-        for name in (
-            REDACTION_ENV, RETIRED_SEAL_GRACE_ENV, "FW_OBS_CAPTURE_PROFILE",
-            "FW_OFFLOAD_EVIDENCE_PRESERVATION",
-        ):
+        for name in (REDACTION_ENV, "FW_OBS_CAPTURE_PROFILE"):
             self._restore_env[name] = os.environ.pop(name, None)
         self.addCleanup(self._restore_environment)
         archive_module._warned_redaction.clear()
@@ -443,13 +437,6 @@ class NoSealLifecycleTests(EvidenceFixture):
             ).fetchall()
         self.assertEqual(before, after)
 
-    def test_the_retired_grace_setting_changes_nothing(self) -> None:
-        os.environ[RETIRED_SEAL_GRACE_ENV] = "0"
-        text = response_with_credential()
-        archive, stored = self.persist(text)
-        RuntimeHandleArchive(self.db_path)
-        self.assertEqual(archive.get(chatbot_scope(), "O1")["text"], text)
-        self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
 
     def test_the_seal_and_sweep_surface_is_gone(self) -> None:
         for owner, names in (

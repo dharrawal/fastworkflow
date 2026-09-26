@@ -385,15 +385,11 @@ Observation offloading itself has no switch: `build_tool_agent` always returns a
 `StructuredContinuationReAct` with `search_memory` in its tools, and the forced
 replan bound is the module constant
 `observation_offloading.continuation.MAX_FORCED_REPLANS` (2, therefore 3
-segments). `FW_OBSERVATION_OFFLOADING`, `FW_MAX_FORCED_REPLANS` and
-`FW_OFFLOAD_HANDLE_ARCHIVE` were removed in 3.4.0; the observation archive
-always lives in the workflow's own observability database. So do the
-offloading runtime's diagnostic events: they are kept in process in a ring of
-the newest 2,000 (`snapshot_events()`) and stored as rows of `offload_events`,
-read back with `ObservabilityStore.offload_events(turn_key=..., channel_id=...,
-kind=...)`. `FW_OFFLOAD_EVENTS`, `FW_OFFLOAD_EVENT_BUFFER_MAX` and
-`FW_SEARCH_OBSERVATION_MAX_BYTES` were removed in 3.4.0 as well; setting them
-has no effect.
+segments). The observation archive always lives in the workflow's own
+observability database. So do the offloading runtime's diagnostic events: they
+are kept in process in a ring of the newest 2,000 (`snapshot_events()`) and
+stored as rows of `offload_events`, read back with
+`ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
 
 The one setting that remains is `FW_OFFLOAD_EVIDENCE_REDACTION`: `on` (the
 default) or `off`. See *Retention, redaction and known limits*.

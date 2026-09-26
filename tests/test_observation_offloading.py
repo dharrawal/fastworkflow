@@ -326,8 +326,7 @@ class StructuredContinuation(unittest.TestCase):
         reset_runtime_state()
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        # ido-pyw.1 removed FW_OFFLOAD_HANDLE_ARCHIVE. The process-default
-        # archive is now one temp file per PID, which these tests share; they
+        # The process-default archive is one temp file per PID, which these tests share; they
         # all write alias O1 under the same process-wide default scope, so each
         # one gets its own archive object instead.
         from fastworkflow.observation_offloading import state as offload_state
@@ -1253,8 +1252,8 @@ class AgentConstruction(unittest.TestCase):
         self.assertEqual(capped["trajectory_manifest"]["observation_count"], 1)
 
     def test_the_replan_bound_is_the_module_constant(self) -> None:
-        """There is no FW_MAX_FORCED_REPLANS setting: the agent the framework
-        builds carries the module constant -- 2 forced replans, 3 segments."""
+        """The agent the framework builds carries the module constant -- 2
+        forced replans, 3 segments."""
         agent = build_tool_agent(
             SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
         )

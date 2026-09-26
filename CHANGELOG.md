@@ -8,9 +8,8 @@ does not backfill them.
 ## 3.4.0 — observation offloading and search
 
 **Observation offloading and answer-time rehydration become the framework's
-behaviour for every workflow.** They are no longer modes a deployment opts into:
-there is no `FW_OBSERVATION_OFFLOADING` and no `FW_ANSWER_REHYDRATION`. A
-fastWorkflow tool agent compacts its trajectory, keeps every observation
+behaviour for every workflow.** They are no longer modes a deployment opts into.
+A fastWorkflow tool agent compacts its trajectory, keeps every observation
 reachable, and answers over the evidence behind its labels rather than over the
 labels themselves.
 
@@ -120,14 +119,6 @@ labels themselves.
   `KeyError: 'what can i do?'`, because the fallback it substitutes was
   registered only for the ambiguity clarification stage.
 
-### Removed
-
-`FW_OBSERVATION_OFFLOADING`, `FW_ANSWER_REHYDRATION`, `FW_OFFLOAD_HANDLE_ARCHIVE`,
-`FW_EAGER_ARTIFACT_VALIDATION`, `FW_MAX_FORCED_REPLANS`, `FW_OBS_MAX_ATTR_BYTES`,
-`FW_OBSERVABILITY`, `FW_OFFLOAD_EVENTS`, `FW_OFFLOAD_EVENT_BUFFER_MAX`,
-`FW_SEARCH_OBSERVATION_MAX_BYTES`, `FW_OFFLOAD_EVIDENCE_PRESERVATION`,
-`FW_OFFLOAD_SEAL_GRACE_SECONDS`. Setting any of them has no effect.
-
 ### Migration
 
 - `LLM_OBSERVATION_SEARCH` is the recommended setting for the model that answers
@@ -148,8 +139,8 @@ labels themselves.
   set `FASTWORKFLOW_STATE_ROOT`. A `WorkflowExecutionContext` built without a
   sink now records into its workflow's database on its own; pass
   `trace_sink=tracing.NoOpTraceSink()` where a context must record nothing.
-- Readers of the old `FW_OFFLOAD_EVENTS` JSONL file should read
-  `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
+- The offloading runtime's events are not written to a separate file; read them
+  with `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
 - To correct the `search_memory` input bound, set `FW_MODEL_CONTEXT_TOKENS` or
   point `LLM_OBSERVATION_SEARCH` at the intended model.
 

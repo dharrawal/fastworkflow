@@ -24,10 +24,9 @@
 > - **A suspended-then-resumed exchange is now ONE conversation turn**, where
 >   the legacy store recorded each half separately. Falls out of one logical
 >   turn = one row.
-> - **With `FW_OBSERVABILITY=0` the server has no conversation persistence at
->   all** (in-memory history only, nothing survives a restart), because the
->   turn record IS the conversation record now. `run_fastapi_mcp` is an entry
->   point, so the sink defaults on.
+> - **Without an observability store the server has no conversation
+>   persistence at all** (in-memory history only, nothing survives a restart),
+>   because the turn record IS the conversation record now.
 
 > Errata (2026-08-26): CLI names herein predate the chatbot UI rework —
 > `fastworkflow studio` shipped as `fastworkflow run_chatbot`, and the
@@ -35,12 +34,10 @@
 > chatbot's confirmed Clear-conversations action plus automatic
 > startup pruning (see the parent design doc's §3.2/§3.4 amendments).
 
-> Errata (2026-09-24): the `FW_OBSERVABILITY` master switch was removed in 3.4.0.
-> Recording is always on, for fastWorkflow's entry points and library embedders
-> alike, so the "`FW_OBSERVABILITY=0` … no conversation persistence" bullet in
-> the status block above no longer describes a reachable state: a server now
-> lacks conversation persistence only when its observability store cannot be
-> opened. The same release moved observation-offloading evidence into this DB
+> Errata (2026-09-24): in 3.4.0 recording became always on, for fastWorkflow's
+> entry points and library embedders alike, so a server lacks conversation
+> persistence only when its observability store cannot be opened. The same
+> release moved observation-offloading evidence into this DB
 > (`offload_evidence`, `offload_subjects`, `offload_events`), erased and pruned
 > with its turn; see `docs/observation_search.md`, "Retention, redaction and
 > known limits".
