@@ -646,7 +646,11 @@ class DistillationSession:
             # Build initial query with next steps using the PLANNER LLM
             # The hook in build_query_with_next_steps will auto-capture the plan
             command_info = build_query_with_next_steps(
-                refined_message, self.chat_session, planning_insights=planning_insights, planner_lm=planner_lm
+                refined_message,
+                self.chat_session,
+                planning_insights=planning_insights,
+                planner_lm=planner_lm,
+                planner_user_query=message,
             )
 
             # Get available commands for current context

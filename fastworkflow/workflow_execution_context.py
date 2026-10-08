@@ -1947,16 +1947,15 @@ class WorkflowExecutionContext:
 
         from fastworkflow.workflow_agent import build_query_with_next_steps, _what_can_i_do
 
-        # When there is prior conversation history, pass the agent trajectory and
-        # inputs to the planner so it does not re-plan steps already completed in
-        # earlier turns (uses TaskPlannerWithTrajectoryAndAgentInputsSignature).
-        has_history = bool(self.conversation_history.messages)
+        # Initial turn planning uses every prior turn summary, not the previous
+        # turn's full agent trajectory (mid-turn replans still use trajectory).
         command_info_and_refined_message_with_todolist = build_query_with_next_steps(
             refined_user_query,
             self,
-            with_agent_inputs_and_trajectory=has_history,
+            with_agent_inputs_and_trajectory=False,
             planning_insights=self._planning_insights,
             planner_lm=getattr(self, "_current_planner_lm", None),
+            planner_user_query=message,
         )
         available_commands = _what_can_i_do(self)
 

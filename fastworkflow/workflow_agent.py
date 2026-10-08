@@ -721,10 +721,27 @@ def _text_turn_plan(plan_text: str, workflow_path: str) -> TurnPlan | None:
 #         return []
 
 
+def _previous_turn_summaries_for_planner(chat_session_obj: fastworkflow.ChatSession) -> str:
+    """Every completed turn summary for the initial planner (not mid-turn replans)."""
+    history = getattr(chat_session_obj, "conversation_history", None)
+    messages = getattr(history, "messages", None) if history is not None else None
+    if not messages:
+        return ""
+    lines: list[str] = []
+    for turn_number, message in enumerate(messages, start=1):
+        if not isinstance(message, dict):
+            continue
+        summary = message.get("conversation summary") or message.get("conversation_summary")
+        if summary:
+            lines.append(f"Turn {turn_number}: {summary}")
+    return "\n".join(lines)
+
+
 def build_query_with_next_steps(user_query: str,
     chat_session_obj: fastworkflow.ChatSession, with_agent_inputs_and_trajectory: bool = False,
     planning_insights: str | None = None, planner_lm = None,
-    trace_trigger: str | None = None) -> str:
+    trace_trigger: str | None = None,
+    planner_user_query: str | None = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -739,6 +756,10 @@ def build_query_with_next_steps(user_query: str,
         trace_trigger: What re-triggered planning mid-turn (e.g.
             "ask_user_response", "parameter_extraction_error"). None means the
             turn's initial plan; set, it marks the span fw.planner.replan.
+        planner_user_query: Current-turn text for the planner LLM only. When prior
+            turns are supplied via ``previous_turn_summaries``, pass the raw user
+            message here so ``user_query`` (often a refined string that already
+            embeds recent summaries) is not duplicated in the planner prompt.
     """
     base_docstring = """
     Carefully review the user_query and generate a next steps sequence based only on available commands.
@@ -784,6 +805,14 @@ def build_query_with_next_steps(user_query: str,
         agent_inputs: dict = dspy.InputField()
         agent_trajectory: dict = dspy.InputField()
         user_response: str = dspy.InputField()
+        next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
+
+    class TaskPlannerTextWithPreviousTurnSummariesSignature(dspy.Signature):
+        __doc__ = enhanced_docstring
+        user_query: str = dspy.InputField()
+        previous_turn_summaries: str = dspy.InputField(
+            desc="Summaries of every completed turn before this one, oldest first"
+        )
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
     current_workflow = chat_session_obj.get_active_workflow()
@@ -839,6 +868,25 @@ def build_query_with_next_steps(user_query: str,
                 agent_trajectory = agent_trajectory,
                 user_response = user_query,
                 available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
+        previous_turn_summaries = (
+            _previous_turn_summaries_for_planner(chat_session_obj)
+            if trace_trigger is None
+            else ""
+        )
+        if previous_turn_summaries:
+            task_planner_func = dspy.ChainOfThought(
+                TaskPlannerTextWithPreviousTurnSummariesSignature
+            )
+            planner_query = (
+                planner_user_query
+                if planner_user_query is not None
+                else user_query
+            )
+            return task_planner_func(
+                user_query=planner_query,
+                previous_turn_summaries=previous_turn_summaries,
+                available_commands=available_commands,
+            )
         # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
         # task_planner_func = dspy.ChainOfThought(
         #     TaskPlannerSignature if structured else TaskPlannerTextSignature)
