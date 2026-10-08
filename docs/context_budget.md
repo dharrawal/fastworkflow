@@ -4,9 +4,7 @@
 
 fastWorkflow bounds several things by UTF-8 bytes: how much trajectory the ReAct
 loop carries into the next step, how much evidence the answer-time extract call
-is given, how large one `search_memory` answer may be, how
-much text the process-local cache may hold, and how much an offload must save
-to be worth doing. Every one of them answers the same question — *how much of
+is given, and how much an offload must save to be worth doing. Every one of them answers the same question — *how much of
 the model's context window may this occupy* — so there is one input and the rest
 are fractions of it.
 
@@ -44,15 +42,10 @@ values exactly.
 |---|---|---|---|---|
 | `trajectory_max_bytes` | packed-trajectory target | 875/16384 (≈ 5.34 %) | **28,000** | `FW_TRAJECTORY_MAX_BYTES` |
 | `answer_rehydration_max_bytes` | answer-time rehydration budget for the extract call | 15625/32768 (≈ 47.68 %) | **250,000** | `FW_ANSWER_REHYDRATION_MAX_BYTES` |
-| `search_answer_max_bytes` | one `search_memory` answer observation, marking included | 3/512 (≈ 0.586 %) | **3,072** | `FW_SEARCH_ANSWER_MAX_BYTES` |
-| `offload_hot_max_bytes` | process-local hot cache of offloaded observations | 1/2 | **262,144** | `FW_OFFLOAD_HOT_MAX_BYTES` |
 | `offload_min_saving_bytes` | minimum UTF-8 bytes an offload must free | 1/512 (≈ 0.195 %) | **1,024** | `FW_OFFLOAD_MIN_SAVING_BYTES` |
 
-The hot cache takes half the window because it is not prompt: it is
-what the prompt can be rebuilt from, and the durable copy is SQLite, so an
-eviction costs a re-read and never loses evidence. The rehydration budget is by
-far the largest prompt share because the extract call is one call with no loop
-after it.
+The rehydration budget is by far the largest prompt share because the extract
+call is one call with no loop after it.
 
 **Observation search is not a context budget here.** `search_memory` sends the
 full archived observation text to the search model (`LLM_OBSERVATION_SEARCH`, or
@@ -90,8 +83,6 @@ context_budget.budget_provenance()
   "budgets": {
     "trajectory_max_bytes": 28000,
     "answer_rehydration_max_bytes": 250000,
-    "search_answer_max_bytes": 3072,
-    "offload_hot_max_bytes": 262144,
     "offload_min_saving_bytes": 1024
   },
   "overrides": {}

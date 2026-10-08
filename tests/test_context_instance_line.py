@@ -7,11 +7,11 @@ decidable from a trajectory and a fixture context class.
 from __future__ import annotations
 
 import hashlib
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastworkflow.context_identity import (
     context_clause_for,
@@ -22,28 +22,19 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
 )
-from fastworkflow.observation_offloading.compact import (
-    annotate_execute_observations,
-    compact_trajectory,
-)
+from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.labels import (
     MAX_INSTANCE_LABEL_CHARS,
     alias_line,
     context_clause,
     is_offload_label,
-    label_alias,
     offload_label,
     printed_alias,
     printed_context,
     strip_alias_line,
 )
-from fastworkflow.observation_offloading.state import (
-    context_clause_of,
-    record_context_change,
-    record_context_clause,
-    reset_runtime_state,
-    snapshot_events,
-)
+from fastworkflow.observation_offloading.state import reset_observation_state
+from fastworkflow.workflow_agent import initialize_workflow_tool_agent
 
 
 # --------------------------------------------------------------------------
@@ -80,12 +71,13 @@ class RaisingContext:
 
 
 class FakeWorkflow:
-    """The two attributes ``context_identity`` reads, and nothing else."""
+    """The attributes ``context_identity`` and the execute closure read."""
 
     def __init__(self, name, obj, *, root=False):
         self._name = name
         self._obj = obj
         self._root = root
+        self.context: dict = {}
 
     @property
     def is_current_command_context_root(self):
@@ -231,177 +223,114 @@ class DeclaredInstanceIdentity(unittest.TestCase):
         self.assertEqual(context_clause_for(None), "")
 
 
-class AnnotationUsesTheRecordedContext(unittest.TestCase):
-    """What `annotate_execute_observations` prints, and what it leaves alone."""
+class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
+    """The execute closure prints the context its command RAN IN, before dispatch."""
 
     def setUp(self) -> None:
-        reset_runtime_state()
-        self.addCleanup(reset_runtime_state)
+        reset_observation_state()
+        self.addCleanup(reset_observation_state)
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.archive = RuntimeHandleArchive(
             str(Path(self.tempdir.name) / "handles.sqlite3"))
         self.scope = RuntimeHandleScope(
-            store_identity="fixture-store", channel_id="fixture-channel",
-            experiment_id="fixture-experiment", task_id="fixture-task",
-            attempt=1, turn_key="fixture-turn")
+            channel_id="fixture-channel",
+            turn_key="fixture-turn")
+        self.workflow = FakeWorkflow("DirectoryExplorer", None)
+        self.trajectory: dict = {}
+        self.session = SimpleNamespace(
+            workflow_tool_agent=SimpleNamespace(trajectory=self.trajectory, iteration_counter=0),
+            get_active_workflow=lambda: self.workflow)
+        self.moves = {"open_account_by_uid": ("Account", _entity("28c5aeb5", "Alan Cooper"))}
+        self.dispatched: list[str] = []
 
-    def compact(self, trajectory, **kwargs):
-        return compact_trajectory(trajectory, scope=self.scope,
-                                  selected_archive=self.archive, **kwargs)
+        def dispatch(command, chat_session_obj):
+            self.dispatched.append(command)
+            name = command.split()[0]
+            if name in self.moves:
+                self.workflow._name, self.workflow._obj = self.moves[name]
+            return "Entered the context." if name in self.moves else "rows"
 
-    @staticmethod
-    def _step(trajectory, index, tool, observation, command=None):
-        trajectory[f"thought_{index}"] = f"think-{index}"
-        trajectory[f"tool_name_{index}"] = tool
-        if command is not None:
-            trajectory[f"tool_args_{index}"] = {"command": command}
-        trajectory[f"observation_{index}"] = observation
+        def context_class(_workflow, name):
+            return AccountContext if name == "Account" else DirectoryExplorerContext
 
-    def test_a_command_that_moves_the_context_prints_where_it_RAN(self) -> None:
-        """The rule: context BEFORE the command, not the one it entered.
+        patches = [
+            patch("fastworkflow.workflow_agent._execute_workflow_query", dispatch),
+            patch("fastworkflow.context_identity.context_class_for", context_class),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
 
-        `open_account_by_uid` runs in DirectoryExplorer and ends in Account. It
-        must read as the DirectoryExplorer command it is; the `list_permissions`
-        that follows it is the one that belongs to the account.
+        captured: dict = {}
+
+        def build(_session, _signature, tools, **_kwargs):
+            captured.update({tool.__name__: tool for tool in tools})
+            return object()
+
+        with patch("fastworkflow.workflow_agent.build_tool_agent", build):
+            initialize_workflow_tool_agent(self.session)
+        self.execute = captured["execute_workflow_query"]
+
+    def archive_steps(self, *indexes: int) -> None:
+        for index in indexes:
+            compact_trajectory(self.trajectory, step_index=index, scope=self.scope,
+                               selected_archive=self.archive)
+
+    def step(self, index: int, command: str) -> str:
+        self.trajectory[f"tool_name_{index}"] = "execute_workflow_query"
+        response = self.execute(command)
+        self.trajectory[f"observation_{index}"] = response
+        return response
+
+    def test_a_command_that_moves_the_context_prints_where_it_ran(self) -> None:
+        """`open_account_by_uid` runs in DirectoryExplorer and ends in Account.
+
+        It must read as the DirectoryExplorer command it is, with the change
+        named; the `list_permissions` that follows belongs to the account.
         """
-        trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "Entered Account context.",
-                   command="open_account_by_uid <account_uid>28c5aeb5</account_uid>")
-        self._step(trajectory, 1, "execute_workflow_query", "permission rows",
-                   command="list_permissions")
-        # Recorded at dispatch: O0 ran in DirectoryExplorer, O1 in the account.
-        record_context_clause(self.scope, "O0", context_clause("DirectoryExplorer", ""))
-        record_context_clause(self.scope, "O1",
-                              context_clause("Account", "28c5aeb5 (Alan Cooper)"))
-        self.compact(trajectory)
-        self.assertEqual(printed_context(trajectory["observation_0"]),
-                         "DirectoryExplorer")
-        self.assertEqual(printed_context(trajectory["observation_1"]),
-                         "Account 28c5aeb5 Alan Cooper")
-
-    def test_root_steps_print_global_and_unrecorded_steps_the_plain_line(self) -> None:
-        trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "root rows", command="find_identity")
-        self._step(trajectory, 1, "execute_workflow_query", "other rows", command="whatever")
-        record_context_clause(self.scope, "O0", "")   # ran at the root
-        # O1 was never recorded at all (an older recording, or a capture that failed).
-        self.compact(trajectory)
-        self.assertEqual(trajectory["observation_0"], alias_line("O0", "") + "root rows")
-        self.assertEqual(trajectory["observation_1"], alias_line("O1") + "other rows")
-        events = {e["alias"]: e for e in snapshot_events() if e["kind"] == "context_line"}
-        self.assertEqual(events["O0"]["context_recorded"], True)
-        self.assertEqual(events["O1"]["context_recorded"], False)
-        self.assertEqual(events["O0"]["clause_utf8_bytes"], len(" ran in global".encode()))
-
-    def test_a_step_that_moved_the_context_says_so(self) -> None:
-        trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "Context is now 'DirectoryExplorer'",
-                   command="go_up")
-        self._step(trajectory, 1, "execute_workflow_query", "rows", command="find_identity")
-        record_context_clause(self.scope, "O0", context_clause("Identity", "4a0d"))
-        record_context_change(self.scope, "O0")
-        record_context_clause(self.scope, "O1", context_clause("DirectoryExplorer", ""))
-        self.compact(trajectory)
+        first = self.step(0, "open_account_by_uid <account_uid>28c5aeb5</account_uid>")
         self.assertEqual(
-            trajectory["observation_0"],
-            alias_line("O0", "Identity 4a0d", context_changed=True)
-            + "Context is now 'DirectoryExplorer'")
-        self.assertEqual(trajectory["observation_1"],
-                         alias_line("O1", "DirectoryExplorer") + "rows")
+            first,
+            alias_line("O0", "DirectoryExplorer", context_changed=True)
+            + "Entered the context.")
+        second = self.step(1, "list_permissions")
+        self.assertEqual(second, alias_line("O1", "Account 28c5aeb5 Alan Cooper") + "rows")
+        self.archive_steps(0, 1)
+        moved = self.archive.get(self.scope, "O0")
+        self.assertEqual((moved["context_clause"], moved["context_changed"]),
+                         ("DirectoryExplorer", True))
+        stayed = self.archive.get(self.scope, "O1")
+        self.assertEqual((stayed["context_clause"], stayed["context_changed"]),
+                         ("Account 28c5aeb5 Alan Cooper", False))
 
     def test_the_archive_stores_the_response_without_the_line(self) -> None:
-        body = "permission_uid  label\n85cde168  Active Directory_Cloud Administrator\n"
-        trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", body, command="list_permissions")
-        record_context_clause(self.scope, "O0",
-                              context_clause("Account", "28c5aeb5 (Alan Cooper)"))
-        self.compact(trajectory)
-        self.assertIn("in Account 28c5aeb5 Alan Cooper", trajectory["observation_0"])
+        self.step(0, "open_account_by_uid <account_uid>28c5aeb5</account_uid>")
+        compact_trajectory(self.trajectory, step_index=0, scope=self.scope,
+                           selected_archive=self.archive)
         stored = self.archive.get(self.scope, "O0")
-        self.assertEqual(stored["text"], body)
+        self.assertEqual(stored["text"], "Entered the context.")
         self.assertEqual(stored["text_sha256"],
-                         hashlib.sha256(body.encode()).hexdigest())
+                         hashlib.sha256(b"Entered the context.").hexdigest())
 
-    def test_an_offload_label_is_unchanged_by_the_clause(self) -> None:
-        """The label describes the RESPONSE, so the clause cannot reach it.
+    def test_a_root_command_prints_global(self) -> None:
+        self.workflow = FakeWorkflow("IDO", None, root=True)
+        self.assertEqual(self.step(0, "find_identity"),
+                         alias_line("O0", "") + "rows")
+        self.archive_steps(0)
+        self.assertEqual(self.archive.get(self.scope, "O0")["context_clause"], "")
 
-        Six executes, because the five most recent are protected from
-        offloading; the oldest is the one that gets a label.
-        """
-        body = "holder rows\n" + "x" * 9_000
-        for clause in ("", context_clause("Account", "28c5aeb5 (Alan Cooper)")):
-            reset_runtime_state()
-            trajectory: dict = {}
-            self._step(trajectory, 0, "execute_workflow_query", body,
-                       command="list_permissions")
-            for index in range(1, 6):
-                self._step(trajectory, index, "execute_workflow_query",
-                           f"small-{index}", command="show_rights")
-            for ordinal in range(1, 7):
-                record_context_clause(self.scope, f"O{ordinal}", clause)
-            self.compact(trajectory, packed_target_bytes=500)
-            self.assertTrue(is_offload_label(trajectory["observation_0"]))
-            self.assertEqual(label_alias(trajectory["observation_0"]), "O0")
-            self.assertEqual(
-                trajectory["observation_0"],
-                offload_label(alias="O0", command_name="list_permissions",
-                              response=body))
+    def test_no_agent_step_in_flight_leaves_the_response_alone(self) -> None:
+        self.trajectory["tool_name_0"] = "what_can_i_do"
+        self.assertEqual(self.execute("what_can_i_do"), "rows")
+        self.assertIsNone(self.archive.get(self.scope, "O0"))
 
-    def test_the_clause_is_never_rewritten_once_printed(self) -> None:
-        trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "rows", command="list_permissions")
-        record_context_clause(self.scope, "O0", context_clause("Account", "28c5aeb5"))
-        self.compact(trajectory)
-        frozen = trajectory["observation_0"]
-        record_context_clause(self.scope, "O0", context_clause("Group", "g-9"))
-        self.compact(trajectory)
-        self.assertEqual(trajectory["observation_0"], frozen)
-
-    def test_the_line_grows_the_packed_trajectory_by_exactly_the_clause(self) -> None:
-        body = "rows\n"
-        plain: dict = {}
-        self._step(plain, 0, "execute_workflow_query", body, command="list_permissions")
-        record_context_clause(self.scope, "O0", "")
-        self.compact(plain)
-        reset_runtime_state()
-        clause = context_clause("Account", "28c5aeb5 (Alan Cooper)")
-        with_clause: dict = {}
-        self._step(with_clause, 0, "execute_workflow_query", body, command="list_permissions")
-        record_context_clause(self.scope, "O0", clause)
-        self.compact(with_clause)
-        grown = (len(json.dumps(with_clause, ensure_ascii=False).encode())
-                 - len(json.dumps(plain, ensure_ascii=False).encode()))
-        self.assertEqual(grown, len(clause.encode()) - len("global".encode()))
-
-    def test_the_context_line_event_carries_the_measures(self) -> None:
-        trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "rows", command="list_permissions")
-        clause = context_clause("Account", "28c5aeb5 (Alan Cooper)")
-        record_context_clause(self.scope, "O0", clause)
-        self.compact(trajectory)
-        [event] = [e for e in snapshot_events() if e["kind"] == "context_line"]
-        self.assertEqual(event["alias"], "O0")
-        self.assertEqual(event["context"], clause)
-        self.assertTrue(event["has_instance"])
-        self.assertEqual(event["clause_utf8_bytes"], len(f" ran in {clause}".encode()))
-        self.assertEqual(event["line_utf8_bytes"],
-                         len(alias_line("O0", clause).encode()))
-
-    def test_a_workspace_context_records_no_instance(self) -> None:
-        trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "rows", command="list_accounts")
-        record_context_clause(self.scope, "O0", context_clause("DirectoryExplorer", ""))
-        self.compact(trajectory)
-        [event] = [e for e in snapshot_events() if e["kind"] == "context_line"]
-        self.assertFalse(event["has_instance"])
-        self.assertEqual(event["context"], "DirectoryExplorer")
-
-    def test_the_registry_does_not_outlive_the_turn(self) -> None:
-        record_context_clause(self.scope, "O0", "Account 28c5aeb5")
-        self.assertEqual(context_clause_of(self.scope, "O0"), "Account 28c5aeb5")
-        reset_runtime_state()
-        self.assertIsNone(context_clause_of(self.scope, "O0"))
+    def test_the_context_is_read_back_after_the_process_state_is_reset(self) -> None:
+        self.step(0, "list_permissions")
+        self.archive_steps(0)
+        reset_observation_state()
+        self.assertEqual(self.archive.get(self.scope, "O0")["context_clause"],
+                         "DirectoryExplorer")
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ import fastworkflow
 from fastworkflow.observability import control
 from fastworkflow.observability import prompt_slots
 from fastworkflow.observability.feedback import human_feedback_row
-from fastworkflow import agent_runtime, state_paths, tracing
+from fastworkflow import state_paths, tracing
 from fastworkflow.utils.logging import logger
 
 # v2 (fix-42b): experiments.benchmark_id / benchmark_version /
@@ -81,8 +81,9 @@ from fastworkflow.utils.logging import logger
 # v8 (fix-0gh0): the capture policy is gone: experiments and offload_evidence
 # lose capture_profile / capture_policy_version. The workspace viewer is gone
 # too, and with it the `sealed_turn_comments` control table.
+# v9 (fix-cws4.8): offload rows lose scope_id and offload_order; offload_subjects is gone and the context an observation ran in is a column of offload_evidence.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned"})
 
@@ -308,9 +309,9 @@ FEATURE_EXPERIMENT_LIFECYCLE_V1 = "experiment_lifecycle_v1"
 FEATURE_EXPERIMENT_DECLARATIONS_V1 = "experiment_declarations_v1"
 FEATURE_EXPERIMENT_CLAIMS_V1 = "experiment_claims_v1"
 FEATURE_EXPERIMENT_SEALING_V1 = "experiment_sealing_v1"
-# The offload evidence tables (`offload_evidence`, `offload_subjects`): every
-# archived execute response lives in this DB, keyed by its turn, and is erased
-# and aged with that turn by the same transactions that erase the turn record.
+# The offload evidence table (`offload_evidence`): every archived execute
+# response lives in this DB, keyed by its turn, and is erased and aged with that
+# turn by the same transactions that erase the turn record.
 FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
 # The offload runtime's diagnostic events (`offload_events`): what was
 # archived, offloaded, searched and rehydrated, keyed by turn like the evidence
@@ -1125,14 +1126,13 @@ _SCHEMA_STATEMENTS = [
     # `channel_id` is carried beside `turn_key`, as on `spans`/`artifacts`,
     # because a turn with no bound turn key is keyed by its channel id and
     # never appears in `turns`: erasure by channel reaches it through this
-    # column. `scope_id` is the in-process scope digest, stored only so an
-    # erasure can drop the process caches of that scope.
+    # column. `context_clause` is the context the observation ran in: NULL when
+    # none was recorded, "" at the workflow root. `context_changed` says the
+    # command moved the context.
     """CREATE TABLE IF NOT EXISTS offload_evidence (
         turn_key TEXT NOT NULL,
         channel_id TEXT NOT NULL,
-        scope_id TEXT NOT NULL,
         alias TEXT NOT NULL,
-        offload_order INTEGER NOT NULL,
         command_name TEXT NOT NULL,
         step_index INTEGER NOT NULL,
         text_utf8 BLOB NOT NULL,
@@ -1141,22 +1141,11 @@ _SCHEMA_STATEMENTS = [
         redacted INTEGER NOT NULL,
         raw_utf8_bytes INTEGER NOT NULL,
         persisted_at TEXT NOT NULL,
-        PRIMARY KEY (turn_key, alias))""",
-    # The context an observation is evidence about. Its own table because a
-    # subject is recorded at DISPATCH, before the step completes and its
-    # evidence row is written, and survives on its own when that write is
-    # refused.
-    """CREATE TABLE IF NOT EXISTS offload_subjects (
-        turn_key TEXT NOT NULL,
-        channel_id TEXT NOT NULL,
-        scope_id TEXT NOT NULL,
-        alias TEXT NOT NULL,
-        context_clause TEXT NOT NULL,
-        recorded_at TEXT NOT NULL,
+        context_clause TEXT,
+        context_changed INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (turn_key, alias))""",
     "CREATE INDEX IF NOT EXISTS idx_offload_evidence_channel ON offload_evidence(channel_id)",
     "CREATE INDEX IF NOT EXISTS idx_offload_evidence_age ON offload_evidence(persisted_at)",
-    "CREATE INDEX IF NOT EXISTS idx_offload_subjects_channel ON offload_subjects(channel_id)",
     # Offload events (FEATURE_OFFLOAD_EVENTS_V1), additive like the evidence
     # tables above. One row per diagnostic event the offload runtime records:
     # search questions, model reasoning and answers among them, so
@@ -1167,7 +1156,6 @@ _SCHEMA_STATEMENTS = [
         event_id INTEGER PRIMARY KEY AUTOINCREMENT,
         turn_key TEXT NOT NULL,
         channel_id TEXT NOT NULL,
-        scope_id TEXT NOT NULL,
         kind TEXT NOT NULL,
         event_json TEXT NOT NULL,
         redaction TEXT NOT NULL,
@@ -1199,10 +1187,9 @@ _SCHEMA_STATEMENTS = [
 
 # The offload tables above, named once for the erasure and retention paths,
 # each with the column that dates its rows.
-_OFFLOAD_EVIDENCE_TABLES = ("offload_evidence", "offload_subjects", "offload_events")
+_OFFLOAD_EVIDENCE_TABLES = ("offload_evidence", "offload_events")
 _OFFLOAD_TABLE_TIMESTAMPS = {
     "offload_evidence": "persisted_at",
-    "offload_subjects": "recorded_at",
     "offload_events": "recorded_at",
 }
 # How many turns one retention batch drops from the offload evidence tables.
@@ -5292,7 +5279,6 @@ class ObservabilityStore:
             "spans": 0, "artifacts": 0, "prompt_slots": 0,
             **{table: 0 for table in _OFFLOAD_EVIDENCE_TABLES},
         }
-        erased_scopes: set[str] = set()
         bound = _BOUND_EXPERIMENTS_SQL + (
             _RELEASED_CLAUSE_SQL if control.present(self) else ""
         )
@@ -5339,7 +5325,7 @@ class ObservabilityStore:
                     exempt=bound_turns,
                 )
                 self._delete_offload_turns_in_txn(
-                    conn, aged_turns, deleted, erased_scopes
+                    conn, aged_turns, deleted
                 )
                 conn.commit()
                 if (
@@ -5371,7 +5357,7 @@ class ObservabilityStore:
                             ).rowcount
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
                     self._delete_offload_turns_in_txn(
-                        conn, keys, deleted, erased_scopes
+                        conn, keys, deleted
                     )
                     conn.commit()
                     deleted["conversationless_turns"] += len(keys)
@@ -5398,7 +5384,7 @@ class ObservabilityStore:
                     exempt=bound_turns,
                 )
                 self._delete_offload_turns_in_txn(
-                    conn, oldest_turns, deleted, erased_scopes
+                    conn, oldest_turns, deleted
                 )
                 # A prompt's pieces are evicted a whole turn at a time, oldest
                 # turn first, beside the spans that referenced them.
@@ -5455,10 +5441,6 @@ class ObservabilityStore:
             # they removed does not wait there for the next checkpoint.
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-        if erased_scopes:
-            deleted["offload_scopes_released"] = agent_runtime.reclaim_erased_scopes(
-                erased_scopes
-            )
         return deleted
 
     @staticmethod
@@ -5492,9 +5474,8 @@ class ObservabilityStore:
         """The oldest offload-evidence turns, optionally only those begun before *before*.
 
         A turn's age is the earliest timestamp on any of its evidence,
-        subject or event rows -- when the turn began -- so a turn is always
-        dropped whole and never leaves a subject or an event whose evidence is
-        gone. Turns *exempt* selects are never returned.
+        or event rows -- when the turn began -- so a turn is always dropped
+        whole and never leaves an event whose evidence is gone. Turns *exempt* selects are never returned.
         """
         tables = _present_offload_tables(conn)
         if not tables:
@@ -5521,21 +5502,12 @@ class ObservabilityStore:
         conn: sqlite3.Connection,
         turn_keys: list[str],
         deleted: dict[str, int],
-        erased_scopes: set[str],
     ) -> None:
-        """Delete these turns' offload evidence, tallying rows and scopes."""
+        """Delete these turns' offload evidence, tallying rows by table."""
         tables = _present_offload_tables(conn)
         for chunk in _chunked(list(turn_keys)):
             marks = ",".join("?" for _ in chunk)
             for table in tables:
-                erased_scopes.update(
-                    str(row[0])
-                    for row in conn.execute(
-                        f"SELECT DISTINCT scope_id FROM {table} "
-                        f"WHERE turn_key IN ({marks})",
-                        chunk,
-                    ).fetchall()
-                )
                 deleted[table] = deleted.get(table, 0) + conn.execute(
                     f"DELETE FROM {table} WHERE turn_key IN ({marks})", chunk
                 ).rowcount
@@ -5545,7 +5517,6 @@ class ObservabilityStore:
         *,
         turn_key: Optional[str] = None,
         channel_id: Optional[str] = None,
-        scope_id: Optional[str] = None,
         kind: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> list[dict[str, Any]]:
@@ -5561,14 +5532,13 @@ class ObservabilityStore:
         clauses: list[str] = []
         params: list[Any] = []
         for column, value in (
-            ("turn_key", turn_key), ("channel_id", channel_id),
-            ("scope_id", scope_id), ("kind", kind),
+            ("turn_key", turn_key), ("channel_id", channel_id), ("kind", kind),
         ):
             if value is not None:
                 clauses.append(f"{column}=?")
                 params.append(str(value))
         query = (
-            "SELECT event_id, turn_key, channel_id, scope_id, kind, event_json, "
+            "SELECT event_id, turn_key, channel_id, kind, event_json, "
             "redaction, redacted, recorded_at FROM offload_events"
         )
         if clauses:
@@ -5592,7 +5562,6 @@ class ObservabilityStore:
                 "event_id": int(row["event_id"]),
                 "turn_key": str(row["turn_key"]),
                 "channel_id": str(row["channel_id"]),
-                "scope_id": str(row["scope_id"]),
                 "kind": str(row["kind"]),
                 "event": parsed if isinstance(parsed, dict) else None,
                 "event_text": text,
@@ -5609,12 +5578,9 @@ class ObservabilityStore:
         "All tables" includes the offload evidence tables, which hold the
         channel's archived execute responses. They are deleted in the same
         transaction as the turn records, by channel and by the channel's turn
-        keys, whether or not a turn belonged to an experiment run. After the
-        commit, the process-local caches of the erased turns are dropped too
-        (``offload_scopes_released`` counts the scopes released).
+        keys, whether or not a turn belonged to an experiment run.
         """
         deleted: dict[str, int] = {}
-        erased_scopes: set[str] = set()
         with self._connect() as conn:
             # Deleted cells are zeroed rather than left in the free space of
             # pages that still hold other rows, so erased evidence text does
@@ -5650,14 +5616,6 @@ class ObservabilityStore:
                     (channel_id, channel_id),
                 ).rowcount
             for table in _present_offload_tables(conn):
-                erased_scopes.update(
-                    str(row[0])
-                    for row in conn.execute(
-                        f"SELECT DISTINCT scope_id FROM {table} WHERE channel_id=? "
-                        "OR turn_key IN (SELECT turn_key FROM turns WHERE channel_id=?)",
-                        (channel_id, channel_id),
-                    ).fetchall()
-                )
                 deleted[table] = conn.execute(
                     f"DELETE FROM {table} WHERE channel_id=? OR turn_key IN "
                     "(SELECT turn_key FROM turns WHERE channel_id=?)",
@@ -5692,9 +5650,6 @@ class ObservabilityStore:
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
 
-        deleted["offload_scopes_released"] = agent_runtime.reclaim_erased_scopes(
-            erased_scopes
-        )
         return deleted
 
     def clear_conversations(self) -> dict[str, int]:
@@ -5709,7 +5664,6 @@ class ObservabilityStore:
         runs' evidence included, as their experiment records are.
         """
         deleted: dict[str, int] = {}
-        erased_scopes: set[str] = set()
         with self._connect() as conn:
             # Deleted cells are zeroed rather than left in the free space of
             # pages that still hold other rows, so erased evidence text does
@@ -5724,13 +5678,6 @@ class ObservabilityStore:
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             offload_tables = _present_offload_tables(conn)
-            for table in offload_tables:
-                erased_scopes.update(
-                    str(row[0])
-                    for row in conn.execute(
-                        f"SELECT DISTINCT scope_id FROM {table}"
-                    ).fetchall()
-                )
             slot_tables = ("prompt_slots",) if _has_prompt_slots(conn) else ()
             for table in (
                 "spans", "artifacts", *offload_tables, *slot_tables,
@@ -5742,9 +5689,6 @@ class ObservabilityStore:
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
 
-        deleted["offload_scopes_released"] = agent_runtime.reclaim_erased_scopes(
-            erased_scopes
-        )
         return deleted
 
 

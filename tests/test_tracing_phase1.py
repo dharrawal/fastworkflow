@@ -606,7 +606,8 @@ class TestAgentLoopSpans:
         agent.iteration_counter = 0
         agent.max_iters = 5
         agent.inputs = {}
-        agent.current_trajectory = {}
+        agent.trajectory = {}
+        agent._dropped_steps = 0
         agent._suspended = None
         agent.tools = tools
         pending = list(script)
@@ -869,7 +870,8 @@ class TestStepSpanExceptionSafety:
         agent.iteration_counter = 0
         agent.max_iters = 5
         agent.inputs = {}
-        agent.current_trajectory = {}
+        agent.trajectory = {}
+        agent._dropped_steps = 0
         agent._suspended = None
         agent.tools = tools
         agent.react = react_fn

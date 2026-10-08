@@ -9,33 +9,18 @@ from typing import Any, Callable, Mapping, Optional
 from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import (
-    alias_line,
-    annotated_observation,
     command_response,
     estimated_tokens,
-    is_offload_label,
     label_alias,
     offload_label,
     offload_saving_bytes,
-    owns_line,
-    printed_alias,
-    printed_context,
+    printed_subject,
     replacement_saves_space,
 )
 from fastworkflow.observation_offloading.state import (
     archive,
-    archived_digest,
-    context_changed_of,
-    context_clause_of,
     default_scope,
-    evict_hot_handles,
-    hot_handle_max_bytes_from_env,
-    hot_payload_bytes,
-    mark_archived,
-    mark_offloaded,
     record_event,
-    register_scope,
-    remember_handle,
 )
 
 #: An execute observation is worth offloading when replacing it with its own
@@ -100,252 +85,65 @@ def execute_step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
     ]
 
 
-def record_foreign_line(
-    reader: str,
-    step_index: int,
-    text: str,
-    expected_alias: str,
-    scope: Optional[RuntimeHandleScope] = None,
-) -> None:
-    """Record a line shaped like ours that a reader refused to trust.
-
-    Every annotated step's backend look-alike is escaped, so on the normal path
-    this never fires; a count above zero means a step reached a reader without
-    its handle line, which is worth knowing before it is worth a wrong answer.
-    """
-    printed = printed_alias(text) or label_alias(text)
-    record_event(
-        {
-            "kind": "foreign_line_ignored",
-            "scope_id": getattr(scope, "scope_id", None),
-            "reader": reader,
-            "step_index": step_index,
-            "printed_alias": printed,
-            "expected_alias": expected_alias,
-        }
-    )
-
-
-def _command_response(text: str, alias: str) -> str:
-    """The exact command response inside an observation slot.
-
-    Only the handle line this module printed for *alias* is presentation, so
-    only that line is removed. A first line naming a different alias is the
-    backend's own text: stripping it would drop a line of the
-    response from the archive, its digest and every search of it.
-    """
-    return command_response(text, alias)
-
-
-def annotate_execute_observations(
-    trajectory: dict[str, Any],
-    *,
-    scope: Optional[RuntimeHandleScope] = None,
-    selected_archive: Optional[RuntimeHandleArchive] = None,
-) -> list[dict[str, Any]]:
-    """Print the canonical ``O{step_index}`` handle on every execute observation, in place.
-
-    The agent only ever saw an alias on an offload label, so it guessed other
-    numbers when it wanted to search a result that was still inline. This
-    prints ``O{step_index}`` on the observation itself, the moment the step
-    completes.
-
-    The line is presentation only. ``strip_alias_line`` recovers the exact
-    command response for the archive and for the offload label's description,
-    so stored text and its digest stay comparable with observations recorded
-    before this existed.
-
-    The step index decides the alias, and nothing read out of the response ever
-    does. A command response is backend text: one whose own first
-    line is shaped like this line, or like an offload label, is quoted by
-    ``escape_response`` and printed UNDER the handle line this step is really
-    called by, so no backend can name a handle. The quote is undone by
-    ``strip_alias_line``, so the archived response is still the exact bytes the
-    command returned. A line already naming this step's own alias is left
-    exactly as it stands; a line naming any other handle is treated as response
-    text via ``record_foreign_line``.
-
-    The line also names the context the command RAN IN and, where
-    the workflow declares one, that context's instance identity. The clause was
-    captured at dispatch (``CommandExecutor._remember_execute_context``) and is
-    read here rather than recomputed, because by now the current context may
-    have moved -- a command that ENTERS a context is printed with the context it
-    ran in, not with the one it entered. A step whose clause was never recorded
-    (no dispatch of ours, an older recording, a capture that failed) prints the
-    plain alias line: the clause is presentation, and its absence is never
-    guessed at.
-    """
-    selected_scope = scope or default_scope()
-    annotated: list[dict[str, Any]] = []
-    for step_index in execute_step_indexes(trajectory):
-        key = f"observation_{step_index}"
-        text = trajectory.get(key)
-        if not isinstance(text, str):
-            continue
-        alias = f"O{step_index}"
-        shown = printed_alias(text)
-        if shown == alias:
-            continue
-        if is_offload_label(text):
-            # This step's own offload label, written by the offload pass below.
-            # It already names the alias and holds no response to annotate.
-            if label_alias(text) == alias:
-                continue
-        if shown is not None or is_offload_label(text):
-            if shown != alias and (not is_offload_label(text) or label_alias(text) != alias):
-                record_foreign_line("annotate", step_index, text, alias, selected_scope)
-        clause = context_clause_of(
-            selected_scope, alias, selected_archive=selected_archive)
-        changed = context_changed_of(selected_scope, alias)
-        line = alias_line(alias, clause, context_changed=changed)
-        trajectory[key] = annotated_observation(alias, clause, text, context_changed=changed)
-        record_event(
-            {
-                "kind": "context_line",
-                "scope_id": selected_scope.scope_id,
-                "alias": alias,
-                "step_index": step_index,
-                "context": printed_context(line) or "",
-                "context_recorded": context_clause_of(
-                    selected_scope, alias,
-                    selected_archive=selected_archive) is not None,
-                "has_instance": bool(clause and " " in clause),
-                "line_utf8_bytes": len(line.encode("utf-8")),
-                "clause_utf8_bytes": (
-                    len(line.encode("utf-8")) - len(alias_line(alias).encode("utf-8"))),
-            }
-        )
-        annotated.append({"alias": alias, "step_index": step_index, "context": clause or ""})
-    return annotated
-
-
-def archive_execute_observations(
+def archive_step(
     trajectory: Mapping[str, Any],
+    step_index: int,
     *,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
-    hot_handle_max_bytes: Optional[int] = None,
-) -> list[dict[str, Any]]:
-    """Persist every execute observation under its canonical alias, offload or not.
+) -> bool:
+    """Persist one execute observation under its ``O{step_index}`` alias. True if stored.
 
-    Compaction only ever archived what it was about to replace, so an alias the
-    agent could read inline resolved to nothing: ``search_memory`` answered
-    "no matching offloaded handle" for a handle the run had just printed. Here
-    the observation becomes durable as soon as the step completes, and the
-    offload decision is purely a residency decision.
-
-    The alias is ``O{step_index}``, never a name read off the observation.
-    Taking the printed one let a command response whose first line was shaped
-    like a handle line file itself under any alias it liked: the genuine step
-    was then refused its archive and a search of the alias answered with the
-    backend's text. ``annotate_execute_observations`` runs first and prints that
-    same index, so the handle the agent can see is still the key it is stored
-    under.
-
-    Stored text is the raw command response: ``_command_response`` removes the
-    presentation line, exactly as the offload path does, so the same alias
-    written twice is the same bytes and the same digest. Writes are
-    insert-or-nothing and skipped entirely once this process has written that
-    digest for that alias, so revisiting a step costs nothing.
-
-    This is an availability optimisation on the hot path of every agent step.
-    A failure to persist must never lose the inline evidence or abort the turn:
-    it records ``archive_refused`` and leaves the observation as it stands.
+    Called once, when the step completes, so every execute observation is
+    written exactly once and before any label can replace it. A failure to
+    persist is recorded as ``archive_refused`` and the observation stays inline;
+    compaction then finds no stored row and does not offload it.
     """
+    if str(trajectory.get(f"tool_name_{step_index}") or "") != EXECUTE_TOOL_NAME:
+        return False
+    shown = trajectory.get(f"observation_{step_index}")
+    if not isinstance(shown, str):
+        return False
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
-    register_scope(selected_scope, store)
-    if hot_handle_max_bytes is None:
-        hot_handle_max_bytes = hot_handle_max_bytes_from_env()
-    archived: list[dict[str, Any]] = []
-    for step_index in execute_step_indexes(trajectory):
-        shown = trajectory.get(f"observation_{step_index}")
-        if not isinstance(shown, str):
-            continue
-        alias = f"O{step_index}"
-        if is_offload_label(shown):
-            if owns_line(shown, alias):
-                mark_offloaded(selected_scope, alias)
-                continue
-            record_foreign_line("archive", step_index, shown, alias, selected_scope)
-        original = _command_response(shown, alias)
-        digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
-        if archived_digest(selected_scope, alias) == digest:
-            continue
-        args = trajectory.get(f"tool_args_{step_index}")
-        command = ""
-        if isinstance(args, Mapping):
-            command = str(args.get("command") or "")
-        try:
-            stored = store.persist(
-                selected_scope,
-                alias=alias,
-                offload_order=step_index,
-                command_name=command,
-                step_index=step_index,
-                text=original,
-                text_sha256=digest,
-            )
-        except Exception as error:  # noqa: BLE001
-            record_event(
-                {
-                    "kind": "archive_refused",
-                    "scope_id": selected_scope.scope_id,
-                    "alias": alias,
-                    "step_index": step_index,
-                    "reason": "persistence_failed_original_retained",
-                    "error": type(error).__name__,
-                }
-            )
-            continue
-        # Two digests, two meanings, and neither is the other (ido-zlm).
-        # ``mark_archived`` keeps the digest of what the COMMAND RETURNED: it is
-        # the key that says "this text is already written", and computing it
-        # from anything else would make the archiver rewrite every step at every
-        # step. The hot cache keeps what the ARCHIVE KEPT, so that one alias
-        # reads the same way whether ``search_memory`` is served from memory or
-        # from SQLite after an eviction.
-        #
-        # For the whole life of this turn in this process those are the SAME
-        # TEXT, and that is the point rather than a coincidence: the row on
-        # disk is redacted at the write, but the archive answers this process's
-        # reads of a live turn from its raw in-memory copy, so the hot copy and
-        # the observation still sitting in the agent's own prompt agree while
-        # the agent can still read either. Reading ``stored`` rather than
-        # ``original`` is still the right call -- the archive is the authority
-        # on what it serves, and this line should not have to know how.
-        mark_archived(selected_scope, alias, text_sha256=digest, inline=True)
-        remember_handle(
+    alias = f"O{step_index}"
+    original = command_response(shown, alias)
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    args = trajectory.get(f"tool_args_{step_index}")
+    command = ""
+    if isinstance(args, Mapping):
+        command = str(args.get("command") or "")
+    context_clause, context_changed = printed_subject(shown)
+    try:
+        store.persist(
             selected_scope,
-            {
-                "alias": alias,
-                "text": stored["text"],
-                "text_sha256": stored["text_sha256"],
-                "command": command,
-                "step_index": step_index,
-                "offload_order": step_index,
-            },
+            alias=alias,
+            command_name=command,
+            step_index=step_index,
+            text=original,
+            text_sha256=digest,
+            context_clause=context_clause,
+            context_changed=context_changed,
         )
-        evicted = evict_hot_handles(
-            selected_scope, hot_handle_max_bytes=hot_handle_max_bytes
-        )
-        record = {
-            "alias": alias,
-            "step_index": step_index,
-            "text_sha256": digest,
-            "utf8_bytes": len(original.encode("utf-8")),
-            "hot_evictions": evicted,
-        }
-        archived.append(record)
+    except Exception as error:  # noqa: BLE001
         record_event(
             {
-                "kind": "observation_archived",
-                "scope_id": selected_scope.scope_id,
-                "hot_payload_bytes": hot_payload_bytes(selected_scope),
-                **record,
-            }
+                "kind": "archive_refused",
+                "alias": alias,
+                "step_index": step_index,
+                "reason": "persistence_failed_original_retained",
+                "error": type(error).__name__,
+            }, scope=selected_scope, store=store
         )
-    return archived
+        return False
+    record_event({
+        "kind": "observation_archived",
+        "alias": alias,
+        "step_index": step_index,
+        "text_sha256": digest,
+        "utf8_bytes": len(original.encode("utf-8")),
+    }, scope=selected_scope, store=store)
+    return True
 
 
 def _over_packed_target(
@@ -362,11 +160,11 @@ def _over_packed_target(
 def compact_trajectory(
     trajectory: dict[str, Any],
     *,
+    step_index: int,
     min_offload_saving_bytes: Optional[int] = None,
     recent_observations_protected: int = RECENT_OBSERVATIONS_PROTECTED,
     packed_target_tokens: Optional[int] = None,
     packed_target_bytes: Optional[int] = None,
-    hot_handle_max_bytes: Optional[int] = None,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
     describe_output: Optional[Callable[[str, str], str]] = None,
@@ -381,37 +179,24 @@ def compact_trajectory(
     oldest-first order, the five most recent execute observations protected,
     the packed target, and ``replacement_saves_space``.
 
+    ``step_index`` is the step that just completed. It is archived here, once,
+    before any offload decision. An observation is offloadable only if the
+    store holds it; one that could not be stored stays inline.
+
     Recency protection applies to the last ``recent_observations_protected``
     execute steps still present in the trajectory.
     """
 
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
-    register_scope(selected_scope, store)
     if min_offload_saving_bytes is None:
         min_offload_saving_bytes = min_offload_saving_bytes_from_env()
     if packed_target_tokens is None and packed_target_bytes is None:
         packed_target_bytes = packed_target_bytes_from_env()
-    if hot_handle_max_bytes is None:
-        hot_handle_max_bytes = hot_handle_max_bytes_from_env()
-    if hot_handle_max_bytes < 0:
-        raise ValueError("hot_handle_max_bytes cannot be negative")
     executes = execute_step_indexes(trajectory)
     if not executes:
         return []
-    # Print the handle before measuring: the packed target must be checked
-    # against the trajectory the agent actually receives.
-    annotate_execute_observations(
-        trajectory, scope=selected_scope, selected_archive=store)
-    # Then make every execute observation durable, whatever the offload
-    # decision below turns out to be. Residency and availability are separate:
-    # a handle the agent can read inline must resolve too.
-    archive_execute_observations(
-        trajectory,
-        scope=selected_scope,
-        selected_archive=store,
-        hot_handle_max_bytes=hot_handle_max_bytes,
-    )
+    archive_step(trajectory, step_index, scope=selected_scope, selected_archive=store)
     if recent_observations_protected <= 0:
         protected_steps: set[int] = set()
     else:
@@ -426,14 +211,14 @@ def compact_trajectory(
         alias = f"O{step_index}"
         # Every offload decision is taken on the exact command response, so the
         # printed handle cannot shift eligibility, savings or the stored digest.
-        original = _command_response(response, alias)
+        original = command_response(response, alias)
         size = {
             "characters": len(original),
             "utf8_bytes": len(original.encode("utf-8")),
             "estimated_tokens": estimated_tokens(original),
         }
         recency_protected = step_index in protected_steps
-        already_label = is_offload_label(response) and owns_line(response, alias)
+        already_label = label_alias(response) == alias
         decision = {
             "alias": alias,
             "step_index": step_index,
@@ -484,64 +269,22 @@ def compact_trajectory(
                 decision["reason"] = "replacement_not_smaller"
                 decisions.append(decision)
                 continue
-            digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
-            packed_utf8_bytes_before = len(packed_text.encode("utf-8"))
-            try:
-                stored = store.persist(
-                    selected_scope,
-                    alias=alias,
-                    offload_order=step_index,
-                    command_name=command,
-                    step_index=step_index,
-                    text=original,
-                    text_sha256=digest,
-                )
-            except Exception as error:  # noqa: BLE001
-                decision["reason"] = "persistence_failed_original_retained"
-                decision["persistence_error"] = type(error).__name__
-                record_event(
-                    {
-                        "kind": "offload_refused",
-                        "scope_id": selected_scope.scope_id,
-                        "alias": alias,
-                        "reason": decision["reason"],
-                        "error": type(error).__name__,
-                    }
-                )
+            if store.get(selected_scope, alias) is None:
+                decision["reason"] = "not_archived"
                 decisions.append(decision)
                 continue
-            # The hot cache holds what the archive serves, which for the whole
-            # life of this turn in this process is what the command returned;
-            # see the note at the eager archiver above.
-            remember_handle(
-                selected_scope,
-                {
-                    "alias": alias,
-                    "text": stored["text"],
-                    "text_sha256": stored["text_sha256"],
-                    "command": command,
-                    "step_index": step_index,
-                    "offload_order": step_index,
-                },
-            )
-            evicted = evict_hot_handles(
-                selected_scope, hot_handle_max_bytes=hot_handle_max_bytes
-            )
+            digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+            packed_utf8_bytes_before = len(packed_text.encode("utf-8"))
             trajectory[key] = label
-            mark_offloaded(selected_scope, alias)
             decision["action"] = "offloaded"
             decision["reason"] = "oldest_eligible_until_target"
             decision["label"] = label
             decision["text_sha256"] = digest
-            decision["persisted_before_label"] = True
-            decision["hot_evictions"] = evicted
-            decision["hot_payload_bytes"] = hot_payload_bytes(selected_scope)
             decision["packed_utf8_bytes_before"] = packed_utf8_bytes_before
             packed_text = json.dumps(trajectory, ensure_ascii=False, default=str)
             record_event(
                 {
                     "kind": "offload",
-                    "scope_id": selected_scope.scope_id,
                     "alias": alias,
                     "step_index": step_index,
                     "text_sha256": digest,
@@ -549,9 +292,7 @@ def compact_trajectory(
                     "offload_saving_bytes": saving,
                     "packed_utf8_bytes_before": packed_utf8_bytes_before,
                     "packed_utf8_bytes_after": len(packed_text.encode("utf-8")),
-                    "hot_payload_bytes": hot_payload_bytes(selected_scope),
-                    "hot_evictions": evicted,
-                }
+                }, scope=selected_scope, store=store
             )
         decisions.append(decision)
     return decisions

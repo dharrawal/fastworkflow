@@ -138,7 +138,7 @@ class _ScriptedAgent:
     def __init__(self, chat_session, pending: list[_PassScript]) -> None:
         self._chat_session = chat_session
         self._pending = pending
-        self.current_trajectory: dict = {}
+        self.trajectory: dict = {}
 
     def __call__(self, **_kwargs):
         from fastworkflow.workflow_agent import _execute_workflow_query
@@ -167,7 +167,7 @@ class _ScriptedAgent:
         for command in script.commands:
             _execute_workflow_query(command, self._chat_session)
 
-        self.current_trajectory = {"thought_0": f"scripted: {script.answer}"}
+        self.trajectory = {"thought_0": f"scripted: {script.answer}"}
         if script.fails:
             raise RuntimeError("scripted student pass failure")
         return type(

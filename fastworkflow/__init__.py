@@ -442,7 +442,6 @@ __all__ = (
     "Workflow",
     "WorkflowExecutionContext",
     "active_workflow",
-    "agent_runtime",
     "chat_session",
     "clear_workflow_stack",
     "context_budget",

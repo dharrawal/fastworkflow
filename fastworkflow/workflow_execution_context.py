@@ -131,7 +131,7 @@ class WorkflowExecutionContext:
                          including an explicit ``tracing.NoOpTraceSink()``,
                          which records no spans or turn records -- is always
                          kept. Observation offloading still writes its
-                         evidence, subjects and events to the workflow's
+                         evidence and events to the workflow's
                          observability database whatever the sink.
         """
         self._session_key = session_key
@@ -1277,8 +1277,6 @@ class WorkflowExecutionContext:
             self._app_workflow.remove_context_change_listener(listener)
             self._context_change_listener = None
 
-        self._reclaim_offloading_scope()
-
         if self._cme_workflow is None:
             return True
         try:
@@ -1287,64 +1285,6 @@ class WorkflowExecutionContext:
             # Child cme workflows should not occur; ignore if mis-invoked.
             logger.debug("WorkflowExecutionContext.close: cme_workflow is not a root session")
             return False
-
-    def _reclaim_offloading_scope(self) -> None:
-        """Release this session's offloading state.
-
-        ``close`` is the one production signal that a session is over in this
-        process: the fleet's session cache calls it when it retires or removes a
-        channel, and an embedder calls it when its session ends. Until this, the
-        offloading runtime's per-scope registries -- the archive memo, the
-        context clauses, the hot observations, the raw in-flight copies of
-        redacted evidence and the turn's diagnostic events -- only ever grew,
-        for the lifetime of the process.
-
-        Two turns are NOT reclaimed. A turn suspended on ask_user is still
-        resumable: its scope is the one the resume writes and reads handles
-        under, and an eviction is precisely the case where it is expected to
-        come back. And nothing per-agent is touched at all -- the execute
-        numbering ledger, the suspended trajectory and the truncated-execute
-        count are the agent's own memory, they die with it, and a resume
-        rebuilds them from the suspension payload.
-
-        Evidence is redacted when it is written, and this process keeps the
-        raw text of redacted observations only while their turn is live, so
-        its own reads stay exact. Releasing the scope is what ends that: after
-        it, a read of the turn's evidence returns the stored text. A suspended
-        turn keeps its raw copies, by the same test as it keeps the rest.
-
-        Best effort by construction: failing to reclaim memory must never turn
-        a session close into an error the caller has to handle.
-        """
-        # getattr, not plain attribute access: ``close`` is reachable on a
-        # context built through ``__new__`` without ``__init__`` -- the
-        # context-change listener test constructs one exactly that way -- so
-        # neither attribute is guaranteed to exist. A context with no agent has
-        # no scope to reclaim, which is the same answer as an agent with no
-        # scope. A context that cannot say whether it is awaiting the user is
-        # assumed to be mid-turn, because declining to reclaim costs memory
-        # while reclaiming early would take a live turn's raw evidence copies.
-        agent = getattr(self, "_workflow_tool_agent", None)
-        scope = getattr(agent, "continuation_scope", None)
-        if scope is None:
-            return
-        try:
-            if getattr(self, "_awaiting_user", True) or agent.export_suspended() is not None:
-                return
-            runtime = getattr(agent, "turn_runtime", None)
-            if runtime is None:
-                from fastworkflow.agent_runtime import build_turn_runtime
-
-                runtime = build_turn_runtime(
-                    scope, archive=getattr(agent, "observation_archive", None)
-                )
-                agent.turn_runtime = runtime
-            runtime.finish_scope(scope)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "WorkflowExecutionContext.close: could not reclaim "
-                f"offloading state ({type(exc).__name__}: {exc})"
-            )
 
     # ------------------------------------------------------------------
     # Active workflow stack (contextvar)
@@ -1852,9 +1792,9 @@ class WorkflowExecutionContext:
                         # evidence rows exist under this turn's keys, which a
                         # retry would reuse. A resumed turn always qualifies,
                         # because resume writes the observation key first.
-                        mirror = getattr(
-                            self._workflow_tool_agent, "current_trajectory", None) or {}
-                        if any(str(key).startswith("observation_") for key in mirror):
+                        trajectory = getattr(
+                            self._workflow_tool_agent, "trajectory", None) or {}
+                        if any(str(key).startswith("observation_") for key in trajectory):
                             raise
                         continue
                     tracing.end_span(

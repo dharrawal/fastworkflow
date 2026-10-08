@@ -58,7 +58,6 @@ PUBLIC = (
     ("Workflow", "type", "fastworkflow.workflow"),
     ("WorkflowExecutionContext", "type", "fastworkflow.workflow_execution_context"),
     ("active_workflow", "module", "fastworkflow.active_workflow"),
-    ("agent_runtime", "module", "fastworkflow.agent_runtime"),
     ("chat_session", "module", "fastworkflow.chat_session"),
     ("clear_workflow_stack", "function", "fastworkflow.active_workflow"),
     ("context_budget", "module", "fastworkflow.context_budget"),

@@ -33,8 +33,6 @@ class Calibration(unittest.TestCase):
     PINNED = {
         "trajectory_max_bytes": 28_000,
         "answer_rehydration_max_bytes": 250_000,
-        "search_answer_max_bytes": 3_072,
-        "offload_hot_max_bytes": 262_144,
         "offload_min_saving_bytes": 1_024,
     }
 
@@ -195,11 +193,10 @@ class Overrides(unittest.TestCase):
     def test_an_override_wins_over_the_derived_budget(self) -> None:
         os.environ[cb.TRAJECTORY.override_env] = "12345"
         self.assertEqual(cb.trajectory_max_bytes(), 12_345)
-        self.assertEqual(cb.search_answer_max_bytes(), 3_072)  # the rest unmoved
 
     def test_an_override_below_the_floor_is_refused(self) -> None:
-        os.environ[cb.SEARCH_ANSWER.override_env] = "16"
-        self.assertEqual(cb.search_answer_max_bytes(), 3_072)
+        os.environ[cb.ANSWER_REHYDRATION.override_env] = "16"
+        self.assertEqual(cb.answer_rehydration_max_bytes(), 250_000)
 
     def test_an_unparseable_override_is_refused(self) -> None:
         os.environ[cb.ANSWER_REHYDRATION.override_env] = "250k"
@@ -268,21 +265,18 @@ class ModulesReadTheSameBudgets(unittest.TestCase):
 
     def test_every_module_default_is_its_budget(self) -> None:
         from fastworkflow import answer_rehydration
-        from fastworkflow.observation_offloading import compact, search
+        from fastworkflow.observation_offloading import compact
 
         self.assertEqual(compact.PACKED_TARGET_BYTES, 28_000)
         self.assertEqual(compact.MIN_OFFLOAD_SAVING_BYTES, 1_024)
-        self.assertEqual(search.SEARCH_ANSWER_MAX_BYTES, 3_072)
         self.assertEqual(answer_rehydration.DEFAULT_MAX_BYTES, 250_000)
 
     def test_every_module_reader_is_the_budget_function(self) -> None:
         from fastworkflow import answer_rehydration
-        from fastworkflow.observation_offloading import compact, search, state
+        from fastworkflow.observation_offloading import compact
 
         self.assertEqual(compact.packed_target_bytes_from_env(), 28_000)
         self.assertEqual(compact.min_offload_saving_bytes_from_env(), 1_024)
-        self.assertEqual(search.search_answer_max_bytes_from_env(), 3_072)
-        self.assertEqual(state.hot_handle_max_bytes_from_env(), 262_144)
         self.assertEqual(answer_rehydration.max_bytes_from_env(), 250_000)
 
 

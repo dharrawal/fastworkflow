@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastworkflow.observation_offloading.offloading_react import OffloadingReAct
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 
 
@@ -16,7 +15,8 @@ def _bare_react_agent(**tools):
     agent.iteration_counter = 0
     agent.max_iters = 5
     agent.inputs = {}
-    agent.current_trajectory = {}
+    agent.trajectory = {}
+    agent._dropped_steps = 0
     agent._suspended = None
     agent.tools = tools
     return agent
@@ -76,10 +76,9 @@ def test_resume_continues_after_observation():
     assert agent._suspended is None
 
 
-def test_run_loop_mirrors_full_step_into_current_trajectory():
-    """A completed tool step must populate current_trajectory with thought,
-    tool_name, tool_args, and observation (not just an action summary), because
-    the planner and distillation read current_trajectory as the agent trajectory."""
+def test_run_loop_records_full_step_in_trajectory():
+    """A completed tool step lands in the trajectory with thought, tool_name,
+    tool_args, and the full observation: the planner and distillation read it."""
     agent = _bare_react_agent(
         do_it=lambda: "did it",
         finish=lambda: "done",
@@ -92,18 +91,18 @@ def test_run_loop_mirrors_full_step_into_current_trajectory():
     agent.react = lambda trajectory, **input_args: next(preds)  # type: ignore[method-assign]
     agent.extract = lambda trajectory, **input_args: {"final_answer": "ok"}  # type: ignore[method-assign]
 
-    result = agent._run_loop({}, 0, {"query": "hello"}, max_iters=5, exception_count=0)
+    trajectory = {}
+    result = agent._run_loop(trajectory, 0, {"query": "hello"}, max_iters=5, exception_count=0)
 
     assert result is None  # completed normally
-    ct = agent.current_trajectory
-    assert ct["thought_0"] == "act"
-    assert ct["tool_name_0"] == "do_it"
-    assert ct["observation_0"] == "did it"
-    assert ct["tool_args_0"] == {}
+    assert trajectory["thought_0"] == "act"
+    assert trajectory["tool_name_0"] == "do_it"
+    assert trajectory["observation_0"] == "did it"
+    assert trajectory["tool_args_0"] == {}
 
 
-def test_current_trajectory_resets_each_forward_turn():
-    """current_trajectory is per-logical-turn: forward() must reset it at the
+def test_trajectory_resets_each_forward_turn():
+    """trajectory is per-logical-turn: forward() must reset it at the
     start of each new turn so a later turn does not accumulate the prior turn's
     steps. (resume() must NOT reset — covered separately.)"""
     agent = _bare_react_agent(do_it=lambda: "did it", finish=lambda: "done")
@@ -138,13 +137,13 @@ def test_current_trajectory_resets_each_forward_turn():
     # Turn 1: 3 tool steps -> populates indices up to thought_3/observation_3.
     agent._call_with_potential_trajectory_truncation = make_turn(3)  # type: ignore[method-assign]
     agent.forward(query="first")
-    assert "observation_3" in agent.current_trajectory  # deep turn
+    assert "observation_3" in agent.trajectory  # deep turn
 
     # Turn 2: 1 tool step -> only indices 0 and 1. If forward() reset the mirror,
     # the leftover observation_3 from turn 1 must be GONE.
     agent._call_with_potential_trajectory_truncation = make_turn(1)  # type: ignore[method-assign]
     agent.forward(query="second")
-    second_keys = set(agent.current_trajectory.keys())
+    second_keys = set(agent.trajectory.keys())
 
     assert "thought_0" in second_keys
     # The load-bearing assertion: turn 1's deep keys did not survive into turn 2.
@@ -152,16 +151,10 @@ def test_current_trajectory_resets_each_forward_turn():
     assert "thought_2" not in second_keys
 
 
-def test_resume_mirrors_user_answer_into_current_trajectory():
-    """The resumed observation (the user's ask_user answer) must land in
-    current_trajectory, not only in the local working trajectory."""
+def test_resume_records_user_answer_in_trajectory():
+    """The resumed observation (the user's ask_user answer) lands in the one
+    trajectory the planner and distillation read."""
     agent = _bare_react_agent(finish=lambda: "done")
-    # Pre-suspend, current_trajectory already holds the pre-ask_user step.
-    agent.current_trajectory = {
-        "thought_0": "ask",
-        "tool_name_0": "ask_user",
-        "tool_args_0": {},
-    }
     trajectory = {"thought_0": "ask", "tool_name_0": "ask_user", "tool_args_0": {}}
     agent._suspended = {
         "trajectory": trajectory,
@@ -177,8 +170,21 @@ def test_resume_mirrors_user_answer_into_current_trajectory():
 
     agent.resume("user said B")
 
-    # The user's answer is recorded as observation_0 in current_trajectory.
-    assert agent.current_trajectory["observation_0"] == "user said B"
+    assert agent.trajectory is trajectory
+    assert trajectory["observation_0"] == "user said B"
+
+
+def test_truncation_drops_oldest_steps_from_the_model_view_only():
+    """The fallback shows the model a copy without the oldest step; the
+    canonical trajectory keeps every step."""
+    agent = _bare_react_agent()
+    trajectory = {f"{name}_{i}": i for i in range(2) for name in ("thought", "tool_name", "tool_args", "observation")}
+    before = dict(trajectory)
+
+    agent.truncate_trajectory(trajectory)
+
+    assert trajectory == before
+    assert list(agent._model_view(trajectory)) == list(before)[4:]
 
 
 def test_clear_suspension_drops_stash():
@@ -190,33 +196,6 @@ def test_clear_suspension_drops_stash():
     assert agent._suspended is None
     with pytest.raises(NoSuspendedAgentStateError, match="No suspended"):
         agent.resume("too late")
-
-
-def test_continuation_scope_rides_the_suspension():
-    blob = {
-        "trajectory": {"thought_0": "list", "tool_name_0": "ask_user", "tool_args_0": {}},
-        "idx": 0,
-        "input_args": {"user_query": "q"},
-        "max_iters": 10,
-        "clarification": "Which?",
-        "continuation_scope": {
-            "store_identity": "store-1",
-            "channel_id": "ch-1",
-            "experiment_id": "",
-            "task_id": "",
-            "attempt": 0,
-            "turn_key": "turn-1",
-        },
-    }
-    agent = OffloadingReAct.__new__(OffloadingReAct)
-    agent.iteration_counter, agent.max_iters, agent.inputs = 0, 10, {}
-    agent.current_trajectory, agent._suspended = {}, None
-    agent.import_suspended(blob)
-    assert agent.continuation_scope is not None
-    assert agent.continuation_scope.turn_key == "turn-1"
-    exported = agent.export_suspended()
-    assert exported is not None
-    assert exported["continuation_scope"]["turn_key"] == "turn-1"
 
 
 def test_aforward_stops_on_finish():

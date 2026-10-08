@@ -39,8 +39,7 @@ from fastworkflow.observation_offloading.labels import (
     printed_context,
 )
 from fastworkflow.observation_offloading.state import (
-    record_context_clause,
-    reset_runtime_state,
+    reset_observation_state,
     snapshot_events,
 )
 from fastworkflow.utils.react import fastWorkflowReAct
@@ -48,8 +47,7 @@ from fastworkflow.utils.react import fastWorkflowReAct
 
 def scope_for(name: str) -> RuntimeHandleScope:
     return RuntimeHandleScope(
-        store_identity=name, channel_id="c", experiment_id="exp-ido-8ps-18",
-        task_id="task", attempt=1, turn_key="turn-1",
+        channel_id="c", turn_key="turn-1",
     )
 
 
@@ -60,18 +58,18 @@ def rows(prefix: str, count: int, width: int = 40) -> list[str]:
 class Fixture:
     """A real archive, with one offloaded observation behind a label."""
 
-    def __init__(self, directory: str, *, listing_rows: int = 60) -> None:
+    def __init__(self, directory: str, *, listing_rows: int = 60,
+                 record_subject: bool = True) -> None:
         self.scope = scope_for(directory)
         path = os.path.join(directory, "obs.sqlite3")
         self.archive = RuntimeHandleArchive(path)
         # (a) an offloaded observation, archived without its presentation line
         self.o1_text = "identity_uid | rights\n" + "\n".join(rows("ident", 30))
         self.archive.persist(
-            self.scope, alias="O0", offload_order=0,
-            command_name="list_permissions", step_index=0, text=self.o1_text,
+            self.scope, alias="O0", command_name="list_permissions", step_index=0, text=self.o1_text,
             text_sha256=hashlib.sha256(self.o1_text.encode("utf-8")).hexdigest(),
+            context_clause="Identity 28c5aeb5 Alan Cooper" if record_subject else None,
         )
-        record_context_clause(self.scope, "O0", "Identity 28c5aeb5 Alan Cooper")
         self.listing_rows = rows("holder", listing_rows)
 
     def trajectory(self) -> dict:
@@ -141,10 +139,10 @@ class Budget(unittest.TestCase):
 class RehydratesEachKind(unittest.TestCase):
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.addCleanup(reset_runtime_state)
+        self.addCleanup(reset_observation_state)
         self.fixture = Fixture(self.directory.name)
 
     def rehydrate(self, trajectory=None, budget=DEFAULT_MAX_BYTES):
@@ -166,15 +164,23 @@ class RehydratesEachKind(unittest.TestCase):
         self.assertEqual(printed_context(copy["observation_0"]),
                          "Identity 28c5aeb5 Alan Cooper")
 
-    def test_an_alias_with_no_recorded_context_prints_the_plain_a1_line(self) -> None:
-        reset_runtime_state()
+    def test_the_change_suffix_is_restored_with_the_context(self) -> None:
         fixture = Fixture(tempfile.mkdtemp())
-        copy, _ = rehydrate(
-            fixture.trajectory(), scope=fixture.scope, archive=fixture.archive,
-            budget=DEFAULT_MAX_BYTES,
+        fixture.archive.persist(
+            fixture.scope, alias="O2", command_name="switch_account", step_index=2,
+            text="switched\n", text_sha256=hashlib.sha256(b"switched\n").hexdigest(),
+            context_clause="Account 1", context_changed=True,
         )
-        # record_context_clause ran inside Fixture; drop it to make the point.
-        reset_runtime_state()
+        restored = rehydrated_label("O2", scope=fixture.scope, archive=fixture.archive)
+        self.assertEqual(
+            restored,
+            "Observation O2 (execute_workflow_query ran in Account 1; "
+            "and resulted in a context change)\nswitched\n",
+        )
+        self.assertTrue(fixture.archive.get(fixture.scope, "O2")["context_changed"])
+
+    def test_an_alias_with_no_recorded_context_prints_the_plain_a1_line(self) -> None:
+        fixture = Fixture(tempfile.mkdtemp(), record_subject=False)
         copy, _ = rehydrate(
             fixture.trajectory(), scope=fixture.scope, archive=fixture.archive,
             budget=DEFAULT_MAX_BYTES,
@@ -223,10 +229,10 @@ class RehydratesEachKind(unittest.TestCase):
 class BudgetAndOrder(unittest.TestCase):
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.addCleanup(reset_runtime_state)
+        self.addCleanup(reset_observation_state)
         self.fixture = Fixture(self.directory.name)
 
     def test_the_budget_is_respected(self) -> None:
@@ -308,17 +314,22 @@ def build_agent() -> fastWorkflowReAct:
 class ExtractHook(unittest.TestCase):
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.addCleanup(reset_runtime_state)
+        self.addCleanup(reset_observation_state)
         os.environ.pop(ANSWER_REHYDRATION_MAX_BYTES_ENV, None)
         self.addCleanup(
             lambda: os.environ.pop(ANSWER_REHYDRATION_MAX_BYTES_ENV, None))
         self.fixture = Fixture(self.directory.name)
         self.agent = build_agent()
-        self.agent.continuation_scope = self.fixture.scope
-        self.agent.observation_archive = self.fixture.archive
+        for target, value in (("current_scope", self.fixture.scope),
+                              ("durable_archive", self.fixture.archive)):
+            patcher = mock.patch(
+                f"fastworkflow.observation_offloading.state.{target}",
+                return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_the_extractor_is_handed_the_evidence(self) -> None:
         """Nothing set, and the extract call still gets the evidence."""
@@ -398,17 +409,13 @@ class ExtractHook(unittest.TestCase):
 
 
 class ContinuationSite(unittest.TestCase):
-    """Answer extraction goes through the offloading ReAct hook."""
+    """Answer extraction goes through the rehydration hook."""
 
     def test_finish_prediction_goes_through_the_hook(self) -> None:
-        from fastworkflow.observation_offloading.offloading_react import (
-            OffloadingReAct,
-        )
-
-        agent = OffloadingReAct(
+        agent = fastWorkflowReAct(
             "user_query -> answer", tools=[lambda value: value], max_iters=2)
         with mock.patch.object(
-            OffloadingReAct, "_extract_prediction",
+            fastWorkflowReAct, "_extract_prediction",
             return_value={"answer": "a"},
         ) as hook:
             agent._extract_prediction({"thought_0": "t"}, user_query="q")
@@ -427,10 +434,10 @@ class WhatTheStopActuallyCost(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.addCleanup(reset_runtime_state)
+        self.addCleanup(reset_observation_state)
         self.fixture = Fixture(self.directory.name)
 
     def rehydrate(self, trajectory, budget):
@@ -494,12 +501,8 @@ class WhatTheStopActuallyCost(unittest.TestCase):
         })
         digest = hashlib.sha256(self.fixture.o1_text.encode("utf-8")).hexdigest()
         self.fixture.archive.persist(
-            self.fixture.scope, alias="O5", offload_order=5,
-            command_name="list_permissions", step_index=5, text=self.fixture.o1_text,
-            text_sha256=digest,
-        )
-        record_context_clause(
-            self.fixture.scope, "O5", "Identity 28c5aeb5 Alan Cooper",
+            self.fixture.scope, alias="O5", command_name="list_permissions", step_index=5, text=self.fixture.o1_text,
+            text_sha256=digest, context_clause="Identity 28c5aeb5 Alan Cooper",
         )
         copy, report = self.rehydrate(twice, budget=DEFAULT_MAX_BYTES)
         entries = [item for item in report.rehydrated if item["alias"] == "O5"]
@@ -531,8 +534,7 @@ class WhatTheStopActuallyCost(unittest.TestCase):
         })
         digest = hashlib.sha256(self.fixture.o1_text.encode("utf-8")).hexdigest()
         self.fixture.archive.persist(
-            self.fixture.scope, alias="O5", offload_order=5,
-            command_name="list_permissions", step_index=5, text=self.fixture.o1_text,
+            self.fixture.scope, alias="O5", command_name="list_permissions", step_index=5, text=self.fixture.o1_text,
             text_sha256=digest,
         )
         label_added = len(

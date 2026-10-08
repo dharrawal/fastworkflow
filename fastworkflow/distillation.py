@@ -696,7 +696,7 @@ class DistillationSession:
             actions = list(self.chat_session.action_log)
 
             # Capture the full ReAct trajectory
-            trajectory = dict(agent.current_trajectory)
+            trajectory = dict(agent.trajectory)
 
             self.chat_session.summarize_and_record_turn(message, actions, result_text)
 

@@ -18,7 +18,12 @@ from dotenv import dotenv_values
 import fastworkflow
 from fastworkflow import state_paths
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.observation_offloading.state import reset_runtime_state
+from fastworkflow.observation_offloading.state import (
+    archive_for_path,
+    observability_db_path,
+    reset_observation_state,
+    scope_for_host,
+)
 from fastworkflow.session_state_store import DiskSessionStateStore
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -121,7 +126,7 @@ def llm(tmp_path, monkeypatch):
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     _init(stub, tmp_path)
     RoutingRegistry.clear_registry()
-    reset_runtime_state()
+    reset_observation_state()
     yield stub
     RoutingRegistry.clear_registry()
     stub.close()
@@ -162,7 +167,7 @@ def test_a_step_stopped_at_parameter_extraction_replans(llm, channel_id):
     ctx = _context(HELLO_WORKFLOW, channel_id)
     ctx.process_turn("add 5 and 3")
     agent = ctx.workflow_tool_agent
-    assert "PARAMETER EXTRACTION ERROR" in agent.current_trajectory["observation_0"]
+    assert "PARAMETER EXTRACTION ERROR" in agent.trajectory["observation_0"]
     ctx.close()
 
 
@@ -184,12 +189,12 @@ def test_the_ask_user_replan_sees_the_request_and_trajectory_after_a_resume(
     agent = ctx.workflow_tool_agent
     inputs, trajectory = agent.planner_view()
     if cold:
-        assert agent.inputs == {} and agent.current_trajectory == {}
+        assert agent.inputs == {} and agent.trajectory == {}
         assert inputs == agent._suspended["input_args"] and inputs is not agent._suspended["input_args"]
         assert trajectory == agent._suspended["trajectory"]
     else:
-        assert inputs is agent.inputs and trajectory is agent.current_trajectory
-        assert inputs and "action_0" in trajectory
+        assert inputs is agent.inputs and trajectory is agent.trajectory
+        assert inputs and "tool_name_0" in trajectory
 
     llm.agent_steps = [("finish", {})]
     ctx.process_turn("no")
@@ -210,25 +215,21 @@ def test_a_context_resuming_a_suspended_turn_archives_in_the_workflows_own_datab
     first.process_turn("add 5 and 3 then ask me")
     assert first.awaiting_user
     expected = state_paths.observability_db(HELLO_WORKFLOW)
-    agent = first.workflow_tool_agent
-    scope = agent.continuation_scope
-    assert agent.observation_archive.db_path == expected
-    assert agent.observation_archive.get(scope, "O0") is not None
-    assert agent.dispatched_commands[scope.scope_id]["O0"].rsplit("/", 1)[-1] == "add_two_numbers"
+    scope = scope_for_host(first)
+    assert observability_db_path(first) == expected
+    assert archive_for_path(expected).get(scope, "O0") is not None
 
     resumed = _move(first, HELLO_WORKFLOW, channel_id, tmp_path / "state")
 
-    moved = resumed.workflow_tool_agent
-    assert moved.observation_archive.db_path == expected
-    assert moved.continuation_scope == scope
-    before = moved.observation_archive.get(scope, "O0")
+    assert observability_db_path(resumed) == expected
+    assert scope_for_host(resumed) == scope
+    before = archive_for_path(expected).get(scope, "O0")
     assert before is not None and "sum_of_two_numbers" in before["text"]
-    assert moved.dispatched_commands == {}
 
     llm.agent_steps = [("execute_workflow_query", {"command": ADD_BOTH}), ("finish", {})]
     resumed.process_turn("yes, once more")
     assert not resumed.awaiting_user
-    after = moved.observation_archive.get(moved.continuation_scope, "O0")
+    after = archive_for_path(expected).get(scope_for_host(resumed), "O0")
     assert after is not None and "sum_of_two_numbers" in after["text"]
     stray = os.path.join(state_paths.state_root(), "workflows",
                          state_paths.workflow_id(os.getcwd()), "observability.sqlite3")

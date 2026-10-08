@@ -116,14 +116,12 @@ allowed to use history — a `search_memory` answer, answer-time rehydration, th
 extract step, a human scrolling a store — cannot recover it. In the benchmark
 run that motivated the line, 12 of its 14 unresolved rows had exactly this cause.
 
-**The context is the one the command RAN IN, not the one it entered.** It is
-captured at dispatch (`CommandExecutor._remember_execute_context`), before the
-command can move the context, and filed against the execute step's own `O` alias
-in a turn-scoped table; `annotate_execute_observations` reads it rather than
-recomputing it, because by the time the line is printed the current context has
-already moved. So `open_account_by_uid` reads as the `DirectoryExplorer` command
-it is, and the `list_permissions` that follows it is the one that belongs to the
-account. An observation is evidence about the context it was produced in.
+**The context is the one the command RAN IN, not the one it entered.** The execute
+closure in `workflow_agent.initialize_workflow_tool_agent` takes the context before it
+dispatches and returns it as the first line of the observation, on the step's own `O`
+alias. So `open_account_by_uid` reads as the `DirectoryExplorer` command it is, and the
+`list_permissions` that follows it is the one that belongs to the account. An
+observation is evidence about the context it was produced in.
 
 **A command that moved the context says so.** Read alone, "ran in X" is easily
 taken for "now in X". So when the context after the command differs from the one
@@ -133,11 +131,8 @@ command's own response says where it moved to:
 > Observation O5 (execute_workflow_query ran in Identity 4a0d… Angelica Schneider; and resulted in a context change)
 > Context is now 'DirectoryExplorer'
 
-A move is a different context object after dispatch than before, whether the
-command returned or raised (`CommandExecutor._remember_context_change`); the
-response is never read. The flag is held in process memory only. A resumed turn
-keeps the lines it already printed; only a label rehydrated for the final answer
-in another process prints without the suffix.
+A move is a different context object after the command returns, compared by the
+closure. The flag is not stored, so a label rehydrated later prints without the suffix.
 
 **The instance identity is declared, never derived.** fastWorkflow has no notion
 of a context instance's identity — the current context is an arbitrary
@@ -154,29 +149,22 @@ the bare `Observation O{n} (execute_workflow_query)` line.
 `context_clause` is the one place the clause is made printable. It removes
 parentheses, semicolons and newlines and caps the name at 60 and the label at 80 characters,
 which is what lets `ALIAS_LINE_RE` treat the closing `)` as unambiguous and match
-lines printed before the clause existed. Each printed line emits a `context_line`
-event carrying the alias, the clause, whether an instance was named and the bytes
-the clause cost — the line is presentation and reaches neither the step span
-(closed with the raw tool return) nor the archive, so the event is the only place
-it can be measured.
+lines printed before the clause existed.
 
 This is not behind a flag. It is an extension of the canonical handle line,
 which is not behind a flag either, and gating presentation would mean two
 shapes of printed observation to
 reason about for a change whose whole cost is ~40 bytes per observation.
 
-`annotate_execute_observations` writes the line during the ReAct
-`on_step_complete` hook, before compaction measures the packed target, so the
-byte budget is checked against the trajectory the agent actually receives. The
-line names `O{step_index}` for that step. A first line shaped like ours but
-naming any other alias is backend text (quoted with `RESPONSE_ESCAPE`) or, on a
-trajectory built outside the loop, ignored and recorded as
-`foreign_line_ignored`. There is no fallback to another step's alias — an `O`
-the run never printed stays an explicit `no matching offloaded handle` miss.
+The line names the `O{step_index}` of the step that is running; the step index is the
+only source of the alias. Backend text is never escaped or inspected: it always
+follows the line, so no response can name a handle. There is no fallback to another
+step's alias — an `O` the run never printed stays an explicit `no matching offloaded
+handle` miss.
 
 **Archived text excludes the handle line**, the context clause included. The
 line is presentation only:
-`strip_alias_line` recovers the exact command response, and that response — not
+`command_response` removes the line the step printed, and that response — not
 the printed text — is what the archive stores, what its `text_sha256` covers,
 what the offload label describes, and what the authored-output lookup matches
 against the action log. Digests of observation text therefore stay comparable
@@ -189,24 +177,13 @@ printing a handle can never be what makes an offload look profitable — a
 response that saves 1,023 B stays inline even though the printed text is ~34 B
 longer.
 
-**The clause is persisted, so the subject survives the process.**
-The clause was captured at dispatch into a turn-scoped process map and nothing
-else, so a turn resumed in another process had no subject for any of its
-observations: the rehydrated handle line lost its clause, and a reader that had
-only the resumed process could not say whose evidence a stored listing was.
-`record_context_clause` now writes through to an `offload_subjects` row in the
-workflow's observability database, keyed by `(turn_key, alias)`, and
-`context_clause_of` reads through to it when the map misses and refills the map
-from what it finds — the bounded runtime cache is REBUILT from the durable
-record rather than kept a second way.
-
-The table is part of the observability store's schema (see *Retention,
-redaction and known limits*), carries the turn's `channel_id` beside its
-`turn_key`, and is erased and pruned with the turn by the store's own
-transactions, like the evidence it describes. An alias nobody stamped has no
-row, which reads back as UNRECORDED — the state every reader already handles —
-and never as a guessed subject. `reclaim_scope` drops the process-local copy
-and never the row: residency, never evidence.
+**The subject is persisted, so it survives the process.** The context a command
+ran in is a column of its `offload_evidence` row (`context_clause`, with
+`context_changed` beside it). It is written when the step completes, from the
+alias line the execute closure printed. `NULL` means UNRECORDED and `""` the
+workflow root; readers never guess a subject. Search and answer-time rehydration
+read it from the same row as the text, so a resumed turn prints the same line.
+No subject is kept in process memory.
 
 **The subject is handed to `search_memory` beside the evidence.**
 Because the archived text is the raw response, a stored `list_permissions` page
@@ -232,9 +209,10 @@ extractor's own copy of the trajectory and under a byte budget: see
 ## Every execute observation is archived
 
 Persistence no longer waits for an offload decision. When a step completes, the
-same `on_step_complete` hook that prints the handle calls
-`archive_execute_observations`, which writes **every** `execute_workflow_query`
-observation into the scoped SQLite archive under its canonical `O` alias.
+same `on_step_complete` hook that prints the handle calls `compact_trajectory`
+with that step's index, which archives it once through `archive_step`. Every
+`execute_workflow_query` observation is written into the scoped SQLite archive
+under its canonical `O` alias, exactly once, and compaction never persists again.
 Offloading is then purely a residency decision — whether the text stays in the
 prompt — and never a decision about whether the text can be found again.
 
@@ -244,21 +222,14 @@ so an alias the run had just printed on an inline result resolved to
 unreachable through `search_memory` at the same time.
 
 What is stored is the raw command response, with the presentation line removed by
-`strip_alias_line`, and `text_sha256` is the digest of exactly those bytes — the
-same convention the offload path uses, so the later offload of an alias finds the
-identical row rather than writing a second one. Writes are insert-or-nothing
-(`ON CONFLICT DO NOTHING` plus a digest check), and a digest already written in
-this process for that alias is skipped, so revisiting a step across the many
-compaction passes of a turn costs nothing and can never produce a duplicate.
+`command_response`, and `text_sha256` is the digest of exactly those bytes.
+Writes are insert-or-nothing (`ON CONFLICT DO NOTHING` plus a digest check).
 The archive key is `O{step_index}` for the execute step that produced the
 response, matching the alias printed on that step's handle line or offload
 label.
 
 Each first write is recorded as an `observation_archived` event (alias, step,
-digest, bytes, hot-cache evictions) and puts a copy in the bounded hot cache, so
-the existing cap and oldest-first eviction still apply — inline observations now
-compete for that cache too, and an evicted alias simply resolves from SQLite at
-the `sqlite` tier. The eager archive is independent of the offload decision, so
+digest, bytes). The eager archive is independent of the offload decision, so
 changing the eligibility rule moves only residency: an observation the rule keeps
 inline is archived and searchable exactly like one it offloads.
 
@@ -266,111 +237,18 @@ Persistence is an availability optimisation on the hot path of every agent step,
 so a failure must never cost evidence. A failed write records an
 `archive_refused` event (`reason: persistence_failed_original_retained`) and
 leaves the observation inline and unchanged; nothing is raised into the agent
-loop. Rewriting a completed observation's text under a live alias is refused the
-same way: the stored evidence stands.
+loop. Compaction offloads an observation only if the store holds it, so an
+observation that failed to persist is never replaced by a label; it is kept
+inline with reason `not_archived`. Rewriting a completed observation's text under
+a live alias is refused the same way: the stored evidence stands.
 
 ## Inline and offloaded searches, and what a miss means
 
 `search_memory` resolves any alias printed in the current scope, whether its text
 is still inline or already replaced by a label, and answers from the same
-archived bytes either way. The search event records the answering tier
-(`hot`/`sqlite`) as before, plus `still_inline`:
-
-| `still_inline` | meaning |
-| --- | --- |
-| `true` | the observation was still in the prompt when the agent searched it |
-| `false` | it had been offloaded to a label |
-| `null` | this process has no record of that alias being printed in this scope |
-
-So a miss with `still_inline: null` is a wrong-handle selection — an invented or
-mis-remembered `O` — while a miss on a handle the run did print would be a
-retrieval failure. The flag is process-local bookkeeping, so a turn resumed in
-another process reports `null` until it prints handles again; `status` still
-says whether the search was answered. There is still no step-number fallback and no nearest-handle
-guess: an alias that was never printed is an explicit miss, recorded with
-`status: missing`, and no model is called.
-
-## Search output residency
-
-An execute observation that grows large is offloaded and replaced by a label. A
-`search_memory` answer is not: it is a non-execute observation, so
-`compact_trajectory` never selects it, so the answer stays in the trajectory for
-the rest of the turn. Whatever a search answer costs, it costs for the rest of
-the turn — and its size is model output, capped only by the 2,048-token
-completion limit (roughly 8 KB).
-
-So a search observation is held to the same 3 KB budget a listing observation
-has. The budget covers the **whole observation**, header and marking included,
-not just the answer body:
-
-```dotenv
-FW_SEARCH_ANSWER_MAX_BYTES=3072   # default; values below 1024 fall back to it
-```
-
-An answer that fits is presented exactly as before, byte for byte:
-
-```
-Observation O34 (tier=hot):
-Christopher Hubbard (identity_uid=c062...) holds it; 3 of the 22 remediation ...
-```
-
-An answer that does not fit is archived whole, then cut at a line boundary by
-`text_page` — the same rule paging uses, so an identifier the answer offers as
-evidence is never split mid-token and a row is never halved into a shorter,
-plausible-looking one — and the observation says what happened:
-
-```
-Observation O34 (tier=hot, bounded):
-00000000000000000000000000000000 Person 0 account_uid=account-00000
-... 38 whole rows ...
-[search_memory BOUNDED ANSWER: shown 2,612 of 27,889 UTF-8 bytes of the answer
-for O34; 25,277 bytes are NOT shown. This is not the complete answer, and nothing
-missing from it is thereby absent from O34. Full answer archived as O34#a1
-(sha256 9f3c1a2b4d5e). To get the rest, call search_memory on O34 again with a
-narrower question naming the entity or predicate you still need.]
-```
-
-A bounded answer is never presented as a complete one. The marking states the
-omission in bytes, denies the absence inference an incomplete answer would
-otherwise invite, and gives an action the agent can actually take: the same
-observation, a narrower question — which is evidence-grounded, where re-reading
-a truncated answer is not.
-
-`O34#a1` is a **record key, not a handle**. The agent-visible `O` namespace is
-execute step indices only, and `search_memory` validates its `alias` against
-`O(?:0|[1-9]\d*)`, so this key can never be passed back as an observation: an
-answer record is not a searchable observation. The prefix files the answer under the
-observation that produced it and the suffix separates repeated searches of the
-same observation within one scope. Operators and evaluation tooling read the
-complete text with `archived_search_answer("O34#a1", scope=...)`, digest-verified
-by the archive and with no second model call; the search event carries the whole
-answer regardless, so a bound never loses the evidence.
-
-Archiving happens **before** the cut, and evidence outranks the byte budget: if
-that write fails, the answer is not bounded at all. The complete text is returned
-inline, over budget, and `search_answer_archive_refused` records
-`persistence_failed_complete_answer_retained` — the same choice a failed offload
-makes when it keeps its observation inline.
-
-The answered search event gains `answer_bounded`, `answer_utf8_bytes`,
-`observation_utf8_bytes` and, when bounded, `answer_shown_utf8_bytes`,
-`answer_omitted_utf8_bytes`, `answer_archive_key` and `answer_sha256`.
-
-The bound is a tail guard, not a saving. Measured over the saved benchmark
-stores, the largest of 27 recorded answers
-was 1,855 B — 60% of the budget — peak completion usage was 790 of 2,048 tokens,
-and the `completion_limit` branch has never been taken. Search answers held
-2.1–7.4% of end-of-turn packed bytes and 0.0–6.8% at peak, behind execute
-observations, thoughts and arguments, and `what_can_i_do` output in every run.
-Nothing in the code prevented an 8 KB answer; the runs simply had not produced
-one. Search observations were deliberately **not** made eligible for oldest-first
-compaction: compaction offloads execute observations only, an offload label is
-about the size of a typical answer (median 355 B) so neither
-`replacement_saves_space` nor the 1 KB minimum saving would admit the swap, and
-reading a label back would cost a paid model call to recover a few hundred bytes.
-(That measurement was taken while eligibility was still the 1,000-token floor;
-the 1 KB minimum saving refuses these answers for the same reason, only more
-directly.)
+archived bytes either way. An alias with no stored row is an explicit miss,
+recorded with `status: missing`, and no model is called. There is no step-number
+fallback and no nearest-handle guess.
 
 ## Configuration
 
@@ -407,13 +285,11 @@ budget on a value that is not a valid integer or is below its minimum:
 |---|---|---|
 | `FW_OFFLOAD_MIN_SAVING_BYTES` | 1024 | minimum UTF-8 bytes an offload must free |
 | `FW_TRAJECTORY_MAX_BYTES` | 28000 | packed-trajectory target |
-| `FW_OFFLOAD_HOT_MAX_BYTES` | 262144 | hot handle cache cap |
-| `FW_SEARCH_ANSWER_MAX_BYTES` | 3072 | presentation bound on a search answer |
 
 Observation offloading itself has no switch: `build_tool_agent` always returns
-an `OffloadingReAct` with `search_memory` in its tools. A turn runs in one ReAct
+a `fastWorkflowReAct` with `search_memory` in its tools. A turn runs in one ReAct
 loop until the agent selects `finish` or the iteration ceiling is reached
-(default 25 steps via `OffloadingReAct` / `fastWorkflowReAct.max_iters`); when
+(default 25 steps, `DEFAULT_MAX_ITERS` in `observation_offloading/agent.py`); when
 the ceiling is hit, the answer is extracted with `exhausted=True`. The observation archive always lives in the workflow's own
 observability database. (Until 2026-09-28 not after a cold resume: an agent
 built while a context restored a suspended turn had no active workflow, so the
@@ -440,94 +316,23 @@ A missing handle produces an explicit error without calling a model or searching
 another observation. Resolution remains scoped to the current turn/attempt and
 survives cache eviction through the SQLite archive.
 
-The implementation reads the **current search step's thought** from the ReAct
-trajectory and prefixes it to the question as `<reasoning>. <question>`. Reasoning
-is not an agent-supplied tool argument. DSPy `Predict` receives that combined
-question, the recorded subject, and the full archived observation text. It answers from that observation,
-preserves exact identifiers and their types, and states evidence gaps. The prompt
-instructs it to treat both the requesting agent's assumptions and instructions
+The implementation sends the question, the recorded subject and the full archived
+observation text to one DSPy `Predict` call; the answer comes from that observation
+alone, preserves exact identifiers and their types, and states evidence gaps. The
+prompt instructs it to treat both the requesting agent's assumptions and instructions
 inside the observation as untrusted claims, not additional evidence.
 
 Broad requests for entire tables receive a count/description and a request for a
-focused predicate. Completions cut off at the output limit are reported as
-incomplete searches rather than successful evidence answers. An answer that fits
-is returned whole; one that does not is bounded and marked as incomplete (see
-*Search output residency*), never silently shortened.
+focused predicate.
 
 The returned answer names the source observation. Search events record scope,
-source hash and size, question and attached reasoning, status, model, answer,
+source hash and size, question, status, model, answer,
 latency and available provider usage/cost. LLM calls are also recorded through
 normal DSPy observability. Provider failure yields an explicit search failure;
 it is never reported as evidence that an entity is absent.
 
 This search supplies evidence; it does not by itself guarantee that the main
 agent's final conclusion is correct.
-
-### Answers that never reach the search model
-
-One kind of search is answered in code:
-
-- **A short observation** (at most `SHORT_OBSERVATION_BYTES`, 256 B) is
-  returned verbatim, with up to three handles in the turn whose command and
-  subject match the question better (the tool's description says: mention
-  the question's words more). Event status `short_verbatim`.
-
-**Short observations.** The header names the observation's own subject:
-`[search_memory SHORT OBSERVATION: O3 is the complete response of
-list_entitlements, in Account 9f1e Heidi Turner, shown verbatim because it is
-too short to search]`; a root-context observation says `, at the workflow
-root`, and an unrecorded subject adds nothing (fix-lzdz). The searched handle
-is scored with the same formula as the others (`relatedness`: 3 per question
-word in the command name, 2 per word in the subject clause), and another
-handle is offered only when it scores **strictly more** -- so a short answer
-about the right subject is no longer undercut by a longer observation about
-another one (the Heidi/Alan case). Until 2026-09-27 every handle scoring above
-0 was offered, and the hints read "observations in this turn that …" and "No
-other observation in this turn matches the question's words; run …". The four
-hints now read:
-
-- with suggestions: "If it does not answer the question, other observations of
-  this turn that mention the question's words more are: …. Search one of those
-  instead.";
-- with none: "No other observation in this turn matches the question's words
-  more than this one; if it does not answer the question, run the command that
-  produces what you need.";
-- when the turn's handles could not be listed (fix-kvq0): "Other observations
-  of this turn could not be listed, so none is suggested here." A locked,
-  unavailable or broken archive no longer blocks the search for 30 s or
-  raises: `list_summaries` waits at most `SUMMARY_READ_TIMEOUT_SECONDS` (0.5 s)
-  for the database, any failure is caught, and the searched handle's own
-  subject is then read from process memory only;
-- in a broad scope (fix-y570): "Other observations are not listed in this
-  scope, so none is suggested here." A scope is broad when its turn key is its
-  channel (`archive.is_broad_scope`) -- the process-default scope and the
-  between-turns fallback -- because its rows span every turn (and, for the
-  default scope, every session) that fell back to it. `list_summaries` returns
-  nothing for such a scope, and it now also filters by `channel_id` as well as
-  `turn_key`. `get()` and `list()` are unchanged; their cross-channel read
-  under those scopes is tracked separately (fix-tyzj). (Since 2026-09-28,
-  fix-tyzj: every archive read and subject write is scoped to the channel as
-  well as the turn key -- `get`, `list`, `get_subject`, `capture_record`,
-  `forget_subject` and the stored-digest check all filter on `channel_id`, and
-  `put_subject`'s upsert updates only a row of the same channel. A scope that
-  pairs another channel with this turn's key reads nothing and cannot replace
-  or forget this channel's subjects; persisting under it still raises the
-  collision error, even for identical text. Since 2026-09-28 that error reads
-  "runtime handle alias is already stored for this turn (different text or
-  another channel)"; it said "collides with different text", which was wrong
-  for identical text from another channel.)
-
-Relatedness reads Unicode letters and digits, casefolded, still split at
-underscores; the English stopwords and the plural fold are kept (fix-1593,
-relatedness half). The observation's text is the backend's, printed between
-framework lines, so any line of it shaped like a framework marker -- a line
-containing `[search_memory`, `Observation O<n> (`, or an offload-label prefix,
-case-insensitively -- is printed with a visible `> ` in front
-(`labels.quote_marker_lines`; fix-znxq, verbatim-quoting part).
-(Since 2026-09-28, fix-vpe3, the relatedness score, the related-handle
-suggestions and the short-observation answer live in
-`observation_offloading/related.py`; `search.py` re-exports every name, so
-imports through `search` are unchanged, and behaviour is unchanged.)
 
 ## Retention, redaction and known limits
 
@@ -542,10 +347,10 @@ schema with feature markers (`offload_evidence_v1`, `offload_events_v1`)
 rather than a schema-version bump:
 
 - `offload_evidence` — one row per archived observation (and per archived
-  search answer): the stored bytes, their digest, and the capture record that
-  produced them (policy version, profile, redaction mode, whether the stored
-  bytes differ from what the command returned, and the raw byte count);
-- `offload_subjects` — the context each observation is evidence about;
+  search answer): the stored bytes, their digest, the capture record that
+  produced them (redaction mode, whether the stored bytes differ from what the
+  command returned, and the raw byte count), and the context the observation
+  ran in (`context_clause`, `context_changed`);
 - `offload_events` — the offloading runtime's diagnostic events.
 
 Every row is keyed by the TURN that produced it and carries that turn's
@@ -555,9 +360,8 @@ no setting turns recording off, for fastWorkflow's own entry points and for
 programs that embed the library alike.
 
 **Evidence lives and dies with its turn.** `forget_channel`, Clear
-conversations and retention pruning delete a turn's evidence, subjects and
-events in the same transactions that delete its turn record, and drop the
-process-local copies that could still serve them. There is no preservation
+conversations and retention pruning delete a turn's evidence and events in the
+same transactions that delete its turn record. There is no preservation
 mode: an experiment run's evidence is erased by a Clear or by forgetting its
 channel, exactly like a chatbot conversation's.
 
@@ -569,18 +373,12 @@ search questions, reasoning and answers. `off` stores responses and events
 verbatim, and each row says which mode produced it. That is the developer
 setting, for reproducing exactly what the agent read.
 
-Redacting at the write would change what the agent reads back mid-turn, so the
-process that wrote a redacted row also keeps its raw text in memory while the
-turn is live, and every read that process makes during the turn — the
-trajectory, `search_memory`, answer-time rehydration — is exact. That memory is
-released when the turn is over: when the agent starts the next turn, or when the
-session closes. A suspended turn keeps it. A turn resumed in a *different*
-process has no such memory and reads the stored, redacted text; that is the
-accepted cost of never writing raw bytes to disk.
+`search_memory` and answer-time rehydration read the stored, redacted text, in
+the process that wrote it and in any other, so a resumed turn sees what it saw.
 
-**Subject clauses are not redacted.** `offload_subjects` holds a context name
+**Subject clauses are not redacted.** `context_clause` holds a context name
 and an instance label rather than command output, and is stored in the clear.
-If your context labels can carry anything sensitive, treat that table as
+If your context labels can carry anything sensitive, treat that column as
 unredacted.
 
 **Older evidence files are deleted, not imported.** Earlier builds kept the
@@ -603,7 +401,7 @@ prune, fastWorkflow's entry points open — and moves it to the new workflow's
 database when it is rebound to another workflow. A sink the caller passes, to
 the constructor or to `set_trace_sink()`, is always kept. Passing
 `tracing.NoOpTraceSink()` records no spans and no turn records, but it does
-not turn offloading off: the evidence, subjects and events above are still
+not turn offloading off: the evidence and events above are still
 written (redacted as configured) to the workflow's `observability.sqlite3`,
 under `FASTWORKFLOW_STATE_ROOT`, and pruned when the archive opens it.
 
@@ -631,26 +429,11 @@ could not put back is appended afterwards rather than reserved inside it. It
 costs a few hundred bytes at most, and it is worth more than the evidence those
 bytes would have bought.
 
-**After a restart, one search answer can come back over its bound.** Bounding an
-answer requires archiving the complete text first, under a key numbered by a
-per-scope counter that lives in process memory. A turn resumed in a fresh process
-restarts that counter, so the write can collide with a key the earlier process
-already used; the archive refuses it, and an answer that cannot be archived is
-returned inline whole rather than cut — past the 3,072-byte presentation bound.
-
 **An evicted suspended session keeps a little memory until the process exits.**
 When the session manager evicts a suspended session, the per-session bookkeeping
-on the offload path is not freed with it. Both parts are capped — the hot
-observation cache by bytes, the in-process event buffer at 2,000 events — so the
-residue is small and bounded per session, but it is held until the process exits.
-
-**Broad scopes still read other channels' evidence by alias.** Under the
-process-default scope and the between-turns fallback, `list_summaries`
-enumerates nothing (fix-y570), but the archive's `get()` and `list()` are still
-keyed by `(turn_key, alias)` alone, so a known alias resolves across channels
-(fix-tyzj, open). (No longer true since 2026-09-28: fix-tyzj scopes every
-archive read and subject write to the channel as well; see the broad-scope
-hint above.)
+on the offload path is not freed with it. The in-process event buffer is
+capped at 2,000 events, so the residue is small and bounded, but it is held until
+the process exits.
 
 **The finish check's thresholds were calibrated on one workflow.** `FLAG_MIN`,
 `ASK_MIN`, the question wording and the published precision and recall come
@@ -669,26 +452,16 @@ the measured saving, the eager archive holding both the kept and the offloaded
 observation, search answers still never offloaded, the environment override in both directions with bad values falling back.
 
 Focused tests cover labels, byte/character savings, scoped resolution, required
-keys, current-step reasoning, archive eviction, and offloading ReAct behavior.
+keys, archive eviction, and offloading ReAct behavior.
 `PrintedObservationHandles` covers the printed handle: interleaved tools,
 context-window truncation, the inline/label/archive alias being one identifier
 per step index, savings accounting with the added line, and an unknown handle
 staying an explicit miss. `EagerObservationArchive` covers the eager archive:
 observations archived whether or not they are offloaded, an inline and an
-offloaded search receiving the same bytes and digest, eviction and a cleared
-cache resolving from SQLite, repeated persistence keeping one row, another
+offloaded search receiving the same bytes and digest, eviction resolving from
+SQLite, repeated persistence keeping one row, another
 turn's alias staying invisible, a failed or conflicting write keeping the
-inline evidence and recording `archive_refused`, and the `still_inline` flag.
-`BoundedSearchAnswers` covers the search output bound: every recorded answer size
-presented unchanged, a long answer bounded, marked and archived whole, the cut
-landing on a line boundary with identifiers intact, a newline-free answer cut on
-a character boundary, the observation fitting the budget at every admissible
-bound, a bad or too-small bound falling back to the default, the full answer
-retrievable by the key the marking names and invisible to another scope, repeated
-searches keeping one record each, the record key rejected by `search_memory` and
-never offered as a handle, a failed answer archive keeping the complete answer
-inline, a bounded observation getting no `O` alias and not being archived as one,
-and the packed cost of a search staying inside the budget.
+inline evidence and recording `archive_refused`.
 Provider tests are opt-in:
 
 ```bash

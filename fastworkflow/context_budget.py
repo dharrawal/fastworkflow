@@ -3,7 +3,7 @@
 Before this module the framework carried seven independent byte
 knobs (``FW_TRAJECTORY_MAX_BYTES``, ``FW_ANSWER_REHYDRATION_MAX_BYTES``,
 ``FW_RESULT_PAGE_MAX_BYTES``, ``FW_SEARCH_ANSWER_MAX_BYTES``,
-``FW_OFFLOAD_HOT_MAX_BYTES``, ``FW_RESULT_HANDLE_HOT_MAX_BYTES``,
+``FW_RESULT_HANDLE_HOT_MAX_BYTES``,
 ``FW_OFFLOAD_MIN_SAVING_BYTES``), each with a constant of its own. The two
 result-handle budgets are gone with the result-handle package; the history is
 kept because it is what the fractions below were derived against. Every one of
@@ -29,10 +29,9 @@ Calibration. The fractions are pinned so that the reference window -- 131,072
 tokens, which is what ``litellm`` reports as ``max_input_tokens`` for
 ``cerebras/gpt-oss-120b`` -- reproduces the previously hand-set values EXACTLY:
 28,000 packed-trajectory target, 250,000 rehydration bytes, 3,072 bytes for a
-result page and for a search answer, 262,144 bytes for each hot cache and 1,024
-bytes of minimum offload saving. ``tests/test_context_budget.py`` asserts that
-identity, so a change to a fraction that would move one of those values fails
-the suite.
+result page, and 1,024 bytes of minimum offload
+saving. ``tests/test_context_budget.py`` asserts that identity, so a change to
+a fraction that would move one of those values fails the suite.
 
 Overrides. Each budget keeps its ``FW_*_MAX_BYTES`` name as a TUNING override,
 for the case where one budget has to move without moving the others. They are
@@ -176,30 +175,6 @@ ANSWER_REHYDRATION = BudgetSpec(
     what="answer-time rehydration budget for the extract call",
 )
 
-#: One ``search_memory`` answer observation, header and bounded marking
-#: included. The same share as a page, because it occupies the prompt the same
-#: way. 3,072 / 524,288 at the reference window.
-SEARCH_ANSWER = BudgetSpec(
-    name="search_answer_max_bytes",
-    fraction=Fraction(3, 512),
-    override_env="FW_SEARCH_ANSWER_MAX_BYTES",
-    floor=1_024,
-    what="one search_memory answer observation",
-)
-
-#: The process-local cache of offloaded observation text. Half the window:
-#: it is not prompt, it is what the prompt can be rebuilt from, and the durable
-#: copy is SQLite so eviction costs a re-read and never loses evidence.
-#: 262,144 / 524,288 at the reference window.
-OFFLOAD_HOT = BudgetSpec(
-    name="offload_hot_max_bytes",
-    fraction=Fraction(1, 2),
-    override_env="FW_OFFLOAD_HOT_MAX_BYTES",
-    floor=0,
-    what="process-local hot cache of offloaded observations",
-)
-
-
 #: The minimum trajectory saving an offload has to buy to be worth doing --
 #: a threshold ON the trajectory, so it scales with it.
 #: 1,024 / 524,288 at the reference window.
@@ -219,8 +194,6 @@ SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
 BUDGETS: tuple[BudgetSpec, ...] = (
     TRAJECTORY,
     ANSWER_REHYDRATION,
-    SEARCH_ANSWER,
-    OFFLOAD_HOT,
     OFFLOAD_MIN_SAVING,
 )
 
@@ -229,8 +202,6 @@ BUDGETS: tuple[BudgetSpec, ...] = (
 #: THE REFERENCE WINDOW and nothing reads them to decide anything at runtime.
 REFERENCE_TRAJECTORY_MAX_BYTES = TRAJECTORY.reference_bytes            # 28,000
 REFERENCE_ANSWER_REHYDRATION_MAX_BYTES = ANSWER_REHYDRATION.reference_bytes  # 250,000
-REFERENCE_SEARCH_ANSWER_MAX_BYTES = SEARCH_ANSWER.reference_bytes      # 3,072
-REFERENCE_OFFLOAD_HOT_MAX_BYTES = OFFLOAD_HOT.reference_bytes          # 262,144
 REFERENCE_OFFLOAD_MIN_SAVING_BYTES = OFFLOAD_MIN_SAVING.reference_bytes  # 1,024
 
 
@@ -345,14 +316,6 @@ def answer_rehydration_max_bytes() -> int:
     return budget_bytes(ANSWER_REHYDRATION)
 
 
-def search_answer_max_bytes() -> int:
-    return budget_bytes(SEARCH_ANSWER)
-
-
-def offload_hot_max_bytes() -> int:
-    return budget_bytes(OFFLOAD_HOT)
-
-
 def offload_min_saving_bytes() -> int:
     return budget_bytes(OFFLOAD_MIN_SAVING)
 
@@ -395,16 +358,12 @@ __all__ = [
     "BudgetSpec",
     "MIN_WINDOW_TOKENS",
     "MODEL_CONTEXT_TOKENS_ENV",
-    "OFFLOAD_HOT",
     "OFFLOAD_MIN_SAVING",
     "REFERENCE_ANSWER_REHYDRATION_MAX_BYTES",
-    "REFERENCE_OFFLOAD_HOT_MAX_BYTES",
     "REFERENCE_OFFLOAD_MIN_SAVING_BYTES",
-    "REFERENCE_SEARCH_ANSWER_MAX_BYTES",
     "REFERENCE_TRAJECTORY_MAX_BYTES",
     "REFERENCE_WINDOW_BYTES",
     "REFERENCE_WINDOW_TOKENS",
-    "SEARCH_ANSWER",
     "SEARCH_MODEL_ENV",
     "SOURCE_FALLBACK",
     "SOURCE_MODEL_METADATA",
@@ -415,9 +374,7 @@ __all__ = [
     "budget_provenance",
     "context_window_tokens",
     "env_value",
-    "offload_hot_max_bytes",
     "offload_min_saving_bytes",
     "reset_cache",
-    "search_answer_max_bytes",
     "trajectory_max_bytes",
 ]

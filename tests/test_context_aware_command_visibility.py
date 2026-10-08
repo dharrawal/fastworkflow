@@ -123,7 +123,8 @@ def test_react_resume_aliases_inputs_to_active_run_args():
     agent.iteration_counter = 0
     agent.max_iters = 5
     agent.inputs = {"available_commands": "stale"}
-    agent.current_trajectory = {}
+    agent.trajectory = {}
+    agent._dropped_steps = 0
     agent.tools = {"finish": lambda: "done"}
     agent.react = object()
     agent.extract = object()

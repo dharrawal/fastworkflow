@@ -114,7 +114,7 @@ with `ObservabilityStore.offload_events(kind="rehydration_finished", ...)`.
 
 | Event | Carries |
 |---|---|
-| `rehydration_started` | `budget_bytes`, `bytes_before`, `scope_id` |
+| `rehydration_started` | `budget_bytes`, `bytes_before` |
 | `rehydration_finished` | `bytes_before`, `bytes_after`, `bytes_added`, `rehydrated_labels`, per-alias `{alias, kind, added_bytes}`, `dropped_aliases`, `unresolved_aliases`, `stopped_on`, `extract_prompt_tokens`, `extract_duration_ms`, `rehydration_overflow` |
 | `rehydration_overflow` | how many times the fallback truncated, the budget, `bytes_after` |
 | `rehydration_failed` | the exception type and detail; the extract call then runs on the plain trajectory |
@@ -129,10 +129,7 @@ estimated.
 single place the copy is built. Every extract call site goes through it:
 
 * `fastworkflow/utils/react.py` — `forward` (agent-selected finish and the
-  iteration ceiling), `resume` (an `ask_user` continuation), `aforward`;
-* `fastworkflow/observation_offloading/offloading_react.py` — `OffloadingReAct`
-  uses the same hook through `fastWorkflowReAct` for agent-selected finish,
-  iteration-ceiling exhaustion, and `ask_user` resume.
+  iteration ceiling), `resume` (an `ask_user` continuation), `aforward`.
 
 A failure anywhere in the copy — an unreadable or broken archive —
 falls back to the plain call on the trajectory object it was handed, and records

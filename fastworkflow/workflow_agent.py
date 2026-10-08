@@ -22,7 +22,16 @@ from fastworkflow.command_executor import CommandNotFoundError
 from fastworkflow.context_navigation import unavailable_command_message
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-from fastworkflow.observation_offloading.agent import build_tool_agent, remember_dispatched_command
+from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.observation_offloading.search import search_memory as search_observation
+from fastworkflow.observation_offloading.labels import annotated_observation
+from fastworkflow.observation_offloading.state import (
+    archive_for_path,
+    current_execute_alias,
+    observability_db_path,
+    scope_for_host,
+)
+from fastworkflow.context_identity import context_clause_for
 # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
 # from fastworkflow.observation_offloading.archive import capture_record_for
 # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
@@ -36,9 +45,6 @@ from fastworkflow.observation_offloading.agent import build_tool_agent, remember
 #     workflow_command_names,
 # )
 
-#: The internal workflow every output of a command stopped before the
-#: application carries as its workflow_name.
-CME_WORKFLOW_NAME = "command_metadata_extraction"
 #: NLU stages a command is left in when it did not run: the step needs
 #: parameters, or its command was ambiguous or not understood.
 _NOT_RUN_STAGES = (
@@ -284,9 +290,6 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     from fastworkflow.command_executor import CommandExecutor, _annotation
     started = datetime.now(timezone.utc)
     try:
-        # A command rejected below never reaches invoke_command, which is where
-        # the context it ran in is otherwise filed for its alias line.
-        CommandExecutor._remember_execute_context(chat_session_obj)
         resolved_command = _explicit_agent_command(command, chat_session_obj.get_active_workflow())
         command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
     except BaseException as e:
@@ -431,11 +434,6 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         "response": response_text
     }
     _append_action_record(chat_session_obj, record)
-    # Which qualified command this step's alias ran, for search_memory's
-    # narrowing inputs. A CME command (the abort after a parameter-extraction
-    # error, go_up) is not the command the step asked for.
-    if command_output.workflow_name != CME_WORKFLOW_NAME:
-        remember_dispatched_command(getattr(chat_session_obj, "workflow_tool_agent", None), name)
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
@@ -601,14 +599,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         """
         return _intent_misunderstood(chat_session_obj = chat_session_obj)
 
-    def execute_workflow_query(command: str) -> str:
-        """
-        Takes just a single argument called 'command'.
-        Executes the command and returns either a response, or a clarification request.
-        Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
-        Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
-        Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
-        """
+    def run_execute_workflow_query(command: str) -> str:
         # Check if this command originated from user input (iteration_counter == 0)
         # Set flag in workflow context so validate_extracted_parameters can access it
         is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
@@ -632,6 +623,27 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
                 # Continue to next attempt
                 logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
 
+    def execute_workflow_query(command: str) -> str:
+        """
+        Takes just a single argument called 'command'.
+        Executes the command and returns either a response, or a clarification request.
+        Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
+        Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
+        Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
+        """
+        # The context this command RUNS IN, taken before dispatch: a command that
+        # moves the context is evidence about the context it ran in.
+        alias = current_execute_alias(chat_session_obj.workflow_tool_agent)
+        workflow = chat_session_obj.get_active_workflow()
+        clause = context_clause_for(workflow)
+        context_before = getattr(workflow, "current_command_context", None)
+        response = run_execute_workflow_query(command)
+        if alias is None:
+            return response
+        context_after = getattr(chat_session_obj.get_active_workflow(), "current_command_context", None)
+        return annotated_observation(alias, clause, response,
+                                     context_changed=context_after is not context_before)
+
     def ask_user(clarification_request: str) -> str:
         """
         Only as the last resort, request clarification for missing information from the human user. 
@@ -647,12 +659,27 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
             return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
         raise AskUserSuspend(clarification_request)
 
+    def search_memory(question: str, alias: str) -> str:
+        """
+        Answers a question about ONE earlier execute_workflow_query observation.
+        alias is the O-number printed on that observation's first line ("Observation O8 (...)") or in its offload label, e.g. O8.
+        Goal is to locate values needed to choose the next step: a uid, a count, one field, whether an item is present.
+        Offloaded observations are restored for the final answer, so do not search just to collect rows to report.
+        question must be clear, relevant and complete sentence
+        """
+        return search_observation(
+            question, alias,
+            scope=scope_for_host(chat_session_obj),
+            selected_archive=archive_for_path(observability_db_path(chat_session_obj)),
+        )
+
     tools = [
         what_can_i_do,
         execute_workflow_query,
         # missing_information_guidance,
         intent_misunderstood,
         ask_user,
+        search_memory,
     ]
 
     return build_tool_agent(
