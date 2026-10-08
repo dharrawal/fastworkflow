@@ -19,6 +19,7 @@ from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import CommandNotFoundError
+from fastworkflow.context_navigation import unavailable_command_message
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.observation_offloading.agent import build_tool_agent, remember_dispatched_command
@@ -199,9 +200,10 @@ def _explicit_agent_command(command: str, workflow) -> str:
 
     This tool takes command names, not natural-language intents. Never let a
     command name that is unavailable here fall through to fuzzy/cache/classifier
-    substitution: name the contexts that do have it instead. A token that names
-    no command in any context of the workflow is not a command name, so it goes
-    to the assistant NLU unchanged. Parameter extraction still runs as before.
+    substitution: name the contexts that do have it, and the commands that
+    reach one of them from here, instead. A token that names no command in any
+    context of the workflow is not a command name, so it goes to the assistant
+    NLU unchanged. Parameter extraction still runs as before.
     """
     parts = command.strip().split(maxsplit=1)
     token = parts[0].lstrip("/") if parts else ""
@@ -224,12 +226,8 @@ def _explicit_agent_command(command: str, workflow) -> str:
         inherited = set().union(*(app.context_model.inherited_base_contexts(c)
                                   for c in home_contexts))
         home_contexts = sorted(home_contexts - inherited)
-        raise CommandNotFoundError(
-            f"Command {token!r} is not available in the current context "
-            f"{_display_context_name(current_context)!r}. It is available in: "
-            f"{', '.join(repr(_display_context_name(c)) for c in home_contexts)}. "
-            "Navigate to one of those contexts first (go_up or reset_context "
-            "return to an enclosing context), then retry the command.")
+        raise CommandNotFoundError(unavailable_command_message(
+            workflow, token, current_context, home_contexts))
     if len(matches) != 1:
         raise CommandNotFoundError(
             f"Command {token!r} is ambiguous in context "
@@ -793,6 +791,7 @@ def build_query_with_next_steps(user_query: str,
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
         active_context_name=current_workflow.current_command_context_name,
+        navigation_workflow=current_workflow,
     )
 
     # Use provided planner_lm if available (distillation mode), else build from env

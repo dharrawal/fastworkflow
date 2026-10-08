@@ -14,6 +14,7 @@ import logging
 import fastworkflow
 from fastworkflow.command_routing import RoutingDefinition
 from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.runtime_manifest import load_manifest, merge_and_gate
 from fastworkflow.utils import python_utils
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,26 @@ class CommandMetadataAPI:
     """
     Provides a centralized API for extracting command metadata.
     """
+
+    @staticmethod
+    def _occupiable_context_names(subject_workflow_path: str) -> set[str] | None:
+        """Contexts a user can enter, from ``workflow_runtime.json``.
+
+        ``None`` when the workflow has no manifest (every context is listed).
+        """
+        manifest = load_manifest(subject_workflow_path)
+        if manifest is None:
+            return None
+        try:
+            metadata = merge_and_gate(manifest, env={})
+        except Exception:
+            logger.debug("occupiable contexts unread", exc_info=True)
+            return None
+        return {
+            name
+            for name in metadata.contexts
+            if metadata.is_occupiable(name) is not False
+        }
 
     @staticmethod
     def get_enhanced_command_info(
@@ -622,6 +643,7 @@ class CommandMetadataAPI:
         cme_workflow_path: str,
         active_context_name: str,
         for_agents: bool = False,
+        navigation_workflow=None,
     ) -> str:
         """Return a display text covering EVERY context, not just the active one.
 
@@ -629,6 +651,10 @@ class CommandMetadataAPI:
         first, then each remaining context with only the commands it *adds*. That keeps
         the map complete without repeating inherited commands in every section. Falls
         back to the scoped view if the routing definition cannot be read.
+
+        *navigation_workflow* is the live app workflow (when the caller has one).
+        Deferred sections list each command by name and doc_string, plus a
+        prescriptive navigation line before it can be run.
         """
         base_text = CommandMetadataAPI.get_command_display_text(
             subject_workflow_path=subject_workflow_path,
@@ -650,8 +676,16 @@ class CommandMetadataAPI:
                     return 0
 
             sections: List[str] = [base_text]
+            occupiable = CommandMetadataAPI._occupiable_context_names(
+                subject_workflow_path
+            )
             for context_name in sorted(crd.contexts, key=lambda c: (_depth(c), c)):
                 if context_name == active_context_name:
+                    continue
+                # Mixin contexts (Directory, Resource, EntityLookup, …) inherit
+                # into occupiable workspaces. They are not navigation targets, and
+                # listing them here produces "no declared navigation path".
+                if occupiable is not None and context_name not in occupiable:
                     continue
                 new_commands = [
                     qualified_name
@@ -667,12 +701,13 @@ class CommandMetadataAPI:
                     f"(not callable until then):"
                 ]
                 for qualified_name in new_commands:
-                    if part := CommandMetadataAPI.get_command_display_text_for_command(
+                    if part := CommandMetadataAPI.format_deferred_planner_command(
                         subject_workflow_path=subject_workflow_path,
                         cme_workflow_path=cme_workflow_path,
-                        active_context_name=context_name,
+                        owning_context_name=context_name,
                         qualified_command_name=qualified_name,
-                        for_agents=for_agents,
+                        active_context_name=active_context_name,
+                        navigation_workflow=navigation_workflow,
                     ):
                         parts.append(part)
                 # Do not re-list these under a later context that also inherits them.
@@ -686,6 +721,72 @@ class CommandMetadataAPI:
                 exc_info=True,
             )
             return base_text
+
+    @staticmethod
+    def format_deferred_planner_command(
+        subject_workflow_path: str,
+        cme_workflow_path: str,
+        owning_context_name: str,
+        qualified_command_name: str,
+        active_context_name: str,
+        navigation_workflow=None,
+    ) -> str:
+        """One deferred-context command for the planner prelude.
+
+        Example::
+
+            - find_identity
+              Find identities by name, login or email …
+              Before executing find_identity, navigate to DirectoryExplorer as follows: open_directory
+        """
+        meta = CommandMetadataAPI.get_enhanced_command_info(
+            subject_workflow_path=subject_workflow_path,
+            cme_workflow_path=cme_workflow_path,
+            active_context_name=owning_context_name,
+        )
+        target_cmd: Dict[str, Any] | None = next(
+            (
+                cmd
+                for cmd in meta.get("commands", [])
+                if cmd.get("qualified_name") == qualified_command_name
+            ),
+            None,
+        )
+        if target_cmd is None:
+            leaf = qualified_command_name.split("/")[-1]
+            for cmd in meta.get("commands", []):
+                if cmd.get("name") == leaf:
+                    target_cmd = cmd
+                    break
+        if target_cmd is None:
+            return ""
+
+        short_name = target_cmd.get("name") or qualified_command_name.split("/")[-1]
+        doc_string = (target_cmd.get("doc_string") or "").strip()
+
+        steps: str | None = None
+        if navigation_workflow is not None:
+            with contextlib.suppress(Exception):
+                from fastworkflow.context_navigation import navigation_steps_to_context
+
+                steps = navigation_steps_to_context(
+                    navigation_workflow, active_context_name, owning_context_name
+                )
+
+        lines = [f"- {short_name}"]
+        if doc_string:
+            lines.append(f"  {doc_string}")
+        if steps is None:
+            follow = "no declared navigation path"
+        elif steps == "":
+            follow = "you are already in that context"
+        else:
+            follow = steps
+        lines.append(
+            f"  Before executing {short_name}, navigate to {owning_context_name} "
+            f"as follows: {follow}"
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def get_suggested_commands_metadata(
@@ -744,12 +845,15 @@ class CommandMetadataAPI:
         active_context_name: str,
         qualified_command_name: str,
         for_agents: bool = False,
-        omit_command_name: bool = False
+        omit_command_name: bool = False,
+        include_parameters: bool = True,
     ) -> str:
         """
         Return a YAML-like display text for a single command in the given context.
 
         Mirrors get_command_display_text but filters to a specific command only.
+        When *include_parameters* is False, only the command name and doc_string
+        are shown (for planner maps of contexts not yet entered).
         """
         meta = CommandMetadataAPI.get_enhanced_command_info(
             subject_workflow_path=subject_workflow_path,
@@ -772,6 +876,24 @@ class CommandMetadataAPI:
                     target_cmd = cmd
                     break
 
+        # If command not found, return empty string (no header here)
+        if target_cmd is None:
+            return ""
+
+        # Massage the single command for display (mirrors the formatter in the multi-command path)
+        new_cmd: Dict[str, Any] = {}
+        if "qualified_name" in target_cmd:
+            new_cmd["qualified_name"] = target_cmd["qualified_name"]
+        if "name" in target_cmd:
+            new_cmd["name"] = target_cmd["name"]
+        if doc_val := (target_cmd.get("doc_string") or "").strip():
+            new_cmd["doc_string"] = doc_val
+
+        if not include_parameters:
+            display_obj: Dict[str, Any] = {"commands": [new_cmd]}
+            display_obj = CommandMetadataAPI._prune_empty(display_obj, remove_keys={"default"})
+            return CommandMetadataAPI._to_yaml_like(display_obj, omit_command_name=omit_command_name)
+
         # Build minimal context info (inheritance/containment if available)
         context_info: Dict[str, Any] = {
             "name": active_context_name,
@@ -790,19 +912,6 @@ class CommandMetadataAPI:
                     containment_data = json.load(f)
                     if vals := containment_data.get(active_context_name, []):
                         context_info["containment"] = vals
-
-        # If command not found, return empty string (no header here)
-        if target_cmd is None:
-            return ""
-
-        # Massage the single command for display (mirrors the formatter in the multi-command path)
-        new_cmd: Dict[str, Any] = {}
-        if "qualified_name" in target_cmd:
-            new_cmd["qualified_name"] = target_cmd["qualified_name"]
-        if "name" in target_cmd:
-            new_cmd["name"] = target_cmd["name"]
-        if doc_val := (target_cmd.get("doc_string") or "").strip():
-            new_cmd["doc_string"] = doc_val
 
         inputs: List[Dict[str, Any]] = []
         for inp in target_cmd.get("inputs", []) or []:

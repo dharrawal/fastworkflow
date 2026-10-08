@@ -16,9 +16,12 @@ from types import SimpleNamespace
 
 import pytest
 
+import dspy
+
 import fastworkflow
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import _refresh_agent_available_commands
 
@@ -179,6 +182,38 @@ def test_react_resume_aliases_inputs_to_active_run_args():
     assert result.final_answer == "ok"
 
 
+def test_deferred_context_sections_omit_parameters_and_name_navigation(
+    todo_list_env,
+):
+    subject = _todo_list_path()
+    cme = _cme_workflow_path()
+    workflow = fastworkflow.Workflow.create(
+        subject, workflow_id_str="planner-deferred-sections"
+    )
+
+    text = CommandMetadataAPI.get_all_contexts_command_display_text(
+        subject_workflow_path=subject,
+        cme_workflow_path=cme,
+        active_context_name="*",
+        for_agents=True,
+        navigation_workflow=workflow,
+    )
+    assert "Commands available in the current context" in text
+    assert "after entering the TodoListManager context" in text
+
+    current, _, deferred = text.partition(
+        "Commands available after entering the TodoListManager context"
+    )
+    assert "type:" in current
+    assert "type:" not in deferred
+    assert "outputs:" not in deferred.lower()
+    assert "- create_todo_list" in deferred or "- get_todo_list" in deferred
+    assert "Before executing" in deferred
+    assert "navigate to TodoListManager as follows:" in deferred
+    assert "doc_string:" not in deferred
+    assert "How to enter" not in deferred
+
+
 def test_get_all_contexts_command_display_text_multi_sections(todo_list_env):
     subject = _todo_list_path()
     cme = _cme_workflow_path()
@@ -244,6 +279,83 @@ def test_get_all_contexts_command_display_text_fallback_logs(
     assert any(
         "Failed to assemble command metadata" in r.message for r in caplog.records
     )
+
+
+def test_agent_system_prompt_refreshes_with_parameters_on_context_change(
+    todo_list_env,
+):
+    """Executor prelude is rebuilt on context change with full param metadata."""
+    subject = _todo_list_path()
+    workflow = fastworkflow.Workflow.create(
+        subject, workflow_id_str="ctx-refresh-system-prompt"
+    )
+
+    class FakeAgent:
+        def __init__(self):
+            self.inputs = {"available_commands": "INITIAL", "user_query": "q"}
+
+    class FakeHost:
+        def __init__(self, app_workflow):
+            self._app_workflow = app_workflow
+            self.workflow_tool_agent = FakeAgent()
+
+        def get_active_workflow(self):
+            return self._app_workflow
+
+    host = FakeHost(workflow)
+    adapter = CommandsSystemPreludeAdapter()
+    signature = dspy.Signature("user_query -> final_answer")
+
+    def system_text():
+        _refresh_agent_available_commands(host)
+        formatted = adapter.format(
+            signature,
+            demos=[],
+            inputs={
+                "user_query": "plan",
+                "available_commands": host.workflow_tool_agent.inputs[
+                    "available_commands"
+                ],
+            },
+        )
+        system = next(m for m in formatted if m.get("role") == "system")
+        return system.get("content", "")
+
+    at_root = system_text()
+    assert "type:" in at_root
+
+    class TodoListManager:
+        pass
+
+    workflow.current_command_context = TodoListManager()
+    in_manager = system_text()
+    assert in_manager != at_root
+    assert "TodoListManager" in in_manager or "create_todo_list" in in_manager.lower()
+    assert "type:" in in_manager
+
+
+def test_wec_registers_context_listener_for_agent_refresh(todo_list_env):
+    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+
+    subject = _todo_list_path()
+    workflow = fastworkflow.Workflow.create(
+        subject, workflow_id_str="ctx-wec-listener"
+    )
+    cme = fastworkflow.Workflow.create(
+        _cme_workflow_path(), workflow_id_str="ctx-wec-listener-cme"
+    )
+    wec = WorkflowExecutionContext.__new__(WorkflowExecutionContext)
+    wec._app_workflow = workflow
+    wec._cme_workflow = cme
+    wec._workflow_tool_agent = None
+    wec._planning_insights = None
+    wec._execution_insights = None
+    wec._context_change_listener = None
+
+    wec._initialize_agent_functionality()
+
+    assert wec._context_change_listener is not None
+    assert len(workflow._context_change_listeners) >= 1
 
 
 def test_refresh_agent_available_commands_on_context_change(todo_list_env):

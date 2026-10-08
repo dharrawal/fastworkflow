@@ -8,7 +8,9 @@ its parameters holds. IDO emits it from ``gen_ido_scaffold.py``; nothing
 hand-edits it.
 
 **Nothing in this module changes runtime behavior.** It parses, validates,
-merges, hashes and gates. No caller acts on the result yet — later slices do.
+merges, hashes and gates. Loading a manifest does not turn a feature on.
+``context_navigation`` reads ``navigation_effect`` to name a path in the
+unavailable-command message; feature execution stays behind the dual gate.
 That is the point of Slice 0: the declarations and the gates land first, with
 every feature ``off``, so that when a feature is built there is already a
 governed way to turn it on.

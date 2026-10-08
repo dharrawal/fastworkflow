@@ -6,9 +6,10 @@ routing definition or the context model records the fact, and inferring it from
 a command's NAME would bake one workflow's spelling conventions into the
 framework.
 
-The live caller is the foreign-context refusal guard in
+The live callers read the declaration to name the entry command: the
+foreign-context refusal guard in
 ``fastworkflow/_workflows/command_metadata_extraction/intent_detection.py``,
-which reads the declaration to name the entry command in its refusal.
+and the unavailable-command path in ``fastworkflow/context_navigation.py``.
 """
 from __future__ import annotations
 
