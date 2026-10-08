@@ -487,6 +487,18 @@ button.newConv:hover { filter: brightness(1.1); }
 }
 .chatMsg .bubble.md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 .chatMsg .bubble.md a { color: var(--accent-ink); }
+.chatMsg .bubble.md .mdTable { overflow-x: auto; margin: 8px 0; max-width: 100%; }
+.chatMsg .bubble.md table {
+  border-collapse: collapse; width: max-content; min-width: 100%;
+  font-size: 12.5px; line-height: 1.45;
+}
+.chatMsg .bubble.md th, .chatMsg .bubble.md td {
+  border: 1px solid var(--border); padding: 4px 8px; text-align: left;
+  vertical-align: top; white-space: normal; overflow-wrap: anywhere;
+}
+.chatMsg .bubble.md th { background: var(--code-bg); font-weight: 600; }
+.chatMsg .bubble.md th.align-center, .chatMsg .bubble.md td.align-center { text-align: center; }
+.chatMsg .bubble.md th.align-right, .chatMsg .bubble.md td.align-right { text-align: right; }
 .chatMsg.system { max-width: 100%; }
 .chatMsg.system .bubble { background: var(--warn-bg); border-color: var(--warn-border);
   box-shadow: none; font-size: 12.5px; }
