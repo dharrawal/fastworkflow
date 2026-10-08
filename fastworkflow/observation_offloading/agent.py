@@ -14,19 +14,13 @@ from fastworkflow.observation_offloading.archive import (
     UnavailableHandleArchive,
 )
 from fastworkflow.observation_offloading.compact import compact_trajectory
-from fastworkflow.observation_offloading.jev_client import TurnBudget
-from fastworkflow.observation_offloading.continuation import (
+from fastworkflow.observation_offloading.offloading_react import (
     DEFAULT_MAX_ITERS,
-    StructuredContinuationReAct,
+    OffloadingReAct,
 )
 from fastworkflow.observation_offloading.manifest import install_span_policy
 from fastworkflow.observability.prompt_slots import install_prompt_slot_enrichment
-from fastworkflow.observation_offloading.search import (
-    search_memory,
-    search_observation_max_bytes,
-)
-from fastworkflow.observation_offloading.search_router import router_for_workflow
-from fastworkflow.observation_offloading.finish_check import checker_from_env, command_effects
+from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import (
     current_execute_alias,
     current_scope,
@@ -64,18 +58,11 @@ def build_compacting_step(
     def compacting_step(idx: int, trajectory: dict[str, Any]) -> bool:
         agent = agent_ref()
         scope = getattr(agent, "continuation_scope", None) or fallback_scope
-        # ido-7qd: the agent's ledger, not a recount of this trajectory. The
-        # alias printed and archived here is then the same one the command
-        # inside the step already declared and stamped under, in a process that
-        # resumed the turn as much as in the one that started it.
-        pairs = getattr(agent, "execute_ordinal_pairs", None)
         try:
             compact_trajectory(
                 trajectory,
                 scope=scope,
                 selected_archive=selected_archive,
-                ordinal_offset=int(getattr(agent, "truncated_execute_steps", 0) or 0),
-                executes=pairs(trajectory) if callable(pairs) else None,
                 describe_output=describe_output,
             )
         except Exception as error:  # noqa: BLE001
@@ -245,10 +232,10 @@ alias is the O-number printed on that observation's first line
 ("Observation O42 (execute_workflow_query ran in global)", or
 "Observation O42 (execute_workflow_query ran in Account 28c5aeb5... Alan
 Cooper)" when the command ran inside a context) or named in its offload
-label. Pass only the O-number. Any printed O-number works, whether its
-result is still shown in full or was replaced by a label. Never pass a
-step number. An alias that was never printed is a miss, not another
-observation.
+label. The O-number is the ReAct step index of that execute step (step 0
+is O0). Pass only that O-number. Any printed O-number works, whether its
+result is still shown in full or was replaced by a label. An alias that
+was never printed is a miss, not another observation.
 
 The "ran in <Context> <instance>" part of that line says WHICH instance the
 observation is about: a listing produced inside an account belongs to
@@ -263,66 +250,24 @@ question about that subject can be answered from rows that never repeat
 its id. It will not adopt a subject your question assumes: when no
 subject was recorded it says so instead of guessing one.
 
-Two different bounds apply, and the right response to each is the
-opposite of the other.
-
-The READ is bounded: at most {read_bound} of the observation's LEADING
-UTF-8 bytes reach the search model, a budget derived from that model's own
-context window. A long observation is therefore searched as a prefix, not
-in full. An answer produced from a partial read says so and states the
-bytes it did not read; nothing missing from it is thereby absent from the
-observation. Every search of an observation starts at byte zero, so
-re-asking with a narrower question reads the same bytes and cannot reach
-the rest. To reach the rest, re-run the command that produced the
-observation with a narrower filter or a smaller page and search the NEW
-observation. If the search model refuses even that bounded prompt as too
-long, the call says so and returns no evidence; repeating it sends the
-same bytes, so do not retry it unchanged.
-
-The ANSWER is bounded separately: a long answer is cut to fit the
-trajectory, says so, and reports how many bytes it left out. That one
-IS worth asking again on the same observation with a narrower question,
-because the evidence was read and only its presentation was cut.
+The ANSWER is bounded: a long answer is cut to fit the trajectory, says
+so, and reports how many bytes it left out. That cut IS worth asking again
+on the same observation with a narrower question, because the evidence was
+read and only its presentation was cut.
 
 Every observation of this turn, offloaded or not, is normally restored in full when
 the final answer is written; an offload label is a pointer to it, not a
 loss. If the answer's evidence limit is reached, the oldest observations are
 not restored and the answer names them. So a table you only need to REPORT
-needs no search. {rows}
+needs no search. Do not search to collect rows for the final answer. Search for the
+specific values you need to choose your NEXT step: a uid to open, whether
+a named item is present, a count, one field. A request for a whole table
+is usually declined or cut and costs a step.
 
 An observation short enough to print whole is returned verbatim instead
 of searched, together with the observations in this turn that mention the
 question's words more.
 """
-
-_ROWS_MODEL_ONLY = (
-    "Do not search to collect rows for the final answer. Search for the "
-    "specific values you need to choose your NEXT step: a uid to open, whether "
-    "a named item is present, a count, one field. A request for a whole table "
-    "is usually declined or cut and costs a step."
-)
-_ROWS_SERVED = (
-    "Search for the specific values you need to choose your NEXT step: a uid "
-    "to open, whether a named item is present, a count, one field. When a "
-    "search asks for every row of a listing, the rows may be copied back "
-    "verbatim instead, as many whole rows as fit the answer bound, with a "
-    "closing line saying how many were shown; otherwise do not search to "
-    "collect rows for the final answer."
-)
-
-
-def search_memory_description(*, read_bound_bytes: int, rows_served: bool) -> str:
-    """The ``search_memory`` tool description for this agent.
-
-    Built, not literal, for two facts only known at build time: the read
-    bound, stated as the number the search will actually apply, and whether a
-    router may answer an all-rows search by copying rows, which the model-only
-    wording would otherwise contradict.
-    """
-    return _SEARCH_MEMORY_DESCRIPTION.format(
-        read_bound=f"{int(read_bound_bytes):,}",
-        rows=_ROWS_SERVED if rows_served else _ROWS_MODEL_ONLY,
-    )
 
 
 def build_tool_agent(
@@ -333,7 +278,7 @@ def build_tool_agent(
     max_iters: int,
     on_step_complete=None,
 ) -> Any:
-    """Construct the ReAct agent once: a StructuredContinuationReAct.
+    """Construct the ReAct agent once: an OffloadingReAct.
 
     The DSPy signature build (tool wrapping, instruction assembly, the react and
     extract predictors) happens exactly once, with ``search_memory`` appended to
@@ -362,15 +307,8 @@ def build_tool_agent(
     # failures, and this is the one storage failure that used to happen too
     # early for it to catch.
     selected_archive = open_handle_archive(archive_path, scope=scope)
-    router = router_for_workflow(workflow_path)
-    # The finish-time execution check, when a deployment turns it on; it reads
-    # the turn's initial plan, which the planner stores on the session.
-    finish_checker = checker_from_env()
     turn_runtime = build_turn_runtime(scope, archive=selected_archive)
     agent: Any = None
-    if router is not None:
-        # The router is shared per process; the budget it draws on is this agent's turn.
-        router = router.within_budget(lambda: getattr(agent, "vendor_budget", None))
 
     compacting_step = build_compacting_step(
         lambda: agent,
@@ -381,85 +319,20 @@ def build_tool_agent(
     )
 
     def scoped_search_memory(question: str, alias: str) -> str:
-        """Answer a question inside ONE earlier execute_workflow_query observation.
-
-        Replaced at build time by ``search_memory_description``; this text is
-        the history it was derived from.
-
-        alias is the O-number printed on that observation's first line
-        ("Observation O42 (execute_workflow_query)", or
-        "Observation O42 (execute_workflow_query, in Account 28c5aeb5... Alan
-        Cooper)" when the command ran inside a context) or named in its offload
-        label. Pass only the O-number. Any printed O-number works, whether its
-        result is still shown in full or was replaced by a label. Never pass a
-        step number. An alias that was never printed is a miss, not another
-        observation.
-
-        The "in <Context> <instance>" part of that line says WHICH instance the
-        observation is about: a listing produced inside an account belongs to
-        that account even though its rows do not repeat the account's id.
-
-        The search also knows WHICH context instance the framework recorded for
-        that observation, and is told it separately from the evidence, so a
-        question about that subject can be answered from rows that never repeat
-        its id. It will not adopt a subject your question assumes: when no
-        subject was recorded it says so instead of guessing one.
-
-        Two different bounds apply, and the right response to each is the
-        opposite of the other.
-
-        The READ is bounded: at most a budget of the observation's LEADING
-        UTF-8 bytes reaches the search model, derived from that model's own
-        context window (a quarter of it: 131,072 bytes at the reference window).
-        (Superseded: a quarter of it; the served text states the byte count.) A long
-        observation is therefore searched as a prefix, not in full. An answer
-        produced from a partial read says so and states the bytes it did not
-        read; nothing missing from it is thereby absent from the observation.
-        Every search of an observation starts at byte zero, so re-asking with a
-        narrower question reads the same bytes and cannot reach the rest. To
-        reach the rest, re-run the command that produced the observation with a
-        narrower filter or a smaller page and search the NEW observation. If
-        the search model refuses even that bounded prompt as too long, the call
-        says so and returns no evidence; repeating it sends the same bytes, so
-        do not retry it unchanged.
-
-        The ANSWER is bounded separately: a long answer is cut to fit the
-        trajectory, says so, and reports how many bytes it left out. That one
-        IS worth asking again on the same observation with a narrower question,
-        because the evidence was read and only its presentation was cut.
-
-        Do not search to collect rows for the final answer. Every observation
-        of this turn, offloaded or not, is restored in full when the final
-        answer is written, so a table you only need to REPORT needs no search.
-        (Superseded: ...is normally restored in full; if the answer's evidence
-        limit is reached, the oldest observations are not restored and the
-        answer names them.)
-        Search for the specific values you need to choose your NEXT step: a uid
-        to open, whether a named item is present, a count, one field. A request
-        for a whole table is usually declined or cut and costs a step.
-
-        An observation short enough to print whole is returned verbatim instead
-        of searched, together with the observations in this turn that match the
-        question better. (Superseded: ...that mention the question's words more.)
-        """
+        """Replaced at build time by ``_SEARCH_MEMORY_DESCRIPTION``."""
 
         current = getattr(agent, "continuation_scope", None) or scope
         return search_memory(
             question, alias, reasoning=current_search_reasoning(agent),
             scope=current, selected_archive=selected_archive,
-            router=router,
             describe_inputs=lambda command: describe_command_inputs(
                 chat_session, command,
                 dispatched=dispatched_command_name(agent, current, alias.strip())),
-            trace_host=chat_session,
         )
 
     scoped_search_memory.__name__ = "search_memory"
-    scoped_search_memory.__doc__ = search_memory_description(
-        read_bound_bytes=search_observation_max_bytes(),
-        rows_served=router is not None,
-    )
-    agent = StructuredContinuationReAct(
+    scoped_search_memory.__doc__ = _SEARCH_MEMORY_DESCRIPTION
+    agent = OffloadingReAct(
         signature,
         tools=[*tools, scoped_search_memory],
         max_iters=int(max_iters or DEFAULT_MAX_ITERS),
@@ -471,38 +344,12 @@ def build_tool_agent(
     agent.observation_archive = selected_archive
     agent.turn_runtime = turn_runtime
     agent.describe_output = lambda command, response: describe_command_output(chat_session, command, response)
-    agent.finish_checker = finish_checker
-    # The check only asks about steps whose commands the workflow's manifest
-    # declares read-only; without the lookup every command is unknown. The
-    # plan names the bound app workflow's commands, and an agent built outside
-    # a turn (a context resuming a suspended one) has no active workflow --
-    # which is why ``workflow_path`` above reads the bound app workflow first.
-    agent.command_effect = command_effects(workflow_path) if finish_checker is not None else None
     # Alias -> qualified command, filed at dispatch (``remember_dispatched_command``).
     agent.dispatched_commands = {}
-    agent.search_router = router
-    # One vendor budget per turn, shared by routing and the finish check;
-    # replaced at every forward(), kept across an ask_user resume. None when
-    # both are off.
-    agent.vendor_budget_factory = TurnBudget if (router is not None or finish_checker is not None) else None
-    agent.vendor_budget = agent.vendor_budget_factory() if agent.vendor_budget_factory else None
-    agent.plan_source = lambda: getattr(chat_session, "_turn_plan", None)
-    agent.plan_status = lambda: getattr(chat_session, "_turn_plan_status", None)
-    if agent.evaluation_control_overrides:
-        record_event(
-            {
-                "kind": "evaluation_controls",
-                "scope_id": scope.scope_id,
-                "finish_reminders_enabled": agent.finish_reminders_enabled,
-                "overrides": dict(agent.evaluation_control_overrides),
-            }
-        )
     record_event(
         {
             "kind": "agent_installed",
             "max_iters": agent.max_iters,
-            "max_forced_replans": agent.max_forced_replans,
-            "finish_check": agent.finish_checker is not None,
             "tools": sorted(agent.tools),
             "scope_id": scope.scope_id,
         }

@@ -21,7 +21,6 @@ from fastworkflow.observation_offloading.labels import (
     printed_alias,
     printed_context,
     replacement_saves_space,
-    strip_alias_line,
 )
 from fastworkflow.observation_offloading.state import (
     archive,
@@ -92,27 +91,13 @@ def step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
     return sorted(indexes)
 
 
-def execute_ordinals(
-    trajectory: Mapping[str, Any], *, ordinal_offset: int = 0
-) -> list[tuple[int, int]]:
-    """``(step_index, ordinal)`` for every execute_workflow_query step present.
-
-    ``ordinal_offset`` is the number of execute steps already truncated out of
-    this trajectory, so the ``O{n}`` alias of a surviving step never shifts onto
-    an alias an earlier, now-removed step already persisted under.
-
-    This is the numbering RULE, not the authority. A live turn's authority is
-    the agent's ledger (``StructuredContinuationReAct.execute_ordinal_by_step``),
-    which is seeded by this function and then only ever extended; callers that
-    hold an agent pass its pairs in as ``executes`` rather than recounting.
-    """
-    found: list[tuple[int, int]] = []
-    ordinal = ordinal_offset
-    for index in step_indexes(trajectory):
-        if str(trajectory.get(f"tool_name_{index}") or "") == "execute_workflow_query":
-            ordinal += 1
-            found.append((index, ordinal))
-    return found
+def execute_step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
+    """Step indexes of every ``execute_workflow_query`` step still present."""
+    return [
+        index
+        for index in step_indexes(trajectory)
+        if str(trajectory.get(f"tool_name_{index}") or "") == EXECUTE_TOOL_NAME
+    ]
 
 
 def record_foreign_line(
@@ -155,35 +140,30 @@ def _command_response(text: str, alias: str) -> str:
 def annotate_execute_observations(
     trajectory: dict[str, Any],
     *,
-    ordinal_offset: int = 0,
-    executes: Optional[list[tuple[int, int]]] = None,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
 ) -> list[dict[str, Any]]:
-    """Print the canonical ``O{n}`` handle on every execute observation, in place.
+    """Print the canonical ``O{step_index}`` handle on every execute observation, in place.
 
-    The agent only ever saw an alias on an offload label, so it guessed ReAct
-    step numbers when it wanted to search a result that was still inline. This
-    prints the same alias ``execute_ordinals`` assigns -- including
-    ``ordinal_offset`` for execute steps truncated out of the trajectory -- on
-    the observation itself, the moment the step completes.
+    The agent only ever saw an alias on an offload label, so it guessed other
+    numbers when it wanted to search a result that was still inline. This
+    prints ``O{step_index}`` on the observation itself, the moment the step
+    completes.
 
     The line is presentation only. ``strip_alias_line`` recovers the exact
     command response for the archive and for the offload label's description,
     so stored text and its digest stay comparable with observations recorded
     before this existed.
 
-    The ordinal decides the alias, and nothing read out of the response ever
+    The step index decides the alias, and nothing read out of the response ever
     does. A command response is backend text: one whose own first
     line is shaped like this line, or like an offload label, is quoted by
     ``escape_response`` and printed UNDER the handle line this step is really
     called by, so no backend can name a handle. The quote is undone by
     ``strip_alias_line``, so the archived response is still the exact bytes the
-    command returned. The alias itself is never rewritten -- a line already
-    naming this step's own ordinal is left exactly as it stands -- and a line
-    naming any other ordinal is still recorded as ``alias_conflict``, because
-    the agent's own execute ledger cannot disagree with itself and such a line
-    is either the backend's or a bug.
+    command returned. A line already naming this step's own alias is left
+    exactly as it stands; a line naming any other handle is treated as response
+    text via ``record_foreign_line``.
 
     The line also names the context the command RAN IN and, where
     the workflow declares one, that context's instance identity. The clause was
@@ -195,16 +175,14 @@ def annotate_execute_observations(
     plain alias line: the clause is presentation, and its absence is never
     guessed at.
     """
-    if executes is None:
-        executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
     selected_scope = scope or default_scope()
     annotated: list[dict[str, Any]] = []
-    for step_index, ordinal in executes:
+    for step_index in execute_step_indexes(trajectory):
         key = f"observation_{step_index}"
         text = trajectory.get(key)
         if not isinstance(text, str):
             continue
-        alias = f"O{ordinal}"
+        alias = f"O{step_index}"
         shown = printed_alias(text)
         if shown == alias:
             continue
@@ -214,15 +192,8 @@ def annotate_execute_observations(
             if label_alias(text) == alias:
                 continue
         if shown is not None or is_offload_label(text):
-            record_event(
-                {
-                    "kind": "alias_conflict",
-                    "step_index": step_index,
-                    "printed_alias": shown or label_alias(text),
-                    "expected_alias": alias,
-                    "action": "escaped_under_computed_alias",
-                }
-            )
+            if shown != alias and (not is_offload_label(text) or label_alias(text) != alias):
+                record_foreign_line("annotate", step_index, text, alias, selected_scope)
         clause = context_clause_of(
             selected_scope, alias, selected_archive=selected_archive)
         changed = context_changed_of(selected_scope, alias)
@@ -251,8 +222,6 @@ def annotate_execute_observations(
 def archive_execute_observations(
     trajectory: Mapping[str, Any],
     *,
-    executes: Optional[list[tuple[int, int]]] = None,
-    ordinal_offset: int = 0,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
     hot_handle_max_bytes: Optional[int] = None,
@@ -265,13 +234,12 @@ def archive_execute_observations(
     the observation becomes durable as soon as the step completes, and the
     offload decision is purely a residency decision.
 
-    The alias is this step's ordinal, from the agent's ledger (``executes``),
-    and never a name read off the observation. Taking the printed one let a
-    command response whose first line was shaped like a handle line file itself
-    under any alias it liked: the genuine step of that ordinal was then refused
-    its archive and a search of the alias answered with the backend's text.
-    ``annotate_execute_observations`` runs first and prints that
-    same ordinal, so the handle the agent can see is still the key it is stored
+    The alias is ``O{step_index}``, never a name read off the observation.
+    Taking the printed one let a command response whose first line was shaped
+    like a handle line file itself under any alias it liked: the genuine step
+    was then refused its archive and a search of the alias answered with the
+    backend's text. ``annotate_execute_observations`` runs first and prints that
+    same index, so the handle the agent can see is still the key it is stored
     under.
 
     Stored text is the raw command response: ``_command_response`` removes the
@@ -289,14 +257,12 @@ def archive_execute_observations(
     register_scope(selected_scope, store)
     if hot_handle_max_bytes is None:
         hot_handle_max_bytes = hot_handle_max_bytes_from_env()
-    if executes is None:
-        executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
     archived: list[dict[str, Any]] = []
-    for step_index, ordinal in executes:
+    for step_index in execute_step_indexes(trajectory):
         shown = trajectory.get(f"observation_{step_index}")
         if not isinstance(shown, str):
             continue
-        alias = f"O{ordinal}"
+        alias = f"O{step_index}"
         if is_offload_label(shown):
             if owns_line(shown, alias):
                 mark_offloaded(selected_scope, alias)
@@ -314,7 +280,7 @@ def archive_execute_observations(
             stored = store.persist(
                 selected_scope,
                 alias=alias,
-                offload_order=ordinal,
+                offload_order=step_index,
                 command_name=command,
                 step_index=step_index,
                 text=original,
@@ -357,7 +323,7 @@ def archive_execute_observations(
                 "text_sha256": stored["text_sha256"],
                 "command": command,
                 "step_index": step_index,
-                "offload_order": ordinal,
+                "offload_order": step_index,
             },
         )
         evicted = evict_hot_handles(
@@ -403,8 +369,6 @@ def compact_trajectory(
     hot_handle_max_bytes: Optional[int] = None,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
-    ordinal_offset: int = 0,
-    executes: Optional[list[tuple[int, int]]] = None,
     describe_output: Optional[Callable[[str, str], str]] = None,
 ) -> list[dict[str, Any]]:
     """Mutate trajectory observations in place. Return offload decisions.
@@ -417,17 +381,8 @@ def compact_trajectory(
     oldest-first order, the five most recent execute observations protected,
     the packed target, and ``replacement_saves_space``.
 
-    ``ordinal_offset`` counts execute steps the agent has truncated out of the
-    trajectory (see ``execute_ordinals``); recency protection is measured over
-    the steps still present.
-
-    ``executes`` is the agent's own ``(step_index, ordinal)`` ledger when there
-    is an agent. Passing it, rather than recounting here, is what
-    keeps the alias printed on an observation identical to the alias the
-    command already declared and stamped under -- including after a cold
-    resume, where this trajectory begins mid-turn. ``ordinal_offset`` is then
-    only the seed for the fallback count, and recency protection is measured
-    from the first ordinal actually present either way.
+    Recency protection applies to the last ``recent_observations_protected``
+    execute steps still present in the trajectory.
     """
 
     selected_scope = scope or default_scope()
@@ -441,41 +396,34 @@ def compact_trajectory(
         hot_handle_max_bytes = hot_handle_max_bytes_from_env()
     if hot_handle_max_bytes < 0:
         raise ValueError("hot_handle_max_bytes cannot be negative")
-    if executes is None:
-        executes = execute_ordinals(trajectory, ordinal_offset=ordinal_offset)
-    else:
-        present = set(step_indexes(trajectory))
-        executes = [pair for pair in executes if pair[0] in present]
+    executes = execute_step_indexes(trajectory)
     if not executes:
         return []
     # Print the handle before measuring: the packed target must be checked
     # against the trajectory the agent actually receives.
     annotate_execute_observations(
-        trajectory, executes=executes, scope=selected_scope,
-        selected_archive=store)
+        trajectory, scope=selected_scope, selected_archive=store)
     # Then make every execute observation durable, whatever the offload
     # decision below turns out to be. Residency and availability are separate:
     # a handle the agent can read inline must resolve too.
     archive_execute_observations(
         trajectory,
-        executes=executes,
         scope=selected_scope,
         selected_archive=store,
         hot_handle_max_bytes=hot_handle_max_bytes,
     )
-    # Measured from the oldest ordinal still present, so an explicit ledger and
-    # a recount protect exactly the same steps.
-    protected_from = (executes[0][1] - 1) + max(
-        1, len(executes) - recent_observations_protected + 1
-    )
+    if recent_observations_protected <= 0:
+        protected_steps: set[int] = set()
+    else:
+        protected_steps = set(executes[-recent_observations_protected:])
     packed_text = json.dumps(trajectory, ensure_ascii=False, default=str)
     decisions: list[dict[str, Any]] = []
-    for step_index, ordinal in executes:
+    for step_index in executes:
         key = f"observation_{step_index}"
         response = trajectory.get(key)
         if not isinstance(response, str):
             continue
-        alias = f"O{ordinal}"
+        alias = f"O{step_index}"
         # Every offload decision is taken on the exact command response, so the
         # printed handle cannot shift eligibility, savings or the stored digest.
         original = _command_response(response, alias)
@@ -484,7 +432,7 @@ def compact_trajectory(
             "utf8_bytes": len(original.encode("utf-8")),
             "estimated_tokens": estimated_tokens(original),
         }
-        recency_protected = ordinal >= protected_from
+        recency_protected = step_index in protected_steps
         already_label = is_offload_label(response) and owns_line(response, alias)
         decision = {
             "alias": alias,
@@ -542,7 +490,7 @@ def compact_trajectory(
                 stored = store.persist(
                     selected_scope,
                     alias=alias,
-                    offload_order=ordinal,
+                    offload_order=step_index,
                     command_name=command,
                     step_index=step_index,
                     text=original,
@@ -573,7 +521,7 @@ def compact_trajectory(
                     "text_sha256": stored["text_sha256"],
                     "command": command,
                     "step_index": step_index,
-                    "offload_order": ordinal,
+                    "offload_order": step_index,
                 },
             )
             evicted = evict_hot_handles(

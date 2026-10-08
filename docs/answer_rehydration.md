@@ -76,7 +76,7 @@ answers. The agent signature, the `search_memory` description and the offload
 label now also say observations are *normally* restored; see
 [`observation_search.md`](observation_search.md).)
 
-Ascending by execute ordinal, always the same line for the same run. It exists so
+Ascending by step index, always the same line for the same run. It exists so
 the extractor can report those slots as **unresolved** rather than guessing at
 them — the opposite of the pointer answer, which claims the evidence was seen.
 The line is appended after the budget rather than reserved inside it, so a
@@ -130,9 +130,9 @@ single place the copy is built. Every extract call site goes through it:
 
 * `fastworkflow/utils/react.py` — `forward` (agent-selected finish and the
   iteration ceiling), `resume` (an `ask_user` continuation), `aforward`;
-* `fastworkflow/observation_offloading/continuation.py` —
-  `StructuredContinuationReAct._finish_prediction`, which is the one extract call
-  of a segmented turn and therefore the site the measured configuration uses.
+* `fastworkflow/observation_offloading/offloading_react.py` — `OffloadingReAct`
+  uses the same hook through `fastWorkflowReAct` for agent-selected finish,
+  iteration-ceiling exhaustion, and `ask_user` resume.
 
 A failure anywhere in the copy — an unreadable or broken archive —
 falls back to the plain call on the trajectory object it was handed, and records

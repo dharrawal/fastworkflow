@@ -88,7 +88,6 @@ PUBLIC = (
     ("time", "module", "time"),
     ("tracing", "module", "fastworkflow.tracing"),
     ("turn", "module", "fastworkflow.turn"),
-    ("turn_plan", "module", "fastworkflow.turn_plan"),
     ("utils", "module", "fastworkflow.utils"),
     ("workflow", "module", "fastworkflow.workflow"),
     ("workflow_execution_context", "module", "fastworkflow.workflow_execution_context"),

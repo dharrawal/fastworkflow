@@ -1,11 +1,11 @@
-"""Observation offloading: compact, archive, search_memory, continuation.
+"""Observation offloading: compact, archive, search_memory, offloading ReAct.
 
 This is how fastWorkflow runs a tool agent; there is no flag to turn it off.
-``build_tool_agent`` always returns a ``StructuredContinuationReAct``, execute
-observations always carry their canonical ``O`` alias, compaction always swaps
-an observation that is no longer worth its residency for its own label, and the
-text behind every label stays reachable through ``search_memory`` and through
-answer-time rehydration. See ``docs/observation_search.md``.
+``build_tool_agent`` always returns an ``OffloadingReAct``, execute
+observations always carry their canonical ``O{step_index}`` alias, compaction
+always swaps an observation that is no longer worth its residency for its own
+label, and the text behind every label stays reachable through ``search_memory``
+and through answer-time rehydration. See ``docs/observation_search.md``.
 """
 from __future__ import annotations
 
@@ -26,14 +26,12 @@ from fastworkflow.observation_offloading.compact import (
     annotate_execute_observations,
     archive_execute_observations,
     compact_trajectory,
-    execute_ordinals,
+    execute_step_indexes,
     min_offload_saving_bytes_from_env,
 )
-from fastworkflow.observation_offloading.continuation import (
-    MAX_FORCED_REPLANS,
-    REPLAN_OBSERVATION_MAX_BYTES,
-    StructuredContinuationReAct,
-    replan_trajectory_skeleton,
+from fastworkflow.observation_offloading.offloading_react import (
+    DEFAULT_MAX_ITERS,
+    OffloadingReAct,
 )
 from fastworkflow.observation_offloading.labels import (
     alias_line,
@@ -58,7 +56,6 @@ from fastworkflow.observation_offloading.search import (
     archived_search_answer,
     bounded_answer_marking,
     declaring_subject,
-    evidence_max_bytes,
     present_answer,
     search_answer_max_bytes_from_env,
     search_memory,
@@ -77,16 +74,15 @@ from fastworkflow.observation_offloading.state import (
 )
 
 __all__ = [
-    "MAX_FORCED_REPLANS",
+    "DEFAULT_MAX_ITERS",
     "MIN_OFFLOAD_SAVING_BYTES",
     "PACKED_TARGET_BYTES",
     "PersistenceError",
     "RECENT_OBSERVATIONS_PROTECTED",
-    "REPLAN_OBSERVATION_MAX_BYTES",
     "RuntimeHandleArchive",
     "RuntimeHandleScope",
     "SEARCH_ANSWER_MAX_BYTES",
-    "StructuredContinuationReAct",
+    "OffloadingReAct",
     "UnavailableHandleArchive",
     "alias_line",
     "archive_for_path",
@@ -96,7 +92,6 @@ __all__ = [
     "context_clause_of",
     "declaring_subject",
     "durable_archive",
-    "evidence_max_bytes",
     "forget_context_clause",
     "record_context_clause",
     "archive_execute_observations",
@@ -107,7 +102,7 @@ __all__ = [
     "clear_hot_handles",
     "compact_trajectory",
     "escape_response",
-    "execute_ordinals",
+    "execute_step_indexes",
     "hot_payload_bytes",
     "install_span_policy",
     "is_search_answer_key",
@@ -120,7 +115,6 @@ __all__ = [
     "printed_alias",
     "printed_context",
     "reclaim_scope",
-    "replan_trajectory_skeleton",
     "reset_runtime_state",
     "search_answer_key",
     "search_answer_max_bytes_from_env",

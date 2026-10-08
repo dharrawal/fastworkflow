@@ -11,7 +11,7 @@ OFFLOAD_MARK = "Offloaded observation "
 #: trajectory recorded before the change resumes.
 LABEL_RE = re.compile(
     r"^(?:Offloaded observation |Use search_memory tool to search inside Observation )"
-    r"(O[1-9]\d*) returned by ")
+    r"(O(?:0|[1-9]\d*)) returned by ")
 #: The A1 handle line, with the ido-8ps.13 context clause optional. The clause
 #: can never contain a parenthesis or a newline (``context_clause`` removes
 #: both), so the closing ``)`` is unambiguous and a line printed before the
@@ -21,7 +21,7 @@ LABEL_RE = re.compile(
 #: A printed clause never contains a semicolon either, so it cannot end in
 #: something the suffix would be mistaken for.
 ALIAS_LINE_RE = re.compile(
-    r"^Observation (O[1-9]\d*) \(execute_workflow_query"
+    r"^Observation (O(?:0|[1-9]\d*)) \(execute_workflow_query"
     r"(?:(?:, in| ran in) ([^()\n]*?))?(; and resulted in a context change)?\)\n")
 #: What the handle line names the root context as. The root's clause is empty.
 ROOT_CONTEXT_LABEL = "global"
@@ -32,7 +32,7 @@ CONTEXT_CHANGE_SUFFIX = "; and resulted in a context change"
 MAX_INSTANCE_LABEL_CHARS = 80
 #: Longest context name printed, for the same reason.
 MAX_CONTEXT_NAME_CHARS = 60
-SEARCH_ANSWER_KEY_RE = re.compile(r"^(O[1-9]\d*)#a([1-9]\d*)$")
+SEARCH_ANSWER_KEY_RE = re.compile(r"^(O(?:0|[1-9]\d*))#a([1-9]\d*)$")
 #: What a command response is quoted with when its own first line is shaped
 #: like a line this module prints (``ido-cku``). Two characters, visible, and
 #: self-escaping: see ``escape_response``.
@@ -42,9 +42,10 @@ RESPONSE_ESCAPE = "> "
 def search_answer_key(alias: str, sequence: int) -> str:
     r"""Archive key for one complete search answer, under the searched handle.
 
-    Deliberately NOT an O alias. The agent-visible ``O`` namespace is execute
-    ordinals only, and ``search_memory`` validates its ``alias`` argument
-    against ``O[1-9]\d*``, so this key can never be passed back as a handle: a
+    Deliberately NOT an O alias. The agent-visible ``O`` namespace is the ReAct
+    step index of execute observations, and ``search_memory`` validates its
+    ``alias`` argument against ``O(?:0|[1-9]\d*)``, so this key can never be
+    passed back as a handle: a
     bounded answer's marking names a record, not a searchable observation. The
     searched alias is kept as the prefix so the archived answer is filed under
     the observation that produced it, and ``sequence`` separates repeated
@@ -157,9 +158,9 @@ def unescape_response(text: str) -> str:
 #: model, not this module's anchored regexes.
 _MARKER_SHAPE_RE = re.compile(
     r"\[search_memory"
-    r"|\bObservation O[1-9]\d* \("
+    r"|\bObservation O(?:0|[1-9]\d*) \("
     r"|\b(?:Offloaded observation |Use search_memory tool to search inside Observation )"
-    r"O[1-9]\d* returned by ",
+    r"O(?:0|[1-9]\d*) returned by ",
     re.IGNORECASE)
 
 

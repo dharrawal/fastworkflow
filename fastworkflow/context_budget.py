@@ -39,10 +39,7 @@ for the case where one budget has to move without moving the others. They are
 not the interface: a deployment sets the window (or lets the model's metadata
 set it) and leaves them alone. An override below the budget's floor is refused
 with a warning and the derived value stands, exactly as the individual knobs
-behaved before. The search-observation bound (``SEARCH_OBSERVATION``) is the
-one derived budget with a ceiling; its override
-``FW_SEARCH_OBSERVATION_MAX_BYTES`` goes through the same parsing and floor,
-and may exceed that ceiling.
+behaved before.
 
 What is NOT here. The per-attribute cap on values written to the observability
 STORE does not belong to this family: it bounds a database row, not a model
@@ -163,7 +160,7 @@ TRAJECTORY = BudgetSpec(
     fraction=Fraction(875, 16_384),
     override_env="FW_TRAJECTORY_MAX_BYTES",
     floor=1,
-    what="packed-trajectory target and replan bound",
+    what="packed-trajectory target",
 )
 
 #: The answer-time extraction budget: how many bytes of rehydrated evidence the
@@ -214,28 +211,7 @@ OFFLOAD_MIN_SAVING = BudgetSpec(
     what="minimum UTF-8 bytes an offload must free",
 )
 
-#: One archived observation handed to the observation-search model. Cut from
-#: THAT model's window (``search_window_tokens``), not the agent's, so it is
-#: not in ``BUDGETS``: ``budget_provenance`` reports it beside them with its
-#: own window and source. It had no tuning override until 2026-09-27; it now
-#: has ``FW_SEARCH_OBSERVATION_MAX_BYTES``, and its derived value is capped at
-#: ``SEARCH_OBSERVATION_CEILING_BYTES`` so a very large search window cannot
-#: turn one search into a megabyte prompt repeated on every call. The
-#: override may exceed the ceiling. The rationale for the fraction is kept
-#: with its user, ``observation_offloading.search``.
-#: The floor is that module's ``DEFAULT_PAGE_BYTES``, repeated because it
-#: imports this one; ``test_observation_search`` pins the two equal.
-SEARCH_OBSERVATION_CEILING_BYTES = 131_072
-SEARCH_OBSERVATION = BudgetSpec(
-    name="search_observation_max_bytes",
-    fraction=Fraction(1, 4),
-    override_env="FW_SEARCH_OBSERVATION_MAX_BYTES",
-    floor=4_096,
-    what="one archived observation handed to the observation-search model",
-    ceiling=SEARCH_OBSERVATION_CEILING_BYTES,
-)
-
-#: The model that reads a searched observation. See ``search_window_tokens``.
+#: The model that reads a searched observation (``observation_offloading.search``).
 SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
 
 #: Every budget, in documentation order. ``docs/context_budget.md`` renders this
@@ -323,28 +299,6 @@ def context_window_tokens() -> tuple[int, str]:
     return REFERENCE_WINDOW_TOKENS, SOURCE_FALLBACK
 
 
-def search_window_tokens() -> tuple[int, str]:
-    """``(tokens, source)`` for the OBSERVATION-SEARCH model's own window.
-
-    The resolution order above, asked about ``LLM_OBSERVATION_SEARCH`` instead
-    of ``LLM_AGENT``. Until 2026-09-27 a valid ``FW_MODEL_CONTEXT_TOKENS``
-    setting won outright; that setting usually describes the AGENT's window, so
-    a large one sized evidence past a small search model's window. When both
-    the setting and the search model's litellm metadata are known the smaller
-    one answers, and the source names whichever that was (the setting on a
-    tie). With only one of them known it answers; with neither,
-    ``context_window_tokens`` does.
-    """
-    tokens, source = context_window_tokens()
-    model = env_value(SEARCH_MODEL_ENV)
-    model_tokens = _model_window_tokens(model) if model else None
-    if model_tokens is None:
-        return tokens, source
-    if source == SOURCE_SETTING and tokens <= model_tokens:
-        return tokens, source
-    return model_tokens, f"{SOURCE_MODEL_METADATA}:{model}"
-
-
 def reset_cache() -> None:
     """Forget the per-model metadata answers. For tests and for a model change."""
     _model_window_cache.clear()
@@ -403,10 +357,6 @@ def offload_min_saving_bytes() -> int:
     return budget_bytes(OFFLOAD_MIN_SAVING)
 
 
-def search_observation_max_bytes() -> int:
-    return budget_bytes(SEARCH_OBSERVATION, search_window_tokens()[0])
-
-
 # ---------------------------------------------------------------------------
 # Provenance
 # ---------------------------------------------------------------------------
@@ -417,14 +367,8 @@ def budget_provenance() -> dict:
     One call, one dict, no re-derivation on the reader's side. ``overrides``
     names only the budgets a tuning override actually moved, so an empty
     ``overrides`` is the statement "these are the derived budgets".
-
-    ``SEARCH_OBSERVATION`` is in ``budgets`` too, cut from the search model's
-    window; ``search_window_tokens`` / ``search_window_source`` say which, so a
-    reader never has to assume it is the agent's. Its override, when it moved
-    the value, is in ``overrides`` like any other.
     """
     tokens, source = context_window_tokens()
-    search_tokens, search_source = search_window_tokens()
     budgets: dict[str, int] = {}
     overrides: dict[str, int] = {}
     for spec in BUDGETS:
@@ -432,18 +376,12 @@ def budget_provenance() -> dict:
         budgets[spec.name] = effective
         if effective != spec.bytes_for(tokens):
             overrides[spec.override_env] = effective
-    search_effective = budget_bytes(SEARCH_OBSERVATION, search_tokens)
-    budgets[SEARCH_OBSERVATION.name] = search_effective
-    if search_effective != SEARCH_OBSERVATION.bytes_for(search_tokens):
-        overrides[SEARCH_OBSERVATION.override_env] = search_effective
     return {
         "context_window_tokens": tokens,
         "context_window_source": source,
         "bytes_per_token": BYTES_PER_TOKEN,
         "context_window_bytes": tokens * BYTES_PER_TOKEN,
         "reference_window_tokens": REFERENCE_WINDOW_TOKENS,
-        "search_window_tokens": search_tokens,
-        "search_window_source": search_source,
         "budgets": budgets,
         "overrides": overrides,
     }
@@ -468,8 +406,6 @@ __all__ = [
     "REFERENCE_WINDOW_TOKENS",
     "SEARCH_ANSWER",
     "SEARCH_MODEL_ENV",
-    "SEARCH_OBSERVATION",
-    "SEARCH_OBSERVATION_CEILING_BYTES",
     "SOURCE_FALLBACK",
     "SOURCE_MODEL_METADATA",
     "SOURCE_SETTING",
@@ -483,7 +419,5 @@ __all__ = [
     "offload_min_saving_bytes",
     "reset_cache",
     "search_answer_max_bytes",
-    "search_observation_max_bytes",
-    "search_window_tokens",
     "trajectory_max_bytes",
 ]

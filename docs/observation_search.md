@@ -4,10 +4,8 @@ Large, older command results can be saved outside the ReAct prompt. A replacemen
 is emitted only when it is shorter than the original in both characters and
 UTF-8 bytes, and only when the swap frees at least 1 KB (see
 [Offload eligibility](#offload-eligibility)). Recent-observation protection and
-the trajectory budget still apply. Replan copies follow the same savings rule and
-persist any newly labelled command observation before returning a pointer.
-Non-command observations in a replan copy stay inline. If this irreducible
-evidence exceeds the byte target, the runtime records the overage and continues.
+the trajectory budget still apply. If irreducible evidence exceeds the byte
+target after compaction, the runtime records the overage and continues.
 
 The replacement format is:
 
@@ -64,9 +62,7 @@ a non-negative integer logs a warning and falls back to the default.
 Nothing else about compaction changes: oldest-first selection, the five most
 recent execute observations protected, the 28,000 B packed target and
 `replacement_saves_space` are as they were. A protected observation is never
-priced, so no label is built for it. `replan_trajectory_skeleton` applies the
-same rule — a label merely shorter than its observation is no longer enough
-there either.
+priced, so no label is built for it.
 
 Decision records report `reason: below_min_saving` with the computed
 `offload_saving_bytes` and `label_size`; `response_size` still carries
@@ -95,11 +91,10 @@ on the first line, inline results included:
 > 477 holder(s).
 > ...
 
-`O{n}` is the execute ordinal — the n-th `execute_workflow_query` step of the
-turn — **never** the ReAct step number. `compact.execute_ordinals` assigns it,
-so the printed handle carries `ordinal_offset` (the count of execute steps the
-context-window fallback has truncated away) and matches the alias an offload
-label or the archive uses for the same observation. Non-execute tool outputs
+`O{n}` is the **ReAct step index** of the execute observation: step 0 prints
+`O0`, step 7 prints `O7`. The handle line, offload label, archive row, and
+`search_memory` argument all use the same alias for that step
+(`O(?:0|[1-9]\d*)`). Non-execute tool outputs
 (`search_memory`, `ask_user`, `what_can_i_do`, `intent_misunderstood`) get no
 handle: there is nothing to search inside them.
 
@@ -173,11 +168,11 @@ reason about for a change whose whole cost is ~40 bytes per observation.
 `annotate_execute_observations` writes the line during the ReAct
 `on_step_complete` hook, before compaction measures the packed target, so the
 byte budget is checked against the trajectory the agent actually receives. The
-line is written once and never rewritten: a surviving step's ordinal cannot
-change, so a disagreement between a printed handle and the recomputed one is a
-defect, recorded as an `alias_conflict` event, with the printed text left as it
-stands. There is no step-number fallback anywhere — an `O` the run never printed
-stays an explicit `no matching offloaded handle` miss.
+line names `O{step_index}` for that step. A first line shaped like ours but
+naming any other alias is backend text (quoted with `RESPONSE_ESCAPE`) or, on a
+trajectory built outside the loop, ignored and recorded as
+`foreign_line_ignored`. There is no fallback to another step's alias — an `O`
+the run never printed stays an explicit `no matching offloaded handle` miss.
 
 **Archived text excludes the handle line**, the context clause included. The
 line is presentation only:
@@ -186,9 +181,9 @@ the printed text — is what the archive stores, what its `text_sha256` covers,
 what the offload label describes, and what the authored-output lookup matches
 against the action log. Digests of observation text therefore stay comparable
 with observations recorded before handles were printed, and `search_memory`
-answers from the unmodified command response — from a bounded leading prefix of
-it when the whole response does not fit the search model's budget, with the
-truncation disclosed to the model. Offload eligibility, the minimum
+answers from the unmodified command response — the full archived text is sent
+to the search model, so workflow authors should keep command outputs small
+enough to fit that model's input context. Offload eligibility, the minimum
 saving and the savings rule are likewise evaluated on the response alone, so
 printing a handle can never be what makes an offload look profitable — a
 response that saves 1,023 B stays inline even though the printed text is ~34 B
@@ -225,7 +220,6 @@ recorded EMPTY clause (the command ran at the workflow root, which declares no
 subject), and UNRECORDED, which says so and tells the model not to infer one.
 The metadata travels beside the evidence and never inside it, so
 `text_sha256` still covers exactly the bytes the command returned; and it is
-paid for out of the same `search_observation_max_bytes` budget the evidence is
 cut to (`evidence_max_bytes`), because the bound exists to fit the search
 model's window and the whole input is what the provider measures.
 
@@ -256,10 +250,9 @@ identical row rather than writing a second one. Writes are insert-or-nothing
 (`ON CONFLICT DO NOTHING` plus a digest check), and a digest already written in
 this process for that alias is skipped, so revisiting a step across the many
 compaction passes of a turn costs nothing and can never produce a duplicate.
-The archive key is the alias actually **printed** on the observation when there
-is one, so the handle the agent can see is always the key its text is stored
-under — including in the `alias_conflict` case, where the printed alias stands
-and the recomputed one is not used.
+The archive key is `O{step_index}` for the execute step that produced the
+response, matching the alias printed on that step's handle line or offload
+label.
 
 Each first write is recorded as an `observation_archived` event (alias, step,
 digest, bytes, hot-cache evictions) and puts a copy in the bounded hot cache, so
@@ -301,11 +294,10 @@ guess: an alias that was never printed is an explicit miss, recorded with
 
 An execute observation that grows large is offloaded and replaced by a label. A
 `search_memory` answer is not: it is a non-execute observation, so
-`compact_trajectory` never selects it, and `replan_trajectory_skeleton` labels
-execute observations only, so the answer is carried into every later segment of
-the turn in full. Whatever a search answer costs, it costs for the rest of the
-turn — and its size is model output, capped only by the 2,048-token completion
-limit (roughly 8 KB).
+`compact_trajectory` never selects it, so the answer stays in the trajectory for
+the rest of the turn. Whatever a search answer costs, it costs for the rest of
+the turn — and its size is model output, capped only by the 2,048-token
+completion limit (roughly 8 KB).
 
 So a search observation is held to the same 3 KB budget a listing observation
 has. The budget covers the **whole observation**, header and marking included,
@@ -345,9 +337,9 @@ observation, a narrower question — which is evidence-grounded, where re-readin
 a truncated answer is not.
 
 `O34#a1` is a **record key, not a handle**. The agent-visible `O` namespace is
-execute ordinals only, and `search_memory` validates its `alias` against
-`O[1-9]\d*`, so this key can never be passed back as an observation: an answer
-record is not a searchable observation. The prefix files the answer under the
+execute step indices only, and `search_memory` validates its `alias` against
+`O(?:0|[1-9]\d*)`, so this key can never be passed back as an observation: an
+answer record is not a searchable observation. The prefix files the answer under the
 observation that produced it and the suffix separates repeated searches of the
 same observation within one scope. Operators and evaluation tooling read the
 complete text with `archived_search_answer("O34#a1", scope=...)`, digest-verified
@@ -414,24 +406,15 @@ budget on a value that is not a valid integer or is below its minimum:
 | override | derived at a 131,072-token window | meaning |
 |---|---|---|
 | `FW_OFFLOAD_MIN_SAVING_BYTES` | 1024 | minimum UTF-8 bytes an offload must free |
-| `FW_TRAJECTORY_MAX_BYTES` | 28000 | packed-trajectory target and replan bound |
+| `FW_TRAJECTORY_MAX_BYTES` | 28000 | packed-trajectory target |
 | `FW_OFFLOAD_HOT_MAX_BYTES` | 262144 | hot handle cache cap |
 | `FW_SEARCH_ANSWER_MAX_BYTES` | 3072 | presentation bound on a search answer |
-| `FW_SEARCH_OBSERVATION_MAX_BYTES` | 131072 (cut from the *search* model's window, capped at 131,072; the override may exceed the cap) | one observation handed to the search model (fix-deus; see *The read is bounded too*) |
 
-Observation offloading itself has no switch: `build_tool_agent` always returns a
-`StructuredContinuationReAct` with `search_memory` in its tools, and the forced
-replan bound defaults to the module constant
-`observation_offloading.continuation.MAX_FORCED_REPLANS` (3, therefore 4
-segments; 2 and 3 until 2026-09-27). `FW_MAX_FORCED_REPLANS` overrides it per
-process (fix-vd5c): a value outside `[0, 10]` is clamped and one that is not an
-integer is ignored, each with one warning per raw value. The default rests on
-one ido task, not on a measured segment tail across workflows, and it raises
-every workflow's worst-case step ceiling from 75 to 100 iterations; the
-`forced_replan` and `forced_replan_wall` events carry `reached_limit`, and the
-rate at which turns hit it is what should decide the value. The
-`agent_installed` event records the bound actually in force as
-`max_forced_replans`. The observation archive always lives in the workflow's own
+Observation offloading itself has no switch: `build_tool_agent` always returns
+an `OffloadingReAct` with `search_memory` in its tools. A turn runs in one ReAct
+loop until the agent selects `finish` or the iteration ceiling is reached
+(default 25 steps via `OffloadingReAct` / `fastWorkflowReAct.max_iters`); when
+the ceiling is hit, the answer is extracted with `exhausted=True`. The observation archive always lives in the workflow's own
 observability database. (Until 2026-09-28 not after a cold resume: an agent
 built while a context restored a suspended turn had no active workflow, so the
 archive opened from an empty workflow path, i.e. a database named after the
@@ -440,17 +423,13 @@ Evidence archived before the suspension was then unreachable by
 `search_memory` and rehydration, and everything archived after it went to the
 stray database for the context's life, out of reach of channel erasure.
 `build_tool_agent` now takes the session's bound app workflow first, then the
-active one; the router's examples and the finish check's effect lookup use the
-same path. Cold-resume archive location.) So do the offloading runtime's diagnostic events: they
+active one. Cold-resume archive location.) So do the offloading runtime's diagnostic events: they
 are kept in process in a ring of the newest 2,000 (`snapshot_events()`) and
 stored as rows of `offload_events`, read back with
 `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
 
 The one setting that remains is `FW_OFFLOAD_EVIDENCE_REDACTION`: `on` (the
 default) or `off`. See *Retention, redaction and known limits*.
-(Besides it: `FW_MAX_FORCED_REPLANS` above, and the two optional decision-model
-features, `FW_SEARCH_ROUTER` and `FW_FINISH_CHECK`, described below, with
-`FW_JEV_BASE_URL`, the endpoint both use.)
 
 ## Tool behavior
 
@@ -464,8 +443,7 @@ survives cache eviction through the SQLite archive.
 The implementation reads the **current search step's thought** from the ReAct
 trajectory and prefixes it to the question as `<reasoning>. <question>`. Reasoning
 is not an agent-supplied tool argument. DSPy `Predict` receives that combined
-question, the recorded subject, and the selected observation cut to the search
-model's own budget (see *The read is bounded too*). It answers from that observation,
+question, the recorded subject, and the full archived observation text. It answers from that observation,
 preserves exact identifiers and their types, and states evidence gaps. The prompt
 instructs it to treat both the requesting agent's assumptions and instructions
 inside the observation as untrusted claims, not additional evidence.
@@ -485,101 +463,14 @@ it is never reported as evidence that an entity is absent.
 This search supplies evidence; it does not by itself guarantee that the main
 agent's final conclusion is correct.
 
-### The read is bounded too
-
-The observation handed to the search model **is** paged, and to that model's own
-window rather than the agent's: `search_observation_max_bytes()` resolves
-`LLM_OBSERVATION_SEARCH`'s context window and takes a quarter of it as bytes,
-which is 131,072 B at the 131,072-token reference window, with a floor of one
-page. (Until 2026-09-27 it took 3/128, 12,288 B, the declared geometry of
-`DEFAULT_PAGE_BYTES` (4,096) x `SEARCH_MEMORY_MAX_PAGES` (3). No recorded ido
-search came near either bound; the quarter lets a large unpaginated
-observation be read whole rather than as a prefix.) It has no tuning override: the search model's window is
-the only input, and `FW_MODEL_CONTEXT_TOKENS` is how a deployment corrects that
-window. (That sentence is history since fix-deus, 2026-09-27; what replaced it
-follows.)
-
-**The derived bound has a ceiling, and its own override** (fix-deus). The
-quarter of the window is capped at `SEARCH_OBSERVATION_CEILING_BYTES`,
-**131,072 B**, so a very large search window no longer turns one search into a
-megabyte prompt re-sent on every search of that observation. On the example
-configuration's search model, `mistral/mistral-small-latest`, whose litellm
-metadata reports a 262,144-token window, that halves the bound from 262,144 B
-to 131,072 B: observations of 128–256 KB are now read as a prefix, with the
-bounded-evidence marker below. `FW_SEARCH_OBSERVATION_MAX_BYTES` sets the bound
-outright, in bytes, and may exceed the ceiling; it goes through the same
-parsing as every other budget override, so a value below the 4,096-byte floor,
-or one that is not an integer, is refused with a warning and the **derived**
-value (not the floor) stands.
-
-**The window is the smaller of the setting and the search model's own**
-(fix-deus). Until 2026-09-27 a valid `FW_MODEL_CONTEXT_TOKENS` won outright.
-That setting usually describes the *agent's* window, so a large one sized the
-evidence past a small search model's window. Now, when both the setting and
-the search model's litellm metadata are known, the smaller one answers and
-`search_window_source` names whichever that was (the setting on a tie). With
-only one known, it answers; with neither, the agent's window
-(`context_window_tokens`) does. The search model's metadata is only consulted
-when `LLM_OBSERVATION_SEARCH` is set: with it unset, the window is the agent's,
-resolved as before, so a setting still wins outright there.
-
-The subject metadata is paid for out of that same budget, so nothing
-travelling to the model escapes the bound the model's window imposes. Without
-it, an execute observation archived at full size (measured at 440,000 B) was
-re-sent whole on every search of it.
-
-The cut is `bounded_evidence`, built from successive `text_page` calls so the
-budget is actually spent on a text with no line structure, and the observation
-says what was left unread:
-
-```
-[search_memory BOUNDED EVIDENCE: answered from the first 12,150 of 440,102 UTF-8
-bytes of O34; 427,952 bytes were NOT read. ... Re-asking O34 reads the same first
-bytes however the question is worded; to reach the rest, re-run <command> with a
-narrower filter or a smaller page and search the new observation.]
-```
-
-The action is deliberately **not** "ask a narrower question": every search reads
-from byte 0, so the same observation answers from the same bytes however the
-question is phrased — the opposite of the bounded-*answer* case above, where
-re-asking is the right move. Only the producing command changes the bytes.
-
-The search model is told the same thing, in band with the evidence: when the
-observation was cut, a one-line `[TRUNCATED: …]` notice is appended to the text
-it receives, saying how many further bytes exist and that nothing missing from
-the prefix may be reported as absent. So the model never reads a prefix of a
-list as the whole list.
-
-When the provider refuses even the bounded prompt, the outcome is typed rather
-than generic: `is_context_window_error` matches `ContextWindowExceededError` on
-the exception's class chain, or the providers' wordings as a fallback, and the
-observation opens with `[search_memory INPUT OVER WINDOW:` — what was sent, that
-the retry cannot succeed, the agent's move, and the operator's (set
-`FW_MODEL_CONTEXT_TOKENS` to the search model's real window, or use a larger
-`LLM_OBSERVATION_SEARCH` model).
-The provider message itself is inspected, never printed: it can carry payload or
-credentials.
-
-The search event carries `observation_bytes`, `observation_sent_bytes`,
-`observation_bounded`, `observation_max_bytes` and `evidence_max_bytes`, so the
-share of searches answered from a prefix is measurable rather than inferred.
-
 ### Answers that never reach the search model
 
-Two kinds of search are answered in code:
+One kind of search is answered in code:
 
 - **A short observation** (at most `SHORT_OBSERVATION_BYTES`, 256 B) is
   returned verbatim, with up to three handles in the turn whose command and
   subject match the question better (the tool's description says: mention
   the question's words more). Event status `short_verbatim`.
-- **A request for every row of a listing** is answered by copying the rows
-  (`observation_offloading/listing.py`), as many whole rows as fit the answer
-  bound, with a closing line stating how many were shown and ending with the
-  same short `Restored in full for the final answer.` marker the labels carry.
-  (Since fix-94m9, 2026-09-28, that marker is `Normally restored for the final
-  answer.`, the same `labels.LABEL_RESTORE_MARK`.)
-  A listing is served only when its parse is provably complete. Event status
-  `rows_served`.
 
 **Short observations.** The header names the observation's own subject:
 `[search_memory SHORT OBSERVATION: O3 is the complete response of
@@ -636,488 +527,7 @@ case-insensitively -- is printed with a visible `> ` in front
 (Since 2026-09-28, fix-vpe3, the relatedness score, the related-handle
 suggestions and the short-observation answer live in
 `observation_offloading/related.py`; `search.py` re-exports every name, so
-imports through `search` are unchanged, and behaviour is unchanged.) The same
-quoting applies to the preamble, column line and rows of a served listing, so
-the closing line is the only unquoted marker in it. Nothing reads these texts
-back, so the quoting is one-way.
-
-**Served rows fit the bound exactly, or the model answers** (fix-3zxk).
-`served_rows` picks the largest row count whose own closing line still fits the
-answer bound, and returns `None` when not even one row fits beside the text
-above the rows -- the search then goes to the model, with `listing_skip_reason`
-`rows_do_not_fit`. The closing now reads "rows 1-N of the M rows listed in O5"
-(until 2026-09-27: "… rows in O5"). Before this, a large preamble produced a
-5,410 B answer against a 3,000 B budget, closings overran by up to 3 B, and an
-oversized row produced a zero-row answer.
-
-Whether a request wants every row is decided by an optional decision-model
-router (`observation_offloading/search_router.py`). It is off unless
-`FW_SEARCH_ROUTER=jev` and `JEV_API_KEY` are both set, because it sends the
-question, the agent's reasoning and the observation's first four lines to
-TypeSafe. **Data egress:** that text leaves the deployment with only the
-credential scrub's patterns removed; names, identifiers
-and other personal data in it are sent as they are. It makes one attempt with a
-2-second timeout and fails open to the search model (hard wall clock and at
-most 3 calls per turn since 2026-09-27; below). `FW_SEARCH_ROUTER_MODEL`
-pins the model (default `jev-1.13.0`); the router is built once per workflow
-path, model and key, so a rotated `JEV_API_KEY` builds a new client (the key is
-cached only as a fingerprint). A set `FW_SEARCH_ROUTER` that cannot take effect
--- a value other than `jev`, `typesafe-sdk` not installed, or no `JEV_API_KEY`
--- logs one warning per cause and routing stays off; an unset flag is silent.
-(Since 2026-09-27 the list of causes is longer, and the flag may name a
-registered provider: see *Decision providers, endpoint and vendor time*.)
-When the turn is traced, each routing call is also an `fw.search.route` span.
-Its tokens are recorded there and on the event, and are **not** included in the
-`fw.llm.call` usage or cost totals: the call goes through the vendor SDK, not
-litellm. A workflow can add examples to the router's
-question in `<workflow>/search_router_examples.json`. Install with the
-`jev` extra (`router` is a deprecated alias of it, kept for existing installs).
-
-Since 2026-09-27 the router shares the finish check's plumbing (see *Decision
-providers, endpoint and vendor time* below): the 2-second timeout is a hard
-wall-clock cutoff, a turn routes at most `ROUTER_CALLS_PER_TURN` (3) searches,
-and once those are used, or the turn's vendor time is spent, `route` returns
-the error `router_budget` with no call, no span and no warning, and the search
-model answers (`listing_skip_reason` `router_budget`). What it sends passes
-`jev_client.egress`: when redaction is off for any of the three values at
-call time, nothing is sent and the router returns the error
-`policy_withheld` (`error_stage` `redaction`, unwarned; its span, when traced,
-has status error and `error_type` `policy_withheld`).
-
-### How a listing is recognised: fail-closed
-
-`listing.parse_table` returns a listing only when it is sure the rows are the
-whole listing, and otherwise refuses (returns `None`), so no search is ever
-served a listing that silently stopped early. Since 2026-09-27 (fix-zoup,
-fix-n4z9, fix-36gv, fix-k56c, fix-3zxk, fix-1593):
-
-- **The first header candidate that accepts a row decides.** A later row it
-  cannot place (an aligned row with more cells than the header, a markdown or
-  tabbed row with another cell count) refuses the whole text; no later line is
-  retried as a header. Retrying from every later line is what made refusals
-  quadratic: a 104 KB aligned listing refused at its last line took 2.51 s and
-  key/value lines 4.59 s; both now take ~2 ms.
-- **Parsing runs after the short-observation check**, so a short observation
-  is never parsed: `listing_parsed` is `False` and `listing_shape` `None` on
-  every `short_verbatim` event.
-- **An aligned listing does not end on an ordinary row.** A one-cell line
-  directly under aligned rows that reads as one of them -- a wrapped (indented)
-  label, separators collapsed to one space, a single token as wide as the first
-  cells (empty trailing cells) -- refuses the parse. Header offsets are used
-  only when the rows are padded to them.
-- **A listing with more around it is refused**: any row-shaped line anywhere
-  after it (a second group or table); a last row starting with `total`, `sum`
-  or `count` -- or, since 2026-09-28 (fix-4riz), a labelled last row, one whose
-  first cell (read per shape: aligned, markdown, tabbed) ends with `:` or is
-  one word followed by `:` and a space (`Note:  2 items`, `Legend: x ...`),
-  matched by shape rather than a word list; the lax
-  `require_complete=False` read drops such a row as it drops a summary row --
-  or text above or below the rows saying there is more --
-  `remaining=N>0`, `complete=false`, `has_more=true`, a `shown=` or `total=`
-  that disagrees with the row count, `pages>1`, `N of M` with N≠M, `A-B of M`
-  not covering 1..M, `page=2` or later, `next page` / `next cursor`, `more
-  rows` (but not `no more rows`), `truncated`, `not shown`. ido's `shown=`
-  stays a built-in generic count.
-- **Wider recognition, conservatively**: column names may be Unicode (`Größe`,
-  `名前`); markdown also accepts the compact `|-|-|` separator and the
-  pipe-less `a | b` / `--- | ---` form, only when the separator has exactly one
-  cell per column (and, pipe-less, the column line reads as column names).
-
-Some footers are now refused rather than dropped, for example a single word
-that fits the first column of a padded table, a `Total  2` row, or a line with
-two or more spaces after the listing. On 4,000 random listings the new parser
-agreed with the old one on 3,298, refused 702, and never accepted a text the
-old one refused. With the router off, the only visible effect is telemetry:
-`listing_parsed` is `False` more often. The labelled-footer rule (fix-4riz)
-was compared old against new over 3,832 distinct recorded ido texts from 361
-databases: 494 accepted in strict mode and 2,467 in lax mode, both before and
-after, with no difference. Times, URLs, `x:1`, a colon in a later cell and a
-`Note:` in an earlier row are still accepted.
-
-Every search event says which path the search took, so a `router` of `None` is
-never ambiguous (fix-wheb):
-
-| field | meaning |
-|---|---|
-| `router` | the router's verdict (choice, `p_all_rows`, `for_report`, `latency_ms`, usage or error), or `None` when no routing call was made. Since 2026-09-27 every record also carries `vendor_ms` (the turn's vendor time so far; `None` without a turn budget) and `provider` (the flag value that selected who answers: `jev` or a registered name); an error record carries `error_status`, `error_request_id`, `error_code` (a single machine-readable token from the body, never its text) and `error_stage` (`redaction`, `request`, or `budget` when the turn's vendor time ran out mid-call) |
-| `router_enabled` | whether a router was attached to this agent |
-| `listing_parsed` | whether the observation parsed as a complete listing |
-| `listing_shape` | `aligned`, `markdown` or `tabbed`, or `None` |
-| `listing_skip_reason` | why rows were not served: `router_disabled`, `no_listing`, `router_error`, `router_budget` (the turn's routing calls or vendor time were used up), `policy_withheld` (since 2026-09-28: a value the router would send could not be sent redacted), `not_all_rows`, `below_threshold`, `rows_do_not_fit` (not one whole row fits the answer bound beside the text above the rows), `short_observation`, `missing_handle`; `None` when they were |
-| `for_report` | the router's verdict on whether the rows were wanted only for the final answer; recorded, it does not change the path |
-
-The router's error values are the error's class name (`CallTimedOut`,
-`OutOfTime`, `VendorBusy`, an SDK error class, …), or `policy_withheld` or
-`router_budget`; the last two are not failures and are not warned about. A
-`policy_withheld` router record is counted under `listing_skip_reason`
-`router_error`, which has no reason of its own. (History: since 2026-09-28 it
-has its own reason, `listing_skip_reason` `policy_withheld`, and a withheld
-route no longer uses one of the turn's `ROUTER_CALLS_PER_TURN` calls. Router
-records and `finish_check` events also carry `vendor_calls_in_flight`, the
-vendor worker slots held, when it is above 0, and `vendor_calls_orphaned`, the
-abandoned requests still running past their slot, when that is above 0.)
-
-A `short_verbatim` event also records `related_scores` (the match score of each
-offered handle, in the order of `related`) and `subject_recorded`; since
-2026-09-27 also `own_score` (the searched handle's own score, which an offered
-handle must beat), `related_lookup_failed`, `related_scope_refused` and
-`related_lookup_error` (`None`, an exception class name, or
-`archive_unavailable`). When the lookup failed, `subject_recorded` reflects
-process memory only. A
-`rows_served` event also records `served_over_bound` (whether the served text
-exceeded the answer bound: the preamble, column line and closing line are
-always served, so an oversized preamble can push it over -- history since
-fix-3zxk: such a search now goes to the model as `rows_do_not_fit`, so the field
-should always be `False`) and `trailing_lines_dropped` (non-blank lines after the
-listing's end, such as a footer, that serving omits).
-
-## Finish-time execution check
-
-When the agent chooses `finish`, an optional check
-(`observation_offloading/finish_check.py`) asks the same decision model, for
-every step of the turn's initial plan and every subject the request names,
-whether the turn's record shows the step executed. It reads a ledger built from
-the turn's full trajectory -- one row per step with its command, the context it
-ran in and the context it left, identifiers resolved to the labels retrieved
-listings gave them, the subjects found in its full output (from the archive),
-its outcome and the first 200 bytes of its output -- all passed through the
-credential scrub before sending. Steps it judges unexecuted are listed in one note
-that replaces the finish observation; the agent may act on it or finish anyway.
-One note per turn, never with fewer than two iterations left in the current
-segment, never for optional or user-gated steps. The count the note states
-includes the iterations later forced-replan segments still hold
-(`shown_iterations_left` on the event); the two-iteration gate does not.
-It checks the turn's initial plan. While the check is on the planner is asked
-for a structured plan (steps, parts, subjects, optional / needs-the-user
-flags); when that call fails to parse or returns no steps, the plain-text
-planner runs and its plan is parsed back into steps, so a text-fallback plan is
-checked too -- with no subjects, which only a structured plan names. With the
-check off the planner stays plain text and nothing is parsed.
-
-**Which planner runs, and when the check counts as on** (fix-5vtw, fix-rm98,
-fix-7eu6). The planner and the agent now share one decision,
-`workflow_agent.finish_check_active(agent)`: a checker attached when the agent
-was built, and finish reminders not switched off. The structured planner runs
-only for a turn's **initial** plan and only when that is true; replans (after a
-parameter-extraction error or an `ask_user` reply) always use the plain-text
-planner, and the check still checks the initial plan. The structured call runs
-with DSPy's JSON-adapter retry turned off
-(`CommandsSystemPreludeAdapter(use_json_adapter_fallback=False)`): that retry
-used a plain `JSONAdapter` that dropped the available-commands prelude, so an
-unparseable structured reply now goes straight to the text planner -- at most
-3 planner calls instead of 6, and `plan_source` `structured` / `text_fallback`
-is accurate. The text planner, the agent loop and intent clarification keep
-DSPy's default, which still has that retry (tracked as fix-6jzi). (Since
-2026-09-28, fix-6jzi: that retry keeps the command list.
-`CommandsSystemPreludeAdapter` overrides DSPy's private
-`_make_json_adapter_fallback()` hook to return
-`CommandsSystemPreludeJSONAdapter`, which puts the same available-commands
-prelude in the system message, so a chat-format reply that fails to parse is
-retried with the commands visible, in the agent loop, intent clarification and
-the plain-text planner alike. Call counts are unchanged. The structured
-planner keeps its retry off. The hook is private DSPy API -- checked against
-DSPy 3.3.0, while `pyproject.toml` still allows `dspy ^3.0.1` -- and
-`tests/test_chat_adapter_commands.py` fails if DSPy renames it.)
-
-**Structured planning is disabled** (2026-09-28, owner decision; supersedes
-the structured-planner sentences in the two paragraphs above). The planner is
-plain text for every plan, with the check on or off. While the check is on
-(`finish_check_active`), the turn's initial plain-text plan is parsed back into
-steps by `parse_text_plan` and that is the plan the check verifies: it has no
-subjects, so the per-subject questions are never asked of a live plan. Replans
-are unchanged. The structured signatures, `STRUCTURED_PLAN_GUIDE`,
-`turn_plan.render`, the structured adapter with its retry off and the
-zero-steps / parse-error fallback are commented out in
-`fastworkflow/workflow_agent.py` and `fastworkflow/turn_plan.py`, not deleted,
-and no setting re-enables them. `fw.planner.plan` / `.replan` keep contract v2:
-`plan_source` is `text` or `none`, `subjects` is `[]`.
-`CommandsSystemPreludeAdapter(use_json_adapter_fallback=...)` and the
-command-list-keeping JSON retry (fix-6jzi) stay; nothing in the planner passes
-`False` any more.
-
-**`FW_EVAL_FINISH_REMINDERS=0` turns off everything the check adds** (fix-rm98):
-no note, and the plain-text planner, so no plan markers. The checker stays
-attached, so the `evaluation_controls` event and the `disabled` skip records
-are unchanged. It is read like `FW_FINISH_CHECK`: the workflow's
-`fastworkflow.env` first, then the process environment (until 2026-09-27 the
-process environment only). Any set value other than `0` -- in either place --
-makes the agent build fail with `ValueError("FW_EVAL_FINISH_REMINDERS must be
-exactly 0 when set")`; an empty value counts as unset and surrounding
-whitespace is ignored (an empty value used to raise).
-
-**The plan survives a cross-process resume** (fix-ju1v). With a checker
-attached, the turn's plan and its status are session state (the additive keys
-`turn_plan` and `turn_plan_status`; no `SCHEMA_VERSION` bump), and a resumed
-agent's empty step record is seeded from the suspended trajectory, so a turn
-suspended on `ask_user` in one process is checked against the same plan and
-the same ledger rows in another. A session state written without the key
-resumes with `no_plan_cause` `lost_on_resume`; a stored plan that fails
-validation is treated the same way rather than failing the restore. A turn
-resumed from a suspension the context-window fallback had already cut is
-skipped with reason `ledger incomplete`, because its record lacks the cut
-steps. With the check off, the blob carries `turn_plan: null` and
-`turn_plan_status: "not_planned"`, and nothing is seeded. Since 2026-09-28 the
-same holds for a check attached but switched off with
-`FW_EVAL_FINISH_REMINDERS=0`: no trajectory is seeded, no dispatch outcome
-recorded and no plan restored.
-
-**The `ask_user` replan sees the request after a cross-process resume**
-(fix-ksdu, 2026-09-28; with or without the check). The replan that runs on
-the user's reply is built before `resume()` restores the agent's `inputs` and
-`current_trajectory`, so in a process that only imported the suspension the
-planner used to get `{}` for both -- no request and no trajectory.
-`plan_with` now reads `ContinuationReAct.planner_view()`: the live `inputs`
-and `current_trajectory` when set (the same objects, so a same-process replan
-prompt is byte-identical), else a copy of the suspended stash's `input_args`
-and `trajectory`. The stash has no `action_N` keys and carries offload labels,
-not raw observations. What is persisted is unchanged.
-
-**Steps that never ran are errors** (fix-lnzw). A step the NLU stage stopped
-before any command ran -- a failed parameter extraction, an ambiguous or
-misunderstood command, or the framework's own `abort` after one -- is recorded
-at dispatch (`finish_check.record_dispatch`, into `dispatch_outcomes`) and its
-ledger row shows outcome `error`, the measured vocabulary, instead of being
-read from its text. `go_up` and `reset_context` count as ran. The record is
-exported with a suspension (the optional react-blob key `dispatch_outcomes`)
-and reset at each new turn.
-
-**Identifiers are resolved from any listing shape** (fix-ft18). A ledger row's
-`refers_to` labels still come first from `id  label` rows; to them are added
-the rows of every listing `listing.parse_table` reads in the step's output
-(keyed by first cell), each blank-line-separated block parsed on its own and
-only the first `LISTING_PARSE_MAX_BYTES` (64 KiB) of each response. An
-identifier is a long token, a parameter value of the command, or a listed
-first cell a context clause names (4+ characters or non-numeric, so
-"TodoList 1" is not read as item 1). Replayed over 82 recorded ido attempts the
-resolved rows are identical to before. JSON outputs still yield no labels.
-Since 2026-09-28 the ledger reads listings in `parse_table`'s label mode
-(`require_complete=False`): a page of a longer listing (`Page 1 of 3`,
-`shown=`, `more rows`) or one group of several still labels its rows, each
-group read after the one before it, while a malformed row still refuses its
-block. Served rows still come only from a complete listing.
-
-Off unless `FW_FINISH_CHECK=jev` and `JEV_API_KEY` are both set;
-`FW_FINISH_CHECK_MODEL` pins the model (default `jev-1.13.0`). **Data egress:**
-the plan, the request and the ledger (commands, contexts, subject names, the
-head of each output) are sent to TypeSafe with only the credential scrub's
-patterns removed. A set `FW_FINISH_CHECK` that cannot
-take effect -- a value other than `jev`, `typesafe-sdk` not installed, or no
-`JEV_API_KEY` -- logs one warning per cause and the check stays off; an unset
-flag is silent. The checker is built once per model and key, so a rotated key
-builds a new client. (Since 2026-09-27 the list of causes is longer and the
-flag may name a registered provider: see *Decision providers, endpoint and
-vendor time*. What is sent -- the subjects' names and kinds, the `refers_to`
-keys and `names_in_output` included -- now all passes the same outbound filter,
-`jev_client.egress` (fix-hu4f); the note and the stored `flagged_steps` still
-use the raw names, which stay in the process.) Each event records
-`calibration` (`"ido-v7-2026-09"`): `FLAG_MIN`, `ASK_MIN` and the question
-wording were calibrated on ido with the default model and need not transfer,
-and a `FW_FINISH_CHECK_MODEL` other than the default logs one warning per
-process (fix-ft18).
-
-Each call has a 4-second timeout and the whole check an 8-second budget. The
-budget is best-effort: it is checked before each call, not enforced during
-one, so a call started just before it runs out can take up to its own
-4-second timeout past it. Any failure, and an exhausted budget, means no note.
-(That paragraph is history since fix-i94q, 2026-09-27: both are now **hard
-wall-clock** cutoffs, and the 8 seconds start **before** the ledger is built,
-so building it counts. The call and the check also draw on the turn's shared
-10-second vendor budget; see *Decision providers, endpoint and vendor time*.
-Building the ledger itself is not cut off: since 2026-09-28 each archive read
-it makes waits at most 0.5 s (`LEDGER_READ_TIMEOUT_SECONDS`) for a locked
-database, where it used to wait the evidence reads' 30 s, and the first
-failed read ends the check as `error` at stage `ledger` -- until then a failed
-read left the inline text. Its context-clause reads go through the same
-process caches as every other clause read, a "no subject" answer included, so
-a second check on the same turn reads no alias from the archive again.)
-The check's tokens are recorded on the `fw.finish_check` span and the event,
-and are **not** included in the `fw.llm.call` usage or cost totals (the call
-goes through the vendor SDK, not litellm).
-
-**The size of a check is bounded** (fix-az9q). A plan naming more than
-`SUBJECTS_MAX` (12) subjects is checked step by step only -- "does step k need
-a command?" and "was step k executed at all?", at most two questions per step
--- with reason `subjects capped`, and no subject name is sent, not even in
-`names_in_output`. (More precisely: the subject list is not sent and
-`names_in_output` is empty, but the request, the step texts and the ledger
-still are, and they usually name the subjects.) A step missed for one subject among many then goes
-unflagged; a step missed for all of them does not. (Recorded turns named at
-most 9 subjects.) The ledger, measured as UTF-8 JSON, is kept under
-`LEDGER_MAX_BYTES` (96 KiB) by emptying rows' `head` and then their
-`refers_to`, oldest rows first; the 118 recorded attempts built ledgers of at
-most 52 KB (p95 43 KB), so none is trimmed. A ledger still too large for one
-request -- detected from the error body's `max_tokens_exceeded` code, no longer
-from the error's text (fix-oivq) -- is halved **once**; later chunks go
-straight to the halves, and a half still too large ends the check as `error`
-(stage `request`). Until 2026-09-27 it was halved again and again.
-
-**The note's wording** (fix-hfbr, partial; fix-03lt). The head line and the
-step list are the measured ones and are unchanged. The tail now reads: "Run any
-that are still needed, or say in your answer why not. Do not repeat a change
-this turn's record shows was already made, and do not make a change the user
-has not confirmed: ask them instead. Skip any step the user has since declined
-or changed. You have N steps left." (until 2026-09-27: "Run them if they are
-still needed, or say in your answer why they were not. You have N steps
-left."). About one flag in four names a step that did run, and the checked plan
-is the initial one even after the user answered an `ask_user` question, so the
-note now tells the agent not to repeat a change, not to bypass confirmation,
-and to skip what the user declined. The tail is not measured. It asks for
-confirmation in words only: a framework-owned approval gate is fix-47a9, which
-fix-hfbr still waits on. (Since 2026-09-28 fix-47a9 is deferred and fix-hfbr
-no longer waits on it: see the next paragraph.)
-
-**Only provably read-only steps are checked** (fix-hfbr, 2026-09-28). A step
-the check would hold the agent to is asked about only if every command it and
-its parts name is declared `read_only` in the workflow's runtime manifest
-(`finish_check.command_effects`: the metadata `register_runtime_metadata`
-retained at CLI or FastAPI startup, else `workflow_runtime.json` merged over
-the core manifest; a plan's command is matched by its last `/` segment, taking
-the most severe kind among the keys sharing that name). A step naming a
-`write` command, or one the manifest does not declare (`unknown`), is never
-asked about, its text is left out of `plan_steps`, and it is never named in
-the note -- so a false flag cannot drive a repeated change or a change the
-user has not confirmed. A step naming no command is still checked; "does step
-k need a command?" decides it. Undeclared counts as not read-only here, the
-safe direction for a note that asks the agent to act (the owner's "treat
-undeclared commands as read-only" decision was for fix-47a9's approval gate,
-not for this). A missing manifest, one that fails to parse or merge, or a
-lookup that raises makes every command `unknown`, so such a workflow has only
-its command-less steps checked; nothing raises. The lookup is read from the
-bound app workflow when the agent is built. Replayed on the 82 recorded ido
-attempts with ido's manifest (cached answers, no new calls): flags on write
-steps 7 to 0 (23 before user-gated steps were skipped), precision 0.80, recall
-0.88 to 0.87.
-
-Every finish of an agent with the check attached records one `finish_check`
-event, with a `reason` even when nothing was asked: `disabled` (finish
-reminders switched off with `FW_EVAL_FINISH_REMINDERS=0`), `cap reached` (this turn's note already fired),
-`no plan`, `nothing to check` (every step optional or user-gated),
-`no room to act`, `error`, `every step executed` or `unexecuted steps`. A
-check that ran also records questions, requests, splits, tokens, latency,
-`flagged_steps` -- each by step index and subject index into the plan's
-subjects, with the subject kind and `p_unmet`, never step or subject text
-(fix-7scj) -- and `scores`, one entry per checked step x subject (x part) with
-`applies`, `executed` and `unmet`, capped at 200 with the rest counted in
-`scores_truncated`. When the check runs and is traced there is also an
-`fw.finish_check` span, closed even when the check raises. With the check off
-no event is recorded. Install with the `jev` extra.
-
-Since 2026-09-27 the reasons also include `policy_withheld` (a value the check
-would send could not be sent redacted, at ledger build or at call time:
-nothing is sent, `requests` is 0, no warning, no `error_*` fields; spelled with
-an underscore, unlike the others), `subjects capped` (above) and `ledger
-incomplete` (above). `subjects capped` replaces `every step executed` /
-`unexecuted steps` on a capped check -- `fired` and `flagged_steps` say what it
-found -- and `policy_withheld` and `error` take precedence over it. `ledger
-incomplete` is decided right after `no plan`. Since 2026-09-28 there is also
-`no read-only steps`, decided right after `nothing to check`: some step would
-be held to the plan, but every such step names a command not declared
-read-only, so nothing is sent. New fields:
-
-| field | on | meaning |
-|---|---|---|
-| `provider` | every event | the flag value that selected who answers: `jev` or a registered provider's name (fix-5uva) |
-| `calibration` | every event | `"ido-v7-2026-09"`, what the thresholds and wording were calibrated on (fix-ft18); on events only, not on the `fw.finish_check` span |
-| `vendor_calls_in_flight` | every event, when above 0 | vendor worker slots held when the event was built, abandoned calls included (since 2026-09-28) |
-| `vendor_calls_orphaned` | every event, when above 0 | abandoned vendor requests still running after their worker slot was given back (`jev_client.calls_orphaned`); at 8 (`ORPHANED_CALLS_MAX`) new calls are refused as `VendorBusy` (since 2026-09-28) |
-| `user_replies` | every event | how many `ask_user` steps the turn's trajectory holds (fix-03lt) |
-| `unchecked_for_effect` | every event recorded once the plan is read (from `nothing to check` on) | how many steps the check would hold the agent to were skipped as not provably read-only (fix-hfbr, since 2026-09-28) |
-| `no_plan_cause` | `no plan` | `planner_empty` (the planner returned nothing), `plan_unreadable` (no steps could be read from it), `lost_on_resume` (resumed from a session state written without the plan) or `not_planned` (fix-ju1v) |
-| `vendor_ms` | a check that ran | the turn's cumulative vendor time, all features together (fix-sotm) |
-| `subjects_capped` | a check that ran | 0, or the subject count when the plan was over `SUBJECTS_MAX` (fix-az9q) |
-| `ledger_bytes`, `ledger_rows_trimmed` | a check that ran | the ledger's size as sent, and how many rows lost a field to fit (fix-az9q) |
-| `error_status`, `error_request_id`, `error_code`, `error_stage` | `error` | HTTP status, the vendor's request id, a single machine-readable token from the error body (never its text), and where it failed: `ledger`, `request`, `budget` (`OutOfTime`), `check` or `note` (fix-conv) |
-
-`error_type` is the error's class name: `CallTimedOut` (a call cut off at its
-own cap) and `VendorBusy` (every vendor worker busy, or 8 abandoned requests
-still running) are at stage `request`,
-`OutOfTime` (the check's or the turn's time ran out) at stage `budget`. A
-`build_ledger` failure is logged with its traceback. The span's attributes and
-contract version are unchanged.
-
-### Decision providers, endpoint and vendor time
-
-Both decision-model features -- the router and the finish check -- share this
-plumbing (`observation_offloading/jev_client.py`, `decision.py`). All of it is
-new on 2026-09-27; with `FW_FINISH_CHECK` and `FW_SEARCH_ROUTER` unset, none of
-it runs except the SDK log filter.
-
-**Activation.** A set flag that cannot take effect logs one warning per cause
-per process and the feature stays off. The causes are now: a value that is
-neither `jev` nor a registered provider's name; `typesafe-sdk` not installed;
-no `JEV_API_KEY`; a rejected `FW_JEV_BASE_URL` (fix-2so9); and
-`FW_OFFLOAD_EVIDENCE_REDACTION=off` (fix-7tz5). The redaction cause reads
-"`<FLAG>=jev but <cause>; <feature> stays off`" and is checked last, so an SDK
-or key problem is reported first. Every value sent then passes
-`jev_client.egress`, which returns nothing to send when redaction is off: the
-per-value backstop behind `policy_withheld`.
-
-**Endpoint** (fix-2so9). Both features send their key and payloads to
-`FW_JEV_BASE_URL`, default `https://api.typesafe.ai` (the SDK's own default),
-read from the env file first, then the process. It must be `https`, or plain
-`http` only to a loopback address (a local stand-in), with no credentials,
-query or fragment and a well-formed port; anything else logs one warning that
-does not include the URL, and both features stay off. A non-default host is
-logged once at INFO. The SDK's own `TYPESAFE_BASE_URL` is **ignored**, with one
-warning: the client is always built with an explicit endpoint, so a variable
-in the process environment can no longer redirect the key and payloads.
-
-**SDK logging** (fix-qgeu). The SDK logs whole request and response bodies,
-unredacted, at DEBUG. A filter attached to the `typesafe_sdk` logger when
-`jev_client` imports the SDK drops those records whatever the log levels,
-keeping its INFO status line (status, latency, request id). There is no opt-in.
-
-**Failures** (fix-conv). A failure is warned about at most once per five
-minutes (`FAILURE_WARN_INTERVAL_SECONDS`) per (feature, error type, HTTP
-status), saying how many more like it were not logged since the last warning;
-until 2026-09-27 each kind was warned about once per process, and the note's
-own failures without limit.
-
-**Vendor time** (fix-i94q, fix-sotm). The SDK's timeout is per network phase,
-so a body trickled in slices, or a slow resolver, outlasted it many times over.
-Every call now runs on its own daemon worker thread, at most `VENDOR_WORKERS`
-(4) process-wide, and the caller waits at most `min(cap, time left)`: the cap
-is 2 s for a routing call and 4 s for a finish-check call; the time left is the
-smaller of the caller's own deadline (the finish check's 8 s) and the turn's
-`TurnBudget`, `TURN_VENDOR_SECONDS` (10 s) of time actually spent waiting on
-vendor calls by every feature together. Past that the request is abandoned and
-the caller fails open; it is never retried and never delays interpreter exit.
-A call with under 0.05 s left is not sent. When all four workers are busy a
-call fails at once with `VendorBusy` ("vendor busy") instead of queueing. The
-SDK's own timeout is set to the cap plus 0.5 s, so the cutoff always decides.
-(Since 2026-09-28 every call passes it explicitly -- a call cut at its own cap
-included, the client's own timeout kept when shorter -- and an abandoned call
-gives its worker slot back at most 0.5 s after its cutoff even when a trickled
-body keeps the request running; such requests are counted by
-`jev_client.calls_orphaned`. Their threads and sockets are bounded instead:
-while `ORPHANED_CALLS_MAX` (8) of them still run, every new call fails at once
-with `VendorBusy` and sends nothing, until they end.)
-A new turn gets a fresh budget and a resume in the same process keeps it. The
-limits are module constants; there are no settings for them.
-
-**Providers** (fix-5uva, stages 1-2). The features ask vendor-neutral questions
-(`decision.YesNo`, `decision.OneOf`) of a `decision.DecisionProvider`; Jev is
-the built-in one (`jev_client.JevProvider`). Code already running in the
-process may register another with
-`decision.register_decision_provider(name, factory)` (and
-`unregister_decision_provider`) and select it by setting `FW_FINISH_CHECK` or
-`FW_SEARCH_ROUTER` to its name; nothing reads a module path from the
-environment. Names are case-insensitive; `jev`, the off values and malformed
-names are refused. The factory takes no arguments, is built once per
-registration and shared by both features; one that raises, or returns
-something that is not a provider, warns once and the feature stays off.
-Selecting a registered provider warns once per flag that the thresholds and
-questions were calibrated with Jev, and with one `JEV_API_KEY`,
-`FW_JEV_BASE_URL` and the `*_MODEL` flags are not read (the event's `model`
-comes from the provider's `model` attribute). The capture-policy gate applies
-to every provider, including one with `third_party=False`. A LiteLLM-backed
-provider (stage 3) is deferred. The request bodies Jev receives are pinned by
-a golden test (`tests/test_decision_provider.py`).
-
-**The SDK is pinned exactly** (fix-em0l): `typesafe-sdk = "0.7.2"`, so
-`pip install 'fastworkflow[jev]'` no longer picks up a later 0.7.x. A bump must
-rerun the SDK contract test (`tests/test_jev_client.py::test_the_sdk_surface_fastworkflow_uses`)
-and the golden request-body tests in `tests/test_decision_provider.py`.
+imports through `search` are unchanged, and behaviour is unchanged.)
 
 ## Retention, redaction and known limits
 
@@ -1221,11 +631,6 @@ could not put back is appended afterwards rather than reserved inside it. It
 costs a few hundred bytes at most, and it is worth more than the evidence those
 bytes would have bought.
 
-**The bounded-evidence notice is added after the evidence budget.** On the same
-terms: when the observation handed to the search model was cut to its byte bound,
-the one-line notice saying so is appended after the bound. The model input can
-therefore exceed the evidence budget by roughly two hundred bytes.
-
 **After a restart, one search answer can come back over its bound.** Bounding an
 answer requires archiving the complete text first, under a key numbered by a
 per-scope counter that lives in process memory. A turn resumed in a fresh process
@@ -1238,20 +643,6 @@ When the session manager evicts a suspended session, the per-session bookkeeping
 on the offload path is not freed with it. Both parts are capped — the hot
 observation cache by bytes, the in-process event buffer at 2,000 events — so the
 residue is small and bounded per session, but it is held until the process exits.
-
-**An abandoned vendor request may still be billed.** A decision-model call cut
-off at its hard wall-clock bound is abandoned, not cancelled: the request may
-still complete vendor-side, and cost tokens, after the turn has moved on. It is
-never retried, and its daemon thread holds one of the four worker slots until
-it ends by itself. (Since 2026-09-28 the slot is given back at most 0.5 s after
-the cutoff; the thread may run on, counted by `jev_client.calls_orphaned`. While
-8 such threads run, new vendor calls are refused as `VendorBusy`: a vendor
-endpoint that keeps trickling can switch both features off until it stops.)
-
-**A turn resumed in another process starts a fresh vendor budget.** The
-per-turn 10-second vendor budget and 3-call routing cap live in the agent, not
-in the suspended session state, so a cross-process `ask_user` resume can spend
-another full budget.
 
 **Broad scopes still read other channels' evidence by alias.** Under the
 process-default scope and the between-turns fallback, `list_summaries`
@@ -1275,23 +666,19 @@ lengthening both label and decision, a 3 KB listing page older than the protecte
 five offloaded when over target, a 1.2 KB result kept, short facts untouched, the
 recency five protected before any label is built, the printed alias line excluded from
 the measured saving, the eager archive holding both the kept and the offloaded
-observation, search answers still never offloaded, the environment override in
-both directions with bad values falling back, and the replan skeleton applying
-the same minimum.
+observation, search answers still never offloaded, the environment override in both directions with bad values falling back.
 
-Focused tests cover labels, byte/character savings, replan persistence, scoped
-resolution, required keys, current-step reasoning, archive eviction and existing
-continuation behavior. `PrintedObservationHandles` covers the printed handle:
-interleaved tools, truncation via `ordinal_offset`, the replan skeleton, the
-inline/label/archive alias being one identifier, savings accounting with the
-added line, and an unknown handle staying an explicit miss.
-`EagerObservationArchive` covers the eager archive: observations archived whether
-or not they are offloaded, an inline and an offloaded search receiving the same
-bytes and digest, eviction and a cleared cache resolving from SQLite, repeated
-persistence keeping one row, another turn's alias staying invisible, a failed or
-conflicting write keeping the inline evidence and recording `archive_refused`,
-the `still_inline` flag, archiving under the printed alias in the
-`alias_conflict` case, and the replan skeleton persisting without a second row.
+Focused tests cover labels, byte/character savings, scoped resolution, required
+keys, current-step reasoning, archive eviction, and offloading ReAct behavior.
+`PrintedObservationHandles` covers the printed handle: interleaved tools,
+context-window truncation, the inline/label/archive alias being one identifier
+per step index, savings accounting with the added line, and an unknown handle
+staying an explicit miss. `EagerObservationArchive` covers the eager archive:
+observations archived whether or not they are offloaded, an inline and an
+offloaded search receiving the same bytes and digest, eviction and a cleared
+cache resolving from SQLite, repeated persistence keeping one row, another
+turn's alias staying invisible, a failed or conflicting write keeping the
+inline evidence and recording `archive_refused`, and the `still_inline` flag.
 `BoundedSearchAnswers` covers the search output bound: every recorded answer size
 presented unchanged, a long answer bounded, marked and archived whole, the cut
 landing on a line boundary with identifiers intact, a newline-free answer cut on
@@ -1301,7 +688,7 @@ retrievable by the key the marking names and invisible to another scope, repeate
 searches keeping one record each, the record key rejected by `search_memory` and
 never offered as a handle, a failed answer archive keeping the complete answer
 inline, a bounded observation getting no `O` alias and not being archived as one,
-and the packed and replan cost of a search staying inside the budget.
+and the packed cost of a search staying inside the budget.
 Provider tests are opt-in:
 
 ```bash

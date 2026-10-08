@@ -472,7 +472,6 @@ __all__ = (
     "time",
     "tracing",
     "turn",
-    "turn_plan",
     "utils",
     "workflow",
     "workflow_execution_context",

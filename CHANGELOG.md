@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Observation handles use the ReAct step index** (`O0`, `O1`, …): execute ordinals,
+  `ordinal_offset`, forced-replan continuation segments, and `alias_conflict` are
+  removed. `OffloadingReAct` replaces `StructuredContinuationReAct`; max-iters
+  exhaustion follows the base ReAct loop.
+
 Releases before 3.4.0 were announced in their merge-commit subjects
 (`feat: v3.2.0 — observability store, chatbot debug UI, …`) and are recoverable
 with `git tag` and `git log --first-parent main`. This file starts at 3.4.0; it

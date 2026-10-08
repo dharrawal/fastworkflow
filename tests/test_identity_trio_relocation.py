@@ -30,7 +30,6 @@ class FakeAgent:
             "observation_0": "done",
             "tool_name_1": "execute_workflow_query",
         }
-        self.execute_ordinal_by_step = {0: 1, 1: 2}
 
 
 class FakeHost:
@@ -72,8 +71,8 @@ class TrioLivesOnState(unittest.TestCase):
         self.assertEqual(state._current_agent.__module__,
                          "fastworkflow.observation_offloading.state")
 
-    def test_alias_reads_the_in_flight_step_from_the_ledger(self):
-        self.assertEqual(current_execute_alias(FakeAgent()), "O2")
+    def test_alias_reads_the_in_flight_step_index(self):
+        self.assertEqual(current_execute_alias(FakeAgent()), "O1")
 
     def test_scope_falls_back_to_the_process_default(self):
         self.assertEqual(current_scope(), default_scope())
@@ -96,7 +95,7 @@ class DispatchRecordsANonEmptyClause(unittest.TestCase):
 
         with tracing.host_scope(self.host):
             alias = current_execute_alias()
-            self.assertEqual(alias, "O2")
+            self.assertEqual(alias, "O1")
             CommandExecutor._remember_execute_context(session)
             clause = context_clause_of(current_scope(), alias)
 

@@ -25,24 +25,16 @@ from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.observation_offloading.agent import build_tool_agent, remember_dispatched_command
 # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
 # from fastworkflow.observation_offloading.archive import capture_record_for
-from fastworkflow.observation_offloading.finish_check import record_dispatch
-from fastworkflow.workflow_execution_context import (
-    TURN_PLAN_NOT_PLANNED,
-    TURN_PLAN_PLANNED,
-    TURN_PLAN_PLANNER_EMPTY,
-    TURN_PLAN_UNREADABLE,
-)
-from fastworkflow.turn_plan import (
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # STRUCTURED_PLAN_GUIDE,
-    # PlanStep,
-    # PlanSubject,
-    TurnPlan,
-    parse_text_plan,
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # render,
-    workflow_command_names,
-)
+# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+# from fastworkflow.turn_plan import (
+#     STRUCTURED_PLAN_GUIDE,
+#     PlanStep,
+#     PlanSubject,
+#     TurnPlan,
+#     parse_text_plan,
+#     render,
+#     workflow_command_names,
+# )
 
 #: The internal workflow every output of a command stopped before the
 #: application carries as its workflow_name.
@@ -449,15 +441,6 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     cme_workflow = chat_session_obj.cme_workflow
     nlu_stage = cme_workflow.context.get("NLU_Pipeline_Stage")
 
-    # For the finish check's ledger: did this step reach a command? Recorded
-    # before the error-state branches below, which abort and re-record it as
-    # not run. go_up and reset_context are CME commands that succeed, so they ran.
-    record_dispatch(
-        getattr(chat_session_obj, "workflow_tool_agent", None),
-        ran=not (nlu_stage in _NOT_RUN_STAGES or (
-            command_output.workflow_name == CME_WORKFLOW_NAME and not command_output.success)),
-    )
-
     # Intent ambiguity / misunderstanding: the NLU's reply already lists the
     # candidate commands (ambiguity) or this context's commands (misunderstanding),
     # so the agent chooses from it. Abort first so its next command is routed
@@ -467,14 +450,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
     ):
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
-        # The abort ran; the step it cleared up after did not.
-        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
         return f'{response_text}\n{abort_confirmation}'
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
-        # The abort ran; the step it cleared up after did not.
-        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
         # Thread the active planning context so replanning uses the same planner LM
         # and insights as the current turn (critical for distillation: otherwise
         # replans silently fall back to LLM_PLANNER instead of the teacher/student LM).
@@ -685,31 +664,6 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
     )
 
 
-def finish_check_active(agent) -> bool:
-    """Whether the finish-time check will verify the plan made for *agent*'s turn.
-
-    The one decision the planner and the agent share: a check attached when the
-    agent was built, and not switched off by ``FW_EVAL_FINISH_REMINDERS=0``. With
-    it off, nothing the check adds runs -- no note, and no structured plan.
-
-    Structured planning is disabled (2026-09-28): with the check active the
-    planner still makes a plain-text plan, parsed for the check by
-    ``parse_text_plan``; this decision still gates that parse and the plan's
-    seeding and restore.
-    """
-    return (getattr(agent, "finish_checker", None) is not None
-            and bool(getattr(agent, "finish_reminders_enabled", True)))
-
-
-def _text_turn_plan(plan_text: str, workflow_path: str) -> TurnPlan | None:
-    """The finish check's plan recovered from plain text; None if it cannot be."""
-    try:
-        return parse_text_plan(plan_text, workflow_command_names(workflow_path))
-    except Exception as error:  # noqa: BLE001 - a plan the check cannot read must not fail the turn
-        logger.warning(f"text plan not parsed ({type(error).__name__}); the finish check has no plan")
-        return None
-
-
 # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
 # def _redacted_subject_names(turn_plan: TurnPlan | None) -> list[str]:
 #     """The plan's subject names as the credential scrub would store them."""
@@ -844,13 +798,6 @@ def build_query_with_next_steps(user_query: str,
             "replan_trigger": trace_trigger,
         },
     )
-    # The turn's INITIAL plan is what the finish check verifies; a replan
-    # (trace_trigger set) never replaces it. Cleared first so a turn whose
-    # planning fails is never checked against the previous turn's plan.
-    if trace_trigger is None:
-        chat_session_obj._turn_plan = None
-        chat_session_obj._turn_plan_status = TURN_PLAN_NOT_PLANNED
-
     # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
     # def plan_with(structured: bool):
     def plan_with():
@@ -901,12 +848,6 @@ def build_query_with_next_steps(user_query: str,
     # # requests: median 12.1 s structured against 3.7 s plain text). A
     # # deployment without the check keeps the plain-text planner it always had,
     # # and so does a replan: only the turn's initial plan is ever checked.
-    # structured = trace_trigger is None and finish_check_active(
-    #     getattr(chat_session_obj, "workflow_tool_agent", None))
-    # Only the turn's initial plan is ever checked, so a replan is not parsed.
-    check_active = trace_trigger is None and finish_check_active(
-        getattr(chat_session_obj, "workflow_tool_agent", None))
-    turn_plan: TurnPlan | None = None
     plan_text = ""
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
@@ -929,16 +870,10 @@ def build_query_with_next_steps(user_query: str,
             #         logger.warning(
             #             f"structured planner failed ({type(structured_error).__name__}); "
             #             "using the plain-text planner")
-            if turn_plan is None:
-                # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-                # prediction = plan_with(structured=False)
-                prediction = plan_with()
-                plan_text = prediction.next_steps or ""
-                # Only the finish check reads a text plan's steps back out.
-                # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-                # if structured:
-                if check_active:
-                    turn_plan = _text_turn_plan(plan_text, current_workflow.folderpath)
+            # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+            # prediction = plan_with(structured=False)
+            prediction = plan_with()
+            plan_text = prediction.next_steps or ""
     except BaseException:
         tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
         raise
@@ -965,22 +900,8 @@ def build_query_with_next_steps(user_query: str,
         },
     )
 
-    # Why the finish check has the plan it has; only a plan made for it counts.
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # if trace_trigger is None and structured:
-    if check_active:
-        if turn_plan is not None and turn_plan.steps:
-            chat_session_obj._turn_plan_status = TURN_PLAN_PLANNED
-        elif not plan_text:
-            chat_session_obj._turn_plan_status = TURN_PLAN_PLANNER_EMPTY
-        else:
-            chat_session_obj._turn_plan_status = TURN_PLAN_UNREADABLE
-
     if not plan_text:
         return user_query
-
-    if trace_trigger is None:
-        chat_session_obj._turn_plan = turn_plan
 
     generated_plan = plan_text.split()
     # Capture the generated plan for distillation when a capture list is present

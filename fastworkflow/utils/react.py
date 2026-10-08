@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import re
@@ -14,31 +13,9 @@ from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 
 from fastworkflow import tracing
-from fastworkflow.context_budget import env_value
 from fastworkflow.utils.dspy_logger import DSPyForward
 
 logger = logging.getLogger(__name__)
-
-# Temporary disable-only controls retained for controlled runs and provenance.
-# Historical four-arm reproduction uses its pinned revisions.
-EVAL_FINISH_REMINDERS_ENV = "FW_EVAL_FINISH_REMINDERS"
-
-
-def _evaluation_control(
-    name: str, *, default_enabled: bool = True
-) -> tuple[bool, str | None]:
-    """Read a disable-only control the way ``FW_FINISH_CHECK`` is read.
-
-    The workflow's ``fastworkflow.env`` first, then the process; an empty value
-    is unset. Anything set other than ``0`` is refused, so a stray ``=1`` fails
-    the agent build instead of silently running the default arm.
-    """
-    raw = env_value(name)
-    if not raw:
-        return default_enabled, None
-    if raw != "0":
-        raise ValueError(f"{name} must be exactly 0 when set")
-    return False, raw
 
 if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
@@ -96,15 +73,6 @@ class fastWorkflowReAct(Module):
         self.signature = signature = ensure_signature(signature)
         self.max_iters = max_iters
         self.iteration_counter = 0
-        self.finish_reminders_enabled, reminder_override = _evaluation_control(
-            EVAL_FINISH_REMINDERS_ENV
-        )
-        self.evaluation_control_overrides = {
-            name: value
-            for name, value in ((EVAL_FINISH_REMINDERS_ENV, reminder_override),)
-            if value is not None
-        }
-
         tools = [t if isinstance(t, Tool) else Tool(t) for t in tools]
         tools = {tool.name: tool for tool in tools}
 
@@ -161,28 +129,11 @@ class fastWorkflowReAct(Module):
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
-        # How many finish-check notes this TURN has injected (ido-8ps.27's roster
-        # nudge until fix-4dsr). The cap is one, so a turn can be reminded and
-        # can then still decide it is done.
-        self._finish_notes_fired = 0
-        # Attached by the builder (observation_offloading/agent.py): the
-        # finish-time execution check and where to read the turn's plan. None
-        # means no check.
-        self.finish_checker = None
-        self.plan_source = None
         # How many times the context-window fallback has truncated a trajectory
         # in this process. Only read as a delta around one call (ido-8ps.18, to
         # tell an extract that overflowed from one that did not); it changes
         # nothing about what the fallback does.
         self._truncation_count = 0
-
-    def _note_step(self, idx: int, tool_name: str) -> None:
-        """A step has been chosen and mirrored, and has not been dispatched yet.
-
-        A no-op here. ``StructuredContinuationReAct`` overrides it to assign the
-        step's ``O`` ordinal, which has to be decided before the tool runs
-        because the command inside the tool declares a result handle under it.
-        """
 
     def clear_suspension(self) -> None:
         """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
@@ -199,7 +150,6 @@ class fastWorkflowReAct(Module):
             "max_iters": self._suspended["max_iters"],
             "clarification": self._suspended.get("clarification"),
             "iteration_counter": self.iteration_counter,
-            "finish_notes_fired": getattr(self, "_finish_notes_fired", 0),
         }
 
     def import_suspended(self, data: dict[str, Any]) -> None:
@@ -212,26 +162,6 @@ class fastWorkflowReAct(Module):
             "clarification": data.get("clarification"),
         }
         self.iteration_counter = data.get("iteration_counter", 0)
-        # A suspension exported before the roster nudge was replaced carries its
-        # count under the old key; the cap it enforces is the same.
-        self._finish_notes_fired = data.get(
-            "finish_notes_fired", data.get("roster_nudges_fired", 0)
-        )
-        # The finish check reads the turn's steps from current_trajectory, which
-        # starts empty in a process that only imported this suspension. Only
-        # with a check attached is it seeded, from a copy of the stash (the two
-        # must stay separate objects), so without one nothing changes. The
-        # stash holds what survived the context-window fallback, not
-        # necessarily every step: ``mirror_restored`` says the mirror came
-        # from it. "Attached" means active (``workflow_agent.finish_check_active``,
-        # not imported here: it imports this module): a check switched off by
-        # FW_EVAL_FINISH_REMINDERS=0 seeds nothing either.
-        self.mirror_restored = False
-        if (not getattr(self, "current_trajectory", None)
-                and getattr(self, "finish_checker", None) is not None
-                and bool(getattr(self, "finish_reminders_enabled", True))):
-            self.current_trajectory = dict(self._suspended["trajectory"])
-            self.mirror_restored = True
 
     def planner_view(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """The request and trajectory a mid-turn replan plans from.
@@ -268,7 +198,6 @@ class fastWorkflowReAct(Module):
         # working `trajectory` below (which is what gets stashed in _suspended),
         # so mirroring into it never corrupts suspend/resume bookkeeping.
         self.current_trajectory = {}
-        self._finish_notes_fired = 0
 
         trajectory: dict[str, Any] = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
@@ -431,11 +360,6 @@ class fastWorkflowReAct(Module):
             self.current_trajectory[f"action_{idx}"] = (
                 f"{pred.next_tool_name}: {pred.next_tool_args}"
             )
-            # The step exists and its tool is known, and nothing has dispatched
-            # yet: the one moment a subclass can number it before any code the
-            # tool calls asks what its number is (ido-7qd).
-            self._note_step(idx, pred.next_tool_name)
-
             try:
                 observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
                 trajectory[f"observation_{idx}"] = observation
@@ -485,21 +409,6 @@ class fastWorkflowReAct(Module):
                 )
                 raise
 
-            # ido-8ps.27 / fix-4dsr: the one interception point. The finish action has been
-            # recognised and its "Completed." observation written, the answer
-            # has NOT been extracted yet, and the loop is by definition not
-            # exhausted. If the finish check finds plan steps the turn's record
-            # shows no command carrying out, and there is budget to reach them,
-            # the observation of this step becomes a bounded note naming them
-            # and the loop continues. At most one per turn; never on
-            # exhaustion; never an ask_user round.
-            nudge = ""
-            if pred.next_tool_name == "finish":
-                nudge = self._intercept_finish(trajectory, idx, input_args, max_iters)
-                if nudge:
-                    step_attributes["observation"] = nudge
-                    step_attributes["finish_check_note"] = True
-
             tracing.end_span(
                 host, step_span, status=step_status, attributes=step_attributes
             )
@@ -514,7 +423,7 @@ class fastWorkflowReAct(Module):
             if on_step_complete and not on_step_complete(idx, trajectory):
                 break
 
-            if pred.next_tool_name == "finish" and not nudge:
+            if pred.next_tool_name == "finish":
                 break
 
             idx += 1
@@ -526,43 +435,9 @@ class fastWorkflowReAct(Module):
 
         return None
 
-    def _intercept_finish(self, trajectory, idx, input_args, max_iters) -> str:
-        """The finish action's one interception point, for BOTH loops.
-
-        The note, and the rule that a fired note REPLACES this step's
-        observation and returns control to the loop, used to live inline in
-        ``_run_loop`` -- so ``aforward`` recognised finish and broke with no
-        note and no fired-note bookkeeping: two loops, two different
-        behaviours for the same rule.
-        The note and the trajectory writes are here; what stays with each loop
-        is what only that loop has -- the sync loop's step span attributes.
-
-        Returns the note, or ``""`` when there is none, which is what each loop
-        tests to decide whether to break on the finish action.
-        """
-        nudge = self._finish_check_note(input_args, max_iters)
-        if nudge:
-            trajectory[f"observation_{idx}"] = nudge
-            self.current_trajectory[f"observation_{idx}"] = nudge
-        return nudge
-
     async def aforward(self, **input_args):
         trajectory = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
-        # The per-TURN state the note's "at most one" is counted in, reset here
-        # for the same reason `forward` resets it (ido-dpx/F15): this call is a
-        # logical turn, and a turn inherits neither the previous turn's mirror
-        # nor its note count.
-        self.current_trajectory = {}
-        self._finish_notes_fired = 0
-        # The rest of the per-turn state the synchronous entry
-        # (``StructuredContinuationReAct.forward``) resets: the finish check's
-        # dispatch outcomes and incomplete-ledger mark, and one vendor budget
-        # per turn for routing and the check together.
-        self.dispatch_outcomes = {}
-        self.ledger_incomplete = False
-        budget_factory = getattr(self, "vendor_budget_factory", None)
-        self.vendor_budget = budget_factory() if callable(budget_factory) else None
         for idx in range(max_iters):
             try:
                 pred = await self._async_call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
@@ -586,73 +461,12 @@ class fastWorkflowReAct(Module):
                 trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
 
             if pred.next_tool_name == "finish":
-                # A fired nudge replaces this step's observation and returns
-                # control to the loop; no nudge ends the turn, as before.
-                # The check makes blocking HTTP calls, so it runs off the event loop;
-                # with no check attached there is nothing to intercept and no thread hop.
-                if getattr(self, "finish_checker", None) is None or not await asyncio.to_thread(
-                    self._intercept_finish, trajectory, idx, input_args, max_iters
-                ):
-                    break
-            # What `_finish_check_note` reads to know how much room is left. The sync
-            # loop has always counted its steps here; without the same count the
-            # async loop would offer a note on a turn with nothing left to do.
+                break
+
             self.iteration_counter += 1
 
         extract = await self._async_extract_prediction(trajectory, **input_args)
         return dspy.Prediction(trajectory=trajectory, **extract)
-
-    def _finish_check_note(self, input_args, max_iters) -> str:
-        """The finish-time execution check's note, or ``""``.
-
-        Called from ``_intercept_finish``, the one place a finish action is
-        recognised, before answer extraction. The check itself
-        (``fastworkflow.observation_offloading.finish_check``) is attached by whoever builds the agent
-        as ``finish_checker``; without one, or with it switched off, there is no
-        note and the turn finishes as it always did.
-
-        ``iterations_left`` is what the agent would still have AFTER spending
-        this step on the note: the loop increments the counter once more and
-        stops at ``max_iters``. The check declines below its minimum, which is
-        how "never on exhaustion" is kept -- a turn with no room is a turn the
-        note cannot help. That gate is this segment's room only. A segmented
-        agent (``later_segment_iterations``) restarts its counter at every
-        segment, so the count the note STATES adds what its later segments
-        still hold (``shown_iterations_left``); it does not change when the
-        note may fire.
-
-        A finish not offered to an attached check (switched off, or this turn's
-        note already spent) is still recorded by it (``record_skip``); with no
-        check attached nothing is recorded.
-        """
-        checker = getattr(self, "finish_checker", None)
-        if checker is None:
-            return ""
-        left = int(max_iters) - int(getattr(self, "iteration_counter", 0)) - 1
-        skipped = ("disabled" if not getattr(self, "finish_reminders_enabled", True)
-                   else "cap reached" if getattr(self, "_finish_notes_fired", 0) >= 1 else "")
-        if skipped:
-            record_skip = getattr(checker, "record_skip", None)
-            if callable(record_skip):
-                try:
-                    record_skip(self, reason=skipped, iterations_left=left)
-                except Exception as error:  # noqa: BLE001 - recording must never fail a turn
-                    logger.warning("finish check event not recorded: %s", type(error).__name__)
-            return ""
-        try:
-            later = getattr(self, "later_segment_iterations", None)
-            later_room = int(later(max_iters)) if callable(later) else 0
-            if later_room > 0:
-                text = checker.note(self, input_args, iterations_left=left,
-                                    shown_iterations_left=max(0, left) + later_room)
-            else:
-                text = checker.note(self, input_args, iterations_left=left)
-        except Exception as error:  # noqa: BLE001 - a note must never fail a turn
-            logger.warning("finish check skipped: %s: %s", type(error).__name__, error)
-            return ""
-        if text:
-            self._finish_notes_fired = getattr(self, "_finish_notes_fired", 0) + 1
-        return text
 
     def _rehydrate_for_extract(self, trajectory):
         """``(trajectory_for_the_extractor, report, budget, scope_id)``.
@@ -679,13 +493,11 @@ class fastWorkflowReAct(Module):
             }
         )
         try:
-            pairs = getattr(self, "execute_ordinal_pairs", None)
             rehydrated, report = answer_rehydration.rehydrate(
                 trajectory,
                 scope=scope,
                 archive=getattr(self, "observation_archive", None),
                 budget=budget,
-                executes=pairs(trajectory) if callable(pairs) else None,
             )
         except Exception as error:  # noqa: BLE001
             logger.warning(

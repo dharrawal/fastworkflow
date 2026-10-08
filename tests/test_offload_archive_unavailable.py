@@ -194,7 +194,7 @@ class ArchiveInitialisationFailure(unittest.TestCase):
             task_id="t", attempt=0, turn_key="k",
         )
         with self.assertRaises(PersistenceError):
-            store.persist(scope, alias="O1", offload_order=1, command_name="c",
+            store.persist(scope, alias="O0", offload_order=1, command_name="c",
                           step_index=0, text="x", text_sha256="0" * 64)
         self.assertIsNone(store.get(scope, "O1"))
         self.assertEqual(store.list(scope), [])

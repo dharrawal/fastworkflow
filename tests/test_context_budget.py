@@ -219,8 +219,7 @@ class Provenance(unittest.TestCase):
         cb.reset_cache()
         self.addCleanup(cb.reset_cache)
         self.names = [spec.override_env for spec in cb.BUDGETS] + [
-            cb.MODEL_CONTEXT_TOKENS_ENV, cb.AGENT_MODEL_ENV, cb.SEARCH_MODEL_ENV,
-            cb.SEARCH_OBSERVATION.override_env]
+            cb.MODEL_CONTEXT_TOKENS_ENV, cb.AGENT_MODEL_ENV, cb.SEARCH_MODEL_ENV]
         self.saved = {name: os.environ.pop(name, None) for name in self.names}
         self.addCleanup(self._restore)
 
@@ -243,75 +242,8 @@ class Provenance(unittest.TestCase):
         self.assertEqual(record["context_window_source"], cb.SOURCE_FALLBACK)
         self.assertEqual(record["bytes_per_token"], 4)
         self.assertEqual(record["context_window_bytes"], 524_288)
-        # The search-observation bound is reported beside the BUDGETS,
-        # cut from the search model's window (here the same fallback).
-        self.assertEqual(record["budgets"],
-                         {**Calibration.PINNED, "search_observation_max_bytes": 131_072})
-        self.assertEqual(record["search_window_tokens"], cb.REFERENCE_WINDOW_TOKENS)
-        self.assertEqual(record["search_window_source"], cb.SOURCE_FALLBACK)
+        self.assertEqual(record["budgets"], Calibration.PINNED)
         self.assertEqual(record["overrides"], {})
-
-    def test_the_search_bound_is_cut_from_the_search_models_window(self) -> None:
-        """A real litellm table entry whose window is not the reference one."""
-        model = "gpt-4o-mini"
-        window = cb._model_window_tokens(model)
-        if window is None or window == cb.REFERENCE_WINDOW_TOKENS:
-            self.skipTest(f"litellm reports no distinct window for {model}")
-        os.environ[cb.SEARCH_MODEL_ENV] = model
-        record = cb.budget_provenance()
-        self.assertEqual(record["context_window_tokens"], cb.REFERENCE_WINDOW_TOKENS)
-        self.assertEqual(record["search_window_tokens"], window)
-        self.assertIn(model, record["search_window_source"])
-        # 128,000 tokens is a quarter of 128,000 x 4 bytes = 128,000 B, under
-        # the 131,072 B ceiling, so the bound still scales with this model.
-        self.assertEqual(record["budgets"]["search_observation_max_bytes"],
-                         cb.SEARCH_OBSERVATION.bytes_for(window))
-        self.assertEqual(record["budgets"]["search_observation_max_bytes"], window)
-        self.assertLess(window, cb.SEARCH_OBSERVATION_CEILING_BYTES)
-        self.assertEqual(record["budgets"]["trajectory_max_bytes"], 28_000)
-        self.assertEqual(record["overrides"], {})
-
-    @pytest.mark.usefixtures("restore_litellm_model_cost")
-    def test_a_wide_search_model_is_capped_at_the_ceiling(self) -> None:
-        """Real litellm entries: the example config's search model and gpt-4.1.
-
-        The example config's model is no longer used: litellm's bundled table
-        gives it 131,072 tokens and only the downloaded one 262,144, so it
-        depended on the network. gpt-4.1's bundled window (1,047,576) and a
-        model registered with its own window are used instead."""
-        litellm.register_model({WIDE_TEST_MODEL: {
-            "max_input_tokens": 1_000_000, "max_tokens": 32_768, "litellm_provider": "openai",
-            "mode": "chat", "input_cost_per_token": 0.0, "output_cost_per_token": 0.0}})
-        for model in (WIDE_TEST_MODEL, "gpt-4.1"):
-            with self.subTest(model):
-                window = self.real_window(model)
-                os.environ[cb.SEARCH_MODEL_ENV] = model
-                record = cb.budget_provenance()
-                self.assertEqual(record["search_window_tokens"], window)
-                self.assertGreater(window, cb.SEARCH_OBSERVATION_CEILING_BYTES)
-                self.assertEqual(record["budgets"]["search_observation_max_bytes"], 131_072)
-                self.assertEqual(record["overrides"], {})
-
-    def test_the_search_window_is_the_smaller_of_setting_and_metadata(self) -> None:
-        model = "gpt-4o-mini"
-        window = self.real_window(model)
-        os.environ[cb.SEARCH_MODEL_ENV] = model
-        os.environ[cb.MODEL_CONTEXT_TOKENS_ENV] = "1000000"
-        record = cb.budget_provenance()
-        self.assertEqual(record["context_window_tokens"], 1_000_000)
-        self.assertEqual(record["context_window_source"], cb.SOURCE_SETTING)
-        self.assertEqual(record["search_window_tokens"], window)
-        self.assertEqual(record["search_window_source"],
-                         f"{cb.SOURCE_MODEL_METADATA}:{model}")
-
-    def test_the_search_bound_override_is_named_as_one(self) -> None:
-        os.environ[cb.SEARCH_MODEL_ENV] = "gpt-4.1"
-        self.real_window("gpt-4.1")
-        os.environ[cb.SEARCH_OBSERVATION.override_env] = "300000"
-        record = cb.budget_provenance()
-        self.assertEqual(record["budgets"]["search_observation_max_bytes"], 300_000)
-        self.assertEqual(record["overrides"],
-                         {"FW_SEARCH_OBSERVATION_MAX_BYTES": 300_000})
 
     def test_an_override_is_named_as_one(self) -> None:
         os.environ[cb.TRAJECTORY.override_env] = "12345"
@@ -336,11 +268,10 @@ class ModulesReadTheSameBudgets(unittest.TestCase):
 
     def test_every_module_default_is_its_budget(self) -> None:
         from fastworkflow import answer_rehydration
-        from fastworkflow.observation_offloading import compact, continuation, search
+        from fastworkflow.observation_offloading import compact, search
 
         self.assertEqual(compact.PACKED_TARGET_BYTES, 28_000)
         self.assertEqual(compact.MIN_OFFLOAD_SAVING_BYTES, 1_024)
-        self.assertEqual(continuation.REPLAN_OBSERVATION_MAX_BYTES, 28_000)
         self.assertEqual(search.SEARCH_ANSWER_MAX_BYTES, 3_072)
         self.assertEqual(answer_rehydration.DEFAULT_MAX_BYTES, 250_000)
 

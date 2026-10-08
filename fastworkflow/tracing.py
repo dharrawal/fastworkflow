@@ -222,12 +222,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # fw.nlu.intent v3 keeps the known-name keys and does not carry
 # auto_navigation_enabled. Auto-navigation was removed.
 #
-# v6: fw.search.route added -- the optional decision-model call that routes a
-# search_memory request over a listing (observation_offloading/search_router.py).
+# v6: fw.search.route added -- a removed optional decision-model routing step
+# on search_memory over listings (span name kept for historical traces).
 # No existing span changed.
 #
-# v7: fw.finish_check added -- the optional finish-time execution check
-# (fastworkflow/observation_offloading/finish_check.py) -- and fw.agent.step v3 replaces the
+# v7: fw.finish_check added (historical; no longer emitted) -- and fw.agent.step v3 replaces the
 # `roster_nudge` attribute with `finish_check_note` (the roster nudge was removed).
 #
 # v8: fw.planner.plan / fw.planner.replan v2 -- `plan` may be the structured plan
@@ -338,13 +337,6 @@ PASS_STATUS_UNKNOWN = "unknown"
 # those are on the search's offload event, and copying them here would put them
 # in a second store.
 SPAN_SEARCH_ROUTE = "fw.search.route"
-
-# The finish-time execution check: the decision-model calls that judge, when the
-# agent chooses finish, which plan steps the turn's record shows executed. It
-# carries counts, cost and the outcome; the flagged steps themselves are on the
-# check's offload event, not here.
-SPAN_FINISH_CHECK = "fw.finish_check"
-
 
 # ----------------------------------------------------------------------
 # Per-emitter attribute contracts (arch §12.0 delta 5, FW-REQ-019 clause 3)
@@ -472,8 +464,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # request were never the subject of a command has its "Completed."
     # observation replaced by a bounded harness note and the loop continues, so
     # a reader counting tool results would otherwise count that note as one.
-    # v3: the same marker, renamed `finish_check_note`: the note now comes from
-    # the finish-time execution check (fix-4dsr), which replaced the roster nudge.
+    # v3: the same marker, renamed `finish_check_note` (fix-4dsr); no longer set.
     # v4: `repaired_tool_name` (fix-8q7a) is the workflow command the model named
     # as its tool; `tool_name`/`tool_args` are the execute_workflow_query call the
     # step ran instead.
@@ -500,7 +491,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `replan_trigger` is on both — None on a first plan says "this was the first
     # plan", where an absent key would only say "older record".
     # v2: `plan` is the structured plan rendered as a numbered list with
-    # "(optional)" / "(needs the user)" flags when the finish check is on;
+    # "(optional)" / "(needs the user)" flags when structured planning was on;
     # `plan_source` says which planner produced it ("structured", "text",
     # "text_fallback" after a failed or empty structured call, "none" for no
     # plan) and `subjects` holds the structured plan's subject names, redacted
@@ -628,25 +619,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "latency_ms",
                 "input_tokens",
                 "output_tokens",
-                "error_type",
-            }
-        ),
-    ),
-    SPAN_FINISH_CHECK: SpanContract(
-        version=1,
-        attributes=frozenset(
-            {
-                "model",
-                "plan_source",
-                "steps",
-                "subjects",
-                "questions",
-                "requests",
-                "splits",
-                "input_tokens",
-                "latency_ms",
-                "flagged",
-                "fired",
                 "error_type",
             }
         ),

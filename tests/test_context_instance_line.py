@@ -26,7 +26,6 @@ from fastworkflow.observation_offloading.compact import (
     annotate_execute_observations,
     compact_trajectory,
 )
-from fastworkflow.observation_offloading.continuation import replan_trajectory_skeleton
 from fastworkflow.observation_offloading.labels import (
     MAX_INSTANCE_LABEL_CHARS,
     alias_line,
@@ -126,26 +125,26 @@ class ContextClauseFormat(unittest.TestCase):
         self.assertEqual(printed_context(line), "Account 28c5aeb5 Alan Cooper")
 
     def test_context_without_an_instance_prints_the_name_alone(self) -> None:
-        line = alias_line("O7", context_clause("DirectoryExplorer", ""))
+        line = alias_line("O0", context_clause("DirectoryExplorer", ""))
         self.assertEqual(
-            line, "Observation O7 (execute_workflow_query ran in DirectoryExplorer)\n")
+            line, "Observation O0 (execute_workflow_query ran in DirectoryExplorer)\n")
         self.assertEqual(printed_context(line), "DirectoryExplorer")
 
     def test_a_context_change_is_named_after_the_clause(self) -> None:
-        line = alias_line("O5", context_clause("Identity", "4a0d (Angelica Schneider)"),
+        line = alias_line("O0", context_clause("Identity", "4a0d (Angelica Schneider)"),
                           context_changed=True)
         self.assertEqual(
             line,
-            "Observation O5 (execute_workflow_query ran in Identity 4a0d Angelica Schneider"
+            "Observation O0 (execute_workflow_query ran in Identity 4a0d Angelica Schneider"
             "; and resulted in a context change)\n")
-        self.assertEqual(printed_alias(line), "O5")
+        self.assertEqual(printed_alias(line), "O0")
         self.assertEqual(printed_context(line), "Identity 4a0d Angelica Schneider")
         self.assertEqual(strip_alias_line(line + "body"), "body")
 
     def test_no_context_name_means_no_clause(self) -> None:
         self.assertEqual(context_clause("", "28c5aeb5"), "")
-        self.assertEqual(alias_line("O1", context_clause("", "28c5aeb5")),
-                         alias_line("O1", ""))
+        self.assertEqual(alias_line("O0", context_clause("", "28c5aeb5")),
+                         alias_line("O0", ""))
 
     def test_parentheses_and_newlines_can_never_reach_the_line(self) -> None:
         clause = context_clause("Account", "28c5 (Alan\nCooper)\n)")
@@ -156,9 +155,9 @@ class ContextClauseFormat(unittest.TestCase):
     def test_a_label_ending_like_the_change_suffix_is_read_back_whole(self) -> None:
         clause = context_clause("Account", "28c5; and resulted in a context change")
         self.assertNotIn(";", clause)
-        self.assertEqual(printed_context(alias_line("O3", clause)), clause)
-        line = alias_line("O3", clause)
-        self.assertEqual(printed_alias(line), "O3")
+        self.assertEqual(printed_context(alias_line("O0", clause)), clause)
+        line = alias_line("O0", clause)
+        self.assertEqual(printed_alias(line), "O0")
         self.assertEqual(printed_context(line), clause)
         self.assertEqual(strip_alias_line(line + "body"), "body")
 
@@ -171,7 +170,7 @@ class ContextClauseFormat(unittest.TestCase):
     def test_the_line_is_stripped_and_digests_are_unchanged(self) -> None:
         body = "permission_uid  label\n85cde168  Active Directory_Cloud Administrator\n"
         for clause in ("", "Account 28c5aeb5 Alan Cooper", "DirectoryExplorer"):
-            shown = alias_line("O9", clause) + body
+            shown = alias_line("O0", clause) + body
             self.assertEqual(strip_alias_line(shown), body)
             self.assertEqual(
                 hashlib.sha256(strip_alias_line(shown).encode()).hexdigest(),
@@ -190,7 +189,7 @@ class ContextClauseFormat(unittest.TestCase):
         self.assertEqual(strip_alias_line(legacy), "rows")
 
     def test_an_offload_label_is_not_an_alias_line(self) -> None:
-        label = offload_label(alias="O5", command_name="Account/list_permissions",
+        label = offload_label(alias="O0", command_name="Account/list_permissions",
                               response="rows")
         self.assertTrue(is_offload_label(label))
         self.assertIsNone(printed_alias(label))
@@ -271,9 +270,9 @@ class AnnotationUsesTheRecordedContext(unittest.TestCase):
                    command="open_account_by_uid <account_uid>28c5aeb5</account_uid>")
         self._step(trajectory, 1, "execute_workflow_query", "permission rows",
                    command="list_permissions")
-        # Recorded at dispatch: O1 ran in DirectoryExplorer, O2 in the account.
-        record_context_clause(self.scope, "O1", context_clause("DirectoryExplorer", ""))
-        record_context_clause(self.scope, "O2",
+        # Recorded at dispatch: O0 ran in DirectoryExplorer, O1 in the account.
+        record_context_clause(self.scope, "O0", context_clause("DirectoryExplorer", ""))
+        record_context_clause(self.scope, "O1",
                               context_clause("Account", "28c5aeb5 (Alan Cooper)"))
         self.compact(trajectory)
         self.assertEqual(printed_context(trajectory["observation_0"]),
@@ -285,41 +284,41 @@ class AnnotationUsesTheRecordedContext(unittest.TestCase):
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query", "root rows", command="find_identity")
         self._step(trajectory, 1, "execute_workflow_query", "other rows", command="whatever")
-        record_context_clause(self.scope, "O1", "")   # ran at the root
-        # O2 was never recorded at all (an older recording, or a capture that failed).
+        record_context_clause(self.scope, "O0", "")   # ran at the root
+        # O1 was never recorded at all (an older recording, or a capture that failed).
         self.compact(trajectory)
-        self.assertEqual(trajectory["observation_0"], alias_line("O1", "") + "root rows")
-        self.assertEqual(trajectory["observation_1"], alias_line("O2") + "other rows")
+        self.assertEqual(trajectory["observation_0"], alias_line("O0", "") + "root rows")
+        self.assertEqual(trajectory["observation_1"], alias_line("O1") + "other rows")
         events = {e["alias"]: e for e in snapshot_events() if e["kind"] == "context_line"}
-        self.assertEqual(events["O1"]["context_recorded"], True)
-        self.assertEqual(events["O2"]["context_recorded"], False)
-        self.assertEqual(events["O1"]["clause_utf8_bytes"], len(" ran in global".encode()))
+        self.assertEqual(events["O0"]["context_recorded"], True)
+        self.assertEqual(events["O1"]["context_recorded"], False)
+        self.assertEqual(events["O0"]["clause_utf8_bytes"], len(" ran in global".encode()))
 
     def test_a_step_that_moved_the_context_says_so(self) -> None:
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query", "Context is now 'DirectoryExplorer'",
                    command="go_up")
         self._step(trajectory, 1, "execute_workflow_query", "rows", command="find_identity")
-        record_context_clause(self.scope, "O1", context_clause("Identity", "4a0d"))
-        record_context_change(self.scope, "O1")
-        record_context_clause(self.scope, "O2", context_clause("DirectoryExplorer", ""))
+        record_context_clause(self.scope, "O0", context_clause("Identity", "4a0d"))
+        record_context_change(self.scope, "O0")
+        record_context_clause(self.scope, "O1", context_clause("DirectoryExplorer", ""))
         self.compact(trajectory)
         self.assertEqual(
             trajectory["observation_0"],
-            alias_line("O1", "Identity 4a0d", context_changed=True)
+            alias_line("O0", "Identity 4a0d", context_changed=True)
             + "Context is now 'DirectoryExplorer'")
         self.assertEqual(trajectory["observation_1"],
-                         alias_line("O2", "DirectoryExplorer") + "rows")
+                         alias_line("O1", "DirectoryExplorer") + "rows")
 
     def test_the_archive_stores_the_response_without_the_line(self) -> None:
         body = "permission_uid  label\n85cde168  Active Directory_Cloud Administrator\n"
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query", body, command="list_permissions")
-        record_context_clause(self.scope, "O1",
+        record_context_clause(self.scope, "O0",
                               context_clause("Account", "28c5aeb5 (Alan Cooper)"))
         self.compact(trajectory)
         self.assertIn("in Account 28c5aeb5 Alan Cooper", trajectory["observation_0"])
-        stored = self.archive.get(self.scope, "O1")
+        stored = self.archive.get(self.scope, "O0")
         self.assertEqual(stored["text"], body)
         self.assertEqual(stored["text_sha256"],
                          hashlib.sha256(body.encode()).hexdigest())
@@ -343,42 +342,19 @@ class AnnotationUsesTheRecordedContext(unittest.TestCase):
                 record_context_clause(self.scope, f"O{ordinal}", clause)
             self.compact(trajectory, packed_target_bytes=500)
             self.assertTrue(is_offload_label(trajectory["observation_0"]))
-            self.assertEqual(label_alias(trajectory["observation_0"]), "O1")
+            self.assertEqual(label_alias(trajectory["observation_0"]), "O0")
             self.assertEqual(
                 trajectory["observation_0"],
-                offload_label(alias="O1", command_name="list_permissions",
+                offload_label(alias="O0", command_name="list_permissions",
                               response=body))
-
-    def test_the_replan_skeleton_is_unchanged_by_the_clause(self) -> None:
-        skeletons = []
-        for clause in ("", context_clause("Account", "28c5aeb5 (Alan Cooper)")):
-            reset_runtime_state()
-            trajectory: dict = {}
-            self._step(trajectory, 0, "execute_workflow_query",
-                       "holder rows\n" + "x" * 9_000, command="show_holders")
-            self._step(trajectory, 1, "execute_workflow_query", "small rows",
-                       command="show_rights")
-            record_context_clause(self.scope, "O1", clause)
-            record_context_clause(self.scope, "O2", clause)
-            self.compact(trajectory)
-            skeleton, metadata = replan_trajectory_skeleton(
-                trajectory, greedy_max_bytes=1_000,
-                scope=self.scope, selected_archive=self.archive)
-            self.assertEqual(metadata["labeled_aliases"], ["O1"])
-            skeletons.append(skeleton)
-        # The labelled observation is identical; the inlined one differs only by
-        # the clause, and strips back to the same bytes.
-        self.assertEqual(skeletons[0]["observation_0"], skeletons[1]["observation_0"])
-        self.assertEqual(strip_alias_line(skeletons[0]["observation_1"]),
-                         strip_alias_line(skeletons[1]["observation_1"]))
 
     def test_the_clause_is_never_rewritten_once_printed(self) -> None:
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query", "rows", command="list_permissions")
-        record_context_clause(self.scope, "O1", context_clause("Account", "28c5aeb5"))
+        record_context_clause(self.scope, "O0", context_clause("Account", "28c5aeb5"))
         self.compact(trajectory)
         frozen = trajectory["observation_0"]
-        record_context_clause(self.scope, "O1", context_clause("Group", "g-9"))
+        record_context_clause(self.scope, "O0", context_clause("Group", "g-9"))
         self.compact(trajectory)
         self.assertEqual(trajectory["observation_0"], frozen)
 
@@ -386,13 +362,13 @@ class AnnotationUsesTheRecordedContext(unittest.TestCase):
         body = "rows\n"
         plain: dict = {}
         self._step(plain, 0, "execute_workflow_query", body, command="list_permissions")
-        record_context_clause(self.scope, "O1", "")
+        record_context_clause(self.scope, "O0", "")
         self.compact(plain)
         reset_runtime_state()
         clause = context_clause("Account", "28c5aeb5 (Alan Cooper)")
         with_clause: dict = {}
         self._step(with_clause, 0, "execute_workflow_query", body, command="list_permissions")
-        record_context_clause(self.scope, "O1", clause)
+        record_context_clause(self.scope, "O0", clause)
         self.compact(with_clause)
         grown = (len(json.dumps(with_clause, ensure_ascii=False).encode())
                  - len(json.dumps(plain, ensure_ascii=False).encode()))
@@ -402,30 +378,30 @@ class AnnotationUsesTheRecordedContext(unittest.TestCase):
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query", "rows", command="list_permissions")
         clause = context_clause("Account", "28c5aeb5 (Alan Cooper)")
-        record_context_clause(self.scope, "O1", clause)
+        record_context_clause(self.scope, "O0", clause)
         self.compact(trajectory)
         [event] = [e for e in snapshot_events() if e["kind"] == "context_line"]
-        self.assertEqual(event["alias"], "O1")
+        self.assertEqual(event["alias"], "O0")
         self.assertEqual(event["context"], clause)
         self.assertTrue(event["has_instance"])
         self.assertEqual(event["clause_utf8_bytes"], len(f" ran in {clause}".encode()))
         self.assertEqual(event["line_utf8_bytes"],
-                         len(alias_line("O1", clause).encode()))
+                         len(alias_line("O0", clause).encode()))
 
     def test_a_workspace_context_records_no_instance(self) -> None:
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query", "rows", command="list_accounts")
-        record_context_clause(self.scope, "O1", context_clause("DirectoryExplorer", ""))
+        record_context_clause(self.scope, "O0", context_clause("DirectoryExplorer", ""))
         self.compact(trajectory)
         [event] = [e for e in snapshot_events() if e["kind"] == "context_line"]
         self.assertFalse(event["has_instance"])
         self.assertEqual(event["context"], "DirectoryExplorer")
 
     def test_the_registry_does_not_outlive_the_turn(self) -> None:
-        record_context_clause(self.scope, "O1", "Account 28c5aeb5")
-        self.assertEqual(context_clause_of(self.scope, "O1"), "Account 28c5aeb5")
+        record_context_clause(self.scope, "O0", "Account 28c5aeb5")
+        self.assertEqual(context_clause_of(self.scope, "O0"), "Account 28c5aeb5")
         reset_runtime_state()
-        self.assertIsNone(context_clause_of(self.scope, "O1"))
+        self.assertIsNone(context_clause_of(self.scope, "O0"))
 
 
 if __name__ == "__main__":

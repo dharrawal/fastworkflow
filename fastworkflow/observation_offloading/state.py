@@ -343,22 +343,8 @@ def current_execute_alias(agent: Any = None) -> Optional[str]:
 
     ReAct writes ``tool_name_{idx}`` before it calls the tool and
     ``observation_{idx}`` after it returns, so during a command the in-flight
-    step is the last one with no observation. Which step is in flight is read
-    from ``current_trajectory``; what that step is CALLED is read from the
-    agent's ``execute_ordinal_by_step`` ledger, which numbered it just before
-    dispatch and is the same ledger ``annotate_execute_observations`` is given
-    when the step completes.
-
-    Counting ``current_trajectory`` instead is only right when the mirror holds
-    the whole turn. A process that imported a suspension has an empty mirror and
-    a resumed trajectory with N executes already in it, so the first command
-    after the resume would declare and stamp O1 while its observation printed
-    O(N+1) -- a collision against the real O1, or a printed handle nothing had
-    declared. The ledger is restored with the suspension, so both sides read one
-    number.
-
-    The count stands in only for an agent with no ledger (a duck-typed host, a
-    plain ReAct), where the mirror is the whole turn by construction.
+    step is the last one with no observation. The alias is ``O{idx}``, the same
+    index ``annotate_execute_observations`` prints when the step completes.
 
     ``None`` when there is no agent step in flight: a direct user command, a
     non-execute tool, or offloading turned off. There is no agent-visible
@@ -381,17 +367,7 @@ def current_execute_alias(agent: Any = None) -> Optional[str]:
     if f"observation_{latest}" in trajectory:
         # The step already completed; this call is not inside it.
         return None
-    ledger = getattr(agent, "execute_ordinal_by_step", None)
-    if isinstance(ledger, Mapping) and latest in ledger:
-        ordinal = int(ledger[latest])
-    else:
-        ordinal = sum(
-            1
-            for index in indexes
-            if str(trajectory.get(f"tool_name_{index}") or "")
-            == "execute_workflow_query"
-        )
-    return f"O{ordinal}" if ordinal else None
+    return f"O{latest}"
 
 
 def record_event(event: Mapping[str, Any]) -> None:
@@ -679,7 +655,7 @@ def release_scope(scope: "RuntimeHandleScope | str") -> None:
 
     The caller decides what "finished" means, and only two places may: a turn
     that is over because the agent has bound the NEXT one
-    (``StructuredContinuationReAct.bind_scope``), and a session that is over
+    (``OffloadingReAct.bind_scope``), and a session that is over
     because its execution context was closed or evicted
     (``WorkflowExecutionContext.close``). Neither fires for a SUSPENDED turn,
     because a suspension is state that must outlive the process, not state to

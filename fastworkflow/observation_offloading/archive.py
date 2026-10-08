@@ -23,7 +23,7 @@ memory for as long as its turn is live. Every in-flight read this process makes
 -- the trajectory's own hot cache, ``search_memory``, answer rehydration -- is
 therefore exact. That memory is released with the rest of the turn's process
 state, by ``state.release_scope``, at the moments the runtime already decides a
-turn is over (``StructuredContinuationReAct.bind_scope``,
+turn is over (``OffloadingReAct.bind_scope``,
 ``WorkflowExecutionContext._reclaim_offloading_scope`` and
 ``agent_runtime.reclaim_scope``). A turn resumed in a DIFFERENT process has no
 such memory and reads the stored, redacted text; that is accepted.
