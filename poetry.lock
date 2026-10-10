@@ -888,13 +888,13 @@ files = [
 
 [[package]]
 name = "dspy"
-version = "3.3.0"
+version = "3.4.0"
 description = "DSPy"
 optional = false
 python-versions = "<3.15,>=3.10"
 files = [
-    {file = "dspy-3.3.0-py3-none-any.whl", hash = "sha256:358cbfb15d13246dc4a289bb2350c0ee602260c8a3869f7f63a48a9d2233e48c"},
-    {file = "dspy-3.3.0.tar.gz", hash = "sha256:39aa9531391accda8acd7903b52f3c9d2efe462d4bab0c2256db5352e7392754"},
+    {file = "dspy-3.4.0-py3-none-any.whl", hash = "sha256:36de329ecdaf18e31977e26c61b587caa470a34f574f2fe6cb7f4c82bcbf97cc"},
+    {file = "dspy-3.4.0.tar.gz", hash = "sha256:4dea089c6bd1f8d314e1095e7f64b4b4ff64bb8a09549efee026c0a609f08c16"},
 ]
 
 [package.dependencies]
@@ -902,26 +902,29 @@ anyio = "*"
 cachetools = ">=5.5.0"
 cloudpickle = ">=3.1.2"
 diskcache = ">=5.6.0"
-gepa = {version = "0.1.1", extras = ["dspy"]}
+gepa = {version = "0.1.4", extras = ["dspy"]}
 json-repair = ">=0.54.2"
 litellm = ">=1.65.8"
 openai = ">=1.66.2"
 orjson = ">=3.9.0"
-pydantic = ">=2.0"
+pydantic = ">=2.11.0"
 regex = ">=2023.10.3"
 requests = ">=2.31.0"
 tenacity = ">=8.2.3"
 tqdm = ">=4.66.1"
+typesafe-sdk = {version = ">=0.6.0,<1.0.0", optional = true, markers = "extra == \"typesafe\""}
 
 [package.extras]
 anthropic = ["anthropic (>=0.18.0,<1.0.0)"]
-dev = ["build (>=1.0.3)", "datamodel_code_generator (>=0.26.3)", "litellm (>=1.65.8)", "litellm[proxy] (>=1.65.8)", "numpy (>=1.26.0)", "pillow (>=10.1.0)", "pre-commit (>=3.7.0)", "pytest (>=6.2.5)", "pytest-asyncio (>=0.26.0)", "pytest-mock (>=3.12.0)", "pytest-xdist (>=3.5.0)", "ruff (>=0.3.0)"]
+deno = ["deno (>=2.4.5,<3.0.0)"]
+dev = ["build (>=1.0.3)", "datamodel_code_generator (>=0.26.3)", "fastapi (<0.140.7)", "litellm (>=1.65.8)", "litellm[proxy] (>=1.65.8)", "numpy (>=1.26.0)", "pillow (>=10.1.0)", "pre-commit (>=3.7.0)", "pytest (>=6.2.5)", "pytest-asyncio (>=0.26.0)", "pytest-mock (>=3.12.0)", "pytest-xdist (>=3.5.0)", "ruff (>=0.3.0)"]
 langchain = ["langchain_core (>=0.3.0)"]
 litellm = ["litellm (>=1.65.8)"]
 mcp = ["mcp"]
 numpy = ["numpy (>=1.26.0)"]
 optuna = ["optuna (>=3.4.0)"]
 test-extras = ["datasets (>=2.14.6)", "langchain_core (>=0.3.0)", "mcp", "numpy (>=1.26.0)", "optuna (>=3.4.0)", "pandas (>=2.1.1)"]
+typesafe = ["typesafe-sdk (>=0.6.0,<1.0.0)"]
 weaviate = ["weaviate-client (>=4.5.4,<4.22.0)"]
 
 [[package]]
@@ -1267,20 +1270,22 @@ tqdm = ["tqdm"]
 
 [[package]]
 name = "gepa"
-version = "0.1.1"
+version = "0.1.4"
 description = "A framework for optimizing textual system components (AI prompts, code snippets, etc.) using LLM-based reflection and Pareto-efficient evolutionary search."
 optional = false
 python-versions = "<3.15,>=3.10"
 files = [
-    {file = "gepa-0.1.1-py3-none-any.whl", hash = "sha256:71ead7c591eafcc727b83509cdc4182f20264800a6ddf8520d61419daeb47466"},
-    {file = "gepa-0.1.1.tar.gz", hash = "sha256:643fda01c23de4c9f01306e01305dd69facc29bcb34ad59e4cd07e6621d34aa1"},
+    {file = "gepa-0.1.4-py3-none-any.whl", hash = "sha256:12b971039599625c156d2231f6d72a29c31a22e9c237689459b5f1a3c353f532"},
+    {file = "gepa-0.1.4.tar.gz", hash = "sha256:6dd153a676ae5481764860d19286a9c0e8ddb5ef70d7f13044faf24978bdb6b8"},
 ]
 
 [package.extras]
-build = ["build", "packaging", "requests", "semver", "setuptools (>=77.0.1)", "twine", "wheel"]
+build = ["build", "packaging", "requests (>=2.33.0)", "semver", "setuptools (>=77.0.1)", "twine", "wheel"]
+confidence = ["litellm (>=1.64.0,<1.92)", "litellm (>=1.81.0,<1.92)", "llm-structured-confidence (>=0.4.5)"]
 dev = ["build (>=1.0.3)", "gepa[build]", "gepa[test]", "pre-commit", "ruff (>=0.3.0)"]
-full = ["cloudpickle (>=3.0.0)", "datasets (>=2.14.6)", "datasets (>=4.5.0)", "litellm (>=1.64.0)", "litellm (>=1.81.0)", "mlflow (>=3.0.0)", "mlflow-skinny (>=3.8.1)", "pyarrow (>=22.0.0)", "pydantic (>=2.12.0)", "tiktoken (>=0.12.0)", "tqdm (>=4.66.1)", "wandb", "wandb (>=0.23.0)"]
+full = ["cloudpickle (>=3.0.0)", "datasets (>=2.14.6)", "datasets (>=4.5.0)", "litellm (>=1.83.0,<1.92)", "mlflow (>=3.11.1)", "mlflow-skinny (>=3.11.1)", "pandas (>=2.3.3)", "pyarrow (>=22.0.0)", "pydantic (>=2.12.0)", "tiktoken (>=0.12.0)", "tqdm (>=4.66.1)", "wandb", "wandb (>=0.23.0)"]
 gskill = ["docker", "gepa[full]", "python-dotenv", "pyyaml", "swesmith"]
+langchain = ["langchain (>=1.0)", "langchain-core (>=1.0)", "tqdm (>=4.66)"]
 test = ["gepa[full]", "pyright", "pytest"]
 
 [[package]]
@@ -5013,6 +5018,29 @@ rich = ">=13.8.0"
 shellingham = ">=1.3.0"
 
 [[package]]
+name = "typesafe-sdk"
+version = "0.7.4"
+description = "Python SDK for TypeSafe AI API."
+optional = false
+python-versions = ">=3.10"
+files = [
+    {file = "typesafe_sdk-0.7.4-py3-none-any.whl", hash = "sha256:61cf3f2fe9da20b68c3d3fe2fb76bbb2f35f8c4a9a65a6b81c43a535d2a53210"},
+    {file = "typesafe_sdk-0.7.4.tar.gz", hash = "sha256:a20dca217a746db1ac5534ac502de16e1f86a400b4ec09f8594e6221c2bc9558"},
+]
+
+[package.dependencies]
+httpx2 = ">=2.0.0"
+packaging = ">=24.0"
+pydantic = ">=2.12.0"
+pydantic-core = ">=2.41.1"
+tenacity = ">=9.0.0"
+truststore = {version = ">=0.10.0", markers = "sys_platform != \"emscripten\""}
+typing-extensions = ">=4.13.0"
+
+[package.extras]
+http2 = ["httpx2[http2] (>=2.0.0)"]
+
+[[package]]
 name = "typing-extensions"
 version = "4.16.0"
 description = "Backported and Experimental Type Hints for Python 3.9+"
@@ -5435,4 +5463,4 @@ training = ["datasets"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.13,<3.15"
-content-hash = "11cdcc53952b92ed39e3675ec29cf7f9bd9a744222e02ad5b964e9cf8e113030"
+content-hash = "5c3d642cb5c02144d7fabcefc983b29f8625d378c40bfbe6482fc2899ddd3482"

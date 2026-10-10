@@ -51,6 +51,9 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     # Unset leaves today's behavior exactly as it was.
     if fastworkflow.get_env_var("FW_LM_CACHE", default="1") in ("0", "false", "False"):
         kwargs.setdefault("cache", False)
+    # Without one, a provider request that stalls blocks the turn for minutes.
+    kwargs.setdefault(
+        "timeout", float(fastworkflow.get_env_var("LLM_TIMEOUT_SECONDS", default="120")))
 
     model = fastworkflow.get_env_var(model_env_var)
     if not model:

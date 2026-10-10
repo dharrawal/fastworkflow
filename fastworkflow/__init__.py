@@ -1,3 +1,7 @@
+# Before anything imports dspy: dspy 3.4 puts a lazy stand-in for `openai` in
+# sys.modules, and litellm importing an openai submodule through that stand-in
+# fails with a circular import. Loaded first, the real openai is used instead.
+import litellm as _litellm  # noqa: F401  (import order)
 import contextlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -463,7 +467,6 @@ __all__ = (
     "os",
     "pop_active_workflow",
     "push_active_workflow",
-    "runtime_manifest",
     "session_state_store",
     "state_paths",
     "state_serialization",

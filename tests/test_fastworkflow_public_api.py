@@ -79,7 +79,6 @@ PUBLIC = (
     ("os", "module", "os"),
     ("pop_active_workflow", "function", "fastworkflow.active_workflow"),
     ("push_active_workflow", "function", "fastworkflow.active_workflow"),
-    ("runtime_manifest", "module", "fastworkflow.runtime_manifest"),
     ("session_state_store", "module", "fastworkflow.session_state_store"),
     ("state_paths", "module", "fastworkflow.state_paths"),
     ("state_serialization", "module", "fastworkflow.state_serialization"),

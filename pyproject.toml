@@ -50,7 +50,7 @@ sentencepiece = "^0.2.0"
 mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
-dspy = ">=3.3.0,<3.4" # 3.3.0 added ChatAdapter._make_json_adapter_fallback, which keeps the commands prelude on the JSON retry; 3.4.0's lazy openai import breaks `import dspy; import litellm`
+dspy = { version = ">=3.4.0,<3.5", extras = ["typesafe"] } # 3.4.0 adds the Jev/TypeSafe decision backend; its lazy openai import breaks `import dspy; import litellm`, so fastworkflow/__init__.py imports litellm first
 # Default: CPU-only wheels from the PyTorch CPU index (portable, smaller).
 # CUDA is an explicit opt-in — Poetry cannot lock torch from two indexes, so:
 #   poetry install --with gpu && make install-gpu-torch
