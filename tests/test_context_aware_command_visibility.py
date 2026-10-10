@@ -349,8 +349,6 @@ def test_wec_registers_context_listener_for_agent_refresh(todo_list_env):
     wec._app_workflow = workflow
     wec._cme_workflow = cme
     wec._workflow_tool_agent = None
-    wec._planning_insights = None
-    wec._execution_insights = None
     wec._context_change_listener = None
 
     wec._initialize_agent_functionality()
@@ -489,3 +487,39 @@ def test_wec_close_removes_context_change_listener(todo_list_env):
     workflow.add_context_change_listener(wec._on_app_context_change)
     assert real.close() is True
     assert real._context_change_listener is None
+
+
+def test_other_contexts_are_one_line_each_with_the_route_in(todo_list_env):
+    subject = _todo_list_path()
+    workflow = fastworkflow.Workflow.create(subject, workflow_id_str="other-contexts")
+
+    text = CommandMetadataAPI.get_other_contexts_text(
+        subject_workflow_path=subject, active_context_name="*",
+        navigation_workflow=workflow)
+
+    lines = text.splitlines()
+    assert lines[0].startswith("Other contexts")
+    manager = next(line for line in lines if line.startswith("- TodoListManager: "))
+    # No docstring on the todo contexts: the commands the context adds stand in.
+    assert "commands: " in manager and "create_todo_list" in manager
+    assert "To enter: " in manager
+    assert not any(line.startswith("- *") for line in lines)
+
+
+def test_a_context_docstring_is_its_one_line_description(todo_list_env, monkeypatch):
+    subject = _todo_list_path()
+    workflow = fastworkflow.Workflow.create(subject, workflow_id_str="other-contexts-doc")
+
+    class Documented:
+        """Where todo lists are created and found.
+
+        More detail that is not shown."""
+
+    monkeypatch.setattr("fastworkflow.context_identity.context_class_for",
+                        lambda wf, name: Documented)
+    text = CommandMetadataAPI.get_other_contexts_text(
+        subject_workflow_path=subject, active_context_name="*",
+        navigation_workflow=workflow)
+
+    assert "- TodoListManager: Where todo lists are created and found. To enter: " in text
+    assert "More detail" not in text

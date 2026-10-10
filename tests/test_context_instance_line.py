@@ -42,7 +42,7 @@ from fastworkflow.workflow_agent import initialize_workflow_tool_agent
 # --------------------------------------------------------------------------
 
 class AccountContext:
-    """Declares the hook as a classmethod (the IDO form)."""
+    """Declares the hook as a classmethod (the form real workflows use)."""
 
     @classmethod
     def instance_label(cls, command_context_object):
@@ -60,7 +60,7 @@ class GroupContext:
     instance_label_attr = "uid"
 
 
-class DirectoryExplorerContext:
+class ItemExplorerContext:
     """A workspace: navigable, but not an instance of anything."""
 
 
@@ -103,34 +103,34 @@ class ContextClauseFormat(unittest.TestCase):
         self.assertEqual(alias_line("O42"),
                          "Observation O42 (execute_workflow_query)\n")
         self.assertEqual(alias_line("O42", ""),
-                         "Observation O42 (execute_workflow_query ran in global)\n")
+                         "Observation O42 (execute_workflow_query ran in context 'global')\n")
         self.assertIsNone(printed_context(alias_line("O42")))
         self.assertIsNone(printed_context(alias_line("O42", "")))
         self.assertEqual(printed_alias(alias_line("O42")), "O42")
 
     def test_context_with_an_instance(self) -> None:
-        line = alias_line("O42", context_clause("Account", "28c5aeb5 (Alan Cooper)"))
+        line = alias_line("O42", context_clause("Account", "28c5aeb5 (Jane Roe)"))
         self.assertEqual(
             line,
-            "Observation O42 (execute_workflow_query ran in Account 28c5aeb5 Alan Cooper)\n")
+            "Observation O42 (execute_workflow_query ran in context 'Account' and 28c5aeb5 Jane Roe)\n")
         self.assertEqual(printed_alias(line), "O42")
-        self.assertEqual(printed_context(line), "Account 28c5aeb5 Alan Cooper")
+        self.assertEqual(printed_context(line), "Account 28c5aeb5 Jane Roe")
 
     def test_context_without_an_instance_prints_the_name_alone(self) -> None:
-        line = alias_line("O0", context_clause("DirectoryExplorer", ""))
+        line = alias_line("O0", context_clause("ItemExplorer", ""))
         self.assertEqual(
-            line, "Observation O0 (execute_workflow_query ran in DirectoryExplorer)\n")
-        self.assertEqual(printed_context(line), "DirectoryExplorer")
+            line, "Observation O0 (execute_workflow_query ran in context 'ItemExplorer')\n")
+        self.assertEqual(printed_context(line), "ItemExplorer")
 
     def test_a_context_change_is_named_after_the_clause(self) -> None:
-        line = alias_line("O0", context_clause("Identity", "4a0d (Angelica Schneider)"),
+        line = alias_line("O0", context_clause("Identity", "4a0d (Sam Poe)"),
                           context_changed=True)
         self.assertEqual(
             line,
-            "Observation O0 (execute_workflow_query ran in Identity 4a0d Angelica Schneider"
+            "Observation O0 (execute_workflow_query ran in prior context 'Identity' and 4a0d Sam Poe"
             "; and resulted in a context change)\n")
         self.assertEqual(printed_alias(line), "O0")
-        self.assertEqual(printed_context(line), "Identity 4a0d Angelica Schneider")
+        self.assertEqual(printed_context(line), "Identity 4a0d Sam Poe")
         self.assertEqual(strip_alias_line(line + "body"), "body")
 
     def test_no_context_name_means_no_clause(self) -> None:
@@ -160,8 +160,8 @@ class ContextClauseFormat(unittest.TestCase):
         self.assertTrue(label.endswith("..."))
 
     def test_the_line_is_stripped_and_digests_are_unchanged(self) -> None:
-        body = "permission_uid  label\n85cde168  Active Directory_Cloud Administrator\n"
-        for clause in ("", "Account 28c5aeb5 Alan Cooper", "DirectoryExplorer"):
+        body = "permission_uid  label\n85cde168  Item Catalog_Cloud Administrator\n"
+        for clause in ("", "Account 28c5aeb5 Jane Roe", "ItemExplorer"):
             shown = alias_line("O0", clause) + body
             self.assertEqual(strip_alias_line(shown), body)
             self.assertEqual(
@@ -175,9 +175,9 @@ class ContextClauseFormat(unittest.TestCase):
         self.assertEqual(strip_alias_line(legacy), "477 holder(s).\n")
 
     def test_a_comma_in_line_recorded_before_this_change_still_reads(self) -> None:
-        legacy = "Observation O3 (execute_workflow_query, in DirectoryExplorer)\nrows"
+        legacy = "Observation O3 (execute_workflow_query, in ItemExplorer)\nrows"
         self.assertEqual(printed_alias(legacy), "O3")
-        self.assertEqual(printed_context(legacy), "DirectoryExplorer")
+        self.assertEqual(printed_context(legacy), "ItemExplorer")
         self.assertEqual(strip_alias_line(legacy), "rows")
 
     def test_an_offload_label_is_not_an_alias_line(self) -> None:
@@ -192,8 +192,8 @@ class DeclaredInstanceIdentity(unittest.TestCase):
 
     def test_classmethod_hook(self) -> None:
         self.assertEqual(
-            declared_instance_label(AccountContext, _entity("28c5aeb5", "Alan Cooper")),
-            "28c5aeb5 (Alan Cooper)")
+            declared_instance_label(AccountContext, _entity("28c5aeb5", "Jane Roe")),
+            "28c5aeb5 (Jane Roe)")
 
     def test_attribute_hook(self) -> None:
         self.assertEqual(
@@ -201,7 +201,7 @@ class DeclaredInstanceIdentity(unittest.TestCase):
 
     def test_no_declaration_yields_nothing(self) -> None:
         self.assertEqual(
-            declared_instance_label(DirectoryExplorerContext, _entity("x")), "")
+            declared_instance_label(ItemExplorerContext, _entity("x")), "")
 
     def test_a_broken_hook_yields_nothing_rather_than_raising(self) -> None:
         self.assertEqual(declared_instance_label(RaisingContext, _entity("x")), "")
@@ -214,7 +214,7 @@ class DeclaredInstanceIdentity(unittest.TestCase):
         self.assertEqual(context_clause_for(workflow), "Account")
 
     def test_root_context_has_no_identity(self) -> None:
-        workflow = FakeWorkflow("IDO", _entity("root"), root=True)
+        workflow = FakeWorkflow("Demo", _entity("root"), root=True)
         self.assertEqual(context_identity(workflow), ("", ""))
         self.assertEqual(context_clause_for(workflow), "")
 
@@ -236,12 +236,12 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
         self.scope = RuntimeHandleScope(
             channel_id="fixture-channel",
             turn_key="fixture-turn")
-        self.workflow = FakeWorkflow("DirectoryExplorer", None)
+        self.workflow = FakeWorkflow("ItemExplorer", None)
         self.trajectory: dict = {}
         self.session = SimpleNamespace(
             workflow_tool_agent=SimpleNamespace(trajectory=self.trajectory, iteration_counter=0),
             get_active_workflow=lambda: self.workflow)
-        self.moves = {"open_account_by_uid": ("Account", _entity("28c5aeb5", "Alan Cooper"))}
+        self.moves = {"open_account_by_uid": ("Account", _entity("28c5aeb5", "Jane Roe"))}
         self.dispatched: list[str] = []
 
         def dispatch(command, chat_session_obj):
@@ -252,7 +252,7 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
             return "Entered the context." if name in self.moves else "rows"
 
         def context_class(_workflow, name):
-            return AccountContext if name == "Account" else DirectoryExplorerContext
+            return AccountContext if name == "Account" else ItemExplorerContext
 
         patches = [
             patch("fastworkflow.workflow_agent._execute_workflow_query", dispatch),
@@ -265,8 +265,8 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
         captured: dict = {}
 
         def build(_session, _signature, tools, **_kwargs):
-            captured.update({tool.__name__: tool for tool in tools})
-            return object()
+            captured.update({getattr(tool, "name", None) or tool.__name__: tool for tool in tools})
+            return SimpleNamespace()
 
         with patch("fastworkflow.workflow_agent.build_tool_agent", build):
             initialize_workflow_tool_agent(self.session)
@@ -284,25 +284,26 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
         return response
 
     def test_a_command_that_moves_the_context_prints_where_it_ran(self) -> None:
-        """`open_account_by_uid` runs in DirectoryExplorer and ends in Account.
+        """`open_account_by_uid` runs in ItemExplorer and ends in Account.
 
-        It must read as the DirectoryExplorer command it is, with the change
+        It must read as the ItemExplorer command it is, with the change
         named; the `list_permissions` that follows belongs to the account.
         """
         first = self.step(0, "open_account_by_uid <account_uid>28c5aeb5</account_uid>")
         self.assertEqual(
             first,
-            alias_line("O0", "DirectoryExplorer", context_changed=True)
+            alias_line("O0", "ItemExplorer", context_changed=True,
+                       now_in="Account 28c5aeb5 Jane Roe")
             + "Entered the context.")
         second = self.step(1, "list_permissions")
-        self.assertEqual(second, alias_line("O1", "Account 28c5aeb5 Alan Cooper") + "rows")
+        self.assertEqual(second, alias_line("O1", "Account 28c5aeb5 Jane Roe") + "rows")
         self.archive_steps(0, 1)
         moved = self.archive.get(self.scope, "O0")
         self.assertEqual((moved["context_clause"], moved["context_changed"]),
-                         ("DirectoryExplorer", True))
+                         ("ItemExplorer", True))
         stayed = self.archive.get(self.scope, "O1")
         self.assertEqual((stayed["context_clause"], stayed["context_changed"]),
-                         ("Account 28c5aeb5 Alan Cooper", False))
+                         ("Account 28c5aeb5 Jane Roe", False))
 
     def test_the_archive_stores_the_response_without_the_line(self) -> None:
         self.step(0, "open_account_by_uid <account_uid>28c5aeb5</account_uid>")
@@ -314,8 +315,8 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
                          hashlib.sha256(b"Entered the context.").hexdigest())
 
     def test_a_root_command_prints_global(self) -> None:
-        self.workflow = FakeWorkflow("IDO", None, root=True)
-        self.assertEqual(self.step(0, "find_identity"),
+        self.workflow = FakeWorkflow("Demo", None, root=True)
+        self.assertEqual(self.step(0, "find_person"),
                          alias_line("O0", "") + "rows")
         self.archive_steps(0)
         self.assertEqual(self.archive.get(self.scope, "O0")["context_clause"], "")
@@ -330,8 +331,51 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
         self.archive_steps(0)
         reset_observation_state()
         self.assertEqual(self.archive.get(self.scope, "O0")["context_clause"],
-                         "DirectoryExplorer")
+                         "ItemExplorer")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_line_printed_in_the_earlier_wording_still_parses():
+    from fastworkflow.observation_offloading.labels import printed_subject
+
+    old = ("Observation O3 (execute_workflow_query ran in Identity 28c5 Jane Roe"
+           "; and resulted in a context change)\nbody")
+
+    assert printed_subject(old) == ("Identity 28c5 Jane Roe", True)
+    assert printed_subject("Observation O3 (execute_workflow_query ran in global)\nbody") == ("", False)
+
+
+def test_a_named_destination_parses_back_to_the_context_the_command_ran_in():
+    from fastworkflow.observation_offloading.labels import alias_line, printed_subject
+
+    line = alias_line("O4", "ItemExplorer", context_changed=True,
+                      now_in="Identity c062 Alisha Ochoa")
+
+    assert line == ("Observation O4 (execute_workflow_query ran in prior context "
+                    "'ItemExplorer'; now in context 'Identity' and c062 Alisha Ochoa)\n")
+    assert printed_subject(line + "body") == ("ItemExplorer", True)
+
+
+def test_printed_instances_reads_both_header_forms_in_order():
+    from fastworkflow.observation_offloading.labels import printed_instances
+
+    entered = ("Observation O5 (execute_workflow_query ran in prior context 'Identity' and "
+               "4a0d Sam Poe; now in context 'Account' and 738e9c85 John Doe)\nbody")
+    ran_in = "Observation O6 (execute_workflow_query ran in context 'Account' and 738e9c85)\nbody"
+
+    assert printed_instances(entered) == [
+        ("Identity", "4a0d", "Sam Poe"),
+        ("Account", "738e9c85", "John Doe"),
+    ]
+    assert printed_instances(ran_in) == [("Account", "738e9c85", "")]
+
+
+def test_printed_instances_skips_contexts_without_an_instance_and_non_headers():
+    from fastworkflow.observation_offloading.labels import printed_instances
+
+    assert printed_instances("Observation O7 (execute_workflow_query ran in context 'global')\nx") == []
+    assert printed_instances("Observation O8 (execute_workflow_query)\nran in context 'Account' and 1 A") == []
+    assert printed_instances("Offloaded observation O9 returned by execute_workflow_query.") == []

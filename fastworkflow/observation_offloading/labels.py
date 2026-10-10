@@ -12,17 +12,24 @@ OFFLOAD_MARK = "Offloaded observation "
 LABEL_RE = re.compile(
     r"^(?:Offloaded observation |Use search_memory tool to search inside Observation )"
     r"(O(?:0|[1-9]\d*)) returned by ")
-#: The A1 handle line, with the ido-8ps.13 context clause optional. The clause
+#: The A1 handle line, with the context clause optional. The clause
 #: can never contain a parenthesis or a newline (``context_clause`` removes
 #: both), so the closing ``)`` is unambiguous and a line printed before the
 #: clause existed still matches.
-#: The clause reads " ran in <clause>" and may be followed by
-#: ``CONTEXT_CHANGE_SUFFIX``; the earlier ", in <clause>" form is still matched.
-#: A printed clause never contains a semicolon either, so it cannot end in
-#: something the suffix would be mistaken for.
+#: The clause is printed as " ran in context '<ContextName>' and <instance
+#: label>" (" and ..." only when there is a label). A command that moved the
+#: context prints " ran in prior context ..." and is followed by
+#: "; now in context '<ContextName>' and <instance label>", or by
+#: ``CONTEXT_CHANGE_SUFFIX`` when the destination was not recorded. The earlier
+#: " ran in <clause>" and ", in <clause>" forms are still matched. A printed
+#: clause never contains a semicolon either, so it cannot end in something the
+#: suffix would be mistaken for.
 ALIAS_LINE_RE = re.compile(
-    r"^Observation (O(?:0|[1-9]\d*)) \(execute_workflow_query"
-    r"(?:(?:, in| ran in) ([^()\n]*?))?(; and resulted in a context change)?\)\n")
+    r"^Observation (?P<alias>O(?:0|[1-9]\d*)) \(execute_workflow_query"
+    r"(?: ran in (?:prior )?context '(?P<name>[^'()\n]*)'(?: and (?P<label>[^()\n]*?))?"
+    r"|(?:, in| ran in) (?P<clause>[^()\n]*?))?"
+    r"(?P<changed>; and resulted in a context change"
+    r"|; now in context '[^'()\n]*'(?: and [^()\n]*?)?)?\)\n")
 #: What the handle line names the root context as. The root's clause is empty.
 ROOT_CONTEXT_LABEL = "global"
 #: Appended to the handle line when the command moved the context. The new
@@ -59,7 +66,16 @@ def context_clause(context_name: str, instance_label: str = "") -> str:
     return f"{name} {label}" if label else name
 
 
-def alias_line(alias: str, context: str | None = None, *, context_changed: bool = False) -> str:
+def _printed_context(clause: str) -> str:
+    """``context '<ContextName>' and <instance label>`` for a ``context_clause``."""
+    # A context name never contains a space, so the first word is the name.
+    name, _, label = clause.partition(" ")
+    printed = f"context '{name or ROOT_CONTEXT_LABEL}'"
+    return f"{printed} and {label}" if label else printed
+
+
+def alias_line(alias: str, context: str | None = None, *, context_changed: bool = False,
+               now_in: str | None = None) -> str:
     """The canonical handle line printed above an inline execute observation.
 
     This is the only identifier the agent is ever asked to pass to
@@ -73,31 +89,47 @@ def alias_line(alias: str, context: str | None = None, *, context_changed: bool 
     is then byte-for-byte the bare alias line.
 
     ``context_changed`` says the command moved the context, so the agent does
-    not read the context it ran in as the one it is now in.
+    not read the context it ran in as the one it is now in. ``now_in`` is the
+    ``context_clause`` the command left the agent in; it is named when given,
+    and is not recorded with an archived observation, so a reprint says only
+    that the context changed.
     """
     if context is None:
         return f"Observation {alias} (execute_workflow_query)\n"
-    clause = _clipped(context, MAX_CONTEXT_NAME_CHARS + MAX_INSTANCE_LABEL_CHARS + 1)
-    suffix = f" ran in {clause or ROOT_CONTEXT_LABEL}"
-    if context_changed:
-        suffix += CONTEXT_CHANGE_SUFFIX
+    limit = MAX_CONTEXT_NAME_CHARS + MAX_INSTANCE_LABEL_CHARS + 1
+    clause = _clipped(context, limit)
+    if not context_changed:
+        suffix = f" ran in {_printed_context(clause)}"
+    elif now_in is None:
+        suffix = f" ran in prior {_printed_context(clause)}{CONTEXT_CHANGE_SUFFIX}"
+    else:
+        suffix = (f" ran in prior {_printed_context(clause)}"
+                  f"; now in {_printed_context(_clipped(now_in, limit))}")
     return f"Observation {alias} (execute_workflow_query{suffix})\n"
 
 
 def annotated_observation(alias: str, context: str | None = None, text: str = "",
-                          *, context_changed: bool = False) -> str:
+                          *, context_changed: bool = False, now_in: str | None = None) -> str:
     """The observation as the agent sees it: our handle line, then the response.
 
     The one place the two are joined, so the step that prints the line and the
     rehydration that re-prints it build the same observation.
     """
-    return alias_line(alias, context, context_changed=context_changed) + text
+    return alias_line(alias, context, context_changed=context_changed, now_in=now_in) + text
 
 
 def printed_alias(text: str) -> str | None:
     """The alias already printed on this observation, or None."""
     match = ALIAS_LINE_RE.match(text)
-    return match.group(1) if match else None
+    return match.group("alias") if match else None
+
+
+def _matched_clause(match: re.Match) -> str | None:
+    """The clause a matched handle line printed, in ``context_clause`` form."""
+    if match.group("name") is not None:
+        label = match.group("label")
+        return f"{match.group('name')} {label}" if label else match.group("name")
+    return match.group("clause")
 
 
 def printed_context(text: str) -> str | None:
@@ -110,7 +142,7 @@ def printed_context(text: str) -> str | None:
     match = ALIAS_LINE_RE.match(text)
     if match is None:
         return None
-    clause = match.group(2)
+    clause = _matched_clause(match)
     return None if clause == ROOT_CONTEXT_LABEL else (clause or None)
 
 
@@ -120,10 +152,34 @@ def printed_subject(text: str) -> tuple[str | None, bool]:
     ``(None, False)`` when no clause was printed; ``""`` for the root context.
     """
     match = ALIAS_LINE_RE.match(text)
-    if match is None or match.group(2) is None:
+    clause = None if match is None else _matched_clause(match)
+    if clause is None:
         return None, False
-    clause = "" if match.group(2) == ROOT_CONTEXT_LABEL else match.group(2)
-    return clause, match.group(3) is not None
+    clause = "" if clause == ROOT_CONTEXT_LABEL else clause
+    return clause, match.group("changed") is not None
+
+
+#: A context an alias line names, in either "ran in context" or "now in context" form.
+CONTEXT_IN_RE = re.compile(
+    r"(?:ran in (?:prior )?|now in )context '(?P<name>[^'()\n]*)'(?: and (?P<label>[^()\n;]*))?")
+
+
+def printed_instances(text: str) -> list[tuple[str, str, str]]:
+    """(context name, instance id, instance label) the handle line of *text* names, in printed order.
+
+    Only contexts that printed an instance are listed. The instance clause is
+    ``<instance id> <label>``: its first word is the id, the rest the label.
+    """
+    match = ALIAS_LINE_RE.match(text)
+    if match is None:
+        return []
+    found = []
+    for named in CONTEXT_IN_RE.finditer(match.group(0)):
+        instance = (named.group("label") or "").strip()
+        if instance:
+            instance_id, _, label = instance.partition(" ")
+            found.append((named.group("name"), instance_id, label.strip()))
+    return found
 
 
 def command_response(text: str, alias: str) -> str:

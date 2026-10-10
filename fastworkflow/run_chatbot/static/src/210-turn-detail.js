@@ -610,6 +610,24 @@ function phaseOf(span) {
   return PHASE_OTHER;
 }
 
+/* What a step label names. `execute_workflow_query` on every step says
+   nothing, so such a step shows the command it ran: the routed name from the
+   first fw.command.execute under `roots`, or, when routing failed and no
+   command ran, the first word of the command the agent sent. */
+function invokedCommand(toolName, toolArgs, roots, kids) {
+  if (toolName !== "execute_workflow_query") { return toolName; }
+  var pending = roots.slice();
+  while (pending.length) {
+    var span = pending.shift();
+    if (span.name === "fw.command.execute" && span.command_name) {
+      return String(span.command_name).split("/").pop();
+    }
+    pending = (kids[span.span_id] || []).slice().sort(byStartNs).concat(pending);
+  }
+  var args = attrObject(toolArgs) || {};
+  return String(args.command || "").trim().split(/\s+/)[0] || toolName;
+}
+
 /* -- recorded agent loop: fw.agent.execute / fw.agent.step -------------- */
 function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
   var attrs = span.attributes || {};
@@ -617,7 +635,7 @@ function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
     .map(function (child) { return spanNode(child, kids, byId); });
   return makeNode("step", "Step " + ordinal, {
     crumb: "Step " + ordinal,
-    detail: attrs.tool_name || "",
+    detail: invokedCommand(attrs.tool_name || "", attrs.tool_args, [span], kids),
     category: "cat-tool",
     status: span.status,
     span: span,
@@ -752,7 +770,7 @@ function buildStepNode(step, incomingObservation, kids, byId) {
   var covered = [step.reasoning].concat(step.actions);
   return makeNode("step", "Step " + step.no, {
     crumb: "Step " + step.no,
-    detail: toolName,
+    detail: invokedCommand(toolName, out.next_tool_args, step.actions, kids),
     category: "cat-tool",
     children: children,
     extent: spanExtent(covered),

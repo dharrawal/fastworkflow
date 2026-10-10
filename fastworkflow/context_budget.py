@@ -28,7 +28,7 @@ measured runs sat at. Nothing else in the framework converts tokens to bytes.
 Calibration. The fractions are pinned so that the reference window -- 131,072
 tokens, which is what ``litellm`` reports as ``max_input_tokens`` for
 ``cerebras/gpt-oss-120b`` -- reproduces the previously hand-set values EXACTLY:
-28,000 packed-trajectory target, 250,000 rehydration bytes, 3,072 bytes for a
+28,000 executor prompt target, 250,000 rehydration bytes, 3,072 bytes for a
 result page, and 1,024 bytes of minimum offload
 saving. ``tests/test_context_budget.py`` asserts that identity, so a change to
 a fraction that would move one of those values fails the suite.
@@ -151,15 +151,16 @@ class BudgetSpec:
         return max(self.floor, derived)
 
 
-#: The packed-trajectory target: how many bytes of ReAct trajectory the agent
-#: may carry into the next step before compaction offloads an observation.
+#: The executor prompt target: how many bytes the whole ReAct prompt (instructions,
+#: inputs, command list and trajectory) may occupy before compaction offloads
+#: observations, oldest first. The trajectory gets what the rest leaves over.
 #: 28,000 / 524,288 at the reference window.
 TRAJECTORY = BudgetSpec(
     name="trajectory_max_bytes",
     fraction=Fraction(875, 16_384),
     override_env="FW_TRAJECTORY_MAX_BYTES",
     floor=1,
-    what="packed-trajectory target",
+    what="executor prompt target",
 )
 
 #: The answer-time extraction budget: how many bytes of rehydrated evidence the

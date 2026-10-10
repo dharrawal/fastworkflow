@@ -102,7 +102,7 @@ class CompactTrajectory(unittest.TestCase):
         trajectory = {}
         for index in range(7):
             trajectory[f"tool_name_{index}"] = "execute_workflow_query"
-            trajectory[f"tool_args_{index}"] = {"command": f"show_holders_{index}"}
+            trajectory[f"tool_args_{index}"] = {"command": f"show_owners_{index}"}
             trajectory[f"observation_{index}"] = alias_line(f"O{index}") + (large if index == 0 else f"small-{index}")
         decisions = self.compact(
             trajectory,
@@ -119,7 +119,7 @@ class CompactTrajectory(unittest.TestCase):
         large = "477 holder(s).\nAaron Garrison\n" + ("row\n" * 4000)
         trajectory = {
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": alias_line("O0") + large,
         }
         for index in range(1, 6):
@@ -141,7 +141,7 @@ class CompactTrajectory(unittest.TestCase):
         large = "holder uid label\n" + ("x" * 30_000)
         trajectory = {
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": alias_line("O0") + large,
         }
         for index in range(1, 6):
@@ -181,7 +181,7 @@ class CompactTrajectory(unittest.TestCase):
         large = "é" * 15_000
         trajectory = {
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": alias_line("O0") + large,
         }
         for index in range(1, 6):
@@ -197,7 +197,7 @@ class CompactTrajectory(unittest.TestCase):
         large = "restart answer\n" + ("row\n" * 1_500)
         trajectory = {
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": alias_line("O0") + large,
         }
         for index in range(1, 6):
@@ -224,7 +224,7 @@ class CompactTrajectory(unittest.TestCase):
         large = "holder uid label\n" + ("x" * 30_000)
         trajectory = {
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": alias_line("O0") + large,
         }
         for index in range(1, 6):
@@ -327,11 +327,11 @@ class TrajectoryManifest(unittest.TestCase):
         self.addCleanup(uninstall_span_policy)
 
     def test_manifest_classifies_resident_labelled_absent(self) -> None:
-        resident = "holder uid Alan Cooper\n" + ("row\n" * 40)
+        resident = "holder uid Jane Roe\n" + ("row\n" * 40)
         raw_offloaded = "permission portrait\n" + ("field\n" * 80)
         label = offload_label(
             alias="O4",
-            command_name="Permission/show_holders",
+            command_name="Permission/show_owners",
             response=raw_offloaded,
         )
         user = (
@@ -435,7 +435,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         agent.react = lambda **kwargs: SimpleNamespace(
             next_thought="read the holders",
             next_tool_name="execute_workflow_query",
-            next_tool_args={"command": "Permission/show_holders"},
+            next_tool_args={"command": "Permission/show_owners"},
         )
         trajectory: dict = {}
         with tracing.host_scope(host):
@@ -475,7 +475,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         return. Without the normalisation this row reports ``alias=null`` and
         the step's own unchanged evidence comes back ``mismatched``.
         """
-        response = "holder uid Alan Cooper\n" + ("permission row\n" * 12)
+        response = "holder uid Jane Roe\n" + ("permission row\n" * 12)
         digest, trajectory = self._one_execute_step(response)
         slot = trajectory["observation_0"]
         self.assertTrue(slot.startswith(alias_line("O0")))
@@ -501,7 +501,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         response = "portrait\n" + ("field\n" * 80)
         digest, _trajectory = self._one_execute_step(response)
         label = offload_label(
-            alias="O0", command_name="Permission/show_holders", response=response
+            alias="O0", command_name="Permission/show_owners", response=response
         )
         manifest = self._manifest({0: label})
         row = manifest["observations"][0]
@@ -521,7 +521,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         slot digest moves and the response digest does not. The row has to say
         both: the transformation is visible, and the evidence is still the step's.
         """
-        response = "holder uid Alan Cooper\n" + ("permission row\n" * 12)
+        response = "holder uid Jane Roe\n" + ("permission row\n" * 12)
         digest, _trajectory = self._one_execute_step(response)
         restored = rehydrated_label("O0", scope=self.scope, archive=self.archive)
         self.assertIsNotNone(restored)
@@ -756,6 +756,34 @@ class HookIsolation(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0]["error"], "ValueError")
 
+    def test_prompt_overhead_leaves_the_trajectory_less_room(self) -> None:
+        """The budget bounds the whole executor prompt, not only the trajectory."""
+        large = alias_line("O0") + ("aaaa " * 2_000)
+        trajectory = {
+            "tool_name_0": "execute_workflow_query",
+            "tool_args_0": {"command": "show"},
+            "observation_0": large,
+        }
+        for index in range(1, 6):
+            trajectory[f"tool_name_{index}"] = "execute_workflow_query"
+            trajectory[f"tool_args_{index}"] = {"command": f"find_{index}"}
+            trajectory[f"observation_{index}"] = alias_line(f"O{index}") + f"small-{index}"
+        archive_step(trajectory, 0, scope=self.scope, selected_archive=self.archive)
+
+        def offloaded_with_overhead(overhead: int) -> bool:
+            agent = SimpleNamespace(inputs={}, prompt_overhead_bytes=lambda inputs: overhead)
+            step = build_compacting_step(SimpleNamespace(workflow_tool_agent=agent),
+                                         selected_archive=self.archive)
+            view = dict(trajectory)
+            with patch("fastworkflow.observation_offloading.agent.scope_for_host",
+                       return_value=self.scope), \
+                 patch("fastworkflow.context_budget.trajectory_max_bytes", return_value=40_000):
+                step(5, view)
+            return view["observation_0"] != large
+
+        self.assertFalse(offloaded_with_overhead(0))
+        self.assertTrue(offloaded_with_overhead(35_000))
+
     def test_malformed_numeric_override_falls_back_to_the_derived_budget(self) -> None:
         self._set_env("FW_TRAJECTORY_MAX_BYTES", "28k")
         self.assertEqual(packed_target_bytes_from_env(), PACKED_TARGET_BYTES)
@@ -831,10 +859,10 @@ class AgentConstruction(unittest.TestCase):
             "evaluation_controls", [event["kind"] for event in snapshot_events()]
         )
 
-    def test_the_workflow_agent_offers_search_memory(self) -> None:
+    def test_the_workflow_agent_does_not_offer_search_memory(self) -> None:
+        # Disabled 2026-10-09; the function is kept for later.
         agent = initialize_workflow_tool_agent(SimpleNamespace())
-        self.assertIn("search_memory", agent.tools)
-        self.assertIn("Answers a question about ONE earlier", agent.tools["search_memory"].desc)
+        self.assertNotIn("search_memory", agent.tools)
 
     def test_multiple_agents_share_one_idempotent_manifest_enricher(self) -> None:
         uninstall_span_policy()
@@ -898,7 +926,7 @@ class PrintedObservationHandles(unittest.TestCase):
 
     def test_interleaved_tools_number_executes_only(self) -> None:
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "holders page", command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", "holders page", command="show_owners")
         self._step(trajectory, 1, "search_memory", "Observation O1:\nan answer")
         self._step(trajectory, 2, "ask_user", "the user replied")
         self._step(trajectory, 3, "what_can_i_do", "available command metadata")
@@ -915,7 +943,7 @@ class PrintedObservationHandles(unittest.TestCase):
     def test_inline_alias_equals_the_label_and_archive_alias_after_offload(self) -> None:
         large = "holder uid label\n" + ("x" * 30_000)
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", large, command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", large, command="show_owners")
         for index in range(1, 6):
             self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
                        command=f"find_{index}")
@@ -940,7 +968,7 @@ class PrintedObservationHandles(unittest.TestCase):
     def test_printed_alias_is_what_search_memory_resolves(self) -> None:
         large = "holder uid label\n" + ("x" * 30_000)
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", large, command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", large, command="show_owners")
         self._step(trajectory, 1, "what_can_i_do", "metadata")
         for index in range(2, 7):
             self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
@@ -970,7 +998,7 @@ class PrintedObservationHandles(unittest.TestCase):
     def test_label_still_saves_space_against_the_printed_observation(self) -> None:
         body = "holder uid label\n" + ("x" * 30_000)
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", body, command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", body, command="show_owners")
         for index in range(1, 6):
             self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
                        command=f"find_{index}")
@@ -987,7 +1015,7 @@ class PrintedObservationHandles(unittest.TestCase):
     def test_decision_sizes_and_eligibility_ignore_the_printed_line(self) -> None:
         body = "y" * 4_000
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", body, command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", body, command="show_owners")
         decisions = self.compact(trajectory, recent_observations_protected=0,
                                  packed_target_tokens=1)
         self.assertEqual(decisions[0]["response_size"]["characters"], len(body))
@@ -1007,7 +1035,7 @@ class PrintedObservationHandles(unittest.TestCase):
     def test_error_and_empty_execute_observations_are_still_addressable(self) -> None:
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query",
-                   "Execution error in execute_workflow_query: boom", command="show_holders")
+                   "Execution error in execute_workflow_query: boom", command="show_owners")
         self._step(trajectory, 1, "execute_workflow_query", "", command="show_rights")
         self.compact(trajectory)
         self.assertEqual(printed_alias(trajectory["observation_0"]), "O0")
@@ -1090,7 +1118,7 @@ class EagerObservationArchive(unittest.TestCase):
 
     def test_every_execute_observation_is_archived_whether_or_not_it_is_offloaded(self) -> None:
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_owners")
         self._step(trajectory, 1, "what_can_i_do", "command metadata")
         self._step(trajectory, 2, "execute_workflow_query", "rights rows", command="show_rights")
         decisions = self.compact(trajectory)
@@ -1112,7 +1140,7 @@ class EagerObservationArchive(unittest.TestCase):
     def test_search_answers_from_the_same_text_inline_or_offloaded(self) -> None:
         large = "holder uid label\n" + ("x" * 30_000)
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", large, command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", large, command="show_owners")
         for index in range(1, 6):
             self._step(trajectory, index, "execute_workflow_query", f"small-{index}",
                        command=f"find_{index}")
@@ -1144,7 +1172,7 @@ class EagerObservationArchive(unittest.TestCase):
 
     def test_repeated_persistence_keeps_one_row_with_the_same_digest(self) -> None:
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_owners")
         for _ in range(4):
             self.compact(trajectory)
             self._step(trajectory, len(trajectory) // 4, "execute_workflow_query",
@@ -1163,7 +1191,7 @@ class EagerObservationArchive(unittest.TestCase):
     def test_another_turns_alias_is_not_visible(self) -> None:
         trajectory: dict = {}
         self._step(trajectory, 0, "execute_workflow_query", "first-turn holders",
-                   command="show_holders")
+                   command="show_owners")
         self.compact(trajectory)
         other = RuntimeHandleScope(
             channel_id="fixture-channel",
@@ -1183,7 +1211,7 @@ class EagerObservationArchive(unittest.TestCase):
                 return None
 
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_owners")
         decisions = compact_completed(
             trajectory,
             scope=self.scope,
@@ -1201,7 +1229,7 @@ class EagerObservationArchive(unittest.TestCase):
 
     def test_rewritten_text_under_a_live_alias_is_refused_not_overwritten(self) -> None:
         trajectory: dict = {}
-        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_holders")
+        self._step(trajectory, 0, "execute_workflow_query", "holder rows", command="show_owners")
         self.compact(trajectory)
         # An observation is immutable once its step completed; a different text
         # under the same alias must never replace the stored evidence.
@@ -1279,11 +1307,11 @@ class MinimumOffloadSaving(unittest.TestCase):
             trajectory, scope=self.scope, selected_archive=self.archive, **kwargs
         )
 
-    def label_for(self, body, *, alias="O0", command="show_holders", description=""):
+    def label_for(self, body, *, alias="O0", command="show_owners", description=""):
         return offload_label(alias=alias, command_name=command, response=body,
                              description=description)
 
-    def body_saving(self, saving, *, alias="O0", command="show_holders", description=""):
+    def body_saving(self, saving, *, alias="O0", command="show_owners", description=""):
         """A response whose real label frees exactly ``saving`` UTF-8 bytes."""
         probe = self.HEAD + "x" * 4_000
         label = self.label_for(probe, alias=alias, command=command, description=description)
@@ -1296,7 +1324,7 @@ class MinimumOffloadSaving(unittest.TestCase):
         )
         return body
 
-    def one_step(self, body, *, command="show_holders"):
+    def one_step(self, body, *, command="show_owners"):
         return {
             "tool_name_0": "execute_workflow_query",
             "tool_args_0": {"command": command},
@@ -1362,7 +1390,7 @@ class MinimumOffloadSaving(unittest.TestCase):
         long_command = "who_has_access_to <type>permission</type> " + "a" * 200
         trajectory = {
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": body,
             "tool_name_1": "execute_workflow_query",
             "tool_args_1": {"command": long_command},
@@ -1378,7 +1406,7 @@ class MinimumOffloadSaving(unittest.TestCase):
         self.assertEqual(by_alias["O1"]["reason"], "below_min_saving")
         self.assertEqual(
             by_alias["O1"]["offload_saving_bytes"],
-            1_024 - (len(long_command.encode("utf-8")) - len("show_holders")),
+            1_024 - (len(long_command.encode("utf-8")) - len("show_owners")),
         )
         self.assertEqual(by_alias["O1"]["label_size"]["utf8_bytes"],
                          len(self.label_for(body, alias="O1",
@@ -1413,7 +1441,7 @@ class MinimumOffloadSaving(unittest.TestCase):
             trajectory[f"observation_{index}"] = f"Entered context {index}."
         # A fresh 30 KB result is what pushes the packed trajectory over target.
         trajectory["tool_name_5"] = "execute_workflow_query"
-        trajectory["tool_args_5"] = {"command": "show_holders"}
+        trajectory["tool_args_5"] = {"command": "show_owners"}
         trajectory["observation_5"] = "holder uid label\n" + "z" * 30_000
         return trajectory
 
@@ -1555,11 +1583,11 @@ class RestoreWording(unittest.TestCase):
     """The restore is budget-bound, and every place that promises it says so."""
 
     def test_a_label_says_normally_restored_and_both_earlier_marks_still_parse(self) -> None:
-        label = offload_label(alias="O3", command_name="show_holders", response="payload",
+        label = offload_label(alias="O3", command_name="show_owners", response="payload",
                               description="holder rows")
         self.assertTrue(label.endswith("Normally restored for the final answer."))
         self.assertEqual(LABEL_RESTORE_MARK, "Normally restored for the final answer.")
-        earlier = ("Offloaded observation O3 returned by show_holders. It contains holder rows. "
+        earlier = ("Offloaded observation O3 returned by show_owners. It contains holder rows. "
                    "Restored in full for the final answer.")
         self.assertTrue(is_offload_label(earlier))
         self.assertEqual(label_alias(earlier), "O3")
@@ -1570,7 +1598,7 @@ class RestoreWording(unittest.TestCase):
         self.assertIn("If the answer's evidence limit is reached, the oldest observations are not "
                       "restored and the answer names them.", doc)
         self.assertNotIn("is restored in full", doc)
-        self.assertIn("Search memory only for a value you need to choose your next step, "
-                      "never to collect rows for the final answer.", doc)
+        self.assertIn("If you need a value from an offloaded observation to choose your next step, "
+                      "run its command again", doc)
 
 

@@ -191,7 +191,7 @@ def _script_the_llm_boundaries(monkeypatch, ctx, scripts: list[_PassScript]) -> 
         lambda chat_session, **_kwargs: _ScriptedAgent(chat_session, pending),
     )
 
-    def scripted_planner(user_query, session, planning_insights=None, planner_lm=None):
+    def scripted_planner(user_query, session, planner_lm=None, **_):
         # The real planner's hook appends to this list as it plans; the capture
         # is what `_run_agent_pass` records as the pass's plan.
         capture = getattr(session, "_planning_steps_capture", None)

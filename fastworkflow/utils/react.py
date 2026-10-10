@@ -8,6 +8,7 @@ from litellm import ContextWindowExceededError
 from litellm import exceptions as litellm_exceptions
 
 import dspy
+from dspy.utils.exceptions import AdapterParseError
 from dspy.adapters.types.tool import Tool
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
@@ -45,6 +46,9 @@ class NoSuspendedAgentStateError(RuntimeError):
 
 
 class fastWorkflowReAct(Module):
+    # Called after each completed tool step (not on suspension); class default for agents built via __new__.
+    on_step_end: Callable[[], None] | None = None
+
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
                  on_step_complete: Callable[[int, dict], bool] | None = None):
         """
@@ -98,44 +102,68 @@ class fastWorkflowReAct(Module):
             args={},
         )
 
-        instr.extend(f"({idx + 1}) {tool}" for idx, tool in enumerate(tools.values()))
-        instr.append("When providing `next_tool_args`, the value inside the field must be in JSON format")
-
-        # Build the ReAct signature with trajectory input.
-        # available_commands is injected into system message by CommandsSystemPreludeAdapter
-        # (see fastworkflow/utils/chat_adapter.py) and is NOT included in the trajectory
-        # formatting to avoid token bloat across iterations.
-        react_signature = (
-            dspy.Signature({**signature.input_fields}, "\n".join(instr))
-            .append("trajectory", dspy.InputField(), type_=str)
-            .append("next_thought", dspy.OutputField(), type_=str)
-            .append("next_tool_name", dspy.OutputField(), type_=Literal[tuple(tools.keys())])
-            .append("next_tool_args", dspy.OutputField(), type_=dict[str, Any])
-        )
-
         fallback_signature = dspy.Signature(
             {**signature.input_fields, **signature.output_fields},
             signature.instructions,
         ).append("trajectory", dspy.InputField(), type_=str)
 
         self.tools = tools
-        self.react = dspy.Predict(react_signature)
+        self._instructions_head = instr
+        self._disabled_tools: frozenset[str] = frozenset()
+        self.react = dspy.Predict(self._react_signature())
         self.extract = dspy.ChainOfThought(fallback_signature)
 
         self.inputs = {}
         self.trajectory: dict[str, Any] = {}
+        # Caller-owned state for one executor run; reset in forward().
+        self.run_state: dict[str, Any] = {}
         self._on_step_complete = on_step_complete
         self._suspended: dict[str, Any] | None = None
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
         # How many times the context-window fallback has fired in this process.
-        # Only read as a delta around one call (ido-8ps.18, to tell an extract
+        # Only read as a delta around one call (to tell an extract
         # that overflowed from one that did not).
         self._truncation_count = 0
         # Steps the fallback has dropped from the model's view of self.trajectory
         # in the current turn. The canonical trajectory is never trimmed.
         self._dropped_steps = 0
+
+    _disabled_tools: frozenset[str] = frozenset()  # class default: agents built via __new__ (tests) have none
+
+    @property
+    def disabled_tools(self) -> frozenset[str]:
+        """Tools the agent may not use now: not listed to the model, refused if called.
+
+        Assign a collection to change it; the ReAct signature is rebuilt to match.
+        """
+        return self._disabled_tools
+
+    @disabled_tools.setter
+    def disabled_tools(self, names) -> None:
+        self._disabled_tools = frozenset(names)
+        self.react.signature = self._react_signature()
+
+    def _react_signature(self):
+        """The ReAct signature, listing the tools that are not disabled."""
+        enabled = {name: tool for name, tool in self.tools.items() if name not in self._disabled_tools}
+        instr = [
+            *self._instructions_head,
+            *(f"({idx + 1}) {tool}" for idx, tool in enumerate(enabled.values())),
+            "When providing `next_tool_args`, the value inside the field must be in JSON format",
+        ]
+        # Build the ReAct signature with trajectory input.
+        # available_commands is injected into system message by CommandsSystemPreludeAdapter
+        # (see fastworkflow/utils/chat_adapter.py) and is NOT included in the trajectory
+        # formatting to avoid token bloat across iterations.
+        return (
+            dspy.Signature({**self.signature.input_fields}, "\n".join(instr))
+            .append("trajectory", dspy.InputField(), type_=str)
+            .append("next_thought", dspy.OutputField(), type_=str)
+            .append("next_tool_name", dspy.OutputField(), type_=Literal[tuple(enabled.keys())])
+            .append("next_tool_args", dspy.OutputField(), type_=dict[str, Any])
+        )
 
     def clear_suspension(self) -> None:
         """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
@@ -153,6 +181,7 @@ class fastWorkflowReAct(Module):
             "clarification": self._suspended.get("clarification"),
             "iteration_counter": self.iteration_counter,
             "dropped_steps": self._dropped_steps,
+            "disabled_tools": sorted(self._disabled_tools),
         }
 
     def import_suspended(self, data: dict[str, Any]) -> None:
@@ -166,6 +195,7 @@ class fastWorkflowReAct(Module):
         }
         self.iteration_counter = data.get("iteration_counter", 0)
         self._dropped_steps = data.get("dropped_steps", 0)
+        self.disabled_tools = data.get("disabled_tools", [])
 
     def planner_view(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """The request and trajectory a mid-turn replan plans from.
@@ -188,17 +218,32 @@ class fastWorkflowReAct(Module):
         trajectory_signature = dspy.Signature(f"{', '.join(trajectory.keys())} -> x")
         return adapter.format_user_message_content(trajectory_signature, trajectory)
 
+    def prompt_overhead_bytes(self, input_args: dict[str, Any]) -> int:
+        """UTF-8 bytes of the executor prompt that is not the trajectory.
+
+        The messages ``self.react`` sends for ``input_args`` with an empty
+        trajectory: instructions, inputs, command list and demos.
+        """
+        adapter = dspy.settings.adapter or dspy.ChatAdapter()
+        messages = adapter.format(
+            self.react.signature,
+            demos=getattr(self.react, "demos", []),
+            inputs={**input_args, "trajectory": ""},
+        )
+        return sum(len(str(m.get("content", "")).encode("utf-8")) for m in messages)
+
     @DSPyForward.intercept
     def forward(self, **input_args):
         self.inputs = input_args
         self.clear_suspension()
 
         self.trajectory = {}
+        self.run_state = {}
         self.iteration_counter = 0
         self._dropped_steps = 0
 
         max_iters = input_args.pop("max_iters", self.max_iters)
-        idx = 0
+        idx = input_args.pop("first_step", 0)
         exception_count = 0
 
         suspended = self._run_loop(
@@ -278,7 +323,10 @@ class fastWorkflowReAct(Module):
                 )
                 if pred is None:
                     raise ValueError("Tool returned is None")
-            except ValueError as err:
+            # A reply no adapter could parse, or a call that timed out, is a bad
+            # step, not a failed turn: it is recovered from like an invalid tool
+            # choice, so one bad completion cannot throw away every step taken.
+            except (ValueError, AdapterParseError, litellm_exceptions.Timeout) as err:
                 repaired = _command_named_as_tool(
                     err, self.tools, input_args.get("available_commands")
                 )
@@ -314,8 +362,8 @@ class fastWorkflowReAct(Module):
                         break
                     continue
             except BaseException as err:
-                # Anything else from the reasoning call — AdapterParseError,
-                # provider errors, control signals. The caller's retry loop
+                # Anything else from the reasoning call — provider errors,
+                # control signals. The caller's retry loop
                 # re-enters this method, and a step span left on the stack
                 # would parent the ENTIRE retried attempt under a phantom
                 # span that is never emitted. Close it, then propagate.
@@ -341,7 +389,10 @@ class fastWorkflowReAct(Module):
                 step_attributes["repaired_tool_name"] = repaired_tool_name
 
             try:
-                observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                if pred.next_tool_name in self.disabled_tools:
+                    observation = f"{pred.next_tool_name} is not available now."
+                else:
+                    observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
                 trajectory[f"observation_{idx}"] = observation
                 step_attributes["observation"] = _as_text(observation)
             except AskUserSuspend as err:
@@ -390,6 +441,8 @@ class fastWorkflowReAct(Module):
             tracing.end_span(
                 host, step_span, status=step_status, attributes=step_attributes
             )
+            if self.on_step_end is not None:
+                self.on_step_end()
 
             # Step-completion callback for distillation: lets external code inspect
             # each completed step and stop execution early (e.g. on trajectory
@@ -405,47 +458,17 @@ class fastWorkflowReAct(Module):
                 break
 
             idx += 1
+            # Still counted: execute_workflow_query reads iteration_counter <= 0
+            # as "this command came from the user".
             self.iteration_counter += 1
+            # The cap is a hand-off signal: the caller summarises progress and
+            # runs a fresh executor to continue the same sub-task.
             if self.iteration_counter >= max_iters:
                 logger.warning("Max iterations reached")
                 self._exhausted_last_run = True
                 break
 
         return None
-
-    async def aforward(self, **input_args):
-        trajectory = self.trajectory = {}
-        self._dropped_steps = 0
-        max_iters = input_args.pop("max_iters", self.max_iters)
-        for idx in range(max_iters):
-            try:
-                pred = await self._async_call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
-            except ValueError as err:
-                repaired = _command_named_as_tool(
-                    err, self.tools, input_args.get("available_commands")
-                )
-                if repaired is None:
-                    logger.warning(f"Ending the trajectory: Agent failed to select a valid tool: {_fmt_exc(err)}")
-                    break
-                repaired.pop("repaired_tool_name")
-                pred = dspy.Prediction(**repaired)
-
-            trajectory[f"thought_{idx}"] = pred.next_thought
-            trajectory[f"tool_name_{idx}"] = pred.next_tool_name
-            trajectory[f"tool_args_{idx}"] = pred.next_tool_args
-
-            try:
-                trajectory[f"observation_{idx}"] = await self.tools[pred.next_tool_name].acall(**pred.next_tool_args)
-            except Exception as err:
-                trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
-
-            if pred.next_tool_name == "finish":
-                break
-
-            self.iteration_counter += 1
-
-        extract = await self._async_extract_prediction(trajectory, **input_args)
-        return dspy.Prediction(trajectory=trajectory, **extract)
 
     def _rehydrate_for_extract(self, trajectory):
         """``(trajectory_for_the_extractor, report, budget, scope)``.
@@ -549,28 +572,15 @@ class fastWorkflowReAct(Module):
                 truncations_before=truncations_before,
             )
 
-    async def _async_extract_prediction(self, trajectory, **input_args):
-        """``_extract_prediction`` for the async loop, same rules."""
-        selected, report, budget, scope = self._rehydrate_for_extract(trajectory)
-        if report is None:
-            return await self._async_call_with_potential_trajectory_truncation(
-                self.extract, selected, **input_args
-            )
-        truncations_before = getattr(self, "_truncation_count", 0)
-        started = time.monotonic()
-        try:
-            return await self._async_call_with_potential_trajectory_truncation(
-                self.extract, selected, **input_args
-            )
-        finally:
-            self._record_extract_finished(
-                report, budget=budget, scope=scope, started=started,
-                truncations_before=truncations_before,
-            )
-
     def _model_view(self, trajectory: dict[str, Any]) -> dict[str, Any]:
-        """A copy of ``trajectory`` without the oldest steps the fallback dropped."""
-        return dict(list(trajectory.items())[4 * self._dropped_steps:])
+        """A copy of ``trajectory`` without the oldest steps the fallback dropped.
+
+        Steps are dropped by step index, not by key count: a parse-error recovery
+        writes an ``observation_<n>`` with no thought, then a full thought/observation
+        pair, so steps do not all have 4 keys.
+        """
+        dropped = set(_step_indexes(trajectory)[: self._dropped_steps])
+        return {k: v for k, v in trajectory.items() if _step_index(k) not in dropped}
 
     def _call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
         for _ in range(3):
@@ -580,18 +590,6 @@ class fastWorkflowReAct(Module):
                     trajectory=self._format_trajectory(self._model_view(trajectory)),
                 )
             except (litellm_exceptions.BadRequestError, ContextWindowExceededError):
-                logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
-                self._count_truncation()
-                self.truncate_trajectory(trajectory)
-
-    async def _async_call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
-        for _ in range(3):
-            try:
-                return await module.acall(
-                    **input_args,
-                    trajectory=self._format_trajectory(self._model_view(trajectory)),
-                )
-            except ContextWindowExceededError:
                 logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
                 self._count_truncation()
                 self.truncate_trajectory(trajectory)
@@ -606,14 +604,29 @@ class fastWorkflowReAct(Module):
         Each call adds one step to ``_dropped_steps``; ``_model_view`` applies
         that to a copy when the trajectory is formatted.
         """
-        if len(trajectory) - 4 * self._dropped_steps < 4:
-            # Every tool call has 4 keys: thought, tool_name, tool_args, and observation.
+        if len(_step_indexes(trajectory)) - self._dropped_steps < 1:
             raise ValueError(
                 "The trajectory is too long so your prompt exceeded the context window, but the trajectory cannot be "
                 "truncated because it only has one tool call."
             )
         self._dropped_steps += 1
         return trajectory
+
+
+_STEP_KEY = re.compile(r"^(?:thought|tool_name|tool_args|observation)_(\d+)$")
+
+
+def _step_index(key: str) -> int | None:
+    """The step index a trajectory key belongs to, or None for an unrecognised key."""
+    match = _STEP_KEY.match(key)
+    return int(match.group(1)) if match else None
+
+
+def _step_indexes(trajectory: dict[str, Any]) -> list[int]:
+    """Distinct step indexes in trajectory order, oldest first."""
+    return list(dict.fromkeys(
+        index for index in (_step_index(k) for k in trajectory) if index is not None
+    ))
 
 
 def _extract_prompt_tokens() -> int | None:
@@ -698,7 +711,7 @@ def _command_named_as_tool(
 ) -> dict[str, Any] | None:
     """The step the agent meant when it named a workflow command as its tool.
 
-    Small models write ``next_tool_name: open_directory`` instead of calling
+    Small models write ``next_tool_name: open_item_explorer`` instead of calling
     ``execute_workflow_query`` with that command. When the rejected name is a
     command listed for the current context and its args are a JSON object
     whose values hold no tag-like text, return the equivalent

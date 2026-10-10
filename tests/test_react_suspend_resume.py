@@ -187,6 +187,36 @@ def test_truncation_drops_oldest_steps_from_the_model_view_only():
     assert list(agent._model_view(trajectory)) == list(before)[4:]
 
 
+def test_truncation_drops_whole_steps_when_a_recovered_step_has_fewer_keys():
+    """A parse-error recovery writes observation_0 alone, then a thought/observation
+    pair under index 1. Dropping one step must remove all of step 0 and nothing
+    of step 1 or 2, not the first four keys by count."""
+    agent = _bare_react_agent()
+    trajectory = {
+        "observation_0": "Agent failed to select a valid tool",
+        "thought_1": "To execute a command, I should use one of the available tools",
+        "observation_1": "Use the appropriate tool with proper arguments",
+        "thought_2": "run it",
+        "tool_name_2": "ask_user",
+        "tool_args_2": {},
+        "observation_2": "ok",
+    }
+
+    agent.truncate_trajectory(trajectory)
+
+    view = agent._model_view(trajectory)
+    assert list(view) == ["thought_1", "observation_1", "thought_2", "tool_name_2", "tool_args_2", "observation_2"]
+    assert len(trajectory) == 7
+
+    agent.truncate_trajectory(trajectory)
+    assert list(agent._model_view(trajectory)) == ["thought_2", "tool_name_2", "tool_args_2", "observation_2"]
+
+    agent.truncate_trajectory(trajectory)
+    assert agent._model_view(trajectory) == {}
+    with pytest.raises(ValueError, match="cannot be truncated"):
+        agent.truncate_trajectory(trajectory)
+
+
 def test_clear_suspension_drops_stash():
     from fastworkflow.utils.react import NoSuspendedAgentStateError
 
@@ -196,31 +226,3 @@ def test_clear_suspension_drops_stash():
     assert agent._suspended is None
     with pytest.raises(NoSuspendedAgentStateError, match="No suspended"):
         agent.resume("too late")
-
-
-def test_aforward_stops_on_finish():
-    import asyncio
-
-    class _FinishTool:
-        async def acall(self, **kwargs):
-            return "Completed."
-
-    agent = _bare_react_agent()
-    agent.react = object()
-    agent.tools = {"finish": _FinishTool()}
-
-    async def acall(module, trajectory, **kwargs):
-        return SimpleNamespace(
-            next_thought="done", next_tool_name="finish", next_tool_args={}
-        )
-
-    agent._async_call_with_potential_trajectory_truncation = acall  # type: ignore[method-assign]
-
-    async def aextract(trajectory, **kwargs):
-        return {"final_answer": "ok"}
-
-    agent._async_extract_prediction = aextract  # type: ignore[method-assign]
-
-    result = asyncio.run(agent.aforward(user_query="q", max_iters=5))
-    assert result.final_answer == "ok"
-    assert result.trajectory["tool_name_0"] == "finish"

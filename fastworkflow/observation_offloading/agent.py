@@ -5,6 +5,7 @@ import logging
 from typing import Any, Callable, Optional
 
 import fastworkflow
+from fastworkflow import context_budget
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
@@ -25,6 +26,24 @@ from fastworkflow.utils.react import fastWorkflowReAct
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ITERS = 25
+
+
+def _trajectory_target_bytes(chat_session: Any) -> int:
+    """The trajectory's share of the executor prompt budget.
+
+    The budget bounds the whole ReAct prompt, so the rest of the prompt (the
+    instructions, inputs and command list) is taken off it first.
+    """
+    budget = context_budget.trajectory_max_bytes()
+    agent = getattr(chat_session, "workflow_tool_agent", None)
+    if agent is None:
+        return budget
+    try:
+        overhead = agent.prompt_overhead_bytes(agent.inputs)
+    except Exception as error:  # noqa: BLE001
+        logger.debug("prompt overhead unavailable, using the whole budget: %s", error)
+        return budget
+    return max(budget - overhead, 0)
 
 
 def build_compacting_step(
@@ -51,6 +70,7 @@ def build_compacting_step(
                 scope=scope,
                 selected_archive=selected_archive,
                 describe_output=describe_output,
+                packed_target_bytes=_trajectory_target_bytes(chat_session),
             )
         except Exception as error:  # noqa: BLE001
             logger.warning(
@@ -156,7 +176,7 @@ def build_tool_agent(
     # can be replayed from lives, and is erased, where the turn's record is.
     archive_path = observability_db_path(chat_session)
     # An archive that cannot be opened degrades; it does not stop the agent
-    # being built (ido-t5x).
+    # being built.
     selected_archive = open_handle_archive(archive_path)
 
     compacting_step = build_compacting_step(

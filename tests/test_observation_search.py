@@ -46,7 +46,7 @@ class ObservationSearch(unittest.TestCase):
 
     def persist(self, alias, text):
         step_index = int(alias[1:])
-        self.archive.persist(self.scope, alias=alias, command_name='show_holders', step_index=step_index,
+        self.archive.persist(self.scope, alias=alias, command_name='show_owners', step_index=step_index,
                              text=text, text_sha256=hashlib.sha256(text.encode()).hexdigest())
 
     def search(self, question, alias, **kwargs):
@@ -67,9 +67,9 @@ class ObservationSearch(unittest.TestCase):
         self.assertIn('no matching offloaded handle O1', result)
 
     def test_label_uses_command_argument_and_authored_description(self):
-        label = offload_label(alias='O11', command_name='show_holders limit=100',
+        label = offload_label(alias='O11', command_name='show_owners limit=100',
                              response='payload', description='identity UIDs and holder names')
-        self.assertEqual(label, 'Offloaded observation O11 returned by show_holders limit=100. '
+        self.assertEqual(label, 'Offloaded observation O11 returned by show_owners limit=100. '
                                 'It contains identity UIDs and holder names. '
                                 'Normally restored for the final answer.')
         self.assertTrue(is_offload_label(label))
@@ -78,11 +78,11 @@ class ObservationSearch(unittest.TestCase):
     def test_a_label_in_the_earlier_wording_is_still_recognised(self):
         # A trajectory recorded before the wording changed must still resume.
         legacy = ('Use search_memory tool to search inside Observation O9 returned by '
-                  'show_holders. It was offloaded to memory and contains holder rows.')
+                  'show_owners. It was offloaded to memory and contains holder rows.')
         self.assertTrue(is_offload_label(legacy))
         self.assertEqual(label_alias(legacy), 'O9')
         # And the older label that carried the whole restore promise.
-        promise = ('Offloaded observation O9 returned by show_holders. It contains holder '
+        promise = ('Offloaded observation O9 returned by show_owners. It contains holder '
                    'rows. It is restored in full when the final answer is written, so search '
                    'it with search_memory only for a value you need for your next step.')
         self.assertTrue(is_offload_label(promise))
@@ -156,7 +156,7 @@ class SearchModelRole(unittest.TestCase):
         self.scope = RuntimeHandleScope('channel', 'turn')
         # Longer than SHORT_OBSERVATION_BYTES, so the search asks get_lm for a model.
         text = 'holder rows\n' + 'x' * 300
-        self.archive.persist(self.scope, alias='O0', command_name='show_holders', step_index=0, text=text,
+        self.archive.persist(self.scope, alias='O0', command_name='show_owners', step_index=0, text=text,
                              text_sha256=hashlib.sha256(text.encode()).hexdigest())
 
     def selected_role(self, env):
@@ -197,9 +197,9 @@ class SearchModelRole(unittest.TestCase):
         lm = SimpleNamespace(history=[{'usage': {'completion_tokens': 7}, 'cost': 0.0}],
                              model='fixture-lm')
         text = 'holder rows\n' + 'x' * 300
-        self.archive.persist(self.scope, alias='O1', command_name='show_holders', step_index=1, text=text,
+        self.archive.persist(self.scope, alias='O1', command_name='show_owners', step_index=1, text=text,
                              text_sha256=hashlib.sha256(text.encode()).hexdigest(),
-                             context_clause='Account 28c5aeb5 Alan Cooper')
+                             context_clause='Account 28c5aeb5 Jane Roe')
 
         def predict(_signature):
             def call(question, subject, observation, **_):
@@ -211,7 +211,7 @@ class SearchModelRole(unittest.TestCase):
                 patch('fastworkflow.observation_offloading.search.dspy') as fake_dspy:
             fake_dspy.Predict.side_effect = predict
             search_memory('Whose holders?', 'O1', scope=self.scope, selected_archive=self.archive)
-        self.assertIn('Account 28c5aeb5 Alan Cooper', seen['subject'])
+        self.assertIn('Account 28c5aeb5 Jane Roe', seen['subject'])
 
     def test_the_archived_observation_is_sent_to_the_model_in_full(self):
         seen: dict = {}
@@ -225,7 +225,7 @@ class SearchModelRole(unittest.TestCase):
                 return SimpleNamespace(answer='ok')
             return call
 
-        self.archive.persist(self.scope, alias='O1', command_name='show_holders', step_index=1, text=large,
+        self.archive.persist(self.scope, alias='O1', command_name='show_owners', step_index=1, text=large,
                              text_sha256=hashlib.sha256(large.encode()).hexdigest())
         with patch('fastworkflow.observation_offloading.search.get_lm', return_value=lm), \
                 patch('fastworkflow.observation_offloading.search.dspy') as fake_dspy:
@@ -251,8 +251,8 @@ class ArchiveAndSubjectCache(unittest.TestCase):
                              context_clause=context_clause)
 
     def test_a_context_is_read_back_from_the_archive_once_recorded(self):
-        self.persist('O0', 'show_holders', 'rows\n' + 'x' * 400)
+        self.persist('O0', 'show_owners', 'rows\n' + 'x' * 400)
         self.assertIsNone(self.archive.get(self.scope, 'O0')['context_clause'])
-        self.persist('O1', 'show_holders', 'rows\n' + 'x' * 400, context_clause='Account 1')
+        self.persist('O1', 'show_owners', 'rows\n' + 'x' * 400, context_clause='Account 1')
         self.assertEqual(self.archive.get(self.scope, 'O1')['context_clause'], 'Account 1')
 

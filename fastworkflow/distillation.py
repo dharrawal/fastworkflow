@@ -611,15 +611,7 @@ class DistillationSession:
             _what_can_i_do,
         )
 
-        # Load execution insights for the agent
-        execution_insights = getattr(
-            self.chat_session, "_execution_insights", None
-        )
-
-        agent = initialize_workflow_tool_agent(
-            self.chat_session,
-            execution_insights=execution_insights,
-        )
+        agent = initialize_workflow_tool_agent(self.chat_session)
 
         # Temporarily install this agent
         original_agent = self.chat_session._workflow_tool_agent
@@ -629,9 +621,6 @@ class DistillationSession:
             refined_message = self.chat_session._refine_user_query(
                 message, self.chat_session.conversation_history
             )
-
-            # Get planning insights for injection into planner prompt
-            planning_insights = getattr(self.chat_session, '_planning_insights', None)
 
             # Set up planner LM for this pass
             planner_lm = dspy_utils.get_lm(planner_lm_role, planner_api_key_role)
@@ -648,7 +637,6 @@ class DistillationSession:
             command_info = build_query_with_next_steps(
                 refined_message,
                 self.chat_session,
-                planning_insights=planning_insights,
                 planner_lm=planner_lm,
                 planner_user_query=message,
             )

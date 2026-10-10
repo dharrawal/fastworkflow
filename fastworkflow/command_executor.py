@@ -24,6 +24,10 @@ class CommandNotFoundError(Exception):
     """Raised when a command cannot be resolved in any accessible context."""
 
 
+class AlreadyInContextError(CommandNotFoundError):
+    """The command enters the context the caller is already in."""
+
+
 def _annotate_exception(exc: BaseException, **fields) -> None:
     """Stamp routed identity onto an in-flight exception, first writer wins.
 
@@ -189,14 +193,9 @@ class CommandExecutor(CommandExecutorInterface):
         command_output.command_call_id = call_id
 
         context_after = None
-        consequence = None
         if span is not None:
             workflow = cls._active_workflow(chat_session)
             context_after = tracing.context_type(workflow)
-            consequence = tracing.consequence_assessment(
-                getattr(workflow, "folderpath", None),
-                command_output.command_name or None,
-            )
 
         tracing.end_span(
             chat_session,
@@ -212,7 +211,6 @@ class CommandExecutor(CommandExecutorInterface):
                 "success": bool(command_output.success),
                 tracing.ATTR_CONTEXT_BEFORE: context_before,
                 tracing.ATTR_CONTEXT_AFTER: context_after,
-                tracing.ATTR_CONSEQUENCE: consequence,
                 # The internal CME/core hops this dispatch made, each naming its
                 # parent (arch §12.1 item 5). They have no spans of their own, so
                 # this ledger is where their correlation lives. An empty list is

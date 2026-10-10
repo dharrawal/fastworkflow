@@ -24,7 +24,7 @@ from fastworkflow.observation_offloading.state import (
 )
 
 #: An execute observation is worth offloading when replacing it with its own
-#: label frees at least this many UTF-8 bytes of trajectory (ido-986.14.6).
+#: label frees at least this many UTF-8 bytes of trajectory .
 #: It replaces a 1,000-estimated-token floor (~4 KB) that asked how big the
 #: observation was rather than how much residency the swap would buy: a 3 KB
 #: listing page stayed resident for the whole turn while its label would have

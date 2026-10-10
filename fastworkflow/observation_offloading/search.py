@@ -36,9 +36,9 @@ def declaring_subject(alias: str, clause: Optional[str], command: str = "") -> s
 
     The archived text is the raw command response: the handle
     line naming the alias and the context it ran in is presentation, stripped
-    before the bytes are stored and hashed. So a stored ``list_permissions``
-    response is a table of permission rows with nothing in it saying WHOSE
-    permissions they are, and a search model told to use only its observation
+    before the bytes are stored and hashed. So a stored ``list_orders``
+    response is a table of order rows with nothing in it saying WHOSE
+    orders they are, and a search model told to use only its observation
     could answer a subject-specific question only by adopting the requesting
     agent's premise or by refusing. This is the missing fact, supplied
     separately from the evidence so the evidence's digest still covers exactly
@@ -94,7 +94,7 @@ class ObservationSearchSignature(dspy.Signature):
     observation was produced in, taken when the command was dispatched. It is
     evidence, on the same footing as the observation: the observation text is
     the raw command response and often names no subject at all, so a table of
-    permission rows is the permissions OF the subject named there. Use it to
+    order rows belongs to the subject named there. Use it to
     answer whose rows these are and to correct a question that names a
     different subject. When it says the subject was NOT RECORDED, the subject
     is unknown: say so, answer only what the rows themselves establish, and do

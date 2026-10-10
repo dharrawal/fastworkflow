@@ -229,7 +229,7 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         trajectory = {
             "thought_0": "look",
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": observation,
         }
         self.assertTrue(agent._on_step_complete(0, trajectory))

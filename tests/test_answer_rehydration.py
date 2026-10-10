@@ -7,7 +7,6 @@ on disk before the test begins.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import os
 import tempfile
@@ -68,7 +67,7 @@ class Fixture:
         self.archive.persist(
             self.scope, alias="O0", command_name="list_permissions", step_index=0, text=self.o1_text,
             text_sha256=hashlib.sha256(self.o1_text.encode("utf-8")).hexdigest(),
-            context_clause="Identity 28c5aeb5 Alan Cooper" if record_subject else None,
+            context_clause="Identity 28c5aeb5 Jane Roe" if record_subject else None,
         )
         self.listing_rows = rows("holder", listing_rows)
 
@@ -83,7 +82,7 @@ class Fixture:
             ),
             "thought_1": "list the holders",
             "tool_name_1": "execute_workflow_query",
-            "tool_args_1": {"command": "show_holders"},
+            "tool_args_1": {"command": "show_owners"},
             "observation_1": (
                 alias_line("O1", "Permission 6fadcafc Cloud Administrator")
                 + "result_handle=O1 page 1 rows 1-25 of 60\n"
@@ -160,9 +159,9 @@ class RehydratesEachKind(unittest.TestCase):
     def test_the_alias_and_context_lines_are_preserved(self) -> None:
         copy, _ = self.rehydrate()
         self.assertTrue(copy["observation_0"].startswith(
-            "Observation O0 (execute_workflow_query ran in Identity 28c5aeb5 Alan Cooper)\n"))
+            "Observation O0 (execute_workflow_query ran in context 'Identity' and 28c5aeb5 Jane Roe)\n"))
         self.assertEqual(printed_context(copy["observation_0"]),
-                         "Identity 28c5aeb5 Alan Cooper")
+                         "Identity 28c5aeb5 Jane Roe")
 
     def test_the_change_suffix_is_restored_with_the_context(self) -> None:
         fixture = Fixture(tempfile.mkdtemp())
@@ -174,7 +173,7 @@ class RehydratesEachKind(unittest.TestCase):
         restored = rehydrated_label("O2", scope=fixture.scope, archive=fixture.archive)
         self.assertEqual(
             restored,
-            "Observation O2 (execute_workflow_query ran in Account 1; "
+            "Observation O2 (execute_workflow_query ran in prior context 'Account' and 1; "
             "and resulted in a context change)\nswitched\n",
         )
         self.assertTrue(fixture.archive.get(fixture.scope, "O2")["context_changed"])
@@ -299,8 +298,6 @@ class Recorder:
                 message="too long", model="m", llm_provider="p")
         return dspy.Prediction(answer="done")
 
-    async def acall(self, **kwargs):
-        return self(**kwargs)
 
 
 def build_agent() -> fastWorkflowReAct:
@@ -398,15 +395,6 @@ class ExtractHook(unittest.TestCase):
         self.assertTrue([e for e in snapshot_events()
                          if e["kind"] == "rehydration_failed"])
 
-    def test_the_async_site_behaves_the_same(self) -> None:
-        recorder = Recorder()
-        self.agent.extract = recorder
-        asyncio.run(self.agent._async_extract_prediction(
-            self.fixture.trajectory(), user_query="q"))
-        self.assertIn(self.fixture.o1_text, recorder.calls[0])
-        self.assertTrue([e for e in snapshot_events()
-                         if e["kind"] == "rehydration_finished"])
-
 
 class ContinuationSite(unittest.TestCase):
     """Answer extraction goes through the rehydration hook."""
@@ -459,7 +447,7 @@ class WhatTheStopActuallyCost(unittest.TestCase):
             "thought_1": "count them",
             "tool_name_1": "execute_workflow_query",
             "tool_args_1": {"command": "count_identities"},
-            "observation_1": (alias_line("O1", "DirectoryExplorer")
+            "observation_1": (alias_line("O1", "ItemExplorer")
                               + "There are 5 identities."),
         })
         for key, value in base.items():
@@ -502,7 +490,7 @@ class WhatTheStopActuallyCost(unittest.TestCase):
         digest = hashlib.sha256(self.fixture.o1_text.encode("utf-8")).hexdigest()
         self.fixture.archive.persist(
             self.fixture.scope, alias="O5", command_name="list_permissions", step_index=5, text=self.fixture.o1_text,
-            text_sha256=digest, context_clause="Identity 28c5aeb5 Alan Cooper",
+            text_sha256=digest, context_clause="Identity 28c5aeb5 Jane Roe",
         )
         copy, report = self.rehydrate(twice, budget=DEFAULT_MAX_BYTES)
         entries = [item for item in report.rehydrated if item["alias"] == "O5"]
