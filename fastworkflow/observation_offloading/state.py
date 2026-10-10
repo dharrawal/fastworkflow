@@ -15,7 +15,7 @@ from fastworkflow.observability import store as observability_store
 
 #: How many diagnostic events the process keeps in memory: a RING, not a ledger.
 #: The durable copy is the ``offload_events`` table of the turn's observability
-#: database (ido-1ew).
+#: database.
 EVENT_BUFFER_MAX = 2000
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ _events: list[dict[str, Any]] = []
 #: is logged once rather than once per event.
 _event_write_failures: set[str] = set()
 _default_archive: Optional[RuntimeHandleArchive] = None
-#: One archive object per database FILE (ido-pg2): two spellings of one path must be one
+#: One archive object per database FILE: two spellings of one path must be one
 #: object, and a caller that holds only a store path must be able to reach the
 #: durable rows in the same file without re-creating the schema on every call.
 _archives_by_path: dict[str, RuntimeHandleArchive] = {}

@@ -496,6 +496,28 @@ class TestSuspensionRootSpan:
         assert sink.turn_records[1].turn_output.status == TurnStatus.COMPLETED
 
 
+class TestFailedTurnIsRecorded:
+    def test_a_turn_that_raises_is_recorded_as_failed_and_closed(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        sink = RecordingTraceSink()
+        ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch, sink=sink)
+        mock_agent = MagicMock(side_effect=RuntimeError("boom\nsecond line"))
+        _set_agents(ctx, mock_agent)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            ctx.process_turn("clean up my tasks")
+
+        assert len(sink.turn_records) == 1
+        record = sink.turn_records[0]
+        assert record.turn_output.status == TurnStatus.FAILED
+        assert record.turn_output.failure_reason == "RuntimeError: boom"
+        assert record.completed_at is not None
+        root = sink.named(tracing.SPAN_TURN)[-1]
+        assert root.status == TurnStatus.FAILED.value
+        assert root.end_ns is not None
+
+
 # ----------------------------------------------------------------------
 # Planner spans
 # ----------------------------------------------------------------------
@@ -561,7 +583,6 @@ class TestPlannerSpans:
         assert plans[0].attributes["replan_trigger"] is None
         assert "step one" in plans[0].attributes["plan"]
         assert plans[0].attributes["plan_source"] == "text"
-        assert plans[0].attributes["subjects"] == []
         assert not sink.named(tracing.SPAN_PLANNER_REPLAN)
 
     def test_replan_span_carries_trigger(

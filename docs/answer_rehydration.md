@@ -1,11 +1,15 @@
 # Answer-time rehydration
 
+> **Status (2026-10-09):** `search_memory` is disabled (commented out of the agent's tools,
+> code kept), so the loop below can no longer search an offload alias. The rehydration at
+> answer time is unchanged.
+
 The ReAct loop and the extract step read the same `trajectory` for two different
 jobs, and only one of them benefits from compaction.
 
 The **loop** is a reader that can ask for more. When compaction swaps a 3 KB
-listing for its 250 B offload label, the agent can still call `search_memory` on
-that alias. That is what holds the peak prompt at
+listing for its 250 B offload label, the agent could call `search_memory` on
+that alias until it was disabled on 2026-10-09. That is what holds the peak prompt at
 ~37k tokens against the control's ~80k, and the benchmark measured it as a clear
 win on trajectory correctness: 0 silent misroutes in 512 execute spans, 44 of 45
 searches answered on valid handles, 479 of 479 observations archived.

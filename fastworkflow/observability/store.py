@@ -562,9 +562,9 @@ def protect_offload_observation(text: str) -> str:
     """Credential-scrub one raw command response bound for `offload_evidence`.
 
     The evidence row is written by `observation_offloading.archive`, not by the
-    TurnResult pipeline, so it cannot ride that pipeline's scrub (ido-zlm:
-    without this a credential in a command response was stored verbatim where
-    the same text inside a span attribute was scrubbed). What it can do -- and
+    TurnResult pipeline, so it cannot ride that pipeline's scrub (without this
+    a credential in a command response was stored verbatim where the same text
+    inside a span attribute was scrubbed). What it can do -- and
     what this function exists for -- is call the SAME scrub as every other
     persisted surface, instead of growing a second redactor that drifts from
     this one. `observation_offloading.archive.persist` passes the response text

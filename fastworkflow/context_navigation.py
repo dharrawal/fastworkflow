@@ -2,8 +2,8 @@
 
 The agent tool refuses a command name that belongs to some other context. Naming
 that context is not enough: ``go_up`` and ``reset_context`` only climb, and the
-command the caller just attempted often lives *down* from here (``find_identity``
-is reached from global by ``open_directory``). This module turns the declarations
+command the caller just attempted often lives *down* from here (``find_item``
+is reached from global by ``open_item_explorer``). This module turns the declarations
 the workflow already made into that sequence, and names the parameters a step
 cannot fill in.
 
@@ -18,8 +18,7 @@ from dataclasses import dataclass
 
 import fastworkflow
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.entry_declarations import declared_entry_commands
-from fastworkflow.runtime_manifest import load_manifest, merge_and_gate
+from fastworkflow.entry_declarations import declared_entry_commands, declared_occupiable
 
 logger = logging.getLogger(__name__)
 
@@ -259,15 +258,49 @@ def unavailable_command_message(
     return render_unavailable_command(token, current, homes, paths)
 
 
-def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
-    """Descend commands declared by the manifest and by ``enter_command``.
+def enters_current_context(workflow, token: str, current: str) -> bool:
+    """Whether ``token`` is a command that enters ``current``, the context the agent is in."""
+    try:
+        edges = collect_descend_edges(workflow.folderpath)
+    except Exception:
+        logger.debug("descend edges unread", exc_info=True)
+        return False
+    return any(edge.target == current
+               and edge.command.split("/")[-1].lower() == token.lower()
+               for edge in edges)
 
-    A manifest entry whose kind is not ``descend`` is not an edge, even when a
-    context names that command as its ``enter_command``: the command's own
-    effect is the fact, and a placeholder command must not be described as a
-    way in. ``enter_command`` supplies the parameter names the manifest does
-    not (``open_account_by_uid <account_uid>``) and is the only edge when the
-    workflow has no manifest.
+
+def render_already_in_context(token: str, current: str, workflow) -> str:
+    """The refusal for a command that enters the context the agent is already in.
+
+    Told only "not available here, go_up", a weak model goes up and enters the
+    same context again, over and over. Say it is already there, and what it can
+    run there instead.
+    """
+    from fastworkflow.context_identity import context_clause_for
+
+    label = display_context_name(current)
+    instance = context_clause_for(workflow).partition(" ")[2]
+    try:
+        names = RoutingRegistry.get_definition(workflow.folderpath).get_command_names(current)
+        commands = sorted({name.split("/")[-1] for name in names} - {"wildcard"})
+    except Exception:
+        logger.debug("commands of %r unread", current, exc_info=True)
+        commands = []
+    text = f"You are already in context {label!r}" + (f" ({instance})" if instance else "")
+    text += f": {token!r} is how you enter it."
+    if commands:
+        text += f" To work on it, run one of its commands: {', '.join(commands)}."
+    text += f" To open a different one, go_up first, then retry {token!r}."
+    return text
+
+
+def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
+    """Descend commands declared by ``descends_to`` and by ``enter_command``.
+
+    ``enter_command`` supplies the parameter names ``descends_to`` does not
+    (``open_account_by_uid <account_uid>``). It is an edge into its context unless
+    the command's own ``descends_to`` names a different context.
     """
     try:
         routing = RoutingRegistry.get_definition(workflow_folderpath)
@@ -279,11 +312,8 @@ def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
     effects, occupiable = _navigation_effects(workflow_folderpath)
     raw: dict[tuple[str, str, str], _RawEdge] = {}
 
-    for manifest_key, effect in effects.items():
-        if effect.kind != "descend":
-            continue
-        sources = _contexts_for_manifest_key(manifest_key, contexts)
-        routing_name = _routing_name(manifest_key, contexts)
+    for command_key, effect in effects.items():
+        sources = _contexts_for_command_key(command_key, contexts)
         gate = effect.when_parameter_present
         for target in effect.declared_targets():
             if not _enterable(target, occupiable):
@@ -291,8 +321,8 @@ def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
             for source in sources:
                 if source == target:
                     continue
-                shown = _shown_command(source, manifest_key, contexts)
-                _put(raw, _RawEdge(source, shown, routing_name or shown, target, gate, ()))
+                shown = _shown_command(source, command_key, contexts)
+                _put(raw, _RawEdge(source, shown, command_key, target, gate, ()))
 
     for context_name, names in contexts.items():
         if not _enterable(context_name, occupiable):
@@ -302,8 +332,6 @@ def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
             if not token:
                 continue
             effect = _effect_for_token(token, effects, contexts)
-            if effect is not None and effect.kind != "descend":
-                continue
             if effect is not None and context_name not in effect.declared_targets():
                 continue
             for source, routing_name in _sources_for_token(token, contexts):
@@ -353,83 +381,73 @@ def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
     )
 
 
-def _navigation_effects(workflow_folderpath: str):
-    """Every declared transition, including those that do not descend.
+@dataclass(frozen=True)
+class _DeclaredDescend:
+    """A command's ``descends_to`` attribute."""
 
-    A ``none`` or ``temporary`` effect has to stay visible. Dropping it makes
-    ``enter_command`` look like the only statement about that command, and a
-    placeholder that does not navigate gets offered as a way in.
+    target: str
+    when_parameter_present: str | None = None
+
+    def declared_targets(self) -> tuple[str, ...]:
+        return (self.target,)
+
+
+def _declared_descend(routing, command_name: str) -> _DeclaredDescend | None:
+    """The ``descends_to`` a command declares on its response-generator class, or None.
+
+    The class is read through the same routing lookup as the other command
+    facts. ``descend_parameter`` is the parameter whose presence makes the command
+    descend; without it the command always descends.
     """
     try:
-        # Navigation effects are facts about commands, not a feature gate.
-        # An ambient FASTWORKFLOW_RUNTIME_FEATURES value must not erase them.
-        metadata = merge_and_gate(load_manifest(workflow_folderpath), env={})
+        module = routing.get_command_class(
+            command_name, fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
     except Exception:
-        logger.debug("runtime manifest unread", exc_info=True)
-        return {}, {}
-    effects = {}
-    for name, declaration in metadata.commands.items():
-        effect = declaration.navigation_effect
-        if effect is not None:
-            effects[name] = effect
-    occupiable = {
-        name: metadata.is_occupiable(name) for name in metadata.contexts
-    }
+        logger.debug("descend declaration unread for %r", command_name, exc_info=True)
+        return None
+    target = getattr(module, "descends_to", None)
+    if not isinstance(target, str) or not target.strip():
+        return None
+    gate = getattr(module, "descend_parameter", None)
+    gate = gate.strip() if isinstance(gate, str) and gate.strip() else None
+    return _DeclaredDescend(target.strip(), gate)
+
+
+def _navigation_effects(workflow_folderpath: str):
+    """The ``descends_to`` commands and the ``occupiable`` contexts of a workflow.
+
+    Both are read from the workflow's own classes: ``occupiable`` on a context's
+    callback class, ``descends_to`` on a command's response-generator class. A
+    context or command that declares nothing is absent from the result.
+    """
+    effects: dict = {}
+    occupiable: dict = {}
+    try:
+        routing = RoutingRegistry.get_definition(workflow_folderpath)
+    except Exception:
+        logger.debug("routing definition unread", exc_info=True)
+        return effects, occupiable
+    for context_name, names in routing.contexts.items():
+        declared = declared_occupiable(workflow_folderpath, context_name)
+        if declared is not None:
+            occupiable[context_name] = declared
+        for name in names:
+            descend = _declared_descend(routing, name)
+            if descend is not None:
+                effects[name] = descend
     return effects, occupiable
 
 
 def _enterable(context_name: str, occupiable: dict[str, bool | None]) -> bool:
-    """A context the manifest marks non-occupiable is a mixin, not a place."""
+    """A context declared ``occupiable = False`` is a mixin, not a place."""
     return occupiable.get(context_name) is not False
 
 
-def _contexts_for_manifest_key(
-    manifest_key: str, contexts: dict[str, list[str]],
+def _contexts_for_command_key(
+    command_key: str, contexts: dict[str, list[str]],
 ) -> tuple[str, ...]:
-    """Contexts whose command list contains this manifest command.
-
-    Global commands are stored unqualified on ``*`` (``open_directory``) while a
-    generator may key the same command by its spec root (``IDO/open_directory``).
-    The prefix is not a context, so the unqualified command is the match. A
-    prefix that *is* a context only matches that qualified name, so
-    ``Identity/list_accounts`` is not ``Application/list_accounts``.
-    """
-    known = set(contexts)
-    prefix, separator, short = manifest_key.partition("/")
-    if not separator:
-        short = prefix
-        prefix = "*"
-    matched: list[str] = []
-    for context_name, names in contexts.items():
-        for name in names:
-            if name == manifest_key:
-                matched.append(context_name)
-                break
-            name_prefix, name_sep, name_short = name.partition("/")
-            if not name_sep:
-                name_prefix, name_short = "*", name
-            if name_short != short:
-                continue
-            if name_prefix == prefix or (prefix not in known and name_prefix == "*"):
-                matched.append(context_name)
-                break
-    return tuple(matched)
-
-
-def _routing_name(manifest_key: str, contexts: dict[str, list[str]]) -> str | None:
-    """The command-directory key ``get_command_class`` can load."""
-    for names in contexts.values():
-        if manifest_key in names:
-            return manifest_key
-    prefix, separator, short = manifest_key.partition("/")
-    if not separator:
-        return manifest_key if any(manifest_key in names for names in contexts.values()) else None
-    if prefix in contexts:
-        return None
-    for names in contexts.values():
-        if short in names:
-            return short
-    return None
+    """Contexts whose command list contains this routing name."""
+    return tuple(name for name, names in contexts.items() if command_key in names)
 
 
 def _sources_for_token(
@@ -445,27 +463,27 @@ def _sources_for_token(
 
 
 def _effect_for_token(token: str, effects: dict, contexts: dict[str, list[str]]):
-    for manifest_key, effect in effects.items():
-        if manifest_key.split("/")[-1] != token:
+    for command_key, effect in effects.items():
+        if command_key.split("/")[-1] != token:
             continue
-        if _contexts_for_manifest_key(manifest_key, contexts):
+        if _contexts_for_command_key(command_key, contexts):
             return effect
     return None
 
 
 def _shown_command(
-    source: str, manifest_or_routing_name: str, contexts: dict[str, list[str]],
+    source: str, routing_name: str, contexts: dict[str, list[str]],
 ) -> str:
     """Short name, unless this context has two commands with that tail."""
-    short = manifest_or_routing_name.split("/")[-1]
+    short = routing_name.split("/")[-1]
     collisions = [
         name for name in contexts.get(source, ())
         if name.split("/")[-1] == short
     ]
     if len(collisions) <= 1:
         return short
-    if manifest_or_routing_name in collisions:
-        return manifest_or_routing_name
+    if routing_name in collisions:
+        return routing_name
     return collisions[0]
 
 

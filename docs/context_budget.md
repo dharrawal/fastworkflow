@@ -40,14 +40,20 @@ values exactly.
 
 | Budget | What it bounds | Fraction of the window | At 131,072 tokens | Tuning override |
 |---|---|---|---|---|
-| `trajectory_max_bytes` | packed-trajectory target | 875/16384 (≈ 5.34 %) | **28,000** | `FW_TRAJECTORY_MAX_BYTES` |
+| `trajectory_max_bytes` | executor prompt target: the whole executor ReAct prompt (instructions, inputs, command list, trajectory) | 875/16384 (≈ 5.34 %) | **28,000** | `FW_TRAJECTORY_MAX_BYTES` |
 | `answer_rehydration_max_bytes` | answer-time rehydration budget for the extract call | 15625/32768 (≈ 47.68 %) | **250,000** | `FW_ANSWER_REHYDRATION_MAX_BYTES` |
 | `offload_min_saving_bytes` | minimum UTF-8 bytes an offload must free | 1/512 (≈ 0.195 %) | **1,024** | `FW_OFFLOAD_MIN_SAVING_BYTES` |
+
+The executor prompt target bounds the whole executor ReAct prompt, not the
+trajectory alone. When the prompt is over it, observations are offloaded
+oldest-first until it fits. Its default is 875/16384 of the window in bytes (4
+bytes per token), so it is a fraction of the agent model's context window: 28,000
+bytes at the 131,072-token reference window.
 
 The rehydration budget is by far the largest prompt share because the extract
 call is one call with no loop after it.
 
-**Observation search is not a context budget here.** `search_memory` sends the
+**Observation search is not a context budget here.** When enabled (disabled 2026-10-09, code kept), `search_memory` sends the
 full archived observation text to the search model (`LLM_OBSERVATION_SEARCH`, or
 `LLM_AGENT` when that role is unset). Workflow authors must keep observations
 small enough to fit that model's input context. See

@@ -280,7 +280,6 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 .chipSignal.low { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
 .chipSignal.asked { color: var(--bar-human); border-color: var(--bar-human); }
-.chipSignal.consequence { color: var(--bar-command); border-color: var(--bar-command); }
 .chipCost.unrecorded { font-style: italic; }
 /* fix-9eg.18.2/.18.3: diagnostic markers. Every marker carries its own word
    and glyph, so the severity classes below only reinforce a distinction the

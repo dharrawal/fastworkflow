@@ -51,7 +51,7 @@ ALIAS_COLLISION_MESSAGE = (
 
 
 # ---------------------------------------------------------------------------
-# Redaction policy (ido-zlm)
+# Redaction policy
 # ---------------------------------------------------------------------------
 
 REDACTION_ENV = "FW_OFFLOAD_EVIDENCE_REDACTION"
@@ -345,7 +345,7 @@ class RuntimeHandleArchive:
                     pass
                 raise
 
-    # -- capture fidelity (ido-zlm) ----------------------------------------
+    # -- capture fidelity ----------------------------------------
 
     def capture_record(
         self, scope: RuntimeHandleScope, alias: str

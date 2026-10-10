@@ -396,7 +396,7 @@ class DSPyObservabilityCallback(BaseCallback):
         prompt = payload.pop("prompt", None)
         payload.pop("items", None)
         payload.pop("request", None)
-        # ido-mn1.6.18: DSPy hands the provider arguments to the callback under
+        # DSPy hands the provider arguments to the callback under
         # a nested `kwargs` key, so leaving the payload as-is recorded
         # `call_kwargs = {"kwargs": {"max_tokens": ...}}`. Every reader of this
         # span asks for a provider argument BY NAME (`call_kwargs.max_tokens`,

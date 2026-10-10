@@ -14,7 +14,7 @@ import logging
 import fastworkflow
 from fastworkflow.command_routing import RoutingDefinition
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.runtime_manifest import load_manifest, merge_and_gate
+from fastworkflow.entry_declarations import declared_occupiable
 from fastworkflow.utils import python_utils
 
 logger = logging.getLogger(__name__)
@@ -38,23 +38,20 @@ class CommandMetadataAPI:
 
     @staticmethod
     def _occupiable_context_names(subject_workflow_path: str) -> set[str] | None:
-        """Contexts a user can enter, from ``workflow_runtime.json``.
+        """Contexts a user can enter. ``None`` when nothing declares it (every context is listed).
 
-        ``None`` when the workflow has no manifest (every context is listed).
+        Each context's callback class may declare ``occupiable = False``; a context
+        that does not is listed.
         """
-        manifest = load_manifest(subject_workflow_path)
-        if manifest is None:
-            return None
         try:
-            metadata = merge_and_gate(manifest, env={})
+            routing_names = set(fastworkflow.RoutingRegistry.get_definition(subject_workflow_path).contexts)
         except Exception:
-            logger.debug("occupiable contexts unread", exc_info=True)
+            logger.debug("routing contexts unread", exc_info=True)
             return None
-        return {
-            name
-            for name in metadata.contexts
-            if metadata.is_occupiable(name) is not False
-        }
+        declared = {name: declared_occupiable(subject_workflow_path, name) for name in routing_names}
+        if all(value is None for value in declared.values()):
+            return None
+        return {name for name in routing_names if declared[name] is not False}
 
     @staticmethod
     def get_enhanced_command_info(
@@ -562,6 +559,7 @@ class CommandMetadataAPI:
         cme_workflow_path: str,
         active_context_name: str,
         for_agents: bool = False,
+        exclude: frozenset[str] = frozenset(),
     ) -> str:
         """
         Return a YAML-like display text for commands in the given context.
@@ -598,6 +596,7 @@ class CommandMetadataAPI:
 
         # Massage commands for display
         cmds = sorted(meta.get("commands", []), key=lambda x: x.get("name", ""))
+        cmds = [cmd for cmd in cmds if cmd.get("name") not in exclude]
         # If there are no commands, preserve original behavior of rendering an empty header
         if not cmds:
             # Preserve header even when no commands are available
@@ -682,7 +681,7 @@ class CommandMetadataAPI:
             for context_name in sorted(crd.contexts, key=lambda c: (_depth(c), c)):
                 if context_name == active_context_name:
                     continue
-                # Mixin contexts (Directory, Resource, EntityLookup, …) inherit
+                # Mixin contexts (shared base contexts a workflow composes into others) inherit
                 # into occupiable workspaces. They are not navigation targets, and
                 # listing them here produces "no declared navigation path".
                 if occupiable is not None and context_name not in occupiable:
@@ -723,6 +722,55 @@ class CommandMetadataAPI:
             return base_text
 
     @staticmethod
+    def get_other_contexts_text(
+        subject_workflow_path: str,
+        active_context_name: str,
+        navigation_workflow=None,
+        exclude: frozenset[str] = frozenset(),
+    ) -> str:
+        """One line per OTHER context the executor can enter: what it is for and how to get there.
+
+        The executor sees only the active context's commands in full; this tells it
+        where everything else lives. The description is the first line of the
+        context class's docstring, or, when it has none, the commands the context
+        adds. Empty when the routing definition cannot be read.
+        """
+        from fastworkflow.context_identity import context_class_for
+        from fastworkflow.context_navigation import navigation_steps_to_context
+
+        try:
+            crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
+            occupiable = CommandMetadataAPI._occupiable_context_names(subject_workflow_path)
+            listed = set(crd.contexts.get(active_context_name, ()))
+            lines: List[str] = []
+            for context_name in sorted(crd.contexts):
+                if context_name in (active_context_name, "*"):
+                    continue
+                if occupiable is not None and context_name not in occupiable:
+                    continue
+                context_class = (context_class_for(navigation_workflow, context_name)
+                                 if navigation_workflow is not None else None)
+                description = (inspect.getdoc(context_class) or "").strip().split("\n")[0]
+                if not description:
+                    added = sorted({name.split("/")[-1] for name in crd.contexts[context_name]
+                                    if name not in listed} - {"wildcard", *exclude})
+                    description = "commands: " + ", ".join(added) if added else ""
+                steps = None
+                if navigation_workflow is not None:
+                    with contextlib.suppress(Exception):
+                        steps = navigation_steps_to_context(
+                            navigation_workflow, active_context_name, context_name)
+                route = steps if steps else "no declared navigation path"
+                lines.append(f"- {context_name}: {description.rstrip('.')}. To enter: {route}")
+            if not lines:
+                return ""
+            return ("Other contexts (enter one to see and run its commands):\n"
+                    + "\n".join(lines))
+        except Exception:  # callers must never break on metadata assembly
+            logger.warning("Failed to list the other contexts.", exc_info=True)
+            return ""
+
+    @staticmethod
     def format_deferred_planner_command(
         subject_workflow_path: str,
         cme_workflow_path: str,
@@ -735,9 +783,9 @@ class CommandMetadataAPI:
 
         Example::
 
-            - find_identity
-              Find identities by name, login or email …
-              Before executing find_identity, navigate to DirectoryExplorer as follows: open_directory
+            - find_item
+              Find items by name or code …
+              Before executing find_item, navigate to ItemExplorer as follows: open_item_explorer
         """
         meta = CommandMetadataAPI.get_enhanced_command_info(
             subject_workflow_path=subject_workflow_path,

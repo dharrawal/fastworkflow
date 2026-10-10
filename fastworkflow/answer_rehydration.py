@@ -287,7 +287,7 @@ def rehydrate(
 
     for position, (index, alias, text) in enumerate(candidates):
         if stopped:
-            # ``ido-1tu``/F34. The note says evidence EXISTS under these
+            # The note says evidence EXISTS under these
             # observations and was not put back, so only an alias that had
             # something to put back belongs in it. A plain inline observation
             # whose full text is already in the trajectory lost nothing to the
@@ -312,7 +312,7 @@ def rehydrate(
                 continue
             digest = hashlib.sha256(archived.encode("utf-8")).hexdigest()
             if alias in seen_labels or digest in seen_label_digests:
-                # ``ido-1tu``/F34. One alias names one archived observation,
+                # One alias names one archived observation,
                 # however many steps print its label. A more recent step
                 # already carries that text in full, so restoring it again
                 # would spend the budget twice on bytes the extractor is
@@ -346,7 +346,7 @@ def rehydrate(
         used += added
         report.counts[kind] += 1
         if kind == KIND_LABEL:
-            # ``ido-1tu``/F34. This alias's archived text is now in the copy;
+            # This alias's archived text is now in the copy;
             # an older step printing the same label needs nothing further.
             seen_labels.add(alias)
             seen_label_digests.add(digest)

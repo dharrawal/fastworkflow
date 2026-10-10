@@ -8,11 +8,9 @@ the field is present.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow import context_navigation
@@ -31,7 +29,7 @@ IDO_WORKFLOW = Path(__file__).resolve().parents[2] / "ido" / "ido_workflow"
 
 
 @pytest.mark.skipif(
-    not (IDO_WORKFLOW / "workflow_runtime.json").is_file(),
+    not IDO_WORKFLOW.is_dir(),
     reason="ido workflow is not checked out beside fastworkflow",
 )
 def test_deferred_planner_skips_mixin_contexts_and_navigates_to_explorer():
@@ -101,52 +99,52 @@ def _steps(path):
 
 
 def test_global_reaches_a_workspace_by_its_descend_command():
-    edges = (DescendEdge("*", "open_directory", "DirectoryExplorer"),)
-    path = plan_navigation("*", ["DirectoryExplorer"], ("*",), edges)["DirectoryExplorer"]
-    assert _steps(path) == ["open_directory"]
+    edges = (DescendEdge("*", "open_item_explorer", "ItemExplorer"),)
+    path = plan_navigation("*", ["ItemExplorer"], ("*",), edges)["ItemExplorer"]
+    assert _steps(path) == ["open_item_explorer"]
     assert path[0].needs == ()
     assert path[0].required_to_enter == ()
 
 
 def test_go_up_follows_the_live_parent_not_every_declared_one():
-    """Account may sit under DirectoryExplorer or Identity. The object in hand
+    """Account may sit under ItemExplorer or Identity. The object in hand
     is under Identity, so the climb is two steps, not the static shortcut."""
-    chain = ("Account", "Identity", "DirectoryExplorer", "*")
-    path = plan_navigation("Account", ["DirectoryExplorer"], chain, ())["DirectoryExplorer"]
+    chain = ("Account", "Identity", "ItemExplorer", "*")
+    path = plan_navigation("Account", ["ItemExplorer"], chain, ())["ItemExplorer"]
     assert _steps(path) == ["go_up", "go_up"]
 
 
 def test_one_go_up_beats_reset_when_the_parent_is_the_target():
-    chain = ("Identity", "DirectoryExplorer", "*")
-    edges = (DescendEdge("*", "open_directory", "DirectoryExplorer"),)
-    path = plan_navigation("Identity", ["DirectoryExplorer"], chain, edges)["DirectoryExplorer"]
+    chain = ("Identity", "ItemExplorer", "*")
+    edges = (DescendEdge("*", "open_item_explorer", "ItemExplorer"),)
+    path = plan_navigation("Identity", ["ItemExplorer"], chain, edges)["ItemExplorer"]
     assert _steps(path) == ["go_up"]
 
 
 def test_reset_is_used_when_it_is_shorter_than_climbing():
     chain = ("ControlFinding", "ControlsMonitor", "*")
-    edges = (DescendEdge("*", "open_directory", "DirectoryExplorer"),)
+    edges = (DescendEdge("*", "open_item_explorer", "ItemExplorer"),)
     path = plan_navigation(
-        "ControlFinding", ["DirectoryExplorer"], chain, edges)["DirectoryExplorer"]
-    assert _steps(path) == ["reset_context", "open_directory"]
+        "ControlFinding", ["ItemExplorer"], chain, edges)["ItemExplorer"]
+    assert _steps(path) == ["reset_context", "open_item_explorer"]
 
 
 def test_equal_length_prefers_the_step_that_needs_nothing():
     edges = (
-        DescendEdge("DirectoryExplorer", "list_accounts", "Account", required_to_enter=("account_uid",)),
-        DescendEdge("DirectoryExplorer", "open_account_free", "Account"),
+        DescendEdge("ItemExplorer", "list_accounts", "Account", required_to_enter=("account_uid",)),
+        DescendEdge("ItemExplorer", "open_account_free", "Account"),
     )
     path = plan_navigation(
-        "DirectoryExplorer", ["Account"], ("DirectoryExplorer", "*"), edges)["Account"]
+        "ItemExplorer", ["Account"], ("ItemExplorer", "*"), edges)["Account"]
     assert _steps(path) == ["open_account_free"]
 
 
 def test_a_shorter_conditional_step_is_kept_and_names_its_parameter():
     edges = (
         DescendEdge("Identity", "list_accounts", "Account", required_to_enter=("account_uid",)),
-        DescendEdge("DirectoryExplorer", "open_account_by_uid", "Account", needs=("account_uid",)),
+        DescendEdge("ItemExplorer", "open_account_by_uid", "Account", needs=("account_uid",)),
     )
-    chain = ("Identity", "DirectoryExplorer", "*")
+    chain = ("Identity", "ItemExplorer", "*")
     path = plan_navigation("Identity", ["Account"], chain, edges)["Account"]
     assert _steps(path) == ["list_accounts"]
     assert path[0].required_to_enter == ("account_uid",)
@@ -157,34 +155,34 @@ def test_no_declared_descend_has_no_path():
     assert path is None
 
 
-def test_the_message_for_find_identity_says_open_directory():
-    edges = (DescendEdge("*", "open_directory", "DirectoryExplorer"),)
-    paths = plan_navigation("*", ["DirectoryExplorer"], ("*",), edges)
-    text = render_unavailable_command("find_identity", "*", ["DirectoryExplorer"], paths)
+def test_the_message_for_find_person_says_open_item_explorer():
+    edges = (DescendEdge("*", "open_item_explorer", "ItemExplorer"),)
+    paths = plan_navigation("*", ["ItemExplorer"], ("*",), edges)
+    text = render_unavailable_command("find_person", "*", ["ItemExplorer"], paths)
     assert text == (
-        "Command 'find_identity' is not available in the current context 'global'. "
-        "It is available in: 'DirectoryExplorer'. "
-        "From here to 'DirectoryExplorer': open_directory. Then retry 'find_identity'."
+        "Command 'find_person' is not available in the current context 'global'. "
+        "It is available in: 'ItemExplorer'. "
+        "From here to 'ItemExplorer': open_item_explorer. Then retry 'find_person'."
     )
     assert "go_up or reset_context" not in text
 
 
 def test_the_message_lists_both_kinds_of_caveat():
     edges = (
-        DescendEdge("*", "open_directory", "DirectoryExplorer"),
+        DescendEdge("*", "open_item_explorer", "ItemExplorer"),
         DescendEdge(
-            "DirectoryExplorer", "open_account_by_uid", "Account", needs=("account_uid",)),
+            "ItemExplorer", "open_account_by_uid", "Account", needs=("account_uid",)),
         DescendEdge(
             "Identity", "list_accounts", "Account", required_to_enter=("account_uid",)),
     )
     opened = plan_navigation("*", ["Account"], ("*",), edges)
     from_global = render_unavailable_command("list_permissions", "*", ["Account"], opened)
     assert (
-        "open_directory, then open_account_by_uid <account_uid> (needs account_uid)"
+        "open_item_explorer, then open_account_by_uid <account_uid> (needs account_uid)"
         in from_global
     )
 
-    chain = ("Identity", "DirectoryExplorer", "*")
+    chain = ("Identity", "ItemExplorer", "*")
     listed = plan_navigation("Identity", ["Account"], chain, edges)
     from_identity = render_unavailable_command("list_permissions", "Identity", ["Account"], listed)
     assert (
@@ -195,13 +193,13 @@ def test_the_message_lists_both_kinds_of_caveat():
 
 def test_each_home_context_gets_its_own_path():
     edges = (
-        DescendEdge("*", "open_directory", "DirectoryExplorer"),
+        DescendEdge("*", "open_item_explorer", "ItemExplorer"),
         DescendEdge("*", "open_controls_monitor", "ControlsMonitor"),
     )
-    paths = plan_navigation("*", ["ControlsMonitor", "DirectoryExplorer"], ("*",), edges)
-    text = render_unavailable_command("list_findings", "*", ["ControlsMonitor", "DirectoryExplorer"], paths)
+    paths = plan_navigation("*", ["ControlsMonitor", "ItemExplorer"], ("*",), edges)
+    text = render_unavailable_command("list_findings", "*", ["ControlsMonitor", "ItemExplorer"], paths)
     assert "From here to 'ControlsMonitor': open_controls_monitor." in text
-    assert "From here to 'DirectoryExplorer': open_directory." in text
+    assert "From here to 'ItemExplorer': open_item_explorer." in text
 
 
 def test_live_chain_stops_at_global_when_the_parent_is_none():
@@ -209,28 +207,28 @@ def test_live_chain_stops_at_global_when_the_parent_is_none():
         pass
 
     class Workflow:
-        current_command_context_name = "DirectoryExplorer"
+        current_command_context_name = "ItemExplorer"
         current_command_context = Explorer()
         root_command_context = None
 
         def get_parent(self, obj):
             return None
 
-    assert live_context_chain(Workflow()) == ("DirectoryExplorer", "*")
+    assert live_context_chain(Workflow()) == ("ItemExplorer", "*")
 
 
 class _Model:
     def inherited_base_contexts(self, name):
-        if name == "DirectoryExplorer":
+        if name == "ItemExplorer":
             return {"Directory"}
         return set()
 
 
 class _App:
     contexts = {
-        "*": ["open_directory"],
-        "Directory": ["Directory/find_identity"],
-        "DirectoryExplorer": ["Directory/find_identity"],
+        "*": ["open_item_explorer"],
+        "Directory": ["Directory/find_person"],
+        "ItemExplorer": ["Directory/find_person"],
     }
     context_model = _Model()
 
@@ -267,111 +265,16 @@ def test_the_agent_guard_reports_the_path(monkeypatch):
     monkeypatch.setattr(
         context_navigation,
         "collect_descend_edges",
-        lambda path: (DescendEdge("*", "open_directory", "DirectoryExplorer"),),
+        lambda path: (DescendEdge("*", "open_item_explorer", "ItemExplorer"),),
     )
     with pytest.raises(CommandNotFoundError) as caught:
-        _explicit_agent_command("find_identity", _Workflow())
-    assert "open_directory" in str(caught.value)
+        _explicit_agent_command("find_person", _Workflow())
+    assert "open_item_explorer" in str(caught.value)
     assert "go_up or reset_context" not in str(caught.value)
 
 
-def test_a_spec_root_prefix_matches_the_unqualified_global_command(tmp_path, monkeypatch):
-    """IDO/open_directory in the manifest is open_directory on the global context."""
-    manifest = {
-        "schema_version": 1,
-        "manifest_version": "1.0.0",
-        "contexts": {
-            "*": {"occupiable": True},
-            "DirectoryExplorer": {"occupiable": True},
-            "Identity": {"occupiable": True},
-            "Account": {"occupiable": True},
-            "Directory": {"occupiable": False},
-        },
-        "commands": {
-            "IDO/open_directory": {
-                "navigation_effect": {
-                    "kind": "descend",
-                    "target_context": "DirectoryExplorer",
-                    "remains_active": True,
-                },
-            },
-            "DirectoryExplorer/open_account_by_uid": {
-                "navigation_effect": {
-                    "kind": "descend",
-                    "target_context": "Account",
-                    "remains_active": True,
-                },
-            },
-            "Identity/list_accounts": {
-                "navigation_effect": {
-                    "kind": "descend",
-                    "target_context": "Account",
-                    "remains_active": True,
-                    "when_parameter_present": "account_uid",
-                },
-            },
-            "IDO/open_subscription_manager": {
-                "navigation_effect": {"kind": "none"},
-            },
-        },
-    }
-    (tmp_path / "workflow_runtime.json").write_text(json.dumps(manifest), encoding="utf-8")
-
-    class Input(BaseModel):
-        account_uid: str
-
-    class Routing:
-        contexts = {
-            "*": ["open_directory", "open_subscription_manager"],
-            "DirectoryExplorer": ["DirectoryExplorer/open_account_by_uid"],
-            "Identity": ["Identity/list_accounts"],
-            "Account": [],
-            "Directory": ["Directory/find_identity"],
-            "SubscriptionManager": [],
-        }
-
-        def get_command_class(self, command_name, module_type):
-            if command_name == "DirectoryExplorer/open_account_by_uid":
-                return Input
-            return None
-
-    class Registry:
-        @staticmethod
-        def get_definition(path, load_cached=True):
-            return Routing()
-
-    monkeypatch.setattr(context_navigation, "RoutingRegistry", Registry)
-    monkeypatch.setattr(
-        context_navigation,
-        "declared_entry_commands",
-        lambda folder, context: {
-            "DirectoryExplorer": ["open_directory"],
-            "Account": ["open_account_by_uid <account_uid>"],
-            "SubscriptionManager": ["open_subscription_manager"],
-        }.get(context, []),
-    )
-
-    edges = {(edge.source, edge.command, edge.target): edge
-             for edge in collect_descend_edges(str(tmp_path))}
-    assert edges["*", "open_directory", "DirectoryExplorer"].needs == ()
-    account = edges["DirectoryExplorer", "open_account_by_uid", "Account"]
-    assert account.needs == ("account_uid",)
-    assert account.required_to_enter == ()
-    listed = edges["Identity", "list_accounts", "Account"]
-    assert listed.required_to_enter == ("account_uid",)
-    assert listed.needs == ()
-    assert not any(edge.command == "open_subscription_manager" for edge in edges.values())
-
-    class Here(_Workflow):
-        folderpath = str(tmp_path)
-
-    text = unavailable_command_message(Here(), "find_identity", "*", ["DirectoryExplorer"])
-    assert "open_directory" in text
-    assert "needs" not in text.split("open_directory", 1)[1]
-
-
 @pytest.mark.skipif(
-    not (IDO_WORKFLOW / "workflow_runtime.json").is_file(),
+    not IDO_WORKFLOW.is_dir(),
     reason="ido workflow is not checked out beside fastworkflow",
 )
 def test_ido_global_find_identity_path_is_open_directory():
@@ -415,3 +318,55 @@ def test_ido_global_find_identity_path_is_open_directory():
     opened = plan_navigation("*", ["Account"], ("*",), edges)["Account"]
     assert [step.command for step in opened] == ["open_directory", "open_account_by_uid"]
     assert "account_uid" in opened[1].needs or "account_uid" in opened[1].required_to_enter
+
+
+@pytest.mark.skipif(
+    not IDO_WORKFLOW.is_dir(),
+    reason="ido workflow is not checked out beside fastworkflow",
+)
+def test_the_command_that_enters_the_current_context_says_you_are_already_there():
+    class Permission:
+        uid = "85cde168"
+        label = "Active Directory_Cloud Administrator"
+
+    class InPermission:
+        folderpath = str(IDO_WORKFLOW)
+        current_command_context_name = "Permission"
+        current_command_context = Permission()
+        root_command_context = None
+        is_current_command_context_root = False
+
+        def get_parent(self, obj):
+            return None
+
+    from fastworkflow.context_navigation import (
+        enters_current_context, render_already_in_context)
+
+    assert enters_current_context(InPermission(), "open_permission_by_uid", "Permission")
+    assert not enters_current_context(InPermission(), "find_permission", "Permission")
+    text = render_already_in_context("open_permission_by_uid", "Permission", InPermission())
+
+    assert text.startswith("You are already in context 'Permission'")
+    assert "show_properties" in text
+    assert "go_up first, then retry 'open_permission_by_uid'" in text
+
+
+def test_go_up_at_the_top_level_names_the_commands_to_use_instead():
+    from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.go_up import (
+        MAX_HINT_COMMANDS, ResponseGenerator)
+
+    fastworkflow.init({})
+    todo = str(Path(__file__).resolve().parent / "todo_list_workflow")
+    app = fastworkflow.Workflow.create(workflow_folderpath=todo, workflow_id_str="go-up-top-level")
+    wrapper = fastworkflow.Workflow.create(workflow_folderpath="/tmp", workflow_id_str="go-up-wrapper")
+    wrapper.context = {"app_workflow": app}
+    assert app.is_current_command_context_root
+
+    text = ResponseGenerator()(wrapper, "IntentDetection/go_up").command_response.response
+
+    assert text.startswith("Already at the top-level 'global' context. From here, use one of: ")
+    names = text.removeprefix("Already at the top-level 'global' context. From here, use one of: ")
+    names = names.removesuffix(".").split(", ")
+    assert 0 < len(names) <= MAX_HINT_COMMANDS
+    assert not {"go_up", "reset_context", "what_can_i_do", "what_is_current_context", "abort"} & set(names)
+    assert all("/" not in name for name in names)
