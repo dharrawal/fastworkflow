@@ -10,6 +10,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.adapters.types.tool import Tool
 from dspy.experimental import Choice, TypeSafe

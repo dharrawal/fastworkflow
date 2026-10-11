@@ -32,6 +32,7 @@ keeping them out of the trajectory to prevent token bloat across iterations.
 This scoped approach ensures the adapter only affects workflow agent calls, not other
 DSPy operations in the system.
 """
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.adapters.json_adapter import JSONAdapter
 

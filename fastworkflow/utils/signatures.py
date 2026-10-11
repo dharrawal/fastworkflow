@@ -1,6 +1,7 @@
 import sys
 import ast
 import inspect
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 import os
 from contextlib import suppress

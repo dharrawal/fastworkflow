@@ -1,4 +1,5 @@
 import ast
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 import hashlib
 import random

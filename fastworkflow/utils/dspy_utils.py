@@ -1,3 +1,9 @@
+# Before anything imports dspy: dspy 3.4 puts a lazy stand-in for `openai` in
+# sys.modules, and litellm importing an openai submodule through that stand-in
+# fails with a circular import. Loaded first, the real openai is used instead.
+# Every module that imports dspy carries the litellm line directly above its dspy import.
+# The dspy-first case (dspy imported before fastworkflow) is repaired in fastworkflow/__init__.py.
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from pydantic import BaseModel, Field
 from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple, List

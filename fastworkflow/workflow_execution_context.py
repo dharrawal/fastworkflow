@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from queue import Queue
 from typing import Any, Optional
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
 import fastworkflow

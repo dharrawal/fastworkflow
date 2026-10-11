@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 from litellm import ContextWindowExceededError
 from litellm import exceptions as litellm_exceptions
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.utils.exceptions import AdapterParseError
 from dspy.adapters.types.tool import Tool
