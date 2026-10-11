@@ -658,12 +658,10 @@ def canonicalized(value):
     return value
 
 # Functions in this module that provably cannot change what is generated or what is
-# written: two file-writing helpers that training never calls, and the cache plumbing
-# itself (whose behaviour is already covered by the fingerprint it computes).
+# written: the cache plumbing itself (whose behaviour is already covered by the
+# fingerprint it computes).
 _UNDIGESTED_FUNCTIONS: frozenset[str] = frozenset(
     {
-        "save_examples_to_file",
-        "save_examples_to_json",
         # Appended by the trainer after generation; never cached.
         "missing_value_example",
         "param_example_fingerprint",
@@ -1180,30 +1178,3 @@ def missing_value_example(command_name: str, field_annotations: Dict[str, Any]) 
     if not has_required:
         return None
     return {"fields": fields, "inputs": ["command"]}
-
-
-def save_examples_to_file(examples: List[str], filename: str = "dspy_examples.py"):
-    """Save generated examples to a Python file"""
-    with open(filename, "w") as f:
-        f.write("import dspy\n\n")
-        f.write("examples = [\n")
-        for example in examples:
-            f.write(f"    {example},\n")
-        f.write("]\n")
-
-def save_examples_to_json(examples: List[str], command_name: str, filename: str = "dspy_examples.json"):
-    """Save generated examples to a JSON file"""
-    import json
-
-    # Format examples properly as strings
-    formatted_examples = list(examples)
-
-    data = {
-        "command_name": command_name,
-        "examples": formatted_examples
-    }
-
-    with open(filename, "w") as f:
-        json.dump(data, f, indent=2)
-    
-    

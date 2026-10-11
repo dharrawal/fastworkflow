@@ -2339,8 +2339,15 @@ async def post_feedback(
             # lands in the same DB the writer is appending evidence to.
             _reject_if_busy(channel_id)
             async with runtime.lock:
+                # [R9] /invoke_agent hands back the EXECUTION key; the evidence
+                # store is keyed by the LOGICAL one. Translate a retired
+                # execution key the way GET /turns/{turn_key} does.
+                request.turn_key = (
+                    turn_registry.resolve_retired_logical_key(request.turn_key, channel_id)
+                    or request.turn_key
+                )
                 try:
-                    stored = record_turn_feedback(runtime, request, logger)
+                    record_turn_feedback(runtime, request, logger)
                 except FeedbackTurnNotFound as exc:
                     # 404, not 400, and the same 404 an unknown key gets: a
                     # write refused for ownership must not confirm that the
@@ -2353,7 +2360,10 @@ async def post_feedback(
                         detail=str(exc),
                     ) from exc
                 logger.info(f"Recorded a review note for session {channel_id}")
-                return {"status": "ok", "feedback": stored}
+                # Returns the turn's notes, including the one just recorded (spec 5.10).
+                return {"status": "ok", "feedback": observability_feedback.present(
+                    runtime.observability_store.list_human_feedback(request.turn_key)
+                )}
 
     except HTTPException:
         raise
@@ -2415,14 +2425,18 @@ async def get_feedback(
             # Ownership, not mere presence. The store is shared by every
             # channel this server serves, so a turn being IN it says nothing
             # about who may read the notes on it (fix-bnym).
+            # [R9] Same key translation as POST /post_feedback.
+            store_key = (
+                turn_registry.resolve_retired_logical_key(turn_key, channel_id) or turn_key
+            )
             try:
-                assert_channel_owns_turn(store, runtime.channel_id, turn_key)
+                assert_channel_owns_turn(store, runtime.channel_id, store_key)
             except FeedbackTurnNotFound as exc:
                 raise _turn_not_found(turn_key) from exc
             return {
                 "turn_key": turn_key,
                 "feedback": observability_feedback.present(
-                    store.list_human_feedback(turn_key)
+                    store.list_human_feedback(store_key)
                 ),
             }
     except HTTPException:
