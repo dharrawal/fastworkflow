@@ -602,8 +602,9 @@ class SummaryTests(LiveTurnFixture):
             seen["workflow_actions"] = json.loads(json.dumps(workflow_actions))
             seen["final_agent_response"] = final_agent_response
             # What the archive served, and what the file held, AT THE MOMENT
-            # the summary was produced.
-            row = archive.get(scope, "O1")
+            # the summary was produced. The turn's only execute observation is
+            # step 0, so its handle is O0 (O{step_index}).
+            row = archive.get(scope, "O0")
             seen["archive_text_at_summary_time"] = None if row is None else row["text"]
             seen["file_at_summary_time"] = file_bytes(archive.db_path)
             return "a summary mentioning the api key", json.dumps({"seen": True})
@@ -668,7 +669,7 @@ class SummaryTests(LiveTurnFixture):
         self.assertNotIn(SK_TOKEN, seen["archive_text_at_summary_time"])
         self.assertNotIn(SK_TOKEN.encode("ascii"), seen["file_at_summary_time"])
         self.close_session(ctx, workflow)
-        self.assert_stored_text(agent, scope)
+        self.assert_stored_text(agent, scope, "O0")
 
 
 if __name__ == "__main__":  # pragma: no cover

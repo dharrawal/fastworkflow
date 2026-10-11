@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 import dspy
+import pytest
 from litellm import ContextWindowExceededError
 
 from fastworkflow.answer_rehydration import (
@@ -42,6 +43,9 @@ from fastworkflow.observation_offloading.state import (
     snapshot_events,
 )
 from fastworkflow.utils.react import fastWorkflowReAct
+
+# The budgets derive from the agent model's window; pin it to the reference.
+pytestmark = pytest.mark.usefixtures("reference_agent_window")
 
 
 def scope_for(name: str) -> RuntimeHandleScope:

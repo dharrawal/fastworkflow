@@ -164,6 +164,22 @@ def pytest_configure(config):
 
 
 @pytest.fixture
+def reference_agent_window(monkeypatch):
+    """Pin the agent model to the budget calibration reference.
+
+    The budgets derive from the agent model's context window, so a test that
+    asserts the reference values must not depend on whatever ``LLM_AGENT`` the
+    machine (or the repo-root ``.env`` litellm loads) names. This pins it to
+    ``context_budget``'s calibration model, whose window is the reference.
+    """
+    monkeypatch.delenv(context_budget.MODEL_CONTEXT_TOKENS_ENV, raising=False)
+    monkeypatch.setenv(context_budget.AGENT_MODEL_ENV, "cerebras/gpt-oss-120b")
+    context_budget.reset_cache()
+    yield
+    context_budget.reset_cache()
+
+
+@pytest.fixture
 def restore_litellm_model_cost():
     """Undo a test's ``litellm.register_model`` when it ends.
 

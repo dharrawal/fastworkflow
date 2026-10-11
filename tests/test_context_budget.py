@@ -260,6 +260,7 @@ class Provenance(unittest.TestCase):
         self.assertIsInstance(json.dumps(cb.budget_provenance()), str)
 
 
+@pytest.mark.usefixtures("reference_agent_window")
 class ModulesReadTheSameBudgets(unittest.TestCase):
     """The named defaults each module exports are the derived values."""
 

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import dspy
+import pytest
 
 import fastworkflow
 from fastworkflow import tracing
@@ -64,6 +65,9 @@ from fastworkflow.observation_offloading.state import (
 from fastworkflow.answer_rehydration import rehydrated_label
 from fastworkflow.observation_offloading.compact import RECENT_OBSERVATIONS_PROTECTED
 from fastworkflow.workflow_agent import WorkflowAgentSignature, initialize_workflow_tool_agent
+
+# The budgets derive from the agent model's window; pin it to the reference.
+pytestmark = pytest.mark.usefixtures("reference_agent_window")
 
 TODO_WORKFLOW = Path(__file__).parent / "todo_list_workflow"
 

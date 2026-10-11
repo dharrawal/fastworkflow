@@ -8,6 +8,7 @@ the field is present.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,12 @@ from fastworkflow.context_navigation import (
 from fastworkflow.workflow_agent import _explicit_agent_command
 
 IDO_WORKFLOW = Path(__file__).resolve().parents[2] / "ido" / "ido_workflow"
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_path(monkeypatch):
+    """get_module() prepends the workflow's parent dir (~/rl/ido) to sys.path; undo it per test."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
 
 
 @pytest.mark.skipif(
