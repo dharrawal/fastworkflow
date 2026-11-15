@@ -1,0 +1,370 @@
+[
+ {
+  "name": "plain",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "Bob"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a",
+     "b"
+    ]
+   }
+  ],
+  "reply": "/record_values name=Bob count=3 ratio=1.5 ids=[\"a\",\"b\"]",
+  "expected": {
+   "name": "Bob",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a",
+    "b"
+   ]
+  }
+ },
+ {
+  "name": "parenthesis",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "Ann (EU)"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name=\"Ann (EU)\" count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "Ann (EU)",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  }
+ },
+ {
+  "name": "double_quote_and_parenthesis",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "say \"hi\" (x)"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name='say \"hi\" (x)' count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "say \"hi\" (x)",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  }
+ },
+ {
+  "name": "trailing_comma",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "a, b,"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name=\"a, b,\" count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "a, b,",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  }
+ },
+ {
+  "name": "semicolon",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "a;b"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name=\"a;b\" count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "a;b",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  }
+ },
+ {
+  "name": "multi_line_value_is_flattened_to_spaces",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "one\ntwo"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name=\"one two\" count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "one two",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  }
+ },
+ {
+  "name": "literal_None_cannot_bind_in_code",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "None"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name=None count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "None",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  },
+  "binds_in_code": false
+ },
+ {
+  "name": "value_wrapped_in_quotes",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "\"x\""
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name='\"x\"' count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "\"x\"",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  }
+ },
+ {
+  "name": "leading_and_trailing_spaces_are_stripped_by_the_parser",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": " pad "
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name=\" pad \" count=3 ratio=1.5 ids=[\"a\"]",
+  "expected": {
+   "name": "pad",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a"
+   ]
+  }
+ },
+ {
+  "name": "ids_with_a_space_and_a_comma",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "Bob"
+   },
+   {
+    "name": "count",
+    "value": 3
+   },
+   {
+    "name": "ratio",
+    "value": 1.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a b",
+     "c,d"
+    ]
+   }
+  ],
+  "reply": "/record_values name=Bob count=3 ratio=1.5 ids=[\"a b\",\"c,d\"]",
+  "expected": {
+   "name": "Bob",
+   "count": 3,
+   "ratio": 1.5,
+   "ids": [
+    "a b",
+    "c,d"
+   ]
+  }
+ },
+ {
+  "name": "negative_decimal_ratio_and_zero_count",
+  "command": "record_values",
+  "pairs": [
+   {
+    "name": "name",
+    "value": "Bob"
+   },
+   {
+    "name": "count",
+    "value": 0
+   },
+   {
+    "name": "ratio",
+    "value": -0.5
+   },
+   {
+    "name": "ids",
+    "value": [
+     "a"
+    ]
+   }
+  ],
+  "reply": "/record_values name=Bob count=0 ratio=-0.5 ids=[\"a\"]",
+  "expected": {
+   "name": "Bob",
+   "count": 0,
+   "ratio": -0.5,
+   "ids": [
+    "a"
+   ]
+  }
+ }
+]

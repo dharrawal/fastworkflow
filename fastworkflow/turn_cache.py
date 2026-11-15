@@ -26,3 +26,9 @@ def memo(key: Hashable, compute: Callable[[], Any]) -> Any:
     if key not in cache:
         cache[key] = compute()
     return cache[key]
+
+
+def active() -> bool:
+    """Whether a turn's memo is bound in this context (``begin_turn`` ran), so a value computed in a copy of the
+    context (a worker started under ``contextvars.copy_context``) lands in the memo the caller reads."""
+    return _memo_var.get() is not None

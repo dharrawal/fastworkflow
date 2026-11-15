@@ -8,15 +8,15 @@ the Inputs are real pydantic models, and the producer edge is resolved by the re
 from __future__ import annotations
 
 import re
-from typing import Literal, Optional
+from typing import Literal, Optional, get_origin
 
 import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import FieldOptions
+from fastworkflow import FieldOptions, UiOptions
 from fastworkflow import planning_commands as pc
-from fastworkflow.field_options import OPTION_KEYS, ConfirmsOptions, CopiedOptions, RecordNamedOptions
+from fastworkflow.field_options import OPTION_KEYS, ConfirmsOptions, CopiedOptions, RecordNamedOptions, UiOptions
 from fastworkflow.utils import argument_checks
 
 
@@ -80,11 +80,14 @@ def test_fieldoptions_is_a_plain_dict_the_loader_reads_the_same_as_a_dict_litera
     assert _params(literal)["value"] == _params(typed)["value"]
 
 
-def test_fieldoptions_names_the_six_keys_and_the_option_typeddicts_are_exported():
+def test_fieldoptions_names_the_option_keys_and_the_option_typeddicts_are_exported():
+    """FieldOptions has one entry per option key (the six author options and ``ui``); every option TypedDict,
+    ``UiOptions`` included, is exported identically on ``fastworkflow`` and ``fastworkflow.planning``."""
     assert set(FieldOptions.__annotations__) == set(OPTION_KEYS)
     assert {"ignore"} == set(CopiedOptions.__annotations__) == set(RecordNamedOptions.__annotations__)
     assert set(ConfirmsOptions.__annotations__) == {"meanings"}
-    for name in ("FieldOptions", "CopiedOptions", "RecordNamedOptions", "ConfirmsOptions"):
+    assert set(UiOptions.__annotations__) == {"hidden", "hero", "format", "widget", "table", "tones", "currency"}
+    for name in ("FieldOptions", "CopiedOptions", "RecordNamedOptions", "ConfirmsOptions", "UiOptions"):
         assert getattr(fastworkflow, name) is getattr(fastworkflow.planning, name)
 
 
@@ -363,3 +366,167 @@ def test_the_new_keys_read_together_on_one_planning_input():
     assert (params["who"].subject, params["who"].ignore) == (True, ("group",))
     assert (params["kind"].verify, params["kind"].means) == (True, (("group", "a group"),))
     assert (params["verified"].alone, params["verified"].verify) == (True, True)
+
+
+# ---------------------------------------------------------------- the ui hint (presentation only)
+
+def test_ui_is_a_registered_option_key_and_not_a_check_option():
+    assert "ui" in OPTION_KEYS
+    assert "ui" not in pc.CHECK_OPTIONS
+
+
+@pytest.mark.parametrize("annotation, extra", [
+    (str, FieldOptions(ui=UiOptions(widget="textarea"))),
+    (Optional[str], {"ui": {"widget": "textarea"}}),
+    (Literal["a", "b"], {"ui": {"widget": "radio"}}),
+    (Optional[Literal["a", "b"]], {"ui": {"widget": "radio"}}),
+])
+@pytest.mark.parametrize("planning", [True, False])
+def test_a_valid_input_ui_hint_loads_and_makes_no_check_param(annotation, extra, planning):
+    default = {} if get_origin(annotation) is Literal else {"default": None if "Optional" in str(annotation) else ""}
+    model = _field(annotation, extra, **default)
+    assert pc.option_params(model, "app/show", planning=planning) == ()
+    assert model.model_json_schema()["properties"]["value"]["ui"] == extra["ui"]
+
+
+def test_a_ui_hint_beside_a_check_option_keeps_the_check_param_unchanged():
+    plain = _params(_field(str, {"copied_from_command_text": True}))["value"]
+    hinted = _params(_field(str, {"copied_from_command_text": True, "ui": {"widget": "textarea"}}))["value"]
+    assert plain == hinted
+
+
+@pytest.mark.parametrize("planning", [True, False])
+@pytest.mark.parametrize("annotation, extra, needles", [
+    (str, {"ui": {"widgt": "textarea"}}, ["did you mean 'widget'?", "'value'"]),
+    (str, {"ui": {"zzzzzz": True}}, ["its options are hidden, hero, format, widget, table"]),
+    (int, {"ui": {"widget": "textarea"}}, ["textarea", "'value'", "a str"]),
+    (str, {"ui": {"widget": "radio"}}, ["radio", "Literal"]),
+    (Literal["a", "b"], {"ui": {"widget": "textarea"}}, ["textarea", "a str"]),
+    (str, {"ui": {"widget": "dropdown"}}, ['"textarea" or "radio"', '"dropdown"']),
+    (str, {"ui": {"hero": True}}, ["ui.hero", "Signature.Output"]),
+    (str, {"ui": {"hidden": True}}, ["ui.hidden", "Signature.Output"]),
+    (str, {"ui": {"format": "code"}}, ["ui.format", "Signature.Output"]),
+    (str, {"ui": {}}, ["ui is empty", "widget"]),
+    (str, {"ui": False}, ["ui: False is not a value", "leave the key out to turn it off"]),
+    (str, {"ui": "textarea"}, ["ui must be a dict", '"textarea"']),
+])
+def test_an_invalid_input_ui_hint_fails_the_load_naming_the_field_the_key_and_what_is_accepted(
+        annotation, extra, needles, planning):
+    with pytest.raises(pc.PlanningCommandFormatError) as error:
+        pc.option_params(_field(annotation, extra), "app/show", planning=planning)
+    for needle in needles:
+        assert needle in str(error.value), (needle, str(error.value))
+
+
+def _output_problems(output_cls):
+    class Command:
+        """Show it."""
+
+    class Input(BaseModel):
+        query: str = Field(default="")
+
+    Command.Input = Input
+    Command.Output = output_cls
+    resolution = pc.FieldSourceResolution(
+        workflow_folderpath="", problems=(), skipped_commands=frozenset(), model_to_command={},
+        signatures={"Library/show": Command}, command_files={}, import_errors={}, base_contexts={})
+    return pc.resolve_signature_field_sources("Library/show", Command, "show.py", resolution)
+
+
+@pytest.mark.parametrize("hint", [{"hidden": True}, {"hero": True, "format": "currency"}, {"format": "badge"},
+                                  {"format": "percent"}, {"format": "code"}])
+def test_a_valid_output_ui_hint_is_not_a_load_problem_and_is_in_the_output_json_schema(hint):
+    class Output(BaseModel):
+        total: float = Field(default=0.0, json_schema_extra=FieldOptions(ui=UiOptions(**hint)))
+
+    assert _output_problems(Output) == []
+    assert Output.model_json_schema()["properties"]["total"]["ui"] == hint
+
+
+@pytest.mark.parametrize("hint, needles", [
+    ({"widget": "textarea"}, ["ui.widget", "Signature.Input", "'total'"]),
+    ({"hidden": False}, ["ui.hidden", "leave the key out to turn it off"]),
+    ({"hero": False}, ["ui.hero", "leave the key out to turn it off"]),
+    ({"hero": "yes"}, ["ui.hero must be True"]),
+    ({"format": "dollars"}, ["ui.format", "'currency'", '"dollars"']),
+    ({"formt": "code"}, ["did you mean 'format'?"]),
+    ({}, ["ui is empty"]),
+])
+def test_an_invalid_output_ui_hint_is_a_field_source_problem_naming_the_bad_option(hint, needles):
+    class Output(BaseModel):
+        total: float = Field(default=0.0, json_schema_extra={"ui": hint})
+
+    problems = _output_problems(Output)
+    assert len(problems) == 1 and problems[0].severity == "error" and problems[0].command == "Library/show"
+    assert problems[0].file == "show.py"
+    for needle in needles:
+        assert needle in problems[0].message, (needle, problems[0].message)
+
+
+def test_an_output_ui_false_is_a_field_source_problem():
+    class Output(BaseModel):
+        total: float = Field(default=0.0, json_schema_extra={"ui": False})
+
+    assert "leave the key out to turn it off" in _output_problems(Output)[0].message
+
+
+def test_a_field_without_a_ui_key_is_unchanged_by_the_ui_check():
+    class Output(BaseModel):
+        total: float = Field(default=0.0, json_schema_extra={"examples": [1.0]})
+
+    assert _output_problems(Output) == []
+    pc.check_ui_option("total", {"examples": [1.0]}, "show.py")   # a no-op without the key
+
+
+def test_a_workflow_with_input_and_output_ui_hints_loads_without_problems_and_serves_the_hints(tmp_path):
+    """The real load path (command_preview.load_problems, the one run/train/the server report) accepts the
+    hints on a copy of the hello workflow, and the schema listing behind GET /command_schemas carries them."""
+    import shutil
+    from pathlib import Path
+
+    from fastworkflow import command_preview
+    from fastworkflow.mcp_server import command_schema_listing
+
+    hello = Path(__file__).resolve().parent / "hello_world_workflow"
+    folder = tmp_path / "hello_ui"
+    shutil.copytree(hello, folder, symlinks=True,
+                    ignore=shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__"))
+    command_file = folder / "_commands" / "add_two_numbers.py"
+    source = command_file.read_text()
+    source = source.replace(
+        '        second_num: float = Field(description="Second number")\n',
+        '        second_num: float = Field(description="Second number")\n'
+        '        note: str = Field(default="", description="A note",\n'
+        '                          json_schema_extra={"ui": {"widget": "textarea"}})\n', 1)
+    source = source.replace(
+        'Field(description="The sum of the two provided numbers")',
+        'Field(description="The sum of the two provided numbers",\n'
+        '                                        json_schema_extra={"ui": {"hero": True, "format": "currency"}})', 1)
+    assert source.count('"ui"') == 2
+    command_file.write_text(source)
+
+    assert command_preview.load_problems(str(folder)) == []
+    entry = command_schema_listing(str(folder))["add_two_numbers"]
+    assert entry["input"]["properties"]["note"]["ui"] == {"widget": "textarea"}
+    assert entry["output"]["properties"]["sum_of_two_numbers"]["ui"] == {"hero": True, "format": "currency"}
+
+
+def test_a_workflow_with_a_misspelt_output_ui_hint_is_a_field_source_error_naming_the_fix(tmp_path):
+    """``command preview --check`` reports ``resolve_field_sources`` errors, and the command directory logs the
+    same problem and skips the command at hydration."""
+    import shutil
+    from pathlib import Path
+
+    hello = Path(__file__).resolve().parent / "hello_world_workflow"
+    folder = tmp_path / "hello_ui_typo"
+    shutil.copytree(hello, folder, symlinks=True,
+                    ignore=shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__"))
+    command_file = folder / "_commands" / "add_two_numbers.py"
+    source = command_file.read_text().replace(
+        'Field(description="The sum of the two provided numbers")',
+        'Field(description="The sum of the two provided numbers", json_schema_extra={"ui": {"formt": "code"}})', 1)
+    command_file.write_text(source)
+
+    errors = pc.resolve_field_sources(str(folder)).errors
+    assert any("did you mean 'format'?" in error.message and error.command == "add_two_numbers"
+               for error in errors), errors

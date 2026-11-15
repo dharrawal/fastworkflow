@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import json
 import logging
 import re
@@ -25,9 +26,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional
 
 import dspy
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
-from fastworkflow import turn_cache
+from fastworkflow import subtask_pool, turn_cache, turn_progress
+from fastworkflow.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
 from fastworkflow.review_engine import (
     KIND_PLAN, KIND_SUB_TASKS, PROPOSAL_SPECS, Add, Change, Drop, EditParseError, EditRefused, Merge, Proposal,
     Split, _SafeValues, register_proposal)
@@ -120,6 +122,26 @@ class SubTaskInput(BaseModel):
         return cls(value=_strip_outer_quotes(text))
 
 
+#: bd fix-1ma8.1: a sub-task's planning-command match is AMBIGUOUS when another planning command clears
+#: ``run_listing.UNSURE_CANDIDATE_FLOOR`` (0.2, the shortlist's floor) and the winner leads it by less than this margin.
+#: Measured on a private 840-task-run benchmark (1,197 matched sub-tasks, Jev's per-option probabilities): a runner-up
+#: at or above the floor in 3.8% of them (45); a lead below 0.5 keeps 36 of those, 10 of them in a run that lost
+#: checklist lines (4% of all matched sub-tasks were), and marks 4.1% of the reviews. A lead of 0.5 or more is "a clear
+#: leader".
+PLAN_AMBIGUITY_CLEAR_MARGIN = 0.5
+#: The most other plans a review item names.
+MAX_PLAN_ALTERNATIVES = 3
+
+
+class PlanAlternative(BaseModel):
+    """Another planning command that fits a sub-task about as well as its means: its name and one-line description.
+
+    No score: the review shows names, the user does not weigh probabilities (bd fix-1ma8.1)."""
+
+    name: str
+    description: str = ""
+
+
 class SubTask(BaseModel):
     """One sub-task of a request: its goal, its desired outcome, its inputs, and its means.
 
@@ -151,6 +173,12 @@ class SubTask(BaseModel):
     #: inputs or means makes it differ, and the item then runs as the one job it reads. Not shown.
     parts: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     parts_fingerprint: str = Field(default="", json_schema_extra={"review_hidden": True})
+    #: The other planning commands that fit this sub-task about as well as its means (bd fix-1ma8.1; see
+    #: ``plan_alternatives``): at most ``MAX_PLAN_ALTERNATIVES``, best first, each with its one-line description. Empty
+    #: (and then absent from the serialized item, so an unambiguous review is byte-identical to before) unless the
+    #: match was ambiguous. The review text names them, the payload carries them, and ``step N: use NAME`` switches the
+    #: means to one of them (the ``change N: means=planning:NAME`` edit). Not user-editable.
+    alternatives: list[PlanAlternative] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     #: The item this one came from before this reply (set by ``apply_edits``; not serialized).
     _before_item: Optional["SubTask"] = PrivateAttr(default=None)
     #: This reply asked for look_up on this item (set by ``apply_edits``; not serialized).
@@ -168,6 +196,13 @@ class SubTask(BaseModel):
     @classmethod
     def _means_from_text(cls, value: Any) -> Any:
         return Means.from_text(value) if isinstance(value, str) else value
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_alternatives(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("alternatives"):
+            data.pop("alternatives", None)
+        return data
 
 
 _MULTI_INPUT_SPLIT = re.compile(
@@ -270,6 +305,29 @@ def _input_edit_parts(stripped: str) -> list[str]:
     return [stripped]
 
 
+def dropped_input_part(existing: list[SubTaskInput], text: str) -> Optional[str]:
+    """The part of a packed ``inputs`` edit that applying *text* over *existing* would lose, or None (fix-j6xa).
+
+    ``inputs=member=Z, check=x`` packs two inputs, and ``_input_edit_parts`` drops a part named ``check``, ``goal``,
+    ``outcome`` or ``means`` (text a model can put there by mistake), so the edit would lose it without a word. A
+    part is lost when applying the pieces one at a time gives another list than applying the text as one edit; the
+    caller refuses it. One input per edit (``inputs=check=x``) is read as written.
+    """
+    stripped = (text or "").strip()
+    if not (_NAMED_VALUE.match(stripped) or _NAMED_COLON.match(stripped) or _FROM_SUBTASK.match(stripped)):
+        return None
+    parts = [part.strip() for part in _split_input_assignments(stripped) if part.strip()]
+    if len(parts) < 2:
+        return None
+    one_by_one = list(existing)
+    for part in parts:
+        one_by_one = _merge_one_subtask_input(one_by_one, part)
+    as_one = merge_subtask_input_edit(existing, stripped)
+    if [(e.name, e.value, e.from_subtask) for e in one_by_one] == [(e.name, e.value, e.from_subtask) for e in as_one]:
+        return None
+    return next((part for part in parts if _input_edit_part_key(part) in _META_INPUT_KEYS), None)
+
+
 #: An input's value that clears the input: ``kind=none`` removes ``kind``.
 _CLEARING_VALUES = frozenset({"none", "null"})
 
@@ -281,6 +339,43 @@ def _is_clearing_change(edit: Change) -> bool:
     parts = _input_edit_parts((edit.value or "").strip())
     return (len(parts) == 1 and _input_edit_part_key(parts[0]) is not None
             and (SubTaskInput.from_text(parts[0]).value or "").strip().lower() in _CLEARING_VALUES)
+
+
+def _raw_input_value(part: str) -> Optional[str]:
+    """The text after ``name=`` (or ``name:``) of one input piece, quotes still on; None for a piece with no name."""
+    stripped = part.strip()
+    if _FROM_SUBTASK.match(stripped):
+        return None
+    match = _NAMED_VALUE.match(stripped) or _NAMED_COLON.match(stripped)
+    return match.group("value").strip() if match else None
+
+
+def unreadable_input_value(text: str) -> Optional[str]:
+    """Why an ``inputs`` edit cannot be applied as the person wrote it (fix-2vyv), or None when it can.
+
+    Two spellings the reader would silently misread are refused instead, so no edit is lost without a word:
+
+    - a quoted ``none`` or ``null`` (``member="none"``): the quotes cannot make it the literal word, because ``none``
+      and ``null`` clear an input wherever an input is rewritten from its text, so it is refused, not read as a clear;
+    - a quoted value cut short by the reader: it holds the quote mark it is wrapped in and also ``, name=`` /
+      ``, name:`` / `` and name=``, so the reader ends the value at the inner mark and starts another input.
+    """
+    stripped = (text or "").strip()
+    parts = _split_input_assignments(stripped)
+    for part in parts:
+        raw = _raw_input_value(part)
+        if not raw:
+            continue
+        mark = raw[0]
+        if mark in "\"'" and len(raw) >= 2 and raw[-1] == mark and raw[1:-1].strip().lower() in _CLEARING_VALUES:
+            return (f"A quoted {raw[1:-1].strip().lower()!r} cannot be set as a value: the words none and null clear an "
+                    "input. Use other wording for the value.")
+        if len(parts) > 1 and mark in "\"'" and raw[-1] != mark:
+            closing = raw.find(mark, 1)
+            if closing != -1 and closing < len(raw) - 1:
+                return ("A quoted value holds its own quote mark and also ', name=' (or ', name:' or ' and name='), "
+                        "so it cannot be read as one value. Quote it with the other kind of quote mark, or reword it.")
+    return None
 
 
 def _merge_one_subtask_input(existing: list[SubTaskInput], text: str) -> list[SubTaskInput]:
@@ -359,6 +454,17 @@ def _input_user_line(inp: SubTaskInput) -> str:
     return f"{inp.name}: {text}" if inp.name else text
 
 
+#: Appended to an ad hoc item's line in the rendered review text in no-agent mode (only then).
+def other_plans_line(number: int, item: "SubTask") -> str:
+    """The review's extra line under a sub-task whose planning-command match was ambiguous (bd fix-1ma8.1): the other plans
+    that fit, and the reply that switches to one. Names only; no scores."""
+    names = [each.name for each in item.alternatives]
+    return f'   other plans that fit: {", ".join(names)}; reply "step {number}: use {names[0]}" to switch'
+
+
+NOT_RUN_HERE_SUFFIX = " - not run here (no agent model); a suggested plan is returned"
+
+
 @register_proposal
 class SubTaskProposal(Proposal):
     kind = KIND_SUB_TASKS
@@ -368,7 +474,7 @@ class SubTaskProposal(Proposal):
     min_items = 1
     items: list[SubTask] = Field(default_factory=list)
 
-    def user_rendering(self, workflow_folderpath: Optional[str] = None) -> str:
+    def user_rendering(self, workflow_folderpath: Optional[str] = None, *, no_agent: bool = False) -> str:
         from fastworkflow.command_writes import write_commands
 
         writes = write_commands(workflow_folderpath) if workflow_folderpath else frozenset()
@@ -379,7 +485,12 @@ class SubTaskProposal(Proposal):
             write_badge = ""
             if item.means.kind != MEANS_FROM_SCRATCH and item.means.name in writes:
                 write_badge = " - changes data"
+            if no_agent and item.means.kind == MEANS_FROM_SCRATCH:
+                # No agent model: this item will not be run here (its review entry is ``not_run_here``).
+                write_badge = NOT_RUN_HERE_SUFFIX
             lines.append(f"{index}. {item.goal}{suffix}{write_badge}")
+            if item.alternatives:
+                lines.append(other_plans_line(index, item))
         return "\n".join(lines)
 
     def model_rendering(self) -> str:
@@ -404,6 +515,10 @@ class SubTaskProposal(Proposal):
         Inputs the user set in the same reply are kept: re-draft, then overlay those inputs.
         """
         workflow = getattr(host, "_app_workflow", None)
+        # The plans that fit a sub-task follow its means, whether or not its inputs are re-drafted (fix-1ma8.1).
+        moved = [_switched_alternatives(workflow, getattr(item, "_before_item", None), item) for item in self.items]
+        if any(new is not old for new, old in zip(moved, self.items)):
+            self = self.model_copy(update={"items": moved})
         if workflow is None or not drafting_on():
             return self
         before_items = list(before.items) if isinstance(before, SubTaskProposal) else []
@@ -429,18 +544,18 @@ class SubTaskProposal(Proposal):
                 item = redraft_for_look_up(workflow, item, items, planner_lm=planner_lm)
                 item = _overlay_inputs(item, kept)
             elif before_item is None and item.means.kind == MEANS_FROM_SCRATCH:
-                picked = build_round1_proposal(
-                    [item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0].means
-                item = item.model_copy(update={"means": picked})
+                built = build_round1_proposal([item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0]
+                picked = built.means
+                item = item.model_copy(update={"means": picked, "alternatives": built.alternatives})
                 if item.means.kind != MEANS_FROM_SCRATCH:
                     item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
                     item = _overlay_inputs(item, kept)
             elif (before_item is not None and item.goal != before_item.goal
                   and item.means == before_item.means):
-                picked = build_round1_proposal(
-                    [item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0].means
+                built = build_round1_proposal([item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0]
+                picked = built.means
                 if picked.kind != MEANS_FROM_SCRATCH:
-                    item = item.model_copy(update={"means": picked})
+                    item = item.model_copy(update={"means": picked, "alternatives": built.alternatives})
                 item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
                 overlay_fallback = (
                     before_item.inputs
@@ -523,6 +638,37 @@ class Candidate:
     name: str
     is_planning: bool
     score: float = 0.0
+    #: A planning command's one-line description (the matcher's own listing); "" for a plain command.
+    description: str = ""
+
+
+def plan_alternatives(candidates: list[Candidate], chosen: Optional[Candidate]) -> list[PlanAlternative]:
+    """The planning commands that fit a sub-task about as well as its chosen means, or ``[]`` when the match is not ambiguous.
+
+    The match is ambiguous when another planning command (not ``chosen``) scores at least
+    ``run_listing.UNSURE_CANDIDATE_FLOOR`` AND ``chosen`` leads the best of them by less than
+    ``PLAN_AMBIGUITY_CLEAR_MARGIN``. Scores are the ones the draft already holds: the heads' planning-label scores and Jev's
+    per-option probabilities, the larger of the two for a name (``_candidates_for_subtask``), so a head that prefers
+    another plan than Jev does shows up as that plan's score and needs no signal of its own; nothing is computed
+    here. The best ``MAX_PLAN_ALTERNATIVES`` of them, best first. A means that is not a planning command has none.
+    """
+    from fastworkflow import run_listing
+
+    if chosen is None or not chosen.is_planning:
+        return []
+    runners = sorted((c for c in candidates
+                      if c.is_planning and c.name != chosen.name and c.score >= run_listing.UNSURE_CANDIDATE_FLOOR),
+                     key=lambda c: (-c.score, c.name))
+    if not runners or chosen.score - runners[0].score >= PLAN_AMBIGUITY_CLEAR_MARGIN:
+        return []
+    return [PlanAlternative(name=c.name, description=c.description) for c in runners[:MAX_PLAN_ALTERNATIVES]]
+
+
+def plan_ambiguity_record(proposal: "SubTaskProposal") -> list[dict]:
+    """The turn span's ``subtask_plan_ambiguity``: ``{subtask, means, alternatives}`` for each item of *proposal* whose
+    planning-command match was ambiguous. Names only (no goal text, no score)."""
+    return [{"subtask": number, "means": item.means.render(), "alternatives": [each.name for each in item.alternatives]}
+            for number, item in enumerate(proposal.items, 1) if item.alternatives]
 
 
 def build_round1_proposal(subtasks: list[str],
@@ -545,7 +691,8 @@ def build_round1_proposal(subtasks: list[str],
         else:
             means = Means(kind=MEANS_PLANNING if choice.is_planning else MEANS_PLAIN, name=choice.name)
         items.append(SubTask(goal=goal, outcome=(outcomes or {}).get(number, ""),
-                             inputs=list((inputs or {}).get(number, [])), means=means))
+                             inputs=list((inputs or {}).get(number, [])), means=means,
+                             alternatives=plan_alternatives(candidates.get(number, []), choice)))
     return SubTaskProposal(items=items)
 
 
@@ -623,6 +770,14 @@ def planning_intent_confirmation(workflow, path: FastPath, sub_task: str) -> Opt
     return None
 
 
+def _planning_descriptions(folder: str) -> dict[str, str]:
+    """``{planning command name: its one-line description}``: the first line of the description the matcher lists."""
+    from fastworkflow.workflow_agent import load_planning_commands
+
+    return {name: (description.strip().splitlines() or [""])[0].strip()
+            for name, description, _ in load_planning_commands(folder)}
+
+
 def _candidates_for_subtask(workflow, sub_task: str, *, exclude: Optional[set[str]] = None) -> list[Candidate]:
     """Per-sub-task candidate means for the round-1 builder (``draft_round1_proposal``, look_up, add)."""
     from fastworkflow import planning_commands, run_listing
@@ -637,16 +792,110 @@ def _candidates_for_subtask(workflow, sub_task: str, *, exclude: Optional[set[st
     scores = {**heads.execution_scores, **heads.planning_scores}
     for name, probability in probabilities.items():
         scores[name] = max(scores.get(name, 0.0), probability)
+    descriptions = _planning_descriptions(folder)
     named = run_listing.gather(workflow, sub_task)
     names = (run_listing.gather(workflow, sub_task, probabilities or None) | heads.labels
              | heads.planning_scores.keys() | heads.execution_scores.keys())
-    return [Candidate(name, is_planning=name in planning, score=scores.get(name, 0.0))
+    return [Candidate(name, is_planning=name in planning, score=scores.get(name, 0.0),
+                      description=descriptions.get(name, ""))
             for name in sorted(names)
             if name not in core and name not in excluded
             and (name in named or scores.get(name, 0.0) >= run_listing.UNSURE_CANDIDATE_FLOOR)]
 
 
-def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None) -> SubTaskProposal:
+def _prefetch_matches(workflow, subtasks: list[str]) -> bool:
+    """Start the Jev match of every sub-task together, so the one-after-another loop that follows finds each in the turn's
+    memo (``planning_match``). True when it did, and then it also announced each sub-task's match stage, in order.
+
+    Only when there is something to wait on and a place to keep it: Jev's matcher exists (planning commands and a
+    ``JEV_API_KEY``), more than one distinct text, pooling on, and the turn's memo bound (the workers write into the
+    caller's memo; without one the loop would ask again). A failed prefetch is dropped: the loop asks that text again
+    and meets the same failure where it did before, so no outcome changes. Never raises.
+    """
+    from fastworkflow import workflow_agent
+
+    texts = list(dict.fromkeys(subtasks))
+    if len(texts) < 2 or not subtask_pool.is_parallel(len(texts)) or not turn_cache.active():
+        return False
+    try:
+        if workflow_agent._planning_command_matcher(workflow.folderpath) is None:     # built once, before the workers
+            return False
+    except Exception:  # noqa: BLE001 - the loop meets the same failure
+        return False
+
+    def match(text: str) -> None:
+        try:
+            planning_match(workflow, text)
+        except Exception as exc:  # noqa: BLE001 - the sequential loop asks again
+            logger.info(f"the prefetched match failed ({type(exc).__name__}: {exc}); it is asked again in order")
+
+    total = len(subtasks)
+    # one announcement per sub-task (a repeated text is announced too, though it is matched once)
+    for number in range(1, total + 1):
+        turn_progress.emit(turn_progress.STAGE_MATCH, number, total)
+    subtask_pool.map_in_order([functools.partial(match, text) for text in texts])
+    return True
+
+
+def jev_says_none(workflow, sub_task: str, bar: Optional[float] = None) -> bool:
+    """Whether Jev's planning-command match gave a confident "none" for *sub_task*: no planning command fits it, at or
+    above *bar* (default ``workflow_agent.PLANNING_COMMAND_MATCH_THRESHOLD``, the bar of a confident pick, which
+    no-agent mode uses). False when Jev gave no verdict (no key, an error, a timeout: the distribution is empty) or was
+    not confident about "none". The turn's memoised match (``planning_match``): the call the draft and the run make, no
+    further model call."""
+    from fastworkflow.workflow_agent import PLANNING_COMMAND_MATCH_THRESHOLD
+
+    _, command, distribution = planning_match(workflow, sub_task)
+    return command is None and distribution.get("none", 0.0) >= (
+        PLANNING_COMMAND_MATCH_THRESHOLD if bar is None else bar)
+
+
+def confident_pick(workflow, sub_task: str) -> Means:
+    """The means *sub_task* may run bound with no agent model to judge it (no-agent mode), or ``Means()`` (ad hoc).
+
+    The signals are the ones that already decide routing, each with its own bar and no new threshold, in this order:
+    the sub-task names a command (``run_listing.exact_command_name``, intent detection's exact-name match); a planning
+    command Jev picked confidently (``planning_match`` returns a command only at
+    ``workflow_agent.PLANNING_COMMAND_MATCH_THRESHOLD``; a planning command is preferred, as the draft prefers it); the
+    trained head routed alone on it (``head_candidates`` ``confident_labels`` with exactly one label: the fast-path
+    predicate, the head's own threshold). A head's top-k score alone (an unsure head, a tie-break the
+    agent would settle) is not confident, so ``build_round1_proposal``'s best-ranked pick, which has no bar, does not
+    decide here. Jev never vouches for a plain command, so a plain write command (``command_writes``) runs only on the
+    caller's own naming or the head's confident routing. Core commands are not parts. No model call beyond Jev's
+    memoised match.
+    """
+    from fastworkflow import planning_commands, run_listing
+    from fastworkflow.workflow_agent import core_command_names
+
+    planning = set(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands)
+    core = core_command_names()
+
+    def means_of(name: str) -> Means:
+        return Means(kind=MEANS_PLANNING if name in planning else MEANS_PLAIN, name=name)
+
+    if (name := run_listing.exact_command_name(workflow, sub_task)) and name not in core:
+        return means_of(name)
+    _, command, _ = planning_match(workflow, sub_task)
+    if command is not None and command.name not in core:
+        return Means(kind=MEANS_PLANNING, name=command.name)
+    confident = [name for name in run_listing.head_candidates(workflow, sub_task).confident_labels
+                 if name not in core]
+    if len(confident) == 1:
+        # Jev judges planning commands: its confident "none" against a head's planning pick is a disagreement the
+        # agent would have settled, so the part is not run. Plain commands are not Jev's to judge.
+        if confident[0] in planning and jev_says_none(workflow, sub_task):
+            return Means()
+        return means_of(confident[0])
+    return Means()
+
+
+def confident_means(workflow, sub_task: str, means: Means) -> bool:
+    """Whether *means* is what ``confident_pick`` stands behind for *sub_task*."""
+    return means.kind != MEANS_FROM_SCRATCH and bool(means.name) and confident_pick(workflow, sub_task) == means
+
+
+def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None, *, confident_only: bool = False,
+                          none_veto: bool = False) -> SubTaskProposal:
     """The draft round-1 proposal for a split result, from real candidates (fix-3rsq.plan-review.2.3).
 
     Per sub-task, the candidates are: the heads' planning and execution top-k (``run_listing.head_candidates``), the
@@ -658,18 +907,70 @@ def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None) -> Sub
     the shared parameter extractor, and for a planning command the typed fill fallback on ``planner_lm``; the values
     the review shows are the ones the run uses, fix-48np.1). A planning pick's refusal is shown on its line: the
     drafted values' refusal, or, with no draft, ``check_planned_arguments`` of no arguments.
+
+    ``none_veto`` (agent mode, a draft that runs unreviewed): a planning-command pick for a sub-task that does not name
+    a command, when Jev's "none" is at or above ``workflow_agent.PLANNING_NONE_VETO_THRESHOLD``, is not bound: the
+    sub-task is ``from_scratch`` and the agent plans it. Jev's verdict is the turn's memoised match the draft already
+    made, so no model call is added.
     """
-    candidates = {number: _candidates_for_subtask(workflow, sub_task)
-                    for number, sub_task in enumerate(subtasks, 1)}
+    total = len(subtasks)
+    prefetched = _prefetch_matches(workflow, subtasks)
+    candidates = {}
+    for number, sub_task in enumerate(subtasks, 1):
+        if not prefetched:
+            turn_progress.emit(turn_progress.STAGE_MATCH, number, total)
+        candidates[number] = _candidates_for_subtask(workflow, sub_task)
     proposal = build_round1_proposal(subtasks, candidates)
-    items: list[SubTask] = []
-    for item, sub_task in zip(proposal.items, subtasks):
-        drafted = drafted_item(workflow, item, sub_task, items, planner_lm=planner_lm)
+    if none_veto and not confident_only:
+        from fastworkflow import run_listing
+        from fastworkflow.workflow_agent import PLANNING_NONE_VETO_THRESHOLD
+
+        proposal = SubTaskProposal(items=[
+            item.model_copy(update={"means": Means(), "alternatives": []})
+            if (item.means.kind == MEANS_PLANNING
+                and not run_listing.exact_command_name(workflow, sub_task)
+                and jev_says_none(workflow, sub_task, PLANNING_NONE_VETO_THRESHOLD))
+            else item
+            for item, sub_task in zip(proposal.items, subtasks)])
+    if confident_only:
+        # No agent model judges a pick here, so a means the signals above do not stand behind is not run: the part is
+        # ad hoc (``from_scratch``) and comes back as not run, with the planner's suggestion (``confident_means``).
+        picks = [confident_pick(workflow, sub_task) for sub_task in subtasks]
+        proposal = SubTaskProposal(items=[
+            item.model_copy(update={"means": pick, "alternatives": item.alternatives if pick == item.means else []})
+            for item, pick in zip(proposal.items, picks)])
+
+    # A draft reads the sub-tasks before it only through their MEANS (``_producers``), which the proposal already
+    # holds, never their drafted inputs: so the drafts are independent and wait on the model together. Each draft is
+    # one sub-task's own text, and the items come back in sub-task order.
+    def draft(number: int, item: SubTask, sub_task: str) -> SubTask:
+        drafted = drafted_item(workflow, item, sub_task, list(proposal.items[:number - 1]), planner_lm=planner_lm)
         if parts := list(getattr(sub_task, "parts", ()) or ()):
             drafted = drafted.model_copy(update={"parts": parts})
             drafted = drafted.model_copy(update={"parts_fingerprint": _fingerprint(drafted)})
-        items.append(drafted)
+        return drafted
+
+    items = subtask_pool.map_in_order(
+        [functools.partial(draft, number, item, sub_task)
+         for number, (item, sub_task) in enumerate(zip(proposal.items, subtasks), 1)],
+        before=lambda index: turn_progress.emit(turn_progress.STAGE_DRAFT, index + 1, total))
     return SubTaskProposal(items=items)
+
+
+def _switched_alternatives(workflow, before: Optional[SubTask], item: SubTask) -> SubTask:
+    """*item* (whose means the user changed from *before*'s) with the plans that fit it brought up to date: when the new
+    means is one of *before*'s alternatives, the means it replaced takes its place among them, so the user can switch
+    back; otherwise the user chose a means of their own and the item has no alternatives. Nothing changes when the
+    means did not change."""
+    if before is None or item.means == before.means or not before.alternatives:
+        return item
+    if item.means.kind != MEANS_PLANNING or item.means.name not in {each.name for each in before.alternatives}:
+        return item.model_copy(update={"alternatives": []})
+    described = _planning_descriptions(workflow.folderpath) if workflow is not None else {}
+    replaced = ([PlanAlternative(name=before.means.name, description=described.get(before.means.name, ""))]
+                if before.means.kind == MEANS_PLANNING else [])
+    kept = [each for each in before.alternatives if each.name != item.means.name]
+    return item.model_copy(update={"alternatives": (replaced + kept)[:MAX_PLAN_ALTERNATIVES]})
 
 
 def _fingerprint(item: SubTask) -> str:
@@ -678,8 +979,8 @@ def _fingerprint(item: SubTask) -> str:
                       sort_keys=True, default=str)
 
 
-def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskProposal], planner_lm=None
-                        ) -> tuple[list[str], Optional[SubTaskProposal]]:
+def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskProposal], planner_lm=None,
+                        *, confident_only: bool = False) -> tuple[list[str], Optional[SubTaskProposal]]:
     """``(subtasks, plan)`` with each joined item that is still as drafted replaced by its parts, in order.
 
     One level only: each part is drafted on its own (``draft_round1_proposal``, as a split sub-task is) and is a leaf. An
@@ -695,7 +996,8 @@ def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskPro
     for number, item in enumerate(plan.items, 1):
         first_number[number] = len(expanded) + 1
         if item.parts and item.parts_fingerprint == _fingerprint(item):
-            for leaf in draft_round1_proposal(workflow, list(item.parts), planner_lm=planner_lm).items:
+            for leaf in draft_round1_proposal(workflow, list(item.parts), planner_lm=planner_lm,
+                                              confident_only=confident_only).items:
                 expanded.append(leaf.model_copy(update={"parts": [], "parts_fingerprint": ""}))
                 goals.append(leaf.goal)
         else:
@@ -707,6 +1009,84 @@ def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskPro
                   if each.from_subtask is not None else each for each in item.inputs]
         renumbered.append(item.model_copy(update={"inputs": inputs}))
     return goals, SubTaskProposal(items=renumbered)
+
+
+def refused_choice_message(workflow, edited: Proposal) -> Optional[str]:
+    """Why *edited* (a proposal after a reply's edits) sets an input to a value outside the choices its command declares,
+    or None when none does (fix-j9qk).
+
+    Only an input the edits set is checked: a (name, value) the item already held under the same means is left alone, so
+    an earlier draft is never refused here. A choice is a ``Literal`` or ``Enum`` value of the field of the means'
+    ``Input`` (scalar fields only; case is not significant). A means whose ``Input`` cannot be read, a from-scratch item,
+    an input without a name, a ``from sub-task N`` input and a field with no declared choices are not checked.
+    """
+    from fastworkflow import ModuleType, RoutingRegistry
+    folder = getattr(workflow, "folderpath", None)
+    if not folder or not isinstance(edited, SubTaskProposal):
+        return None
+    for number, item in enumerate(edited.items, 1):
+        if item.means.kind == MEANS_FROM_SCRATCH:
+            continue
+        before = getattr(item, "_before_item", None)
+        held = {(each.name, each.value) for each in before.inputs} if before is not None and before.means == item.means else set()
+        fresh = [each for each in item.inputs
+                 if each.name and each.from_subtask is None and each.value is not None
+                 and (each.name, each.value) not in held]
+        if not fresh:
+            continue
+        try:
+            params_class = RoutingRegistry.get_definition(folder).get_command_class(
+                item.means.name, ModuleType.COMMAND_PARAMETERS_CLASS)
+        except Exception:  # noqa: BLE001 - no readable Input: nothing to check against
+            continue
+        fields = getattr(params_class, "model_fields", None) or {}
+        for each in fresh:
+            info = fields.get(each.name)
+            if info is None:
+                continue
+            try:
+                allowed = _string_choices(info.annotation)
+                value = str(each.value).strip()
+                if allowed and value.casefold() not in {choice.casefold() for choice in allowed}:
+                    return (f"Step {number}: {each.name} must be one of {', '.join(allowed)}; "
+                            f"{value!r} is not allowed.")
+            except Exception:  # noqa: BLE001 - a check that cannot be made never fails a reply
+                continue
+    return None
+
+
+def _string_choices(annotation: Any) -> list[str]:
+    """The sorted declared choices of a scalar field, or [] (not checked) when it is a container, declares none, or
+    declares any non-string choice (an int or bool ``Literal``, an ``Enum`` with non-string values)."""
+    import enum
+    from typing import get_args, get_origin
+
+    if _is_container(annotation):
+        return []
+    raw: list[Any] = []
+
+    def collect(each: Any) -> None:
+        if isinstance(each, type) and issubclass(each, enum.Enum):
+            raw.extend(member.value for member in each)
+        elif get_origin(each) is Literal:
+            raw.extend(get_args(each))
+        else:
+            for argument in get_args(each):
+                collect(argument)
+
+    collect(annotation)
+    if not raw or not all(isinstance(value, str) for value in raw):
+        return []
+    return sorted(raw)
+
+
+def _is_container(annotation: Any) -> bool:
+    """Whether *annotation* is a list, tuple or set, alone or inside an ``Optional``/``Union``."""
+    from typing import get_args, get_origin
+
+    if get_origin(annotation) in (list, tuple, set, frozenset):
+        return True
+    return any(_is_container(argument) for argument in get_args(annotation)) and get_origin(annotation) is not Literal
 
 
 def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask], planner_lm=None) -> SubTask:
@@ -958,13 +1338,15 @@ def redraft_for_look_up(workflow, item: SubTask, earlier: list[SubTask], *, plan
         exclude = set(writes)
         _, command, _ = planning_match(workflow, item.goal, exclude=exclude)
         if command is not None:
-            item = item.model_copy(update={"means": Means(kind=MEANS_PLANNING, name=command.name)})
+            item = item.model_copy(update={"means": Means(kind=MEANS_PLANNING, name=command.name), "alternatives": []})
             return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
-        new_means = build_round1_proposal(
-            [item.goal], {1: _candidates_for_subtask(workflow, item.goal, exclude=exclude)}).items[0].means
+        built = build_round1_proposal(
+            [item.goal], {1: _candidates_for_subtask(workflow, item.goal, exclude=exclude)}).items[0]
+        new_means = built.means
         if new_means.kind == MEANS_FROM_SCRATCH:
-            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": ""})
-        item = item.model_copy(update={"means": new_means})
+            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": "",
+                                           "alternatives": []})
+        item = item.model_copy(update={"means": new_means, "alternatives": built.alternatives})
         return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
     return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
 
@@ -1180,10 +1562,11 @@ def _infer_missing_indexes_from_reply(
             expanded.append(edit)
             continue
         if edit.op == "drop":
-            steps: list[int] = []
-            for clause in clauses:
+            steps: list[int] = list(removal_reading(reply_text, count).remove)
+            for clause in clauses if not steps else ():
                 if _READER_DROP_CUE.search(clause):
-                    steps.extend(_extract_step_numbers(clause, count))
+                    steps.extend(step for step in _extract_step_numbers(clause, count)
+                                 if step not in removal_reading(clause, count).keep)
             if not steps and edit.indexes:
                 steps = [idx for idx in edit.indexes if 1 <= idx <= count]
             steps = [step for step in dict.fromkeys(steps)]
@@ -1287,6 +1670,23 @@ def _dedupe_engine_edits(
         else:
             others.append(edit)
 
+    # A merge of items that the same reply also drops ('make it a single step and drop the second step'): the dropped
+    # member is already joined into the first by the merge, so the merge keeps the others, and a merge left with one
+    # item is a change of that item's goal. Without this the engine refuses it: 'Item 2 is named by more than one edit'.
+    if drop_by_index and merge_indexes & set(drop_by_index):
+        rewritten: list = []
+        for edit in others:
+            if isinstance(edit, Merge) and set(edit.indexes) & set(drop_by_index) and min(edit.indexes) not in drop_by_index:
+                rest = [index for index in edit.indexes if index not in drop_by_index]
+                if len(rest) >= 2:
+                    rewritten.append(edit.model_copy(update={"indexes": rest}))
+                elif edit.values.get("goal"):
+                    changes.append(Change(index=rest[0], field="goal", value=edit.values["goal"]))
+                continue
+            rewritten.append(edit)
+        others = rewritten
+        merge_indexes = {index for edit in others if isinstance(edit, Merge) for index in edit.indexes}
+
     whole_indexes = split_indexes | merge_indexes
     skip_drop: set[int] = set()
     skip_change: set[int] = set()
@@ -1316,16 +1716,29 @@ def _dedupe_engine_edits(
             merged_inputs: list[SubTaskInput] = []
             for field_edit in field_edits:
                 merged_inputs = merge_subtask_input_edit(merged_inputs, field_edit.value)
-            merged_changes.append(
-                Change(
-                    index=index,
-                    field="inputs",
-                    value=", ".join(item.render() for item in merged_inputs),
-                )
-            )
+            joined = ", ".join(item.render() for item in merged_inputs)
+            there = list(proposal.items[index - 1].inputs) if proposal is not None and 1 <= index <= count else []
+            if dropped_input_part(there, joined) and not any(dropped_input_part(there, each.value) for each in field_edits):
+                # Each edit holds one input, but written back as one text a part named like a step field would be
+                # dropped: keep the edits as written, one input each (fix-j6xa). A packed edit is read as before.
+                merged_changes.extend(field_edits)
+            else:
+                merged_changes.append(Change(index=index, field="inputs", value=joined))
         else:
             merged_changes.append(field_edits[-1])
 
+    # An input cleared on an item the reply drops, splits or merges away is moot (and the engine would refuse the item as
+    # named twice); an input cleared and also set by the same reply is set (the set is what the user wrote).
+    gone_items = {drop.index for drop in surviving_drops} | whole_indexes
+    set_keys = {
+        (change.index, key)
+        for change in merged_changes if change.field == "inputs" and not _is_clearing_change(change)
+        for key in (_input_edit_part_key(part) for part in _input_edit_parts((change.value or "").strip())) if key}
+    others = [
+        edit for edit in others
+        if not (isinstance(edit, Change) and _is_clearing_change(edit)
+                and (edit.index in gone_items
+                     or (edit.index, _input_edit_part_key(_input_edit_parts((edit.value or "").strip())[0])) in set_keys))]
     return others + surviving_drops + merged_changes
 
 
@@ -1418,9 +1831,11 @@ def _best_quoted_match(value: str, quoted: list[str]) -> Optional[str]:
 def _repair_change_inputs_value(value: str, quoted: list[str], reply_text: str = "") -> str:
     parts = _split_input_assignments(value)
     if len(parts) <= 1:
-        match = _best_quoted_match(_strip_outer_quotes(value), quoted)
-        if match and "=" in value and not _said_literally(_strip_outer_quotes(value.partition("=")[2]), reply_text, quoted):
-            name, _, _rest = value.partition("=")
+        # ``name=Kline`` with the reply quoting 'Kline and Sons Ltd': the value is compared with the quoted names, not the
+        # whole ``name=value`` text.
+        name, equals, rest = value.partition("=")
+        match = _best_quoted_match(_strip_outer_quotes(rest if equals else value), quoted)
+        if match and equals and not _said_literally(_strip_outer_quotes(rest), reply_text, quoted):
             return f"{name.strip()}={match}"
         return value
     repaired: list[str] = []
@@ -1436,16 +1851,41 @@ def _repair_change_inputs_value(value: str, quoted: list[str], reply_text: str =
     return ", ".join(repaired)
 
 
+_WORD_EDGE = ",.;:?!()[]'\""
+
+
+def _norm_word(word: str) -> str:
+    return word.strip(_WORD_EDGE).lower()
+
+
 def _repair_goal_value(value: str, quoted: list[str]) -> str:
+    """Complete a name the reader cut short in a goal: the words of *value* that are a run of the quoted name (not all of
+    it) are replaced by the whole name. Only that run is replaced: the rest of the sentence stays, so a goal that shares
+    two words with a name is not overwritten by the name."""
     result = value
     for name in sorted(quoted, key=len, reverse=True):
         if name in result:
             continue
-        for match in re.finditer(r"[A-Za-z][A-Za-z0-9\s&'\-.,]*", result):
-            span = match.group(0).strip(" ,.")
-            if span and _is_truncated_match(span, name):
-                result = result.replace(match.group(0), name, 1)
-                break
+        name_words = [_norm_word(word) for word in name.split()]
+        if len(name_words) < 2:
+            continue
+        words = list(re.finditer(r"\S+", result))
+        best: Optional[tuple[int, int]] = None
+        for start in range(len(words)):
+            for end in range(len(words), start, -1):
+                run = [_norm_word(match.group(0)) for match in words[start:end]]
+                if len(run) >= len(name_words) or not all(run):
+                    continue
+                if len(run) < 2 and len(words) > 1:
+                    continue
+                if any(run == name_words[at:at + len(run)] for at in range(len(name_words) - len(run) + 1)):
+                    if best is None or end - start > best[1] - best[0]:
+                        best = (start, end)
+                    break
+        if best is not None:
+            first, last = words[best[0]], words[best[1] - 1]
+            tail = last.group(0)[len(last.group(0).rstrip(_WORD_EDGE)):]
+            result = result[:first.start()] + name + tail + result[last.end():]
     return result
 
 
@@ -1521,6 +1961,9 @@ def _primary_entity_key(item: SubTask) -> Optional[str]:
     return names[0] if names else None
 
 
+_PART_OF_NAME = re.compile(r"\bpart\s+of\b", re.I)
+
+
 def _apply_quoted_names_from_reply(
     proposal: SubTaskProposal,
     edits: list,
@@ -1537,6 +1980,9 @@ def _apply_quoted_names_from_reply(
             repaired.append(
                 edit.model_copy(update={"value": _repair_goal_value(edit.value, quoted)})
             )
+        elif isinstance(edit, (Merge, Add)) and edit.values.get("goal"):
+            repaired.append(edit.model_copy(update={
+                "values": {**edit.values, "goal": _repair_goal_value(edit.values["goal"], quoted)}}))
         else:
             repaired.append(edit)
 
@@ -1553,6 +1999,16 @@ def _apply_quoted_names_from_reply(
         if not primary_key or _reader_touches_input(reader_edits, target_index, primary_key):
             continue
         clause = _clause_containing_quote(reply_text, quoted_name)
+        if _PART_OF_NAME.search(clause) and not any(
+                quoted_name.lower() in (inp.value or "").lower() for inp in target_item.inputs):
+            # 'X is part of the name in step 1': X is a piece of the name, not the name. Setting it would replace the name
+            # by its piece, and the whole name was not given, so the user is asked for it.
+            read = [f"drop {edit.index}" for edit in repaired if isinstance(edit, Drop)]
+            understood = f" I understood: {'; '.join(read)}." if read else ""
+            raise EditRefused(
+                f"You said '{quoted_name}' is part of the {primary_key} in step {target_index}, but I do not know the "
+                f"whole {primary_key}.{understood} Give the whole {primary_key} in quotes, for example "
+                f"'change {target_index}: inputs={primary_key}=<whole {primary_key}>'.")
         kv = [f"{primary_key}={quoted_name}"]
         inferred_kind = _infer_kind_from_clause(clause)
         has_kind = any(inp.name == "kind" for inp in target_item.inputs)
@@ -1574,7 +2030,7 @@ _GENERIC_INPUT_NAMES = frozenset(_ENTITY_INPUT_KEYS | {"scope", "fact"})
 _NAME_PREFIXES = ("include_", "with_", "is_", "has_", "show_")
 _REMOVE_VERBS = r"(?:drop|remove|delete|skip|omit|cut|leave\s+out|take\s+out|get\s+rid\s+of|replace)"
 _STEP_WORD = r"(?:steps?|items?|sub-?tasks?)"
-_STEP_LIST = r"#?\d+(?:\s*(?:,|and|to|through|&|-|–)\s*#?\d+)*"
+_STEP_LIST = _NUMBER_LIST
 _REMOVE_STEP_OBJECT = re.compile(
     rf"\b{_REMOVE_VERBS}\s+(?:(?:the|these|those|this|that|both|all|extra|duplicate|stray|separate)\s+)*"
     rf"(?:{_STEP_WORD}\s+)?(?P<list>{_STEP_LIST})\b", re.I)
@@ -1584,7 +2040,6 @@ _STEP_NOT_WANTED = re.compile(
     r"(?:not\s+be\s+there|go|be\s+(?:removed|dropped|deleted))|"
     r"(?:is|are)\s+(?:a\s+|an\s+)?(?:duplicates?|stray|extra|unneeded|unnecessary|not\s+needed|not\s+wanted|not\s+there)|"
     r"(?:isn'?t|aren'?t)\s+needed)", re.I)
-_KEEP_ONLY_STEP = re.compile(rf"\b(?:keep|retain)\s+(?:only|just)\s+(?:the\s+)?{_STEP_WORD}\s+#?(?P<n>\d+)\b", re.I)
 _MERGE_REPLY = re.compile(
     r"\b(?:merge|combine|join|single\s+step|one\s+step|one\s+single|a\s+single|just\s+one|only\s+one|"
     r"one\s+(?:name|entity|organi[sz]ation|record)|not\s+two)\b", re.I)
@@ -1633,10 +2088,11 @@ def _input_mentioned(clause: str, inp: SubTaskInput) -> bool:
 
 
 def _explicit_removed_steps(reply_text: str, count: int, proposal: Optional["SubTaskProposal"] = None) -> set[int]:
-    """Steps the reply explicitly asks to remove ('remove step 2', 'step 2 should not be there', 'keep only step 1').
-    'drop it' counts only when the clause does not name an input of the step it follows ('I did not ask for risk, so
-    drop it' is about the risk setting)."""
-    removed: set[int] = set()
+    """Steps the reply explicitly asks to remove ('remove steps 2, 3 and 4', 'step 2 should not be there', 'keep only
+    step 1'). 'drop it' counts only when the clause does not name an input of the step it follows ('I did not ask for
+    risk, so drop it' is about the risk setting). A step the reply says to keep ('do not remove step 2') is not one."""
+    reading = removal_reading(reply_text, count)
+    removed: set[int] = set(reading.remove)
     previous: list[int] = []
     for clause in _reply_clauses(reply_text):
         for match in _REMOVE_STEP_OBJECT.finditer(clause):
@@ -1650,9 +2106,9 @@ def _explicit_removed_steps(reply_text: str, count: int, proposal: Optional["Sub
                         if not any(inp.name and _input_mentioned(clause, inp) for inp in proposal.items[step - 1].inputs)]
             removed.update(lead)
         previous = _leading_step_numbers(clause, count) or previous
-    for match in _KEEP_ONLY_STEP.finditer(reply_text or ""):
-        keep = int(match.group("n"))
-        removed.update(step for step in range(1, count + 1) if step != keep)
+    if not reading.contradiction:
+        removed -= set(reading.keep) - set(reading.remove)
+    removed -= set(reading.uncertain)
     return removed
 
 
@@ -1809,6 +2265,129 @@ def _guard_unreported_clears(proposal: "SubTaskProposal", proposed: list[Propose
     return result
 
 
+_ORDINAL_STEP_CUE = re.compile(r"\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|last|final|previous|next)\b", re.I)
+
+
+def reconcile_dropped_items(proposal: Proposal, items: list[str], text: str) -> list[int]:
+    """The steps a routed ``drop`` removes, checked against the reply's own words (``review_step_refs.removal_reading``).
+
+    *items* are the step numbers another reader (the parameter extractor of the ``drop`` command) took from *text*.
+    A reply that names the steps to remove by number removes all of those and no other (a list read short, or a step
+    the reply says to keep, is corrected); a step the reply never named is not removed unless it points at a step by
+    position ('the last step'). A reply with no certain reading raises ``EditRefused`` (the user is asked again, with the
+    removal that was read shown back). Replies that name no step by number keep *items* as given.
+    """
+    count = len(proposal.items)
+    numbers = [int(item) for item in items]
+    reading = removal_reading(text, count)
+    if unsure := [number for number in numbers if number in reading.uncertain]:
+        raise EditRefused(
+            f"I am not sure you want step {unsure[0]} removed: your words could mean a change to it, or a condition. "
+            f"Reply 'drop {unsure[0]}' to remove it, or say what to change in it.")
+    if reading.contradiction:
+        clash = sorted(set(reading.remove) & set(reading.keep))
+        raise EditRefused(
+            f"I could not tell whether to remove or keep step {clash[0]}: you asked for both. "
+            f"Which steps should I remove? (I read the removal of {_step_list_text(sorted(reading.remove))}.)")
+    if reading.remove:
+        # A step the extractor took that the reply neither names nor points at by position is not removed.
+        extras = [number for number in numbers if number not in reading.remove and number not in reading.keep]
+        if extras and _ORDINAL_STEP_CUE.search(text):
+            return list(reading.remove) + extras
+        return list(reading.remove)
+    kept = [number for number in numbers if number in reading.keep]
+    if kept:
+        rest = [number for number in numbers if number not in reading.keep]
+        if rest:
+            return rest
+        raise EditRefused(
+            f"I read that as removing {_step_list_text(kept)}, but you said to keep "
+            f"{'it' if len(kept) == 1 else 'them'}. Which steps should I remove?")
+    return numbers
+
+
+def certain_removals(proposal: Proposal, text: str) -> list[int]:
+    """The steps *text* clearly asks to remove by number (``drop steps 2, 3 and 4``), or [] when it does not, or when it
+    also says to keep one of them."""
+    reading = removal_reading(text, len(proposal.items))
+    return list(reading.remove) if reading.certain and not reading.uncertain else []
+
+
+def _guard_removals(
+    proposal: "SubTaskProposal", proposed: list[ProposedEdit], reply_text: str, kept_out: Optional[list[int]] = None,
+) -> list[ProposedEdit]:
+    """The reply's own words decide which steps go (``review_step_refs.removal_reading``), over what the reader returned.
+
+    A drop of a step the reply says to keep ('keep only step 1', 'steps 1 to 4 are fine', 'do not remove step 2') is not
+    applied, and a step the reply asks to remove that the reader left out is dropped: a reply that names several steps
+    removes all of them. A reply that both removes and keeps the same step has no certain reading: nothing is dropped
+    and the user is asked, with the removal that was read shown back."""
+    count = len(proposal.items)
+    if count < 2:
+        return proposed
+    reading = removal_reading(reply_text, count)
+    if not reading.remove and not reading.keep and not reading.uncertain:
+        return proposed
+    readers_drops = [edit for edit in proposed if edit.op == "drop"]
+    unsure = [step for edit in readers_drops
+              for step in ([edit.index] if edit.index is not None else []) + list(edit.indexes)
+              if step in reading.uncertain]
+    if unsure:
+        # A removal verb touched this step without a certain reading ('remove step 2's filter', 'skip step 2 if ...'), and
+        # the reader dropped the step: not applied, the user is asked, with the removals that were certain shown back.
+        understood = (f" (I did read the removal of {_step_list_text(list(reading.remove))}.)" if reading.remove else "")
+        raise EditRefused(
+            f"I am not sure you want step {unsure[0]} removed: your words could mean a change to it, or a condition."
+            f"{understood} Reply 'drop {unsure[0]}' to remove it, or say what to change in it.")
+    if reading.contradiction:
+        if not readers_drops and not reading.remove:
+            return proposed
+        clash = sorted(set(reading.remove) & set(reading.keep))
+        raise EditRefused(
+            f"I could not tell whether to remove or keep step {clash[0]}: you asked for both. "
+            f"Which steps should I remove? (I read the removal of {_step_list_text(sorted(reading.remove))}.)")
+    kept = [edit for edit in readers_drops
+            if edit.index in reading.keep and edit.index not in reading.remove
+            or any(each in reading.keep and each not in reading.remove for each in edit.indexes)]
+    result = [edit for edit in proposed if edit not in kept]
+    if kept_out is not None:
+        kept_out.extend(edit.index for edit in kept if edit.index is not None)
+    gone: set[int] = set()
+    for edit in result:
+        if edit.op == "drop":
+            gone.update(([edit.index] if edit.index is not None else []) + list(edit.indexes))
+        elif edit.op == "split" and edit.index is not None:
+            gone.add(edit.index)
+        elif edit.op == "merge":
+            gone.update(edit.indexes[1:] if len(edit.indexes) > 1 else [])
+    aimed_at_input = {step for step, _ in _clear_requests(proposal, reply_text, weak=True)}
+    for step in reading.remove:
+        if step not in gone and step not in aimed_at_input:
+            result.append(ProposedEdit(op="drop", index=step))
+    return result
+
+
+def _step_list_text(steps: list[int]) -> str:
+    labels = [str(step) for step in steps]
+    if len(labels) <= 1:
+        return f"step {labels[0]}" if labels else "no step"
+    return f"steps {', '.join(labels[:-1])} and {labels[-1]}"
+
+
+def _guard_switch_clause_in_goal(proposed: list[ProposedEdit], reply_text: str) -> None:
+    """Refuse a reader edit whose goal is, or ends with, an explicit plan-switch clause copied from the reply (``step 7: use
+    NAME``): the clause asks to change a plan, and as goal text it would damage the step it lands in (bd fix-1ma8.1)."""
+    from fastworkflow.review_engine import switch_clause_in_goal_message
+    from fastworkflow.review_plan_switch import goal_copies_switch_clause
+
+    for edit in proposed:
+        goals = ([edit.value] if edit.op in ("add", "merge") or (edit.op == "change" and edit.field == "goal")
+                 else list(edit.parts) if edit.op == "split" else [])
+        for goal in goals:
+            if goal and (clause := goal_copies_switch_clause(goal, reply_text)):
+                raise EditRefused(switch_clause_in_goal_message(clause))
+
+
 def _guard_reader_edits(
     proposal: Proposal, proposed: list[ProposedEdit], reply_text: Optional[str],
 ) -> list[ProposedEdit]:
@@ -1816,14 +2395,20 @@ def _guard_reader_edits(
     every edit left was a drop the reply does not ask for."""
     if not reply_text or not isinstance(proposal, SubTaskProposal) or not proposed:
         return proposed
+    _guard_switch_clause_in_goal(proposed, reply_text)
     if len(proposal.items) == 1:
         proposed = [edit.model_copy(update={"index": 1}) if edit.index is None and edit.op in ("change", "drop") else edit
                     for edit in proposed]
     refused: list[int] = []
+    kept_out: list[int] = []
     proposed = _guard_drops_to_clears(proposal, proposed, reply_text)
     proposed = _guard_retarget_changes(proposal, proposed, reply_text)
+    proposed = _guard_removals(proposal, proposed, reply_text, kept_out)
     proposed = _guard_unasked_drops(proposal, proposed, reply_text, refused)
     proposed = _guard_unreported_clears(proposal, proposed, reply_text)
+    if not proposed and kept_out:
+        raise EditRefused(
+            f"I read that as removing step {kept_out[0]}, but you said to keep it. Which steps should I remove?")
     if not proposed and refused:
         raise EditRefused(
             f"I read that as removing step {refused[0]}, but you did not ask for that. "

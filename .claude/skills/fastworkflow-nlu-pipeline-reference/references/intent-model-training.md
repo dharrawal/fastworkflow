@@ -104,7 +104,9 @@ After both models train (per context):
      failed mean), returns threshold **-1** with -1 metrics (:228-241) and that gets
      written to threshold.json. A -1 threshold means tiny is always "confident enough".
 3. Ambiguous thresholds (:1174-1190): `tiny_ambiguous_threshold` = mean confidence of
-   tiny's misclassified test samples (0.0 if none); same for large. Rationale: if the
+   tiny's misclassified test samples (0.0 if none); the large tier uses that mean only with at
+   least 5 misclassified test rows, otherwise the 10th percentile of its correct rows'
+   confidences; both clamped to [0.5, 0.99]. Rationale: if the
    answering model's confidence is below the typical confidence *of its own mistakes*,
    don't trust a single label — show top-k.
 4. Written artifacts: `threshold.json`, `tiny_ambiguous_threshold.json`,
@@ -118,9 +120,10 @@ Worked real example (CME workflow, committed in-repo, `global` context):
 | tiny_ambiguous_threshold.json | 0.4010 | tiny answered and confidence ≤ 0.4010 → return top-k |
 | large_ambiguous_threshold.json | 0.5468 | distil answered and confidence ≤ 0.5468 → return top-k |
 
-(For the CME `IntentDetection` context, large_ambiguous is 0.0 — DistilBERT never
-misclassified on that tiny test set, so a single label is always returned when distil
-answers.)
+(Historical: before the floor and the correct-side rule, the CME `IntentDetection`
+context wrote large_ambiguous 0.0 because DistilBERT never misclassified on that tiny
+test set. With no misclassified rows the threshold now comes from the correct rows'
+10th-percentile confidence, never below 0.5.)
 
 **Calibration caveat for the tau2 program**: these are decision thresholds tuned on a
 ~25% split of ~20-25 utterances/command — noisy. Softmax confidences of fine-tuned BERTs

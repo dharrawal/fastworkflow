@@ -17,6 +17,7 @@ from fastworkflow.observation_offloading.facts import (
     FactsError,
     MissingFactError,
     PAGING_PARAMETERS,
+    _FIRST_PAGE,
     _command_matches,
     _join_list,
     _page_key,
@@ -328,13 +329,29 @@ def _matching_runs(runs: Sequence[Mapping[str, Any]], command: str, *,
     ]
 
 
+def _first_page_run(matching: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The run whose Output a step that is not a full-list step reads: the latest run.
+
+    Exception: when the runs differ only in paging parameters (the same non-paging
+    query, by ``_page_key``) and one of them read the first page, that run (the latest
+    such read) is used, since the first page states what a later page does not (a count).
+    A run with another query is a re-run with corrected arguments: the latest run wins.
+    """
+    keys = [_page_key(run.get("input"), PAGING_PARAMETERS, None) for run in matching]
+    if len({query for query, _page, _size in keys}) == 1:
+        firsts = [run for run, (_q, page, _s) in zip(matching, keys) if page == _FIRST_PAGE]
+        if firsts:
+            return firsts[-1]
+    return matching[-1]
+
+
 def _output_blob_from_runs(runs: Sequence[Mapping[str, Any]], command: str, *,
                            context: Optional[str], full_list: bool) -> dict[str, Any] | None:
     """Merged Output dict from *runs* of *command* (pages joined when *full_list*)."""
     matching = _matching_runs(runs, command, context=context)
     if not matching:
         return None
-    last = matching[-1]
+    last = matching[-1] if full_list else _first_page_run(matching)
     output = last.get("output")
     if not isinstance(output, Mapping):
         return None

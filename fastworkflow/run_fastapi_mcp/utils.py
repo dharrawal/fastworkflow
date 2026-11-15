@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import queue
 import time
@@ -16,7 +17,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from pydantic import BaseModel, Field, field_validator
 
 import fastworkflow
-from fastworkflow import approval_binding
+from fastworkflow import approval_binding, approval_grants
 from fastworkflow.session_state_store import (
     IncompatibleSessionState,
     PendingReapOutcome,
@@ -28,6 +29,7 @@ from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
+from fastworkflow.turn_progress import ProgressEvent
 from fastworkflow.experiment.runner import (
     MissingExperimentLifecycleFeature,
     experiment_store_readiness,
@@ -63,6 +65,9 @@ from fastworkflow.observability.store import (
 )
 from fastworkflow.tracing import ATTR_PASS
 from . import checkpoint
+from . import session_notices
+from .session_notices import SessionNoticeStore
+from . import jwt_manager
 from .jwt_manager import verify_token
 
 
@@ -119,10 +124,101 @@ def resolve_max_live_sessions() -> tuple[int, str]:
     return value, source
 
 
+# The live-session count has two limits. MAX_LIVE_SESSIONS (above) is the soft target: past it the server evicts
+# sessions it can checkpoint. A session it cannot checkpoint (a workflow context class with no get_state hook, a
+# declared EPHEMERAL one, a failing hook) is never evicted, so the soft target alone does not bound anything.
+# The hard ceiling does: a request that would create a session past it is first made room for (evict, then expire
+# idle sessions), and otherwise refused with 503 + Retry-After.
+DEFAULT_HARD_CEILING_FACTOR = 4
+# A pinned session idle this long may be expired, but only while the live count is above the soft target.
+DEFAULT_PINNED_IDLE_TTL_SECONDS = 1800
+# A pinned session with a question waiting for its user is protected from the shorter TTL; it expires after this
+# one (and its pending question is discarded), again only above the soft target. 0 disables expiry.
+DEFAULT_PROTECTED_IDLE_TTL_SECONDS = 86400
+SESSION_CAPACITY_RETRY_AFTER_SECONDS = 30
+# Most trace events one session's queue holds. The server drains it every turn; the cap only matters for a turn
+# that produces events faster than they are drained, or one that failed before its drain.
+MAX_TRACE_QUEUE_EVENTS = 10_000
+
+
+def _resolve_env_int(name: str, default: int, *, minimum: int) -> tuple[int, str]:
+    """An integer setting, the process environment first (same precedence as resolve_max_live_sessions)."""
+    raw = os.environ.get(name)
+    source = "process environment"
+    if raw is None or raw == "":
+        raw = fastworkflow.get_env_var(name, default=None)
+        source = "workflow env file"
+    if raw is None or raw == "":
+        return default, "default"
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name}={raw!r} (from {source}) is not an integer") from exc
+    if value < minimum:
+        raise ValueError(f"{name}={value} (from {source}) must be at least {minimum}")
+    return value, source
+
+
+def resolve_max_live_sessions_hard(soft_target: int) -> tuple[int, str]:
+    """MAX_LIVE_SESSIONS_HARD: the live-session ceiling. Default is 4 x the soft target; below it is an error."""
+    value, source = _resolve_env_int(
+        "MAX_LIVE_SESSIONS_HARD", soft_target * DEFAULT_HARD_CEILING_FACTOR, minimum=1)
+    if value < soft_target:
+        raise ValueError(
+            f"MAX_LIVE_SESSIONS_HARD={value} (from {source}) must not be below MAX_LIVE_SESSIONS={soft_target}"
+        )
+    return value, source
+
+
+def resolve_pinned_idle_ttl() -> tuple[int, str]:
+    """PINNED_SESSION_IDLE_TTL_SECONDS (default 1800; 0 never expires a session)."""
+    return _resolve_env_int("PINNED_SESSION_IDLE_TTL_SECONDS", DEFAULT_PINNED_IDLE_TTL_SECONDS, minimum=0)
+
+
+def resolve_protected_idle_ttl() -> tuple[int, str]:
+    """PROTECTED_SESSION_IDLE_TTL_SECONDS (default 86400; 0 never expires a protected session)."""
+    return _resolve_env_int("PROTECTED_SESSION_IDLE_TTL_SECONDS", DEFAULT_PROTECTED_IDLE_TTL_SECONDS, minimum=0)
+
+
+class BoundedTraceQueue(queue.Queue):
+    """The per-session trace queue, bounded: past ``maxlen`` the OLDEST event is dropped and counted.
+
+    Unbounded ``Queue`` was fine only while every turn was drained. The server drains it after every turn and
+    during streaming, but a turn that fails before its drain leaves its events behind, so the bound is made
+    structural instead of depending on that. ``dropped`` is summed into the readiness probe.
+    """
+
+    def __init__(self, maxlen: int = MAX_TRACE_QUEUE_EVENTS) -> None:
+        super().__init__()
+        self._maxlen = maxlen
+        self.dropped = 0
+
+    def _put(self, item) -> None:  # called by Queue.put with the queue mutex held
+        if len(self.queue) >= self._maxlen:
+            self.queue.popleft()
+            self.dropped += 1
+        super()._put(item)
+
+
+class SessionCapacityExceeded(Exception):
+    """A new session would pass the live-session ceiling and none could be made room for."""
+
+    def __init__(self, live: int, ceiling: int) -> None:
+        super().__init__(
+            f"The server is at its live-session ceiling ({ceiling}; {live} sessions are held) and no idle "
+            f"session could be released. Retry in {SESSION_CAPACITY_RETRY_AFTER_SECONDS} seconds, or end "
+            "channels you no longer use with end_session."
+        )
+        self.live = live
+        self.ceiling = ceiling
+
+
 # Newest conversation turns kept in memory per channel. Turns are request-sized
 # (~450 KB in the workload this bound was sized against, so ~9 MB per channel),
 # only the newest few are ever read, and the durable record keeps the rest.
 MAX_CONVERSATION_TURNS_IN_MEMORY = 20
+# While the newest turn record is not yet durable the window trim is deferred, but never past this many windows.
+DEFERRED_TRIM_WINDOW_FACTOR = 2
 
 
 # ============================================================================
@@ -205,6 +301,9 @@ class InitializeResponse(BaseModel):
     # [R9] the startup turn's LOGICAL key (TurnOutput.turn_key), once known —
     # the key GET /turns and the observability store are ultimately keyed by.
     startup_logical_turn_key: Optional[str] = None
+    # Present when this channel's earlier session was dropped by the server (expired under capacity pressure, or
+    # ended with state that could not be saved): {code: "context_dropped", reason, message}. Shown once.
+    session_notice: Optional[dict[str, Any]] = None
 
 
 class SessionData(BaseModel):
@@ -225,8 +324,14 @@ class InvokeRequest(BaseModel):
     """
     user_query: str
     timeout_seconds: int = 60
-    # None leaves the process's DSPy cache setting as it is.
-    use_dspy_cache: Optional[bool] = None
+    use_dspy_cache: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Takes effect only on a server started with --allow_request_cache_toggle (the local chat); "
+            "otherwise it is ignored and a value that disagrees with the server is named in the "
+            "X-FW-DSPy-Cache response header (the response cache is chosen at start with FW_LM_CACHE=0)."
+        ),
+    )
     # This turn runs with nobody to answer: the agent gets no ask_user tool.
     # Per turn, never sticky; omitted means attended.
     unattended: bool = False
@@ -234,21 +339,90 @@ class InvokeRequest(BaseModel):
     approval_token: Optional[str] = None
 
 
+class EndSessionRequest(BaseModel):
+    """Optional body of POST /end_session. The channel is the token's; it is never a parameter."""
+    discard_pending: bool = Field(
+        default=False,
+        description=(
+            "Set true to end the session even though a question is waiting for an answer (an agent question, "
+            "a review, an approval, a parameter request). The question is lost. Left false, ending is "
+            "refused while one is pending."
+        ),
+    )
+
+
+class EndSessionResponse(BaseModel):
+    """What POST /end_session did to the caller's channel."""
+    channel_id: str
+    ended: bool = Field(description="True when a live session was released; false when the channel had none.")
+    pinned: bool = Field(
+        description=(
+            "True when the session's state could not be checkpointed, so its in-memory workflow state was "
+            "dropped and a later call on the channel starts fresh. False: it was checkpointed and a later "
+            "call restores it (or there was no session)."
+        )
+    )
+    pending_discarded: bool = Field(description="True when a pending question was discarded (discard_pending).")
+
+
+DSPY_CACHE_HEADER = "X-FW-DSPy-Cache"
+
+_allow_request_cache_toggle = False
 _dspy_cache_enabled: Optional[bool] = None
 
 
-def apply_dspy_cache_choice(use_dspy_cache: Optional[bool]) -> None:
-    """Turn the process-wide DSPy cache on or off when the request asks for a change."""
+def set_allow_request_cache_toggle(allowed: bool) -> None:
+    """Set at startup from --allow_request_cache_toggle (like set_chat_approval_surface)."""
+    global _allow_request_cache_toggle, _dspy_cache_enabled
+    _allow_request_cache_toggle = bool(allowed)
+    _dspy_cache_enabled = None
+
+
+def allow_request_cache_toggle() -> bool:
+    return _allow_request_cache_toggle
+
+
+def apply_dspy_cache_choice(use_dspy_cache: Optional[bool]) -> Optional[str]:
+    """Act on a request's ``use_dspy_cache`` only on a server the operator started for it.
+
+    DEFAULT (``--allow_request_cache_toggle`` off): the argument never applies. The response cache is a
+    SERVER-WIDE setting chosen at start (``FW_LM_CACHE=0`` builds every model without it;
+    ``dspy_utils.lm_cache_enabled``); a request that rebuilt the process-wide DSPy cache would change every
+    other channel's behaviour and drop the memory bound the readiness probe checks. Returns None when the
+    request left it unset or agrees with the server; when it disagrees, it is ignored and the returned notice
+    (also the ``X-FW-DSPy-Cache`` header and a log line) says what was asked and what the server does.
+
+    OPT-IN (a single local user, the chat page's "LLM cache" checkbox): the argument toggles the process-wide
+    cache, as it always did, through ``server_memory.apply_cache_toggle``, which keeps the memory bound so
+    readiness stays green. Nothing is reported.
+    """
     global _dspy_cache_enabled
-    if use_dspy_cache is None or use_dspy_cache == _dspy_cache_enabled:
-        return
-    from fastworkflow.utils.dspy_cache_utils import (
-        clear_dspy_cache_completely, reset_dspy_cache_settings)
-    if use_dspy_cache:
-        reset_dspy_cache_settings()
-    else:
-        clear_dspy_cache_completely()
-    _dspy_cache_enabled = use_dspy_cache
+    if use_dspy_cache is None:
+        return None
+    if _allow_request_cache_toggle:
+        if use_dspy_cache != _dspy_cache_enabled:
+            from fastworkflow.run_fastapi_mcp import server_memory
+            server_memory.apply_cache_toggle(use_dspy_cache)
+            _dspy_cache_enabled = use_dspy_cache
+        return None
+    from fastworkflow.utils.dspy_utils import lm_cache_enabled
+    server_on = lm_cache_enabled()
+    if use_dspy_cache == server_on:
+        return None
+    notice = (
+        f"ignored: use_dspy_cache={'true' if use_dspy_cache else 'false'} was requested, but the response "
+        f"cache is a server-wide setting and is {'on' if server_on else 'off'} (start the server with "
+        f"FW_LM_CACHE={'1' if use_dspy_cache else '0'} to change it)"
+    )
+    logger.info(f"use_dspy_cache {notice}")
+    return notice
+
+
+def with_cache_notice(response, notice: Optional[str]):
+    """``response`` with the ignored-argument notice as a header, when there is one."""
+    if notice:
+        response.headers[DSPY_CACHE_HEADER] = notice
+    return response
 
 
 class PerformActionRequest(BaseModel):
@@ -672,21 +846,50 @@ async def ensure_user_runtime_exists(
             )
             return
 
-        # Hold the lease across creation so the overflow sweep inside
-        # create_session cannot choose the runtime being created (invariant 20).
-        async with session_manager.initialization_lease(channel_id):
-            await _create_user_runtime(
-                channel_id=channel_id,
-                session_manager=session_manager,
-                workflow_path=workflow_path,
-                context=context,
-                startup_command=startup_command,
-                startup_action=startup_action,
-                stream_format=stream_format,
-                http_bearer_token=http_bearer_token,
-                run_startup=run_startup,
-                experiment_bootstrap=experiment_bootstrap,
-            )
+        # The hard ceiling: reserve room before anything is built, or refuse (503 + Retry-After). Released in
+        # the finally on every path, so a failed creation does not hold a slot.
+        try:
+            await session_manager.admit_new_session(channel_id)
+        except SessionCapacityExceeded as capacity:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(capacity),
+                headers={"Retry-After": str(SESSION_CAPACITY_RETRY_AFTER_SECONDS)},
+            ) from capacity
+        try:
+            # Hold the lease across creation so the overflow sweep inside
+            # create_session cannot choose the runtime being created (invariant 20).
+            async with session_manager.initialization_lease(channel_id):
+                await _create_user_runtime(
+                    channel_id=channel_id,
+                    session_manager=session_manager,
+                    workflow_path=workflow_path,
+                    context=context,
+                    startup_command=startup_command,
+                    startup_action=startup_action,
+                    stream_format=stream_format,
+                    http_bearer_token=http_bearer_token,
+                    run_startup=run_startup,
+                    experiment_bootstrap=experiment_bootstrap,
+                )
+                _attach_dropped_session_notice(session_manager, channel_id)
+        finally:
+            session_manager.release_admission(channel_id)
+
+
+def _attach_dropped_session_notice(session_manager: "ChannelSessionManager", channel_id: str) -> None:
+    """If this channel's earlier session was dropped by the server, put the notice on the new one (once).
+
+    Fails open: the notice describes a loss that already happened, so a store that cannot be read is logged and
+    skipped, never allowed to fail the request that created the session.
+    """
+    try:
+        notice = session_manager.notice_store.take(channel_id)
+        runtime = session_manager._sessions.get(channel_id)
+        if notice is not None and runtime is not None:
+            runtime.session_notice = notice
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Dropped-session notice not attached ({type(exc).__name__}: {exc})")
 
 
 @dataclass
@@ -906,7 +1109,7 @@ async def _create_user_runtime(
 
     # The claim transaction above reserves the labelled conversation before
     # this constructor can allocate any session work.
-    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id, detect_no_agent_mode=True)
     # Identity plumbing [R1]: the embedder binds channel identity before any
     # turn so spans/turn records are attributable (conversation ids are minted
     # by the observability store from Phase 2).
@@ -924,7 +1127,7 @@ async def _create_user_runtime(
         ctx.set_trace_sink(trace_sink)
     if claim is not None:
         ctx.bind_experiment_claim(claim, trace_sink.store)
-    trace_queue: Queue = Queue()
+    trace_queue: Queue = BoundedTraceQueue()
     ctx.set_transport_queues(command_trace_queue=trace_queue)
 
     app_workflow = fastworkflow.Workflow.create(
@@ -1209,21 +1412,87 @@ def drop_parked_pending_for_conversation(
     return len(dropped)
 
 
+# ----------------------------------------------------------------------
+# The approval surface of a request (fix-rkr1)
+# ----------------------------------------------------------------------
+# /invoke_agent and /perform_action are always a host surface. --chat_approval_surface picks what the
+# streaming endpoint (also the MCP invoke_agent tool) and /invoke_assistant pass; it never changes the
+# first two. The default is ``host`` (strict: one rule on every endpoint and every MCP tool); ``channel``
+# passes no surface, so the turn falls back to its channel surface (a plain yes approves, no token), which
+# is what the local `run_chatbot` server pins explicitly.
+CHAT_APPROVAL_SURFACES = ("channel", "host")
+DEFAULT_CHAT_APPROVAL_SURFACE = "host"
+_chat_approval_surface = DEFAULT_CHAT_APPROVAL_SURFACE
+
+
+def set_chat_approval_surface(mode: str) -> None:
+    """Set at startup from --chat_approval_surface (like jwt_manager.set_jwt_verification_mode)."""
+    global _chat_approval_surface
+    if mode not in CHAT_APPROVAL_SURFACES:
+        raise ValueError(f"chat approval surface must be one of {CHAT_APPROVAL_SURFACES}, got {mode!r}")
+    _chat_approval_surface = mode
+
+
+def chat_approval_surface() -> str:
+    return _chat_approval_surface
+
+
+def approval_surface_for(user_id: Optional[str], *, scope: str = "direct") -> "approval_binding.Surface | None":
+    """The approval surface one request passes to the turn.
+
+    scope "direct" (/invoke_agent, /perform_action): always the host surface, verified only when
+    JWT signatures are checked. Never loosened by --chat_approval_surface.
+
+    scope "chat" (/invoke_agent_stream, /invoke_assistant): under ``channel`` this returns the channel
+    surface with the chat origin (its standing approvals are the chat's own, not the CLI's). Under ``host`` (the
+    default) it returns the same surface scope "direct" builds.
+    """
+    if scope not in ("direct", "chat"):
+        raise ValueError(f"unknown approval scope {scope!r}")
+    if scope == "chat" and _chat_approval_surface != "host":
+        # The channel surface of the chat server: the origin is set here, on the server side, so its standing
+        # approvals are the chat's own and never the CLI's (fix-d6no). Nothing a caller sends reaches it.
+        return approval_binding.Surface(kind="channel", origin=approval_grants.ORIGIN_CHAT)
+    return approval_binding.Surface(
+        kind="host", verified=bool(jwt_manager.EXPECT_ENCRYPTED_JWT), uid=user_id)
+
+
+def turn_approval_kwargs(surface: "approval_binding.Surface | None", token: Optional[str]) -> dict:
+    """process_turn keyword arguments for a surface: none at all when there is no surface, so the call
+    is the one made before the option existed; the token only travels with a surface."""
+    if surface is None:
+        return {}
+    # A channel surface has no token to check (a plain yes approves), so none travels with it.
+    return {"approval_surface": surface, "approval_token": token if surface.kind == "host" else None}
+
+
 async def run_process_turn(
     runtime: "ChannelRuntime",
     message: str,
     timeout_seconds: int,
     session_manager: "ChannelSessionManager",
     unattended: bool = False,
+    approval_surface: "approval_binding.Surface | None" = None,
+    approval_token: Optional[str] = None,
+    delivered: Optional[dict] = None,
 ) -> fastworkflow.TurnOutput:
-    """Run one logical turn in a thread pool with timeout (Topology B)."""
+    """Run one logical turn in a thread pool with timeout (Topology B).
+
+    ``delivered``, when given, receives the host's live approval fields (the token) taken after the
+    turn on the same thread; they are never part of the returned TurnOutput.
+    """
     loop = asyncio.get_running_loop()
     ctx = runtime.execution_context
 
     def _run() -> fastworkflow.TurnOutput:
         # process_turn() is the public execution API: it returns the TurnOutput
         # the whole transport edge speaks (and captures the full turn).
-        return ctx.process_turn(message, unattended=unattended)
+        output = ctx.process_turn(
+            message, unattended=unattended,
+            **turn_approval_kwargs(approval_surface, approval_token))
+        if delivered is not None:
+            delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+        return output
 
     try:
         output = await asyncio.wait_for(
@@ -1300,6 +1569,23 @@ async def _emit_trace_callback(
     await _maybe_await(on_trace(trace_dict))
 
 
+async def _deliver_trace_or_progress(
+    evt: Any,
+    on_trace: Callable[[dict[str, Any]], Any],
+    on_progress: Optional[Callable[[dict[str, Any]], Any]],
+    user_id: Optional[str],
+) -> None:
+    """A stage-progress event goes to ``on_progress`` (dropped when there is none or it fails); a trace event to ``on_trace``."""
+    if isinstance(evt, ProgressEvent):
+        if on_progress is not None:
+            try:
+                await _maybe_await(on_progress(evt.to_dict()))
+            except Exception as exc:  # progress is advisory; it never fails the turn
+                logger.debug(f"progress callback failed: {exc!r}")
+        return
+    await _emit_trace_callback(on_trace, _format_trace_event(evt, user_id), user_id)
+
+
 async def run_process_message_with_trace_stream(
     runtime: "ChannelRuntime",
     message: str,
@@ -1309,6 +1595,10 @@ async def run_process_message_with_trace_stream(
     user_id: Optional[str] = None,
     on_timeout: Optional[Callable[[str], Any]] = None,
     unattended: bool = False,
+    on_progress: Optional[Callable[[dict[str, Any]], Any]] = None,
+    approval_surface: "approval_binding.Surface | None" = None,
+    approval_token: Optional[str] = None,
+    delivered: Optional[dict] = None,
 ) -> fastworkflow.TurnOutput:
     """
     Run one logical turn in an executor while draining command_trace_queue concurrently.
@@ -1325,12 +1615,19 @@ async def run_process_message_with_trace_stream(
     if trace_queue is None:
         return await run_process_turn(
             runtime, message, timeout_seconds, session_manager,
-            unattended=unattended,
+            unattended=unattended, approval_surface=approval_surface,
+            approval_token=approval_token, delivered=delivered,
         )
 
-    exec_future = loop.run_in_executor(
-        None, lambda: ctx.process_turn(message, unattended=unattended)
-    )
+    def _run() -> fastworkflow.TurnOutput:
+        output = ctx.process_turn(
+            message, unattended=unattended,
+            **turn_approval_kwargs(approval_surface, approval_token))
+        if delivered is not None:
+            delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+        return output
+
+    exec_future = loop.run_in_executor(None, _run)
     start = time.time()
     timed_out = False
 
@@ -1342,9 +1639,7 @@ async def run_process_message_with_trace_stream(
                 break
             if evt is None:
                 continue
-            await _emit_trace_callback(
-                on_trace, _format_trace_event(evt, user_id), user_id
-            )
+            await _deliver_trace_or_progress(evt, on_trace, on_progress, user_id)
         if not timed_out and time.time() - start >= timeout_seconds:
             timed_out = True
             logger.warning(
@@ -1369,9 +1664,7 @@ async def run_process_message_with_trace_stream(
             break
         if evt is None:
             continue
-        await _emit_trace_callback(
-            on_trace, _format_trace_event(evt, user_id), user_id
-        )
+        await _deliver_trace_or_progress(evt, on_trace, on_progress, user_id)
     persist_pending_after_turn(session_manager, runtime, output)
     return output
 
@@ -1398,6 +1691,8 @@ def collect_trace_events(runtime: "ChannelRuntime", user_id: Optional[str] = Non
             evt = trace_queue.get_nowait()
             if evt is None:
                 break
+            if isinstance(evt, ProgressEvent):
+                continue
             traces.append(_format_trace_event(evt, user_id))
         except queue.Empty:
             break
@@ -1426,6 +1721,8 @@ async def collect_trace_events_async(
             evt = trace_queue.get_nowait()
             if evt is None:
                 break
+            if isinstance(evt, ProgressEvent):
+                continue
             trace = {
                 "direction": evt.direction.value if hasattr(evt.direction, 'value') else str(evt.direction),
                 "raw_command": evt.raw_command,
@@ -1498,6 +1795,11 @@ class ChannelRuntime:
     # turn_key of the startup turn (if any), so the /initialize "already exists"
     # branch can return its three-state status (§3.3).
     startup_turn_key: Optional[str] = None
+    # Monotonic time of the channel's last use; the idle age that session expiry reads. Updated by every lookup
+    # and when a turn finishes (ChannelSessionManager.note_activity).
+    last_active: float = field(default_factory=time.monotonic)
+    # A dropped-session notice (session_notices) waiting for this session's first reply; taken exactly once.
+    session_notice: Optional[dict[str, Any]] = None
 
     @property
     def chat_session(self) -> WorkflowExecutionContext:
@@ -1542,11 +1844,31 @@ class ChannelSessionManager:
         self,
         session_state_store: Optional[SessionStateStore] = None,
         max_live_sessions: int = DEFAULT_MAX_LIVE_SESSIONS,
+        max_live_sessions_hard: Optional[int] = None,
+        pinned_idle_ttl_seconds: int = DEFAULT_PINNED_IDLE_TTL_SECONDS,
+        protected_idle_ttl_seconds: int = DEFAULT_PROTECTED_IDLE_TTL_SECONDS,
     ):
         self._sessions: OrderedDict[str, ChannelRuntime] = OrderedDict()
         self._lock = asyncio.Lock()
         self._max_live_sessions = max_live_sessions
         self._max_live_sessions_source = "constructor"
+        # The hard ceiling (None: DEFAULT_HARD_CEILING_FACTOR x the soft target) and the two idle TTLs that let
+        # the server release sessions it can never checkpoint. See admit_new_session.
+        self._max_live_hard = max_live_sessions_hard
+        self._max_live_hard_source = "constructor" if max_live_sessions_hard is not None else "default"
+        self._pinned_idle_ttl = pinned_idle_ttl_seconds
+        self._protected_idle_ttl = protected_idle_ttl_seconds
+        self._ttl_sources = ("default", "default")
+        # Channels admitted by admit_new_session whose session is not registered yet. They count toward the
+        # ceiling, or concurrent creators would each see room and overshoot it.
+        self._creating: set[str] = set()
+        # Bumped whenever a session is added or removed; lets a "nothing can be released" verdict be reused
+        # briefly instead of rescanning every session (and running every get_state hook) per refused request.
+        self._membership_version = 0
+        self._saturated: Optional[tuple[int, float]] = None
+        self.refused_total = 0
+        self.expired_total = 0
+        self._notice_store: Optional[SessionNoticeStore] = None
         # A FastAPI process serves exactly one workflow; this is set at server
         # startup (before any store access) so the lazily-built stores below can
         # namespace their paths under that workflow. See set_workflow_path.
@@ -1583,6 +1905,8 @@ class ChannelSessionManager:
         self._leases: dict[str, int] = {}
         self._checkpoint_store: Optional[ChannelCheckpointStore] = None
         self._admission_closed = False
+        # Wired by the server to the turn registry: forget the channel's active-turn pointer on end_session.
+        self.release_channel_turns: Optional[Callable[[str], None]] = None
         # The configured initial context, kept so restore can tell an operator's
         # change from an application's (three-way merge, design 11.9).
         self._launch_context: dict = {}
@@ -1608,6 +1932,7 @@ class ChannelSessionManager:
             yield runtime
         finally:
             if runtime is not None:
+                runtime.last_active = time.monotonic()
                 self._release_lease(channel_id)
 
     @asynccontextmanager
@@ -1705,11 +2030,56 @@ class ChannelSessionManager:
         return self._max_live_sessions_source
 
     def configure_max_live_sessions(self) -> tuple[int, str]:
-        """Apply the resolver. Must run after fastworkflow.init() loads env files."""
+        """Apply the resolvers (soft target, hard ceiling, both TTLs). Must run after fastworkflow.init() loads env files.
+
+        Returns the soft target and its source, as before; ``limits_summary`` names the rest.
+        """
         value, source = resolve_max_live_sessions()
         self._max_live_sessions = value
         self._max_live_sessions_source = source
+        self._max_live_hard, self._max_live_hard_source = resolve_max_live_sessions_hard(value)
+        self._pinned_idle_ttl, pinned_source = resolve_pinned_idle_ttl()
+        self._protected_idle_ttl, protected_source = resolve_protected_idle_ttl()
+        self._ttl_sources = (pinned_source, protected_source)
         return value, source
+
+    @property
+    def hard_ceiling(self) -> int:
+        if self._max_live_hard is not None:
+            return self._max_live_hard
+        return self._max_live_sessions * DEFAULT_HARD_CEILING_FACTOR
+
+    def limits_summary(self) -> str:
+        """One line naming every session limit in force and where each came from (the startup log)."""
+        return (
+            f"max_live_sessions={self._max_live_sessions} (source={self._max_live_sessions_source}), "
+            f"max_live_sessions_hard={self.hard_ceiling} (source={self._max_live_hard_source}), "
+            f"pinned_session_idle_ttl_seconds={self._pinned_idle_ttl} (source={self._ttl_sources[0]}), "
+            f"protected_session_idle_ttl_seconds={self._protected_idle_ttl} (source={self._ttl_sources[1]})"
+        )
+
+    @property
+    def notice_store(self) -> SessionNoticeStore:
+        if self._notice_store is None:
+            from fastworkflow import state_paths
+            self._notice_store = SessionNoticeStore(
+                os.path.join(state_paths.workflow_state_dir(self.workflow_path), "session_notices")
+            )
+        return self._notice_store
+
+    def take_session_notice(self, channel_id: str) -> Optional[dict[str, Any]]:
+        """The dropped-session notice waiting on the channel's live session, once; None if there is none."""
+        runtime = self._sessions.get(channel_id)
+        if runtime is None or runtime.session_notice is None:
+            return None
+        notice, runtime.session_notice = runtime.session_notice, None
+        return notice
+
+    def note_activity(self, channel_id: str) -> None:
+        """Mark the channel as just used (idle age restarts). A turn that ran for an hour is not 'idle'."""
+        runtime = self._sessions.get(channel_id)
+        if runtime is not None:
+            runtime.last_active = time.monotonic()
 
     def reap_checkpoints(self, policy: Optional[RetentionPolicy] = None) -> Any:
         """Reclaim abandoned checkpoints, protecting every channel we hold live.
@@ -1809,8 +2179,10 @@ class ChannelSessionManager:
         )
 
     def _touch(self, channel_id: str) -> None:
-        if channel_id in self._sessions:
+        runtime = self._sessions.get(channel_id)
+        if runtime is not None:
             self._sessions.move_to_end(channel_id)
+            runtime.last_active = time.monotonic()
 
     async def trim_live_sessions(self) -> None:
         """Bring the cache back to target after a turn frees a channel up.
@@ -1830,7 +2202,7 @@ class ChannelSessionManager:
             if not await self._retire_one_candidate():
                 break
 
-    async def _retire_one_candidate(self) -> bool:
+    async def _retire_one_candidate(self, *, log_if_none: bool = True) -> bool:
         """Retire the oldest retirable session. False when none can be.
 
         Retirement is publish-then-pop. Popping first and writing "best effort"
@@ -1867,17 +2239,164 @@ class ChannelSessionManager:
                 continue
 
             self._sessions.pop(channel_id, None)
+            self._membership_version += 1
             runtime.execution_context.close()
             logger.debug(
                 f"Retired channel_id {channel_id} at generation {generation}"
             )
             return True
 
-        logger.warning(
-            "Session cache over capacity but no candidate could be retired "
-            f"({skipped_pinned} pinned); staying over target"
-        )
+        if log_if_none:
+            logger.warning(
+                "Session cache over capacity but no candidate could be retired "
+                f"({skipped_pinned} pinned); staying over target"
+            )
         return False
+
+    # ------------------------------------------------------------------
+    # The hard ceiling: admission and expiry
+    # ------------------------------------------------------------------
+
+    def _occupancy(self) -> int:
+        """Live sessions plus admitted creations whose session is not registered yet."""
+        return len(self._sessions) + len(self._creating - self._sessions.keys())
+
+    def release_admission(self, channel_id: str) -> None:
+        """Forget the creation reservation (always called, success or failure)."""
+        self._creating.discard(channel_id)
+
+    async def admit_new_session(self, channel_id: str) -> None:
+        """Reserve room for one new session, or raise ``SessionCapacityExceeded``.
+
+        Called by ``ensure_user_runtime_exists`` before anything is built, so a refusal costs one lock hold and
+        no model or database work. The reservation counts toward the ceiling until ``release_admission``.
+        Below the hard ceiling this is a set insert. At it, in order:
+
+        1. retire an idle session the server can checkpoint (publish, then drop; nothing is lost);
+        2. expire an idle pinned session (``_expire_one_idle_pinned``), which is only allowed because the count
+           is above the soft target;
+        3. refuse. Pinned sessions that are busy, leased, belong to a registered experiment or are not idle
+           for long enough are never touched.
+
+        A "nothing can be released" verdict is reused for one second while no session was added or removed, so a
+        burst of refused requests does not run every session's ``get_state`` hook once per request under the lock.
+        """
+        async with self._lock:
+            self._creating.add(channel_id)
+            try:
+                ceiling = self.hard_ceiling
+                while self._occupancy() > ceiling:
+                    now = time.monotonic()
+                    verdict = self._saturated
+                    if verdict is not None and verdict[0] == self._membership_version and now - verdict[1] < 1.0:
+                        raise SessionCapacityExceeded(len(self._sessions), ceiling)
+                    if await self._retire_one_candidate(log_if_none=False):
+                        continue
+                    if self._expire_one_idle_pinned(now, pressure=True):
+                        continue
+                    self._saturated = (self._membership_version, now)
+                    raise SessionCapacityExceeded(len(self._sessions), ceiling)
+            except BaseException as exc:
+                self._creating.discard(channel_id)
+                if isinstance(exc, SessionCapacityExceeded):
+                    self.refused_total += 1
+                    logger.warning(
+                        f"Refused a new session for channel_id {channel_id}: at the live-session ceiling "
+                        f"({ceiling}); {len(self._sessions)} live, none releasable"
+                    )
+                raise
+
+    async def expire_idle_under_pressure(self, max_expiries: int = 25) -> int:
+        """Expire idle pinned sessions while the live count is above the soft target (the reaper's pass).
+
+        Never expires below the soft target: a deployment that stays within it loses nothing, however long its
+        sessions sit idle. Returns how many were expired. ``max_expiries`` bounds one pass.
+        """
+        expired = 0
+        async with self._lock:
+            while expired < max_expiries and len(self._sessions) > self._max_live_sessions:
+                if not self._expire_one_idle_pinned(time.monotonic(), pressure=True):
+                    break
+                expired += 1
+        return expired
+
+    def _expire_one_idle_pinned(self, now: float, *, pressure: bool) -> bool:
+        """Expire the longest-idle expirable pinned session. False when there is none. Caller holds ``_lock``.
+
+        Expirable means all of: ``pressure`` (live count above the soft target), no lease and no work in
+        flight, not a registered experiment channel (its attempt claim lives on the session), idle at least the
+        TTL that applies, and not checkpointable (a checkpointable session is retired, not expired).
+        The TTL is PINNED_SESSION_IDLE_TTL_SECONDS, or PROTECTED_SESSION_IDLE_TTL_SECONDS for a session with a
+        question waiting for its user (that question is discarded on expiry). A TTL of 0 never expires.
+        """
+        if not pressure:
+            return False
+        best: Optional[tuple[float, str, ChannelRuntime, bool]] = None
+        for channel_id, runtime in list(self._sessions.items()):
+            if self._leases.get(channel_id) or self._has_work_in_flight(channel_id):
+                continue
+            ctx = runtime.execution_context
+            if ctx.observability_experiment_claim:
+                continue
+            idle = now - runtime.last_active
+            pending = pending_kind(ctx) is not None
+            ttl = self._protected_idle_ttl if pending else self._pinned_idle_ttl
+            if ttl <= 0 or idle < ttl:
+                continue
+            if best is not None and idle <= best[0]:
+                continue
+            try:
+                evictable = checkpoint.assess(runtime, self.session_state_store).evictable
+            except Exception:  # noqa: BLE001 - a hook that raises is a pinned session
+                evictable = False
+            if evictable:
+                continue
+            best = (idle, channel_id, runtime, pending)
+        if best is None:
+            return False
+        idle, channel_id, runtime, pending = best
+        self._expire_locked(channel_id, runtime, pending, idle)
+        return True
+
+    def _expire_locked(self, channel_id: str, runtime: "ChannelRuntime", pending: bool, idle: float) -> None:
+        """Drop one pinned session, leave a notice for its next session, and count it. Caller holds ``_lock``."""
+        ctx = runtime.execution_context
+        if pending:
+            # The question's user never came back. Discard it the way end_session(discard_pending) does, so the
+            # saved blob does not outlive the context object it refers to.
+            ctx.discard_live_pending()
+            persist_pending_after_turn(self, runtime, None)
+        self._teardown_locked(channel_id, runtime)
+        self.expired_total += 1
+        self.notice_store.record(
+            channel_id,
+            session_notices.REASON_EXPIRED_PENDING if pending else session_notices.REASON_EXPIRED,
+        )
+        logger.info(
+            f"Expired pinned session for channel_id {channel_id} after {int(idle)} s idle "
+            f"({'a pending question was discarded' if pending else 'no pending question'}); "
+            f"{len(self._sessions)} live"
+        )
+
+    def _teardown_locked(self, channel_id: str, runtime: "ChannelRuntime") -> None:
+        """Remove a session from the cache and close everything it holds. Caller holds ``_lock``."""
+        ctx = runtime.execution_context
+        self._sessions.pop(channel_id, None)
+        self._membership_version += 1
+        ctx.close()
+        app_workflow = ctx.app_workflow
+        if app_workflow is not None:
+            # Evict it from the process registry now. Left to garbage collection, a stale workflow can
+            # still be found by the channel's next session, which would reuse its state.
+            import sys as _sys
+            folder = app_workflow.folderpath
+            was_on_path = folder in _sys.path
+            with contextlib.suppress(Exception):
+                app_workflow.close()
+            if was_on_path and folder not in _sys.path:
+                _sys.path.insert(0, folder)  # close() tidies it away; other channels still import from it
+        if self.release_channel_turns is not None:
+            self.release_channel_turns(channel_id)
 
     async def get_session(self, channel_id: str) -> Optional[ChannelRuntime]:
         async with self._lock:
@@ -1916,6 +2435,7 @@ class ChannelSessionManager:
                 startup_epoch=startup_epoch,
             )
             self._sessions[channel_id] = runtime
+            self._membership_version += 1
             self._touch(channel_id)
             await self._evict_oldest_if_needed()
             return runtime
@@ -1928,15 +2448,174 @@ class ChannelSessionManager:
         return bool(cancelled)
 
     async def remove_session(self, channel_id: str) -> None:
+        """Drop a session without consulting eligibility and without writing a checkpoint.
+
+        The low-level removal (tests and embedders). It does not refuse a busy channel; the HTTP
+        operation is ``end_session`` below.
+        """
         async with self._lock:
             if runtime := self._sessions.pop(channel_id, None):
+                self._membership_version += 1
                 # Session end: pending approvals end with the session (owner 2026-11-01).
                 self._clear_pending_approvals(channel_id, runtime)
                 runtime.execution_context.close()
 
     async def evict_live_session(self, channel_id: str) -> None:
-        """Drop from process cache without clearing durable pending state."""
-        await self.remove_session(channel_id)
+        """Drop from process cache without clearing durable pending state.
+
+        Unlike ``remove_session`` it does not cancel pending approvals: their stored state survives, as it
+        does for an ordinary retirement (the old body delegated to ``remove_session`` and so cleared it).
+        """
+        async with self._lock:
+            if runtime := self._sessions.pop(channel_id, None):
+                self._membership_version += 1
+                runtime.execution_context.close()
+
+    def session_counts(self, *, assess_pinned: bool = False) -> dict[str, Any]:
+        """Live and over-target facts for the readiness probe.
+
+        ``pinned`` is only computed on request: it runs each session's ``get_state`` hook, which a probe
+        that fires every few seconds should not do by default. A channel with work in flight is not
+        assessed (its state is being mutated); it is counted under ``busy_unassessed``.
+        """
+        live = len(self._sessions)
+        counts: dict[str, Any] = {
+            "live": live,
+            "max_live": self._max_live_sessions,
+            "over_target": max(0, live - self._max_live_sessions),
+            "hard_ceiling": self.hard_ceiling,
+            "at_ceiling": self._occupancy() >= self.hard_ceiling,
+            "refused_total": self.refused_total,
+            "expired_total": self.expired_total,
+            "pinned_idle_ttl_seconds": self._pinned_idle_ttl,
+            "protected_idle_ttl_seconds": self._protected_idle_ttl,
+        }
+        if assess_pinned:
+            pinned = busy = pending_protected = experiment_exempt = 0
+            for channel_id, runtime in list(self._sessions.items()):
+                if self._leases.get(channel_id) or self._has_work_in_flight(channel_id):
+                    busy += 1
+                    continue
+                try:
+                    is_pinned = not checkpoint.assess(runtime, self.session_state_store).evictable
+                except Exception:  # noqa: BLE001 - a hook that raises is a pinned session, not a failed probe
+                    is_pinned = True
+                if not is_pinned:
+                    continue
+                pinned += 1
+                if runtime.execution_context.observability_experiment_claim:
+                    experiment_exempt += 1
+                elif pending_kind(runtime.execution_context) is not None:
+                    pending_protected += 1
+            counts["pinned"] = pinned
+            counts["busy_unassessed"] = busy
+            counts["pending_protected"] = pending_protected
+            counts["experiment_exempt"] = experiment_exempt
+            counts["trace_events_dropped"] = sum(
+                getattr(runtime.execution_context.command_trace_queue, "dropped", 0)
+                for runtime in list(self._sessions.values())
+            )
+        return counts
+
+    async def end_session(self, channel_id: str, *, discard_pending: bool = False) -> "EndSessionOutcome":
+        """End a channel's live session: the explicit counterpart of creation (``POST /end_session``).
+
+        Refuses (``SessionEndRefused``) while a turn runs or another request holds the channel, and while a
+        question is pending unless ``discard_pending``. Otherwise:
+
+        * checkpointable session: the checkpoint is published first, exactly as an eviction does, so a later
+          call on the channel restores it; a failed write refuses the end and leaves the session live
+          (state is never dropped by a write that did not land);
+        * pinned session (state that cannot be checkpointed): the in-memory workflow state is dropped; a later
+          call on the channel starts from launch configuration. Conversation history is not lost either way:
+          every finished turn was written to the evidence store when it finished.
+
+        No stored turn, conversation record or observability row is touched. Ending a channel with no live
+        session is not an error (``ended`` False). Everything runs under the manager lock, so the checks and
+        the removal cannot be separated by a request that arrives between them.
+        """
+        async with self._lock:
+            runtime = self._sessions.get(channel_id)
+            if runtime is None:
+                discarded = False
+                if discard_pending and self.session_state_store.exists(channel_id):
+                    self.session_state_store.clear(channel_id)
+                    discarded = True
+                return EndSessionOutcome(channel_id, ended=False, pinned=False, pending_discarded=discarded)
+
+            if self._has_work_in_flight(channel_id):
+                raise SessionEndRefused("busy", f"A turn is already in progress for user: {channel_id}")
+            if self._leases.get(channel_id):
+                raise SessionEndRefused(
+                    "busy", f"Another request is using the channel right now: {channel_id}; try again")
+
+            ctx = runtime.execution_context
+            kind = pending_kind(ctx)
+            if kind is not None and not discard_pending:
+                raise SessionEndRefused(
+                    "pending",
+                    f"The channel has a pending {kind.replace('_', ' ')}; ending the session would lose it. "
+                    "Answer it, or send discard_pending=true to end the session and discard it.",
+                    pending_kind=kind,
+                )
+            discarded = kind is not None
+            if discarded:
+                ctx.discard_live_pending()
+                persist_pending_after_turn(self, runtime, None)
+
+            eligibility = checkpoint.assess(runtime, self.session_state_store)
+            if eligibility.evictable:
+                try:
+                    checkpoint.publish(self.checkpoint_store, runtime, eligibility, self._launch_context)
+                except (StateEncodingError, CheckpointStoreError, OSError) as exc:
+                    raise SessionEndRefused(
+                        "not_saved",
+                        f"The session's state could not be saved ({type(exc).__name__}); it was left live.",
+                    ) from exc
+
+            self._teardown_locked(channel_id, runtime)
+            if not eligibility.evictable:
+                # Nothing was saved, so the channel's next session starts from launch configuration: say so once.
+                self.notice_store.record(channel_id, session_notices.REASON_ENDED)
+            logger.info(
+                f"Ended session for channel_id {channel_id} "
+                f"({'checkpointed' if eligibility.evictable else 'pinned, in-memory state dropped'})"
+            )
+            return EndSessionOutcome(
+                channel_id, ended=True, pinned=not eligibility.evictable, pending_discarded=discarded
+            )
+
+
+class SessionEndRefused(Exception):
+    """``end_session`` declined: ``reason`` is busy, pending or not_saved."""
+
+    def __init__(self, reason: str, message: str, pending_kind: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.pending_kind = pending_kind
+
+
+@dataclass
+class EndSessionOutcome:
+    channel_id: str
+    ended: bool
+    pinned: bool
+    pending_discarded: bool
+
+
+def pending_kind(ctx: WorkflowExecutionContext) -> Optional[str]:
+    """What the session is waiting on, or None: approval, review, agent_question, parameter_request, question."""
+    workflow = ctx.app_workflow
+    if workflow is not None:
+        if approval_binding.active_approvals(workflow):
+            return "approval"
+        if approval_binding.active_reviews(workflow):
+            return "review"
+    if ctx.awaiting_user:
+        return "agent_question"
+    if ctx.has_open_command():
+        return "parameter_request"
+    return "question" if ctx.has_pending_state() else None
 
 
 # ============================================================================
@@ -2007,12 +2686,22 @@ def trim_conversation_window(runtime: ChannelRuntime, logger) -> int:
     """
     stored = runtime.execution_context.last_turn_record_stored
     if stored is False:
+        # The deferral is capped: a sink that never lands its writes must not let the history grow without
+        # bound. Past twice the window the OLDEST turns go anyway (the undurable one is the newest, so it stays).
+        hard_window = DEFERRED_TRIM_WINDOW_FACTOR * MAX_CONVERSATION_TURNS_IN_MEMORY
+        if len(runtime.execution_context.conversation_history.messages) <= hard_window:
+            logger.warning(
+                f"Deferring the conversation-window trim for channel_id "
+                f"{runtime.channel_id}: the last turn record is queued, not yet "
+                "durable, and trimming it out of memory now could lose it"
+            )
+            return 0
+        trimmed = runtime.execution_context.trim_conversation_history(hard_window)
         logger.warning(
-            f"Deferring the conversation-window trim for channel_id "
-            f"{runtime.channel_id}: the last turn record is queued, not yet "
-            "durable, and trimming it out of memory now could lose it"
+            f"The conversation-window trim for channel_id {runtime.channel_id} was deferred past twice the "
+            f"window; trimmed {trimmed} oldest turn(s) to {hard_window} with the last record still queued"
         )
-        return 0
+        return trimmed
     trimmed = runtime.execution_context.trim_conversation_history(
         MAX_CONVERSATION_TURNS_IN_MEMORY
     )

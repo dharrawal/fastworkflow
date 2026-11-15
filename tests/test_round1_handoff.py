@@ -34,7 +34,10 @@ from tests.test_round1_gate import (  # noqa: F401 - the gated context and the g
 from tests.test_turn_result_capture import (  # noqa: F401 - the shared fixtures
     _make_agent_ctx, _set_agents, initialized_fastworkflow)
 
-pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
+# The free-text reply tests reach the consultation head through the reader (``process_turn`` -> the CME wildcard
+# command); they run on the head's recorded answers (tests/recorded_router.py) so a retrain cannot turn them red and a
+# clean checkout runs them. The others never ask the head.
+pytestmark = pytest.mark.usefixtures("initialized_fastworkflow", "recorded_review_router")
 
 
 @pytest.fixture(autouse=True)

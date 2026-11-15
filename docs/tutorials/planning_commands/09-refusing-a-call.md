@@ -29,8 +29,9 @@ sentence the framework appends to it are what the extractor reads. A model choos
 names again only when the same field also has `classifier_confirms`, and only when `JEV_API_KEY`
 is set. Without the key the string check still runs.
 
-The keys are not the whole list: `command_text_after_command_name`, `from_command_output`
-and `converted_from_command_text` are the other field keys, and the
+The keys are not the whole list: `command_text_after_command_name`, `from_command_output`,
+`converted_from_command_text` and `ui` (presentation hints for the chat client; see the README) are the
+other field keys, and the
 [planning command file layout](../../planning_command_file_layout.md) has them under "Field
 options". A field with no check is cleaned in code: call `strip_words(text, words)` from
 `fastworkflow.planning_commands` in a `field_validator` on that field. A validator's returned value

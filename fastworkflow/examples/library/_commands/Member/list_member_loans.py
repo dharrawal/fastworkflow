@@ -14,8 +14,10 @@ class Signature:
         start: Optional[int] = Field(default=None, description="the first row of the page")
 
     class Output(BaseModel):
-        titles: list[str] = Field(description="each borrowed book's title, in row order")
-        due_dates: list[str] = Field(description="each loan's due date, in row order")
+        titles: list[str] = Field(description="each borrowed book's title, in row order",
+                                  json_schema_extra={"ui": {"table": "loans"}})
+        due_dates: list[str] = Field(description="each loan's due date, in row order",
+                                     json_schema_extra={"ui": {"table": "loans"}})
         total: int = Field(description="how many books the member has on loan, on every page")
 
     plain_utterances = [

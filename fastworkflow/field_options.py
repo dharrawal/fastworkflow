@@ -31,6 +31,10 @@ FROM_COMMAND_OUTPUT = "from_command_output"
 #: checked against the command text (execution commands; the field keeps its placeholder checks).
 CONVERTED_FROM_COMMAND_TEXT = "converted_from_command_text"
 
+#: ``ui``: presentation hints an application declares for any client that renders results or collects input
+#: (``UiOptions``). Read by no check, extractor or planner; a client may follow them or ignore them.
+UI = "ui"
+
 #: Every author-facing option key.
 OPTION_KEYS = (
     COPIED_FROM_COMMAND_TEXT,
@@ -40,6 +44,7 @@ OPTION_KEYS = (
     COMMAND_TEXT_AFTER_COMMAND_NAME,
     FROM_COMMAND_OUTPUT,
     CONVERTED_FROM_COMMAND_TEXT,
+    UI,
 )
 
 
@@ -61,6 +66,38 @@ class ConfirmsOptions(TypedDict, total=False):
     meanings: dict[str, str]
 
 
+class UiOptions(TypedDict, total=False):
+    """Options of ``ui`` (a dict form): presentation hints the application declares for any client that renders its
+    results or collects its input. The framework only validates and passes them through in the field's JSON Schema; they
+    change no check or extraction, and a client is free to ignore them.
+
+    ``hidden``, ``hero``, ``format``, ``table``, ``tones`` and ``currency`` are for a ``Signature.Output`` field; ``widget`` is for a
+    ``Signature.Input`` field.
+    """
+
+    #: Output: a hint that the field is not for a human-readable view of the result (it is still in the Output JSON).
+    hidden: Literal[True]
+    #: Output (a scalar): a hint that the field is the one to show first.
+    hero: Literal[True]
+    #: Output: a hint for how a client shows the value.
+    format: Literal["currency", "percent", "code", "badge"]
+    #: Input: ``"textarea"`` on a ``str`` field, ``"radio"`` on a ``Literal`` field.
+    widget: Literal["textarea", "radio"]
+    #: Output (a list of scalars): a group name. The list fields of one output with the same name are the
+    #: columns of one table, in field order. Needs two visible members; a client should not infer columns from
+    #: equal lengths alone, and should show no table when the declared lists differ in length.
+    table: str
+    #: Output (with ``format="badge"`` on a ``str``, ``Literal`` or ``Enum`` field, or a list of one): a map from a value
+    #: to one of ``"good"``, ``"warning"``, ``"bad"``, ``"neutral"``. Keys are the value as text, matched
+    #: case-insensitively after trimming (an ``Enum`` member by its value); on a ``Literal`` or ``Enum`` every key must
+    #: be a declared value. A client uses the author's tone first and its own vocabulary for any other value.
+    tones: dict[str, Literal["good", "warning", "bad", "neutral"]]
+    #: Output (with ``format="currency"`` on an ``int`` or ``float`` field, or a list of one): a three-letter ISO 4217
+    #: code such as ``"USD"`` (either case; a client upper-cases it). A client that cannot format the code shows a plain
+    #: number.
+    currency: str
+
+
 class FieldOptions(TypedDict, total=False):
     """The ``json_schema_extra`` keys of a field of a planning command or execution command ``Input``.
 
@@ -74,3 +111,4 @@ class FieldOptions(TypedDict, total=False):
     command_text_after_command_name: Literal[True]
     from_command_output: Union[str, list[str]]
     converted_from_command_text: Literal[True]
+    ui: UiOptions

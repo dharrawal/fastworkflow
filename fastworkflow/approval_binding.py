@@ -101,6 +101,8 @@ MSG_BEHIND = ("Approval required for {command}; another approval is awaiting the
 MSG_REPLY = "Reply yes to approve, no to decline, or always to approve this command from now on. The action has not run."
 MSG_RECORD_FAILED = "The standing approval for {command} could not be recorded, so the action was not run."
 MSG_NO_GRANT = "No standing approval for {command} is recorded for you."
+MSG_ALWAYS_HINT = ("Standing approval recorded. List your standing approvals with /approvals and revoke "
+                   "one with /revoke_approval <command>.")
 MSG_GRANT_REVOKED = "The standing approval for {command} is revoked. It will ask you again."
 MSG_DECLINED = "Declined. {command} was not run."
 MSG_INVALIDATED = ("The parameters for {command} changed after the approval was requested. The action "
@@ -202,7 +204,9 @@ def decide(annotation: Optional[str], *, origin: Origin, surface: Surface, unatt
     """The gate's policy: a pure, deterministic function from its inputs to a graded outcome.
 
     ``auto_granted`` is the user's standing approval for this command (approval_grants): an input,
-    so a recorded grant yields ``run`` without a prompt, on any surface. ``consequence`` and
+    so a recorded grant yields ``run`` without a prompt. On a channel surface an unattended turn is
+    checked first and queues whatever the grant says; a verified host surface's per-end-user grant
+    still runs (ADR-EXP-025 amendment 2026-11-02: the grant is the user's delegation). ``consequence`` and
     ``uncertainty`` are reserved inputs (fix-ajv.11, fix-47a9 delegation): accepted so the decision
     can grow without a new signature, and they never turn an outcome into a boolean.
 
@@ -216,6 +220,10 @@ def decide(annotation: Optional[str], *, origin: Origin, surface: Surface, unatt
         return Decision(Outcome.RUN, "delegatable, and the user's own instruction")
     if surface.required_identity == IDENTITY_END_USER and not surface.satisfies_end_user():
         return Decision(Outcome.REFUSE, "end_user identity required and not verifiable")
+    if unattended and surface.kind != "host":
+        # A channel surface's standing grant is the local user's, made at a prompt on an interactive
+        # channel; no human is present now, so it never lets an unattended run execute (fix-d6no).
+        return Decision(Outcome.QUEUE, "no human channel")
     if auto_granted:
         return Decision(Outcome.RUN, "standing auto-approval recorded by the user")
     if unattended:
@@ -552,6 +560,10 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
     _transition(chat_session, store, record, EXECUTED, reason="executed", surface=surface,
                 outcome="success" if output.success else "failed")
     text = output.command_response.response or ""
+    if verdict is Verdict.ALWAYS:
+        # Say how to undo it where the user reads the reply (the rendering hash covers the prompt, not this).
+        text = f"{text}\n\n{MSG_ALWAYS_HINT}" if text else MSG_ALWAYS_HINT
+        output.command_response.response = text
     return Resolution(True, text, output)
 
 
@@ -671,6 +683,14 @@ def take_host_delivery(workflow: Any) -> dict:
 # ----------------------------------------------------------------------
 
 
+def _origin_note(surface: Surface) -> tuple[str, str]:
+    """(where, other): a channel grant belongs to where it was made, and the other place's grants are
+    neither listed nor revoked here (fix-d6no). A host surface has one identity: ("", "")."""
+    if getattr(surface, "kind", "channel") == "host":
+        return "", ""
+    return " on this channel", "Approvals made on another channel are not shown or revoked here."
+
+
 def management_reply(chat_session: Any, workflow: Any, message: str) -> Optional[str]:
     """The reply to ``/approvals`` or ``/revoke_approval <command>``; None for any other message.
 
@@ -689,10 +709,12 @@ def management_reply(chat_session: Any, workflow: Any, message: str) -> Optional
     workflow_id = state_paths.workflow_id(workflow.folderpath)
     if text == MANAGE_LIST:
         grants = approval_grants.list_active(identity, workflow_id)
+        where, other = _origin_note(store.surface)
         if not grants:
-            return "No standing approvals are recorded for you."
+            return " ".join(part for part in (f"No standing approvals are recorded for you{where}.", other) if part)
         lines = [f"- {grant['command']}" for grant in grants]
-        return "Standing approvals (revoke one with /revoke_approval <command>):\n" + "\n".join(lines)
+        head = f"Standing approvals{where} (revoke one with /revoke_approval <command>)"
+        return head + ":\n" + "\n".join(lines) + (f"\n{other}" if other else "")
     if not text.startswith(MANAGE_REVOKE + " ") or not text[len(MANAGE_REVOKE):].strip():
         return f"Use {MANAGE_REVOKE} <command>, or {MANAGE_LIST} to see the standing approvals."
     name = text[len(MANAGE_REVOKE):].strip()

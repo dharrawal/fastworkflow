@@ -126,51 +126,12 @@ _STEP_RANGE = re.compile(
 _COUNT_WORDS = {
     "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
 }
-_STEP_RANGE_INLINE = re.compile(
-    r"(?:steps?|items?)?\s*#?(\d+)\s*(?:to|through|[-–—])\s*#?(\d+)",
-    re.I,
-)
-_STEP_PAIR_INLINE = re.compile(
-    r"(?:steps?|items?)\s+#?(\d+)\s+and\s+#?(\d+)",
-    re.I,
-)
-_STEP_REF_INLINE = re.compile(
-    r"\b(?:step|item)\s+#?(\d+)\b",
-    re.I,
-)
-
 
 def extract_step_numbers(segment: str, count: int) -> list[int]:
-    """Collect 1-based step numbers named in *segment* within ``1..count``."""
-    if not segment or count <= 0:
-        return []
-    found: list[int] = []
+    """Collect 1-based step numbers named in *segment* within ``1..count`` (one grammar, ``review_step_refs``)."""
+    from fastworkflow.review_step_refs import step_numbers
 
-    def add(value: int) -> None:
-        if 1 <= value <= count and value not in found:
-            found.append(value)
-
-    for lo_s, hi_s in _STEP_RANGE_INLINE.findall(segment):
-        lo, hi = int(lo_s), int(hi_s)
-        if lo > hi:
-            lo, hi = hi, lo
-        for index in range(lo, hi + 1):
-            add(index)
-    for first, second in _STEP_PAIR_INLINE.findall(segment):
-        add(int(first))
-        add(int(second))
-    for match in re.finditer(
-        r"(?:steps?|items?)\s+#?(\d+)(?:\s*(?:,|and)\s*#?(\d+))+",
-        segment,
-        re.I,
-    ):
-        add(int(match.group(1)))
-        for group in match.groups()[1:]:
-            if group:
-                add(int(group))
-    for ref in _STEP_REF_INLINE.findall(segment):
-        add(int(ref))
-    return found
+    return step_numbers(segment, count)
 
 
 def resolve_slot_item(proposal, raw: str, *, field_name: str = "item") -> str:

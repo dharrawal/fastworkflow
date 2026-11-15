@@ -118,23 +118,6 @@ def _coerce_to_engine_edits(proposal: object, edits: list, *, reply_text: str | 
     return list(edits)
 
 
-def _proposal_with_rendering(proposal: object, rendering: str) -> object:
-    class _Shim:
-        __slots__ = ("_inner", "_rendering")
-
-        def __init__(self, inner: object, text: str) -> None:
-            self._inner = inner
-            self._rendering = text
-
-        def model_rendering(self) -> str:
-            return self._rendering
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._inner, name)
-
-    return _Shim(proposal, rendering)
-
-
 def _read_edits(workflow: Workflow, reply: str) -> list:
     scripted = workflow.context.get("consultation_edit_reader")
     proposal = workflow.context.get("consultation_proposal")
@@ -155,7 +138,8 @@ def _read_edits(workflow: Workflow, reply: str) -> list:
     reader = model_edit_reader(
         planning_names=tuple(str(name) for name in planning_names)
     )
-    return list(reader(reply, _proposal_with_rendering(proposal, rendering)))
+    # The real proposal, not a stand-in with its rendering: the reader's deterministic guards act only on a SubTaskProposal.
+    return list(reader(reply, proposal))
 
 
 class ResponseGenerator:

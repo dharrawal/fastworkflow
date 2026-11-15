@@ -607,14 +607,8 @@ def test_the_listing_shows_a_planning_commands_template_steps_verbatim(copy_of):
 # The turn's planning-match distribution, and the production arm (10.15 step 2 and 3)
 # ---------------------------------------------------------------------------
 
-def test_without_a_jev_key_the_match_leaves_the_distribution_empty_and_the_listing_is_unchanged(copy_of, monkeypatch):
+def test_without_a_jev_key_the_match_leaves_the_distribution_empty_and_the_listing_is_unchanged(copy_of, no_planner_key):
     """No JEV_API_KEY: no planning match runs, so the turn's distribution stays empty and every listing is as before."""
-    import os
-
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    if os.environ.get("JEV_API_KEY"):
-        pytest.skip("a JEV key is configured in this environment")
-    workflow_agent._planning_command_matcher.cache_clear()
     library = _library_in(copy_of, name="no_jev_key")
     distribution: dict[str, float] = {}
     template, command = workflow_agent.planner_planning_command_for(
@@ -623,7 +617,6 @@ def test_without_a_jev_key_the_match_leaves_the_distribution_empty_and_the_listi
     sub_task = "who has Dune on loan"
     assert workflow_agent.planner_listing_text(library, sub_task, planning_probabilities=None) == \
         workflow_agent.planner_commands_text(library)
-    workflow_agent._planning_command_matcher.cache_clear()
 
 
 def test_the_planning_distribution_gathers_the_planning_command_into_the_threshold_listing(copy_of, monkeypatch):

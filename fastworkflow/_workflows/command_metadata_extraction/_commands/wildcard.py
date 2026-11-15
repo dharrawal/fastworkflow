@@ -42,6 +42,11 @@ class Signature:
         reply_intent: Optional[str] = None
         # The nested command's Output, when a CME command answered (the handled path only).
         output: Optional[Any] = Field(default=None, exclude=True)
+        # Structured prompts for a human ("/") session only; None in agent mode (fix-weih.2).
+        # parameter_request: the failed extraction's missing/invalid fields and the values given.
+        # intent_choices: the qualified command names an ambiguous message could mean.
+        parameter_request: Optional[dict] = None
+        intent_choices: Optional[list[str]] = None
 
     # These are the PARAMETER_EXTRACTION stage's bare-value literals. They belong
     # to nlu_labels.PARAMETER_VALUE_LABEL, not to this command's INTENT_DETECTION
@@ -185,6 +190,13 @@ class ResponseGenerator:
                 cmd_ctxt_obj_name = scope.context_name
                 bound_record = scope.record
 
+        # Agentic mode: not an assistant-mode command, in an agent session. Only a human's
+        # session gets the structured prompts below (the agent sees none).
+        is_agentic_mode = (
+            "is_assistant_mode_command" not in workflow.context
+            and bool(app_workflow.context.get("run_as_agent"))
+        )
+
         predictor = CommandNamePrediction(workflow)
         cnp_output = None
         # Confident global first (owner-approved, step 3 bars): for natural language, the global
@@ -217,6 +229,9 @@ class ResponseGenerator:
                     f"Ambiguous intent error for command '{command}'\n"
                     f"{cnp_output.error_msg}"
                 ),
+                intent_choices=(
+                    list(dict.fromkeys(cnp_output.candidates))
+                    if (not is_agentic_mode and cnp_output.candidates) else None),
             )
         else:
             if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION and \
@@ -372,6 +387,7 @@ class ResponseGenerator:
                     f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
                     f"{pe_output.error_msg}"
                 ),
+                parameter_request=pe_output.parameter_request,
             )
 
         workflow.context.pop("missing_value_question", None)

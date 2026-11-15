@@ -951,7 +951,7 @@ class PlanGenerator:
 
 <!-- load-error -->
 ```text
-PlanningCommandFormatError: _commands/bad_option.py: field 'title': unknown option 'strip_words'; its options are copied_from_command_text, record_named_in_command_text, classifier_confirms, classifier_decides, command_text_after_command_name, from_command_output, converted_from_command_text
+PlanningCommandFormatError: _commands/bad_option.py: field 'title': unknown option 'strip_words'; its options are copied_from_command_text, record_named_in_command_text, classifier_confirms, classifier_decides, command_text_after_command_name, from_command_output, converted_from_command_text, ui
 ```
 
 <!-- broken: fan_out_param -->

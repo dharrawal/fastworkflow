@@ -25,10 +25,12 @@ from dspy.experimental import Choice, TypeSafe
 import fastworkflow
 from fastworkflow import tracing
 from fastworkflow import approval_binding
+from fastworkflow import turn_progress
+from fastworkflow import subtask_pool
 from fastworkflow import planning_commands
 from fastworkflow.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
-    refusal_names_an_input)
+    refusal_names_an_input, planning_refusal_parameter_request)
 from fastworkflow.split_merge import (
     JoinedSubtask, Reduction, definite_descriptions, merge_subtasks, reduce_to_cap, request_subjects, subjects_in,
     unnamed_subjects, with_referent, without_repeated_clauses)
@@ -1872,6 +1874,12 @@ def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLE
 #: probability (measured offline: at 0.5, 96.6% of sub-tasks get a template, 1.1% a wrong one).
 PLANNING_COMMAND_MATCH_THRESHOLD = 0.5
 
+#: The bar of a VETO: a draft that runs unreviewed in agent mode (nobody to answer its review) does not bind a planning
+#: command to a sub-task when Jev's "none" is at or above this (the agent plans it instead). A separate, higher bar than
+#: the match's: on recorded runs a veto at 0.5 was a coin flip (as many reasonable bindings destroyed as wrong ones
+#: prevented), no bound sub-task had a "none" at 0.9 or above, and requests no command covers had 0.93 to 1.00.
+PLANNING_NONE_VETO_THRESHOLD = 0.9
+
 #: The planner's instructions (the planner signatures use them as their docstring unchanged).
 PLANNER_INSTRUCTIONS = """
     Carefully review the user_query and generate a next steps sequence based only on available commands.
@@ -2354,9 +2362,30 @@ _UNRESOLVED_REFERENCE = re.compile(
     r"\b(?:each of them|both of them|all of them|the same treatment|the same look)\b", re.IGNORECASE)
 
 
-def _visibly_broken(subtasks: list[str]) -> bool:
-    """Two identical sub-tasks, or one that still refers to the rest of the request ("each of them")."""
-    return len(set(subtasks)) < len(subtasks) or any(_UNRESOLVED_REFERENCE.search(t) for t in subtasks)
+#: A brace placeholder the model left in a sub-task ("{HIGHER_RISK_PERSON} carries more risk"): an identifier, or
+#: words, in braces. "{}", "{ }" and JSON-ish text ('{"a": 1}', '{1}') do not match: they start with no letter.
+_BRACE_PLACEHOLDER = re.compile(r"\{[A-Za-z][A-Za-z0-9_ ]*\}")
+
+
+def _invented_placeholders(text: str, user_query: str) -> list[str]:
+    """The brace placeholders of ``text`` whose exact text is not in the user's request (a request may hold braces)."""
+    return [p for p in _BRACE_PLACEHOLDER.findall(text) if p not in user_query]
+
+
+def _visibly_broken(subtasks: list[str], user_query: str = "") -> bool:
+    """Two identical sub-tasks, one that still refers to the rest of the request ("each of them"), or one with
+    a brace placeholder the request does not contain."""
+    return (len(set(subtasks)) < len(subtasks)
+            or any(_UNRESOLVED_REFERENCE.search(t) or _invented_placeholders(t, user_query) for t in subtasks))
+
+
+def _whole_if_placeholder(user_query: str, subtasks: list[str]) -> list[str]:
+    """The request whole when a chosen sub-task still holds a placeholder the request does not (it would be
+    shown, approved, and then fail downstream as a name)."""
+    if any(_invented_placeholders(t, user_query) for t in subtasks):
+        logger.warning("a sub-task still holds an unresolved placeholder; leaving the request whole")
+        return [user_query]
+    return subtasks
 
 
 def _breakage(user_query: str, subtasks: list[str], workflow_folderpath: str | None) -> tuple[int, int]:
@@ -2461,12 +2490,14 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             if reduction is None:
                 return [user_query]
             if reduction.merged:
-                return _with_referents(user_query, reduction.items, workflow_folderpath)
+                return _whole_if_placeholder(
+                    user_query, _with_referents(user_query, reduction.items, workflow_folderpath))
             subtasks = reduction.items
         if not subtasks:
             return [user_query]
-        if not _visibly_broken(subtasks):
-            return _merged(user_query, subtasks, workflow_folderpath, conversation)
+        if not _visibly_broken(subtasks, user_query):
+            return _whole_if_placeholder(
+                user_query, _merged(user_query, subtasks, workflow_folderpath, conversation))
         # A sub-task the model listed twice is one job: the list without its copies is a candidate too.
         unique = list(dict.fromkeys(subtasks))
         if len(unique) >= 2:
@@ -2474,7 +2505,7 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     if not usable:
         return [user_query]
     best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
-    return _merged(user_query, best, workflow_folderpath, conversation)
+    return _whole_if_placeholder(user_query, _merged(user_query, best, workflow_folderpath, conversation))
 
 
 def _with_referents(user_query: str, items: list[str], workflow_folderpath: str | None) -> list[str]:
@@ -2610,21 +2641,25 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
     jev_lm = _jev_lm()
     if jev_lm is None:
         return subtasks
+    turn_progress.emit(turn_progress.STAGE_REFERENTS)
     identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
     notes = (split_settings(workflow_folderpath).subject_hints if workflow_folderpath else None) or "(none)"
-    out = []
-    for text in subtasks:
+
+    def resolved(text: str) -> str:
         try:
             candidates = unnamed_subjects(user_query, text, identifiers)
             subject = _choose_referent(user_query, text, candidates, notes, jev_lm) if candidates else None
             descriptions = definite_descriptions(text) if subject else []
             description = _choose_description(user_query, text, subject, descriptions, notes, jev_lm) \
                 if descriptions else None
-            out.append(with_referent(text, subject, description) if subject else text)
+            return with_referent(text, subject, description) if subject else text
         except Exception:  # noqa: BLE001 - resolving a referent is a clean-up; never fail the turn
             logger.warning("could not resolve the sub-task's referent", exc_info=True)
-            out.append(text)
-    return out
+            return text
+
+    # Each sub-task is resolved from the request and its own original text, never from another's resolved text, so the
+    # calls are independent: they wait on Jev together (subtask_pool), and the results keep the sub-tasks' order.
+    return subtask_pool.map_in_order([functools.partial(resolved, text) for text in subtasks])
 
 
 def _choose_referent(user_query: str, text: str, candidates: list[str], notes: str, jev_lm) -> str | None:
@@ -2801,11 +2836,13 @@ def build_query_with_next_steps(user_query: str,
     # The question to put to the user when the planning command call is refused and the turn may ask (see
     # _planning_command_refusal_may_ask); None when the text planner takes over as before.
     refusal_ask = None
+    refusal_request = None
     if initial_plan:
         # A phased planning command call (planning_phases): the runner reads it after this plan.
         chat_session_obj._phased_planning_command_call = None
         # A refused planning command call the turn asks the user about (set below; read by the execution context).
         chat_session_obj._planning_command_refusal = None
+        chat_session_obj._planning_command_refusal_request = None
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
             if planning_command is not None and initial_plan:
@@ -2822,6 +2859,7 @@ def build_query_with_next_steps(user_query: str,
                 except PlanningCommandInputError as exc:  # asked of the user, or the text planner takes over
                     planning_command_fallback = f"{type(exc).__name__}: {exc}"[:500]
                     refusal_ask = planning_command_refusal_to_ask(chat_session_obj, planning_command, exc)
+                    refusal_request = planning_refusal_parameter_request(planning_command, exc)
                     if refusal_ask is not None:
                         logger.info(f"planning command call {planning_command.name} refused, asking the user: {refusal_ask!r}")
                     else:
@@ -2840,6 +2878,7 @@ def build_query_with_next_steps(user_query: str,
         # No plan for the refused call: the turn waits on the user, and the execution context
         # reads the question and suspends (_call_agent_for_query).
         chat_session_obj._planning_command_refusal = refusal_ask
+        chat_session_obj._planning_command_refusal_request = refusal_request
         plan_source = "none"
     tracing.end_span(
         chat_session_obj,

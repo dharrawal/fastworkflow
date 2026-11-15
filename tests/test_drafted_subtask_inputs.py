@@ -64,16 +64,15 @@ class _PlannerLM(DummyLM):
 
 
 @pytest.fixture(autouse=True)
-def _framework(tmp_path, monkeypatch):
+def _framework(tmp_path, monkeypatch, no_planner_key):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     fastworkflow.RoutingRegistry.clear_registry()
     # Jev's "is this field given" check is a model call: off, so the scripted LM answers alone.
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
     # Drafting is on by default; set explicitly so a developer's environment cannot turn it off here.
     monkeypatch.setitem(fastworkflow._env_vars, "FW_DRAFT_ARGUMENTS", "on")
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    monkeypatch.setattr(fastworkflow, "_env_vars",
-                        {k: v for k, v in fastworkflow._env_vars.items() if k != "JEV_API_KEY"})
+    # One extractor LM is scripted in CALL order across the sub-tasks: drafts run one after another here (fix-awg8).
+    monkeypatch.setenv("FW_SUBTASK_WORKERS", "1")
     monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     yield
     fastworkflow.RoutingRegistry.clear_registry()

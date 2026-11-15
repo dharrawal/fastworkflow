@@ -311,7 +311,9 @@ recommends; D and E exist to keep the comparison honest.
 
 Reject when `max_prob` falls below a threshold chosen as a real operating point rather
 than, as today, the mean confidence of misclassified test rows
-(`model_pipeline_training.py:1174-1190`).
+(`model_pipeline_training.py:1174-1190`). (As measured at that commit. Since fix-1hs8 the large tier uses the
+10th percentile of correct-row confidences when fewer than 5 test rows are misclassified; the failed mean is
+unchanged otherwise, and the small tier is unchanged.)
 
 **What it costs:** almost nothing. The artifact
 (`tiny_ambiguous_threshold.json` / `large_ambiguous_threshold.json`) and the reader
@@ -1371,3 +1373,18 @@ detector.
 | 48 | near_domain | why was my credit application declined | no (prompt) | `modify_pending_order_payment` | 0.3084 | 0.6375 |
 | 49 | near_domain | can i speak to your legal department about a trademark | no (prompt) | `modify_pending_order_items` | 0.2142 | 0.4949 |
 | 50 | near_domain | what is your policy on child labour in the supply chain | **yes** | `IntentDetection/what_can_i_do` | 0.7071 | 0.8090 |
+
+
+## Addendum (fix-1hs8): where the "not here" class comes from for a head with no foreign command
+
+The sparse "not here" class (`wildcard` label) is built only from seeds of foreign commands
+(`not_here_seed_rows`). A head with no foreign command (a single-context workflow without core
+commands, e.g. the built-in consultation review-reply head) therefore had no class at all, and a
+vague reply ("hmm", "it depends") was routed confidently to the nearest real command and acted on.
+Such a head is now seeded from a short built-in list of domain-neutral vague replies
+(`BUILT_IN_VAGUE_REPLIES`, recorded under the source name `built_in/vague_reply` in the head's
+not-here samples and training signature). The rows are used as written (no generation, as for every
+foreign seed) and repeated `BUILT_IN_VAGUE_WEIGHT` times, because nine rows are out-voted by the
+34-41 rows of each real command. Heads that have a foreign seed read nothing from the list, and the
+internal CME still has no class. The held-out report records, per context, that the class was seeded
+from the list, so the "at floor without a wildcard class" warning no longer applies to such a head.

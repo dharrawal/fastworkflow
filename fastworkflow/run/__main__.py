@@ -24,6 +24,8 @@ def run_main(args):
 
     import fastworkflow
     from fastworkflow.utils.logging import logger
+    from fastworkflow.turn_progress import ProgressEvent
+    from fastworkflow.run.turn_wait import WaitOutcome, interrupted_message, timed_out_message, wait_for_turn
 
     # Progress bar helper
     from fastworkflow.utils.startup_progress import StartupProgress
@@ -133,7 +135,8 @@ def run_main(args):
     console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
     console.print(
         "[bold green]Tips:[/bold green] Type '//exit' to quit the application. Type '//new' to start a new conversation. " 
-        "[bold green]Tips:[/bold green] Prefix natural language commands with a single '/' to execute them in deterministic (non-agentic) mode")
+        "[bold green]Tips:[/bold green] Prefix natural language commands with a single '/' to execute them in deterministic (non-agentic) mode. "
+        "Type '//cancel' to cancel a pending question, review or approval. Ctrl-C stops waiting for a running turn.")
 
     # Command files that do not load are skipped; say so before the first prompt (not only in the log).
     from fastworkflow.command_preview import load_problems
@@ -193,10 +196,21 @@ def run_main(args):
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    run_as_agent = not args.assistant
+    # No agent model (LLM_AGENT unset): deterministic mode, said plainly (fastworkflow.no_agent_mode).
+    from fastworkflow import no_agent_mode
+
+    run_as_agent, fallback_banner = no_agent_mode.run_mode(args.assistant)
+    # (`load_problems` above ran before `init` loaded the env files, so the startup problem is read here.)
+    if startup_problems := no_agent_mode.runtime_problems():
+        # Neither the agent model nor Jev is set: stop, with no fallback to assistant mode.
+        StartupProgress.end()
+        for problem in startup_problems:
+            console.print(f"[bold red]Startup problem:[/bold red] {problem}")
+        exit(1)
     fastworkflow.chat_session = fastworkflow.ChatSession(
         run_as_agent=run_as_agent,
         generate_insights=getattr(args, "generate_insights", False),
+        detect_no_agent_mode=True,
     )
 
     # Observability [R4]: recording is always on, so the SQLite sink is opened
@@ -242,6 +256,8 @@ def run_main(args):
 
     StartupProgress.advance("ChatSession ready")
     StartupProgress.end()
+    if fallback_banner:
+        console.print(f"[bold yellow]{fallback_banner}[/bold yellow]")
    
     with contextlib.suppress(queue.Empty):
         timeout: float = 0.000001
@@ -279,36 +295,65 @@ def run_main(args):
             console.print("[bold]Agent >[/bold] New conversation started!\n", end="")
             user_command = prompt_session.prompt()
 
-        fastworkflow.chat_session.user_message_queue.put(user_command)
+        if user_command.strip() == "//cancel":
+            # The same engine replies the chat page's Cancel sends (see ChatSession.cancel_pending_prompt).
+            if fastworkflow.chat_session.cancel_pending_prompt() is None:
+                console.print(
+                    "[bold]Nothing to cancel.[/bold]"
+                    if not fastworkflow.chat_session.interrupted_turn_running
+                    else "[bold]The interrupted turn is still finishing; there is nothing pending to cancel.[/bold]"
+                )
+                continue
+        else:
+            if fastworkflow.chat_session.interrupted_turn_running:
+                console.print("[bold yellow]The interrupted turn is still finishing; your message runs after it.[/bold yellow]")
+            fastworkflow.chat_session.user_message_queue.put(user_command)
 
-        # Show spinner while draining trace events until sentinel signals completion
+        def _cancelled_unseen_note() -> None:
+            if fastworkflow.chat_session.take_cancelled_unseen_notice():
+                console.print("[bold yellow]A question from the interrupted turn was cancelled; "
+                              "your message ran against a clean state.[/bold yellow]")
+
+        def _show_event(evt) -> None:
+            if isinstance(evt, ProgressEvent):
+                status.update(f"[bold cyan]{evt.label}...[/bold cyan]")
+                return
+
+            # Choose styles based on success
+            info_style = "dim orange3" if (evt.success is False) else "dim yellow"
+            resp_style = "dim orange3" if (evt.success is False) else "dim green"
+
+            if evt.direction == fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW:
+                console.print(f'[bold]Agent >[/bold] {evt.raw_command}', style=info_style)
+            else:
+                header = f"{evt.command_name or ''}"
+                if evt.parameters:
+                    header += f", {evt.parameters}"
+                if header.strip():
+                    console.print(f'[bold]Workflow >[/bold] {header}', style=info_style)
+                console.print(f'[bold]Workflow >[/bold] {evt.response_text}', style=resp_style)
+
+        def _show_tick(counter: int) -> None:
+            if counter % 10 == 0:
+                status.update(f"[bold cyan]Processing command... ({counter//10}s)[/bold cyan]")
+
+        # Show spinner while draining trace events until sentinel signals completion.
+        # Ctrl-C or --timeout_seconds stops the wait (the turn is abandoned; see turn_wait).
         with console.status("[bold cyan]Processing command...[/bold cyan]", spinner="dots") as status:
-            counter = 0
-            while True:
-                try:
-                    evt = fastworkflow.chat_session.command_trace_queue.get(timeout=0.1)
-                except queue.Empty:
-                    counter += 1
-                    if counter % 10 == 0:
-                        status.update(f"[bold cyan]Processing command... ({counter//10}s)[/bold cyan]")
-                    continue
+            outcome = wait_for_turn(
+                fastworkflow.chat_session, _show_event,
+                timeout_seconds=getattr(args, "timeout_seconds", None), on_tick=_show_tick,
+            )
 
-                if evt is None:
-                    break
-
-                # Choose styles based on success
-                info_style = "dim orange3" if (evt.success is False) else "dim yellow"
-                resp_style = "dim orange3" if (evt.success is False) else "dim green"
-
-                if evt.direction == fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW:
-                    console.print(f'[bold]Agent >[/bold] {evt.raw_command}', style=info_style)
-                else:
-                    header = f"{evt.command_name or ''}"
-                    if evt.parameters:
-                        header += f", {evt.parameters}"
-                    if header.strip():
-                        console.print(f'[bold]Workflow >[/bold] {header}', style=info_style)
-                    console.print(f'[bold]Workflow >[/bold] {evt.response_text}', style=resp_style)
+        _cancelled_unseen_note()
+        if outcome is not WaitOutcome.DONE:
+            console.print(
+                "[bold yellow]"
+                + (interrupted_message() if outcome is WaitOutcome.INTERRUPTED
+                   else timed_out_message(args.timeout_seconds))
+                + "[/bold yellow]"
+            )
+            continue
 
         # Get command output (already queued before the sentinel)
         try:
@@ -349,6 +394,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--assistant", action="store_true", default=False,
         help="Run in assistant (non-agentic) mode. Default is agentic mode.",
+    )
+    parser.add_argument(
+        "--timeout_seconds", type=float, default=None,
+        help="Optional per-turn limit in seconds (default: none). Past it the terminal stops waiting and returns to the prompt; "
+             "the turn finishes in the background and its result is discarded.",
     )
     parser.add_argument(
         "--generate_insights", action="store_true", default=False,

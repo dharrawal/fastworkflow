@@ -17,8 +17,10 @@ class Signature:
 
     class Output(BaseModel):
         book_uids: list[str] = Field(description="the uid of each book found, in row order; "
-                                                 "open_book takes one")
-        titles: list[str] = Field(description="the title of each book found, in row order")
+                                                 "open_book takes one",
+                                     json_schema_extra={"ui": {"table": "books"}})
+        titles: list[str] = Field(description="the title of each book found, in row order",
+                                  json_schema_extra={"ui": {"table": "books"}})
         total: int = Field(description="how many books match, on every page")
 
     plain_utterances = [

@@ -36,6 +36,7 @@ import contextlib
 import enum
 import hashlib
 import json
+import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -185,6 +186,10 @@ class TurnExecution:
     # (the approval token, ADR-EXP-025 section 6.4). Never persisted and never in TurnResult: it is
     # rendered once, on the first terminal response, and then cleared.
     live_extras: Optional[dict[str, Any]] = None
+    # Set when this turn is the first work on a session that replaced one the server dropped (expired, or
+    # ended without a saved state): rendered in the turn body as ``session_notice``. Unlike live_extras it is
+    # not secret, so it is not cleared on first render.
+    session_notice: Optional[dict[str, Any]] = None
     user_id: Optional[str] = None
     # Carried on the execution, never written to shared workflow state by the
     # dependency that authenticated the request. Two requests on one channel
@@ -204,6 +209,12 @@ class TurnExecution:
     # While still QUEUED there is no snapshot and ``current_turn_key`` may hold
     # the previous turn's key — resolve_logical_turn_key guards on that.
     pre_turn_key: Optional[str] = None
+    # What a running streaming turn has shown so far, for the ``progress`` object of its 202 body (see
+    # ``note_stream_frame``). In memory only, set by the stream's own emit, never persisted.
+    frames_emitted: int = 0
+    last_frame: Optional[dict[str, Any]] = None
+    last_frame_monotonic: Optional[float] = None
+    started_monotonic: float = field(default_factory=time.monotonic)
     task: Optional[asyncio.Task] = None
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
     created_at: datetime = field(default_factory=_now)
@@ -214,6 +225,53 @@ class TurnExecution:
     @property
     def is_terminal(self) -> bool:
         return self.exec_state in _TERMINAL_STATES
+
+
+def _frame_label(frame: dict[str, Any]) -> Optional[str]:
+    """A short human-readable line for a stream frame, from fields the frame already carries (never the answer text)."""
+    data = frame.get("data")
+    if not isinstance(data, dict):
+        return None
+    kind = frame.get("type")
+    if kind == "progress":
+        return data.get("label")
+    if kind == "trace":
+        name = data.get("command_name")
+        direction = data.get("direction")
+        if name:
+            return f"{direction}: {name}" if direction else str(name)
+        return str(direction) if direction else None
+    if kind == "timeout":
+        return "still working"
+    return None
+
+
+def note_stream_frame(execn: "TurnExecution", frame: dict[str, Any]) -> None:
+    """Remember the latest frame of a running streaming turn so a poller (get_turn) can say where it is.
+
+    Constant work, no model, store or session access. A terminal frame is not remembered: the turn is done and
+    its body carries the result.
+    """
+    if frame.get("type") in STREAM_TERMINAL_FRAMES:
+        return
+    execn.frames_emitted += 1
+    execn.last_frame = {"type": frame.get("type"), "seq": frame.get("seq"), "label": _frame_label(frame)}
+    execn.last_frame_monotonic = time.monotonic()
+
+
+def running_progress(execn: "TurnExecution") -> dict[str, Any]:
+    """The ``progress`` object of a running turn: elapsed time and the latest frame, from memory only."""
+    now = time.monotonic()
+    progress: dict[str, Any] = {
+        "elapsed_seconds": round(now - execn.started_monotonic, 1),
+        "frames": execn.frames_emitted,
+    }
+    if execn.last_frame is not None and execn.last_frame_monotonic is not None:
+        progress["last_frame"] = {
+            **{k: v for k, v in execn.last_frame.items() if v is not None},
+            "seconds_ago": round(now - execn.last_frame_monotonic, 1),
+        }
+    return progress
 
 
 class ChannelBusyError(Exception):
@@ -296,6 +354,16 @@ class TurnRegistry:
         so callers can check-then-act without a separate primitive.
         """
         return self._active_execution(channel_id) is not None
+
+    def release_channel(self, channel_id: str) -> None:
+        """Forget the channel's active-execution pointer (the channel's session ended).
+
+        Retained terminal executions stay in ``_by_key`` for their normal retention; only the pointer from
+        the channel to its latest execution goes. A live execution is never released (the caller has
+        already refused while one runs).
+        """
+        if self._active_execution(channel_id) is None:
+            self._active_by_channel.pop(channel_id, None)
 
     def active_turn_key(self, channel_id: str) -> Optional[str]:
         execn = self._active_execution(channel_id)
@@ -689,6 +757,8 @@ async def _run_turn(
         async with runtime.lock:
             execn.exec_state = ExecState.RUNNING
             execn.started_at = _now()
+            # First use of a session that replaced a dropped one: say so in this turn's result, once.
+            execn.session_notice = session_manager.take_session_notice(runtime.channel_id)
 
             # [R9] record the execution↔logical mapping as early as knowable,
             # under the lock, before the worker thread exists (no race). A
@@ -737,8 +807,13 @@ async def _run_turn(
             f"channel={execn.channel_id}) failed: {exc}"
         )
         traceback.print_exc()
+        # A turn that failed before its drain leaves its trace events in the session's queue, where they would
+        # sit until the next turn. Nobody reads a failed turn's traces; discard them now.
+        with contextlib.suppress(Exception):
+            collect_trace_events(runtime, user_id=execn.user_id)
     finally:
         execn.finished_at = _now()
+        session_manager.note_activity(runtime.channel_id)
         # Before the outcome becomes observable: this is the path /initialize's
         # startup turn takes, so it is the one that has to make the fact durable.
         _commit_startup_outcome(session_manager, runtime, execn)
@@ -817,6 +892,7 @@ async def run_owned_turn(
         traceback.print_exc()
     finally:
         execn.finished_at = _now()
+        session_manager.note_activity(runtime.channel_id)
         execn.exec_state = ExecState.DONE
         await registry.clear_active(execn.channel_id, execn.turn_key)
         execn.done_event.set()
@@ -876,6 +952,10 @@ class TurnStreamChannel:
     FRAME TYPES:
 
       ``trace``    one public agent↔workflow interaction, as it happens.
+      ``progress`` non-terminal: the turn started a model-backed stage (split,
+                   referents, match, draft, review). A small payload (stage key,
+                   generic label, optional index/total); a client that does not
+                   know it ignores it. Not part of the durable record.
       ``timeout``  non-terminal: this turn passed the delivery deadline the
                    request asked for. It is still running and still owns its
                    executor, so more ``trace`` frames and the ``output`` frame
@@ -926,6 +1006,8 @@ class TurnStreamChannel:
         self._logical_turn_key: Callable[[], Optional[str]] = lambda: None
         self._closed = False
         self._terminated = False
+        # Called with every queued frame (the owning execution's progress memory); a failure never reaches the turn.
+        self.on_frame: Optional[Callable[[dict[str, Any]], None]] = None
 
     def bind(
         self,
@@ -982,6 +1064,11 @@ class TurnStreamChannel:
         }
         self._seq += 1
         self._queue.put_nowait(frame)
+        if self.on_frame is not None:
+            try:
+                self.on_frame(frame)
+            except Exception as exc:  # advisory bookkeeping must never fail the turn
+                logger.debug(f"stream frame observer failed: {exc!r}")
         return frame
 
     async def emit(self, kind: str, data: Any) -> None:
@@ -1179,6 +1266,7 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
         body = {
             "turn_key": execn.turn_key,
             "exec_state": ExecState.RUNNING.value,
+            "progress": running_progress(execn),
         }
         if execn.logical_turn_key:
             body["logical_turn_key"] = execn.logical_turn_key
@@ -1192,6 +1280,8 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
         }
         if execn.logical_turn_key:
             body["logical_turn_key"] = execn.logical_turn_key
+        if execn.session_notice:
+            body["session_notice"] = execn.session_notice
         return 200, body
 
     result = execn.result
@@ -1216,4 +1306,6 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
     if execn.live_extras:
         body.update(execn.live_extras)
         execn.live_extras = None
+    if execn.session_notice:
+        body["session_notice"] = execn.session_notice
     return 200, body

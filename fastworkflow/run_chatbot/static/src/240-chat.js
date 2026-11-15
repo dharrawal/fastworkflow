@@ -13,6 +13,10 @@ var tm = {
   managed: false,     // true = talking to the chatbot-spawned server
   activeConversationId: null,
   reuse: null,        // recorded message copied into the composer, if any
+  commandSchemas: null,        // GET /command_schemas listing; {} once settled empty [fix-weih.3]
+  commandSchemasPromise: null, // in-flight load, if any
+  cardCache: {},               // validated composed cards by turn_key [fix-weih.10]
+  composeUnavailable: false,   // the server said no_model; reset on connect
   epoch: 0            // bumped when the evidence source changes [fix-9eg.7.2]
 };
 
@@ -140,6 +144,7 @@ function tmFetch(path, body, extra) {
   }
   var opts = { method: extra && extra.method ? extra.method : "POST", headers: headers };
   if (opts.method !== "GET") { opts.body = JSON.stringify(body || {}); }
+  if (extra && extra.signal) { opts.signal = extra.signal; }
   return fetch(tm.baseUrl + path, opts);
 }
 
@@ -518,10 +523,16 @@ function tmRenderTurn(bubbleMsg, out) {
   clear(bubble);
   tmCloseArtifactPanel(bubbleMsg);
   Array.prototype.slice.call(
-    bubbleMsg.querySelectorAll(".cmdOut, .meta, .artifacts, .artifactsLink")
+    bubbleMsg.querySelectorAll(".cmdOut, .turnFooter, .meta, .artifacts, .artifactsLink")
   ).forEach(function (node) { node.parentNode.removeChild(node); });
+  tmDropResultsUi(bubbleMsg);
+  bubble.classList.remove("md");
   var answer = out.answer || "(no answer)";
   appendMarkdown(bubble, answer);
+  /* The whole answer stays in the bubble. Structured results go behind a link
+     under it, in a panel beside it [fix-weih.4, fix-weih.24]. */
+  tmRenderResults(bubbleMsg, out);
+  tmComposeCard(bubbleMsg, out);
   if (out.status === "awaiting_user") {
     bubbleMsg.appendChild(el("div", "cmdOut",
       "The agent is waiting for your reply — the next message resumes this turn."));
@@ -536,6 +547,7 @@ function tmRenderTurn(bubbleMsg, out) {
     if (activity) { activity.appendChild(lineNode); }
     else { bubbleMsg.appendChild(lineNode); }
   });
+  tmRenderPromptForms(bubbleMsg, out);
   tmRenderArtifacts(bubbleMsg, out.command_outputs);
   var meta = el("div", "meta");
   var statusTxt = turnOutcome(out.status, out.failure_reason).text +
@@ -546,7 +558,11 @@ function tmRenderTurn(bubbleMsg, out) {
     link.addEventListener("click", function () { openTurnInDebug(out.turn_key); });
     meta.appendChild(link);
   }
-  bubbleMsg.appendChild(meta);
+  /* The status and trace link are the footer's centre; the footer is the last
+     thing in the turn, below any command line or prompt added above
+     [fix-weih.32]. */
+  tmFooterSlot(bubbleMsg, "centre").appendChild(meta);
+  bubbleMsg.appendChild(tmTurnFooter(bubbleMsg));
   tmScrollIfFollowing();
 }
 

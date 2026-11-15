@@ -90,6 +90,9 @@ class PolicyStatus:
 
 
 _status: Optional[PolicyStatus] = None
+# True while an operator-allowed per-request toggle (--allow_request_cache_toggle) has the response cache off.
+# A named, intentional condition: readiness reports it and does not fail on it.
+_cache_off_by_request: bool = False
 _reported_drift: Optional[str] = None
 
 
@@ -187,6 +190,32 @@ def install_policy(
     _assert_policy_structurally(status)
     _status = status
     return status
+
+
+def request_cache_off() -> bool:
+    """Whether a sanctioned per-request toggle has the response cache switched off right now."""
+    return _cache_off_by_request
+
+
+def apply_cache_toggle(enabled: bool) -> None:
+    """Switch the process-wide response cache on or off, keeping the memory bound.
+
+    Only the server started with ``--allow_request_cache_toggle`` calls this. The policy protects memory (a
+    bounded in-memory cache, a capped disk cache), not whether caching is on, so the toggle re-applies the
+    same bound it installs at start: on, the cache is rebuilt exactly as ``install_policy`` builds it; off,
+    no in-memory cache exists to bound. The readiness probe then sees the policy in force in both states.
+    """
+    global _cache_off_by_request
+    entries = _status.memory_cache_entries if _status else SERVER_DSPY_MEMORY_CACHE_ENTRIES
+    previous_cache = getattr(dspy, "cache", None)
+    dspy.configure_cache(
+        enable_memory_cache=enabled,
+        memory_max_entries=entries,
+        enable_disk_cache=enabled,
+        disk_size_limit_bytes=SERVER_DSPY_DISK_CACHE_LIMIT_BYTES,
+    )
+    _close_replaced_disk_cache(previous_cache)
+    _cache_off_by_request = not enabled
 
 
 def _close_replaced_disk_cache(previous_cache: Any) -> None:
@@ -298,6 +327,8 @@ def check_policy_in_force() -> Optional[str]:
         for key, expected in POLICY_SETTINGS.items()
         if _effective(key) != expected
     ]
+    if _cache_off_by_request:
+        return ", ".join(drift) or None  # cache intentionally off: no disk or memory cache to bound
     if not getattr(dspy.cache, "enable_disk_cache", True):
         drift.append("disk cache disabled")
     if _memory_cache_maxsize() != _status.memory_cache_entries:

@@ -172,6 +172,17 @@ choosable command (`:410-418`). Only `wildcard` is in `ESCALATION_LABELS` — a 
 carries no evidence that an ancestor can help. Use `is_escalation` / `is_non_routable`
 rather than string-comparing to `"wildcard"`.
 
+**Where the "not here" class comes from today (fix-1hs8).** The class is built from seeds of
+*foreign* commands (`not_here_seed_rows`: core commands, other contexts' commands, planning
+commands; one seed each under the shipped `sparse_1` arm). A head with none of those, such as a
+single-context workflow with no core commands (the built-in consultation review-reply head), would
+have no class and would route a vague reply confidently to the nearest real command. Such a head is
+seeded instead from `BUILT_IN_VAGUE_REPLIES` (9 domain-neutral vague replies, used as written, no
+utterance generation) under the pseudo source `built_in/vague_reply`, repeated `BUILT_IN_VAGUE_WEIGHT`
+times so nine rows are not out-voted by 34-41 rows per real command. Heads with any foreign seed are
+untouched; the internal CME still has no class. The held-out report's per-context `large_ambiguity`
+records `wildcard_seeded_from_built_in_vague_replies` and the weight.
+
 Why the root-context drop is safe rather than a lost out-of-scope sink: in a root context
 the escalation class would collapse to a single row, the split is not stratified, and the
 ambiguous thresholds are the *mean confidence of misclassified test samples* — so that one
@@ -199,8 +210,13 @@ fastworkflow/model_pipeline_training.py`.
   discounted by how often the slower model is consulted. If a context has zero
   misclassifications (no failed-confidence mean), it writes threshold **-1** (:229-241) —
   every input then goes to whichever branch `-1` implies (tiny always confident).
-- `tiny/large_ambiguous_threshold` ← simply the **mean confidence of that model's
-  misclassified test samples** (:1174-1190), 0.0 if it never misclassified.
+- `tiny/large_ambiguous_threshold` ← the tiny tier is separated from its tier
+  threshold (`separated_tiny_ambiguous_threshold`). The large tier is the **mean
+  confidence of DistilBERT's misclassified test samples** when there are at least
+  `LARGE_FAILED_ROWS_MIN` (5) of them; with fewer (or none) it is the 10th percentile of
+  its *correct* rows' confidences (`large_ambiguous_threshold_and_rule`). Both are
+  clamped to [0.5, 0.99]; the rule and failure count are in `heldout_evaluation.json`
+  (`large_ambiguity`).
 - Real values (CME workflow `global` context, committed in-repo): confidence 0.4129,
   tiny-ambiguous 0.4010, large-ambiguous 0.5468. Inspect any workflow with
   `scripts/show_intent_thresholds.py` (in this skill).

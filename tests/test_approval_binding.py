@@ -276,11 +276,16 @@ def test_the_policy_decision_point_returns_graded_outcomes(annotation, origin, s
 
 def test_a_recorded_standing_approval_runs_without_a_prompt_on_any_surface():
     # The grant is an input: it yields run, and it satisfies delegatable as well as mandatory.
+    # (Edited by fix-d6no: the channel cells no longer pass unattended=True; an unattended channel run
+    # queues whatever the grant says, see the test below. The host cell is added and is unchanged.)
     for annotation in (REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED):
         for origin in (Origin.AGENT, Origin.AGENT_DIRECT, Origin.USER):
-            decision = ab.decide(annotation, origin=origin, surface=Surface(), unattended=True,
+            decision = ab.decide(annotation, origin=origin, surface=Surface(), unattended=False,
                                  awaiting_on_channel=True, auto_granted=True)
             assert decision.outcome is Outcome.RUN
+            host = ab.decide(annotation, origin=origin, surface=Surface("host", verified=True, uid="u"),
+                             unattended=True, awaiting_on_channel=True, auto_granted=True)
+            assert host.outcome is Outcome.RUN        # a verified host's per-end-user grant: unchanged
     # ...but an unverifiable host still has no identity to grant to, so it is refused first.
     refused = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=Surface("host", verified=False, uid="u"),
                         unattended=False, awaiting_on_channel=False, auto_granted=True)
@@ -797,10 +802,121 @@ def test_an_approved_planning_step_run_is_seen_by_the_finish_check(todo, annotat
     assert all(note is None for note in notes), notes
 
 
-def test_a_standing_approval_runs_a_mandatory_command_even_on_an_unattended_turn(todo, annotated_library, grant_root):
-    # Flagged to the owner: the grant is an input that precedes the unattended check, so no human is needed.
+def test_a_standing_approval_does_not_run_a_mandatory_command_on_an_unattended_turn(todo, annotated_library, grant_root):
+    # fix-d6no (owner 2026-11-13): this test used to assert the opposite (the grant ran the command with no human).
+    # An unattended run never uses a channel-surface standing grant: it queues, as the ADR documents.
     _ask(todo, "add_note <text>Ann</text>", steps=_finish())
     todo.ctx.process_turn("always")
     out = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), unattended=True)
-    assert out.status is TurnStatus.COMPLETED
+    assert _added(todo.chores, todo.base) == ["Ann"]            # Bob's did not run
+    queued = [r for r in todo.store.records if r.queued and r.state == ab.AWAITING]
+    assert len(queued) == 1 and queued[0].command == "Record/add_note"
+    assert _approval_spans(todo, "used") == []
+    assert len(_approval_spans(todo, "queued")) == 1
+    assert out is not None
+
+
+# ----------------------------------------------------------------------
+# fix-d6no: unattended before the grant (channel), and the origin in the channel grant identity
+# ----------------------------------------------------------------------
+
+CHAT = Surface(kind="channel", origin="chat")
+CLI = Surface()          # the interactive CLI's default surface: the legacy key
+
+
+def _always_on(todo, surface, text="Ann"):
+    """Ask, then answer "always", both on *surface*; the binding runs once and the grant is recorded."""
+    out = _ask(todo, f"add_note <text>{text}</text>", steps=_finish(), approval_surface=surface)
+    assert out.status is TurnStatus.AWAITING_USER
+    return todo.ctx.process_turn("always", approval_surface=surface)
+
+
+@pytest.mark.parametrize("surface", [CLI, CHAT], ids=["cli", "chat"])
+def test_a_channel_grant_runs_attended_and_queues_unattended(todo, annotated_library, grant_root, surface):
+    _always_on(todo, surface)
+    attended = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), approval_surface=surface)
+    assert attended.status is TurnStatus.COMPLETED               # attended: no prompt, the grant ran it
     assert _added(todo.chores, todo.base) == ["Ann", "Bob"]
+    unattended = _ask(todo, "add_note <text>Cy</text>", steps=_finish(), unattended=True,
+                      approval_surface=surface)
+    assert _added(todo.chores, todo.base) == ["Ann", "Bob"]      # unattended: queued, not run
+    assert any(r.queued and r.state == ab.AWAITING for r in todo.store.records)
+    assert len(_approval_spans(todo, "used")) == 1               # only the attended call used the grant
+    assert unattended is not None
+
+
+def test_the_unattended_policy_cells_for_a_channel_surface_and_a_verified_host():
+    for origin_surface in (Surface(), Surface(kind="channel", origin="chat")):
+        granted = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=origin_surface, unattended=True,
+                            awaiting_on_channel=False, auto_granted=True)
+        assert granted.outcome is Outcome.QUEUE and granted.reason == "no human channel"
+        attended = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=origin_surface, unattended=False,
+                             awaiting_on_channel=False, auto_granted=True)
+        assert attended.outcome is Outcome.RUN
+    host = Surface("host", verified=True, uid="u")
+    assert ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=host, unattended=True,
+                     awaiting_on_channel=False, auto_granted=True).outcome is Outcome.RUN
+    assert ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=host, unattended=True,
+                     awaiting_on_channel=False).outcome is Outcome.QUEUE
+
+
+def test_the_channel_identity_names_the_origin_and_the_cli_keeps_the_legacy_key(grant_root):
+    from fastworkflow import approval_grants as ag
+    user = ag.local_user()
+    assert ag.identity_key(CLI, "c1") == f"channel:{user}"                       # legacy: stored grants stay valid
+    assert ag.identity_key(CHAT, "c1") == f"channel:{user}:chat"
+    assert ag.identity_key(Surface(kind="channel", origin="somewhere"), "c1") is None   # unknown origin: none
+
+
+@pytest.mark.parametrize("made_on, used_on", [(CHAT, CLI), (CLI, CHAT)], ids=["chat-then-cli", "cli-then-chat"])
+def test_a_grant_made_in_one_origin_does_not_approve_in_the_other(todo, annotated_library, grant_root, made_on,
+                                                                   used_on):
+    _always_on(todo, made_on)
+    assert _added(todo.chores, todo.base) == ["Ann"]
+    out = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), approval_surface=used_on)
+    assert out.status is TurnStatus.AWAITING_USER                # asks: the other origin's grant does not apply
+    assert _added(todo.chores, todo.base) == ["Ann"]
+    assert todo.store.active() is not None
+
+
+def test_a_legacy_channel_grant_still_approves_on_the_cli_and_not_on_the_chat_origin(todo, annotated_library,
+                                                                                    grant_root):
+    from fastworkflow import approval_grants as ag
+    # A grant stored before origins existed: identity channel:<user>, nothing else about it.
+    ag.record(f"channel:{ag.local_user()}", state_paths_workflow_id(todo), "Record/add_note", REQUIRED_ALWAYS)
+    chat = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), approval_surface=CHAT)
+    assert chat.status is TurnStatus.AWAITING_USER and _added(todo.chores, todo.base) == []
+    todo.ctx.process_turn("no", approval_surface=CHAT)
+    cli = _ask(todo, "add_note <text>Cy</text>", steps=_finish(), approval_surface=CLI)
+    assert cli.status is TurnStatus.COMPLETED and _added(todo.chores, todo.base) == ["Cy"]
+
+
+def state_paths_workflow_id(todo) -> str:
+    import fastworkflow.state_paths as state_paths
+    return state_paths.workflow_id(todo.wf.folderpath)
+
+
+def test_listing_and_revoking_see_only_the_callers_own_origin(todo, annotated_library, grant_root):
+    _always_on(todo, CHAT, "Ann")
+    todo.script.steps = []
+    on_chat = todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
+    assert "Record/add_note" in on_chat and "on this channel" in on_chat
+    assert "another channel are not shown" in on_chat
+    on_cli = todo.ctx.process_turn("/approvals", approval_surface=CLI).answer
+    assert "Record/add_note" not in on_cli and "No standing approvals" in on_cli
+    assert "another channel are not shown" in on_cli
+    # The CLI cannot revoke the chat's grant; the chat can.
+    refused = todo.ctx.process_turn("/revoke_approval add_note", approval_surface=CLI).answer
+    assert "No standing approval for add_note" in refused
+    assert "Record/add_note" in todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
+    done = todo.ctx.process_turn("/revoke_approval add_note", approval_surface=CHAT).answer
+    assert "is revoked" in done
+    assert "Record/add_note" not in todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
+
+
+@pytest.mark.parametrize("surface", [CLI, CHAT], ids=["cli", "chat"])
+def test_the_reply_to_always_says_how_to_list_and_revoke_the_grant(todo, annotated_library, grant_root, surface):
+    out = _always_on(todo, surface)
+    shown = "\n".join(o.command_response.response or "" for o in out.command_outputs)
+    assert "/approvals" in shown and "/revoke_approval" in shown       # in the command's reply the user reads
+    assert _added(todo.chores, todo.base) == ["Ann"]                  # the command still ran once

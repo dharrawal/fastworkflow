@@ -89,10 +89,16 @@ class ResponseGenerator:
 
 <!-- file: fastworkflow/examples/library/_commands/Book/_Book.py -->
 ```python
+from typing import Any
+
+import fastworkflow
+
 from ...application.library import Book, Library
 
 
 class Context:
+    state_version = 1
+
     @classmethod
     def get_parent(cls, record: Book) -> Library:
         return record.library
@@ -100,10 +106,24 @@ class Context:
     @classmethod
     def get_displayname(cls, record: Book) -> str:
         return f"Book: {record.title} ({record.uid})"
+
+    @classmethod
+    def get_state(cls, record: Book) -> dict[str, Any]:
+        """A book is only ever reached through its library, so the snapshot is the library plus the book's uid."""
+        return {"library": record.library.to_state_dict(), "uid": record.uid}
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,
+                   *, state_version: int) -> Book:
+        if state_version != cls.state_version:
+            raise fastworkflow.UnsupportedStateVersion(state_version)
+        return Library.from_state_dict(state["library"]).books[state["uid"]]
 ```
 
 `_Book.py` describes the `Book` context's object. `get_parent` is the record that encloses a
-book, the library; `get_displayname` is how a book is named to the agent. The context class
+book, the library; `get_displayname` is how a book is named to the agent. `get_state` and `from_state` are the serialization hooks: they let the server save a session standing on a
+book and restore it, so the session can be evicted instead of held in memory for good (a context class without
+`get_state` pins its session). The context class
 says nothing about how to enter it: that is the navigation command's `@descends_to`. And here
 is one of the book's own commands:
 
@@ -125,8 +145,10 @@ class Signature:
         start: Optional[int] = Field(default=None, description="the first row of the page")
 
     class Output(BaseModel):
-        borrowers: list[str] = Field(description="each borrower's name, in row order")
-        due_dates: list[str] = Field(description="each loan's due date, in row order")
+        borrowers: list[str] = Field(description="each borrower's name, in row order",
+                                     json_schema_extra={"ui": {"table": "loans"}})
+        due_dates: list[str] = Field(description="each loan's due date, in row order",
+                                     json_schema_extra={"ui": {"table": "loans"}})
         total: int = Field(description="how many loans the book has, on every page")
 
     plain_utterances = [
@@ -154,6 +176,7 @@ class ResponseGenerator:
 `list_loans` takes no `book_uid`. It reads the book it acts on from
 `workflow.record`: the book the workflow stands on. It is
 also **paged**, by its integer `start`; page 7 says what that asks of its `Output`.
+The `ui` `table` hint on `borrowers` and `due_dates` only tells the chat page to show the two lists as the columns of one table named `loans`; it does not change what the command returns.
 
 ## Every command leaves the workflow where it ends
 

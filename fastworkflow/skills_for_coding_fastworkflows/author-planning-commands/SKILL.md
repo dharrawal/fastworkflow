@@ -30,7 +30,9 @@ How a matched planning command runs (`workflow_agent.match_planning_command` mat
    `plain_utterances`, so a request can reach it as it reaches an execution command. With
    `JEV_API_KEY` the matcher picks the planning command for a sub-task from its description and
    `plain_utterances` first. Without the key the planner finds the command in its list, and no typed
-   call fills its inputs.
+   call fills its inputs. When two planning commands fit a sub-task about equally, the sub-task review
+   names the others (the first line of each one's `Signature` docstring is shown beside its name), so
+   write that line so a reader can tell the commands apart.
 2. The planner fills `Input` in one typed call.
 3. The arguments are checked: `check_arguments` checks each field against its type and its options
    (`copied_from_command_text` here), and the file's own rules run.
@@ -399,6 +401,28 @@ strings work too; the helpers only make the wording exact.
   builds it" otherwise. An `Output` field cannot declare `from_command_output`; the value is built in `__result__`.
 - If `__result__` raises or returns something else, one model call writes the answer instead
   (`planning_phases.py` `run_call_result`, logged as a warning).
+
+## How the chat draws an `Output`: names never decide, hints do
+
+A field's name never decides how it is drawn. Type and shape give the plain default; everything else is a `ui` hint
+you declare in `Field(json_schema_extra={"ui": {...}})` (the full reference is in the command-authoring rule,
+`.claude/rules/command-authoring.md`):
+
+| Hint | Controls |
+|---|---|
+| `title` (`Field(title=...)`) | the label |
+| `hidden` | left out of the result card |
+| `hero` | pinned to the stat strip |
+| `format` | `currency`, `percent`, `code` or `badge` |
+| `tones` | with `format: badge`, a value to `good`, `warning`, `bad` or `neutral` |
+| `currency` | with `format: currency`, an ISO code such as `"EUR"` |
+| `widget` | an `Input` field as `textarea` or `radio` |
+| `table` | list fields of one output with the same group name are the columns of one table |
+
+A badge needs `format: badge`: a field called `status` or `state` is plain text without it. A table of parallel lists
+needs the `table` hint in the results panel: an int `total` beside lists of one length no longer draws one there (the answer
+card still infers one from that until the next step). `fastworkflow command preview <workflow> --check` prints a `notice:` for an `Output` with two or
+more visible list-of-scalar fields in no `table` group; it never fails the check.
 
 ## Reuse: inherit from `_` modules only
 

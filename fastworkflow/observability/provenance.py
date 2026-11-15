@@ -87,10 +87,10 @@ LOCK_FILENAMES: tuple[str, ...] = (
 #     code deriving the key name from the role name silently reads an unset
 #     variable for this one role. That is why the pairing is a table and not a
 #     format string.
-#   * `LLM_RESPONSE_GEN` is an orphan. It appears in every env file and in
-#     AGENTS.md, and no Python reads it. It is snapshotted below under
-#     `ORPHAN_ROLE_VARS` because a value an operator believes is in effect is
-#     worth having in the record, but it is not an active role.
+#   * `LLM_RESPONSE_GEN` was an orphan until `run_chatbot.composer` began reading it
+#     (it composes answer cards and question forms), so it is an active role
+#     now. `ORPHAN_ROLE_VARS` stays for a setting an operator believes is in
+#     effect that no Python reads; it is empty today.
 LLM_ROLE_VARS: tuple[tuple[str, str], ...] = (
     ("LLM_SYNDATA_GEN", "LITELLM_API_KEY_SYNDATA_GEN"),
     ("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION"),
@@ -103,9 +103,10 @@ LLM_ROLE_VARS: tuple[tuple[str, str], ...] = (
     ("LLM_TEACHER_PLANNER", "LITELLM_API_KEY_TEACHER_PLANNER"),
     ("LLM_STUDENT_AGENT", "LITELLM_API_KEY_STUDENT_AGENT"),
     ("LLM_STUDENT_PLANNER", "LITELLM_API_KEY_STUDENT_PLANNER"),
+    ("LLM_RESPONSE_GEN", "LITELLM_API_KEY_RESPONSE_GEN"),
 )
 
-ORPHAN_ROLE_VARS: tuple[str, ...] = ("LLM_RESPONSE_GEN",)
+ORPHAN_ROLE_VARS: tuple[str, ...] = ()
 
 # Routing, not authentication: a model string prefixed `litellm_proxy/` is
 # served from somewhere else entirely, which changes what the model

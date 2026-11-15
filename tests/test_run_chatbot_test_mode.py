@@ -406,6 +406,25 @@ class TestSpawnDecision:
         assert "--cors_origin" not in plan.cmd
         assert "*" not in plan.cmd
 
+    def test_the_spawned_server_pins_the_channel_approval_surface(self):
+        # fix-rkr1: the chat's behaviour (a plain yes approves, no token) is stated, not inherited from a
+        # server default that a later release moves to host. Signed or unsigned.
+        for signed in (False, True):
+            plan = launcher.plan_server_spawn(
+                **self.KW, allow_unsigned_jwt=not signed, expect_encrypted_jwt=signed, missing_packages=[]
+            )
+            at = plan.cmd.index("--chat_approval_surface")
+            assert plan.cmd[at + 1] == "channel"
+            assert plan.cmd.count("--chat_approval_surface") == 1
+
+    def test_the_spawned_server_opts_in_to_the_request_cache_toggle(self):
+        # The chat page's "LLM cache" checkbox keeps its effect for the local chat; no other server has it.
+        for signed in (False, True):
+            plan = launcher.plan_server_spawn(
+                **self.KW, allow_unsigned_jwt=not signed, expect_encrypted_jwt=signed, missing_packages=[]
+            )
+            assert plan.cmd.count("--allow_request_cache_toggle") == 1
+
     def test_missing_server_extra_is_a_friendly_refusal(self):
         plan = launcher.plan_server_spawn(
             **self.KW, allow_unsigned_jwt=True,

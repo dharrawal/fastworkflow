@@ -1,0 +1,127 @@
+{
+ "label": "baseline",
+ "model": "bedrock/nvidia.nemotron-nano-3-30b",
+ "note": "raw ChatAdapter completions from the code before the guards and prompt rewrite; live pass/fail under the old code is in live_pass",
+ "runs": [
+  {
+   "name": "pick_one_of_two_ids",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"account_id\", \"label\": \"Account ID\", \"kind\": \"text\", \"options\": [{\"value\": \"ACC-1001\", \"label\": \"ACC-1001\"}, {\"value\": \"ACC-2002\", \"label\": \"ACC-2002\"}], \"required\": true, \"help\": \"Select the account you wish to close.\"}, {\"name\": \"status\", \"label\": \"Status\", \"kind\": \"text\", \"options\": [{\"value\": \"active\", \"label\": \"active\"}, {\"value\": \"frozen\", \"label\": \"frozen\"}], \"required\": false, \"help\": \"Current account status.\"}, {\"name\": \"balance\", \"label\": \"Balance\", \"kind\": \"number\", \"options\": [], \"required\": false, \"help\": \"Current account balance.\"}, {\"name\": \"flagged_logins\", \"label\": \"Flagged Logins\", \"kind\": \"number\", \"options\": [], \"required\": false, \"help\": \"Number of flagged logins.\"}]\n\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 1.2
+  },
+  {
+   "name": "choice_plus_reason",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"ticket_id\", \"label\": \"Ticket ID\", \"kind\": \"choice\", \"options\": [{\"value\": \"TCK-100\", \"label\": \"TCK-100\"}, {\"value\": \"TCK-205\", \"label\": \"TCK-205\"}], \"required\": true, \"help\": \"Select the ticket to escalate.\"}, {\"name\": \"reason\", \"label\": \"Reason\", \"kind\": \"text\", \"required\": true, \"help\": \"Provide the reason for escalation.\"}]\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 0.8
+  },
+  {
+   "name": "pick_one_of_five_in_results",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\":\"book_title\",\"label\":\"Book Title\",\"kind\":\"text\",\"options\":[],\"required\":true,\"help\":\"Enter the title of the book you wish to borrow\"}]\n\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 0.5
+  },
+  {
+   "name": "multichoice_loans",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"loans\", \"label\": \"Loans to renew\", \"kind\": \"choice\", \"options\": [{\"value\": \"r1\", \"label\": \"r1\"}]}, {\"name\": \"other_loans\", \"label\": \"Other loans (optional)\", \"kind\": \"text\", \"required\": false, \"help\": \"Enter any additional loan IDs you wish to renew.\"}]\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 0.8
+  },
+  {
+   "name": "yes_no_cancel",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"cancel_order\", \"label\": \"Cancel Order\", \"kind\": \"boolean\", \"options\": [{\"value\": \"yes\", \"label\": \"Yes\"}, {\"value\": \"no\", \"label\": \"No\"}], \"required\": true, \"help\": \"Do you want to cancel order ORD-5521 now?\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "date_reschedule",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"appointment_id\", \"label\": \"Appointment ID\", \"kind\": \"text\", \"options\": [], \"required\": false, \"help\": \"\"}, {\"name\": \"date\", \"label\": \"Date\", \"kind\": \"date\", \"options\": [], \"required\": true, \"help\": \"\"}, {\"name\": \"clinic\", \"label\": \"Clinic\", \"kind\": \"text\", \"options\": [], \"required\": false, \"help\": \"\"}]\n\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 0.8
+  },
+  {
+   "name": "quantity",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"copies\", \"label\": \"Copies\", \"kind\": \"number\", \"options\": [], \"required\": true, \"help\": \"How many copies would you like to order?\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "free_text_reason",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"reason\", \"label\": \"Reason for dispute\", \"kind\": \"longtext\", \"options\": [], \"required\": true, \"help\": \"Explain why you are disputing this charge.\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "choice_dict_keys",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"payment_method\", \"label\": \"Payment Method\", \"kind\": \"choice\", \"options\": [{\"value\": \"card_8841\", \"label\": \"card_8841\"}, {\"value\": \"bank_2210\", \"label\": \"bank_2210\"}], \"required\": true, \"help\": \"Select the payment method used for the refund.\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "json_string_wrapped",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"reassign_to\", \"label\": \"Reassign to\", \"kind\": \"choice\", \"options\": [{\"value\": \"agent_17\", \"label\": \"agent_17\"}, {\"value\": \"agent_22\", \"label\": \"agent_22\"}], \"required\": true, \"help\": \"Select the agent to reassign ticket TCK-3301 to.\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.8
+  },
+  {
+   "name": "no_results_open_text",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"email\", \"label\": \"Email Address\", \"kind\": \"text\", \"options\": [], \"required\": true, \"help\": \"Enter the email address to send the receipt to.\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "words_refund_or_exchange",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"refund_or_exchange\", \"label\": \"Refund or Exchange\", \"kind\": \"choice\", \"options\": [{\"value\": \"refund\", \"label\": \"Refund\"}, {\"value\": \"exchange\", \"label\": \"Exchange\"}], \"required\": true, \"help\": \"Select whether you would like a refund or an exchange.\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "rambling_one_ask",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"mailing_address\", \"label\": \"New Mailing Address\", \"kind\": \"text\", \"options\": [], \"required\": true, \"help\": \"Enter the new mailing address to update your profile.\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "context_values_only",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"order_id\", \"label\": \"Order ID\", \"kind\": \"text\", \"options\": [], \"required\": true, \"help\": \"The identifier of the order.\"}, {\"name\": \"status\", \"label\": \"Status\", \"kind\": \"text\", \"options\": [], \"required\": false, \"help\": \"Current status of the order.\"}, {\"name\": \"total\", \"label\": \"Total Amount\", \"kind\": \"number\", \"options\": [], \"required\": false, \"help\": \"Total monetary value of the order.\"}, {\"name\": \"cancel_option\", \"label\": \"Cancel Order\", \"kind\": \"choice\", \"options\": [{\"value\": \"yes\", \"label\": \"Yes\"}, {\"value\": \"no\", \"label\": \"No\"}], \"required\": true, \"help\": \"Confirm whether to cancel the order.\"}]\n\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 0.9
+  },
+  {
+   "name": "asked_id_not_in_results",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"confirmation_code\", \"label\": \"Confirmation Code\", \"kind\": \"text\", \"options\": [], \"required\": true, \"help\": \"Enter the confirmation code printed on your receipt\"}]\n\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "quantity_and_date",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\":\"seats\",\"label\":\"Seats\",\"kind\":\"number\",\"options\":[],\"required\":true,\"help\":\"Number of seats to book\"},{\"name\":\"date\",\"label\":\"Date\",\"kind\":\"date\",\"options\":[],\"required\":true,\"help\":\"Date of the show\"}]\n\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 0.5
+  },
+  {
+   "name": "three_loans_named",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"loan_id\", \"label\": \"Loan ID\", \"kind\": \"choice\", \"options\": [{\"value\": \"LN-301\", \"label\": \"LN-301\"}, {\"value\": \"LN-302\", \"label\": \"LN-302\"}, {\"value\": \"LN-303\", \"label\": \"LN-303\"}], \"required\": true, \"help\": \"Select the loan that is overdue.\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "multichoice_words",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"notifications\", \"label\": \"Notifications\", \"kind\": \"choice\", \"options\": [{\"value\": \"email\", \"label\": \"email\"}, {\"value\": \"sms\", \"label\": \"sms\"}, {\"value\": \"push\", \"label\": \"push\"}], \"required\": true, \"help\": \"Select which notifications to turn off.\"}]\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 0.5
+  },
+  {
+   "name": "new_value_not_restated",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\":\"phone\",\"label\":\"Phone Number\",\"kind\":\"text\",\"options\":[],\"required\":true,\"help\":\"Enter the new phone number\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "pick_ids_two_results",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"order_id\", \"label\": \"Order ID\", \"kind\": \"text\", \"options\": [{\"value\": \"ORD-8001\", \"label\": \"ORD-8001\"}, {\"value\": \"ORD-8002\", \"label\": \"ORD-8002\"}], \"required\": true, \"help\": \"Select the order ID you want to return.\"}, {\"name\": \"status\", \"label\": \"Status\", \"kind\": \"text\", \"options\": [{\"value\": \"delivered\", \"label\": \"delivered\"}], \"required\": false, \"help\": \"Current status of the order.\"}, {\"name\": \"total\", \"label\": \"Total\", \"kind\": \"number\", \"options\": [{\"value\": 20.0, \"label\": 20.0}, {\"value\": 35.5, \"label\": 35.5}], \"required\": false, \"help\": \"Total amount of the order.\"}]\n\n[[ ## completed ## ]]",
+   "live_pass": false,
+   "latency": 1.0
+  }
+ ]
+}

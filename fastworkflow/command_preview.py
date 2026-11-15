@@ -1819,7 +1819,7 @@ def _load_error(name: str, path: str, folder: str) -> str:
     return f"{name}: skipped by the loader (see the log)"
 
 
-def load_problems(workflow_folder: str) -> list[str]:
+def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[str]:
     """The workflow's command files that do not load, each as ``<name>: <error>``: the load problems
     ``fastworkflow command preview --check`` reports for them (``_load_error``). Empty when every planning
     command file and every execution command's Signature loads. One function for the three places a developer
@@ -1827,7 +1827,16 @@ def load_problems(workflow_folder: str) -> list[str]:
     training, and the FastAPI server logs them at startup. A retired ``_skills`` folder is one problem, as it is
     for the preview. An execution command's Signature is checked here too, so a removed
     ``validate_extracted_parameters`` (spec 3.1) fails the load of its command.
+
+    ``runtime=True`` (a process that serves turns, called after ``fastworkflow.init`` so the env files are loaded) adds
+    the no-agent-mode startup problem (``no_agent_mode.runtime_problems``: neither ``LLM_AGENT`` nor ``JEV_API_KEY``).
+    ``fastworkflow train`` never asks for it: training does not need the agent.
     """
+    if runtime:
+        # The problems only a process that serves turns has (no agent model and no Jev key); training does not.
+        from fastworkflow import no_agent_mode
+
+        return load_problems(workflow_folder) + no_agent_mode.runtime_problems()
     from fastworkflow import workflow_agent
     from fastworkflow.command_directory import check_no_planning_commands_folder
 
@@ -2104,6 +2113,29 @@ def check_kind_list_warnings(workflow_folder: str) -> list[str]:
     return warnings
 
 
+def check_ungrouped_list_notices(workflow_folder: str) -> list[str]:
+    """Notices (not warnings, not failures) for a command whose ``Signature.Output`` has two or more visible
+    list-of-scalar fields in no ``table`` group: the page draws them as separate lists. Printed by
+    ``command preview --check`` only; nothing is read from a field's name and nothing at run time changes."""
+    from fastworkflow import planning_commands
+    from fastworkflow.observation_offloading.facts import workflow_signatures
+
+    try:
+        signatures = workflow_signatures(os.path.abspath(workflow_folder))
+    except Exception:  # noqa: BLE001 - without signatures no command is known
+        return []
+    notices: list[str] = []
+    for name, signature in sorted(signatures.items()):
+        output_cls = getattr(signature, "Output", None)
+        if not (isinstance(output_cls, type) and hasattr(output_cls, "model_fields")):
+            continue
+        try:
+            notices.extend(planning_commands.ungrouped_list_notices(output_cls, name))
+        except Exception:  # noqa: BLE001 - a notice never fails the check
+            continue
+    return notices
+
+
 def preview_main(args) -> int:
     """``fastworkflow command preview``: write the previews, or with ``--check`` compare them."""
     from fastworkflow import planning_commands
@@ -2130,6 +2162,8 @@ def preview_main(args) -> int:
             print(warning)
         for warning in check_kind_list_warnings(args.workflow_folder):
             print(warning)
+        for notice in check_ungrouped_list_notices(args.workflow_folder):
+            print(notice)
         if command_problems:
             return 1
         if problems:
@@ -2159,6 +2193,7 @@ __all__ = [
     "check_kind_list_warnings",
     "check_note_condition_warnings",
     "check_previews",
+    "check_ungrouped_list_notices",
     "condition_text",
     "default_out_dir",
     "describe_inputs",

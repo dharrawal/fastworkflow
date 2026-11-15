@@ -138,6 +138,13 @@ def plan_server_spawn(
         # legitimately serve the chatbot page from a different local port
         # [R19 as amended alongside R18].
         "--cors_loopback_only",
+        # The page asks for approvals as the channel surface (a plain yes, no token). The server's own
+        # default is the strict host surface, so the chat's loopback server must say channel
+        # explicitly. (fix-rkr1)
+        "--chat_approval_surface", "channel",
+        # The page's "LLM cache" checkbox toggles the cache for its single local user. Any other server
+        # ignores the request field.
+        "--allow_request_cache_toggle",
     ]
     if expect_encrypted_jwt:
         cmd.append("--expect_encrypted_jwt")

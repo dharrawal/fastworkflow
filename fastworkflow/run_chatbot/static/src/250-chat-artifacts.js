@@ -10,6 +10,8 @@ var TM_ARTIFACT_LAZY_BYTES = 262144;
 /* How many restored turns fetch their stored record on sight. Older turns keep
    a button, so reopening a long conversation is not a hundred round trips. */
 var TM_RESTORED_ARTIFACT_AUTOLOAD = 10;
+/* The artifact key under which the core lists the parts of a split turn (TURN_PARTS_ARTIFACT). */
+var TM_TURN_PARTS_KEY = "fw_sub_tasks";
 
 function tmArtifactPath(ref) {
   /* The chat's artifacts live in the LIVE workflow's store, which is this
@@ -168,6 +170,10 @@ function tmArtifactsIn(commandOutputs, callIds) {
     var resp = (co && co.command_response) || {};
     var artifacts = resp.artifacts || {};
     Object.keys(artifacts).forEach(function (key) {
+      /* Prompt descriptions are UI protocol, not artifacts [fix-weih.5]. */
+      if (TM_PROMPT_ARTIFACT_KEYS.indexOf(key) !== -1) { return; }
+      /* The parts of a split turn are data for the composed card, not something the user asked to see. */
+      if (key === TM_TURN_PARTS_KEY) { return; }
       found.push({
         key: key,
         value: artifacts[key],
@@ -186,7 +192,7 @@ function tmRenderArtifacts(bubbleMsg, commandOutputs, note) {
     frame: function () { return document.getElementById("chatLog"); }
   });
   if (!viewer) { return null; }
-  tmAppendBeforeMeta(bubbleMsg, viewer.linkRow);
+  tmFooterSlot(bubbleMsg, "right").appendChild(viewer.linkRow);
   tmAppendBeforeMeta(bubbleMsg, viewer.panel);
   return viewer.panel;
 }
@@ -387,6 +393,8 @@ function tmPlaceArtifactPanelBelow(panel, place) {
 
 function tmOpenArtifactPanel(bubbleMsg, panel, link, place) {
   if (tmOpenArtifacts) { tmCloseArtifactPanel(tmOpenArtifacts.msg); }
+  /* The results panel sits in the same place beside this answer [fix-weih.24]. */
+  if (typeof tmCloseResultsPanel === "function") { tmCloseResultsPanel(bubbleMsg); }
   tmOpenArtifacts = {msg: bubbleMsg, panel: panel, link: link, place: place};
   panel.hidden = false;
   link.setAttribute("aria-expanded", "true");
@@ -415,11 +423,50 @@ document.getElementById("chatLog").addEventListener("scroll", tmPlaceArtifactPan
 document.getElementById("detail").addEventListener("scroll", tmPlaceArtifactPanel);
 window.addEventListener("resize", tmPlaceArtifactPanel);
 
-function tmAppendBeforeMeta(bubbleMsg, node) {
-  /* The status/"view trace" line stays last, so anything added after a turn
-     was painted lands above it rather than below the footer. */
-  var meta = bubbleMsg.querySelector(".meta");
-  if (meta) { bubbleMsg.insertBefore(node, meta); }
-  else { bubbleMsg.appendChild(node); }
+/* -- the turn footer [fix-weih.32] -------------------------------------- */
+/* One row under each answer holds the three turn controls: the results link
+   (left), the status with "view trace" (centre) and the artifacts toggle
+   (right). The pieces arrive at different times (the status with the paint,
+   results and artifacts later on a restored turn), so each one asks for its
+   slot and the row is made once, with all three slots, on the first ask. The
+   artifact list and the results panel stay siblings of the row, never inside
+   it. A row left with nothing in it is removed (tmFooterTidy). */
+var TM_FOOTER_SLOTS = {left: "turnFooterLeft", centre: "turnFooterCentre", right: "turnFooterRight"};
+
+function tmFindFooter(bubbleMsg) {
+  var found = null;
+  Array.prototype.forEach.call(bubbleMsg.children, function (child) {
+    if (child.classList.contains("turnFooter")) { found = child; }
+  });
+  return found;
 }
 
+function tmTurnFooter(bubbleMsg) {
+  var footer = tmFindFooter(bubbleMsg);
+  if (footer) { return footer; }
+  footer = el("div", "turnFooter");
+  ["left", "centre", "right"].forEach(function (which) {
+    footer.appendChild(el("div", "turnFooterSlot " + TM_FOOTER_SLOTS[which]));
+  });
+  bubbleMsg.appendChild(footer);
+  return footer;
+}
+
+function tmFooterSlot(bubbleMsg, which) {
+  return tmTurnFooter(bubbleMsg).querySelector("." + TM_FOOTER_SLOTS[which]);
+}
+
+function tmFooterTidy(bubbleMsg) {
+  var footer = tmFindFooter(bubbleMsg);
+  if (!footer) { return; }
+  var used = Array.prototype.some.call(footer.children, function (slot) { return !!slot.firstChild; });
+  if (!used) { footer.parentNode.removeChild(footer); }
+}
+
+function tmAppendBeforeMeta(bubbleMsg, node) {
+  /* The turn footer stays last, so anything added after a turn was painted
+     lands above it rather than below it. */
+  var footer = tmFindFooter(bubbleMsg) || bubbleMsg.querySelector(".meta");
+  if (footer) { bubbleMsg.insertBefore(node, footer); }
+  else { bubbleMsg.appendChild(node); }
+}

@@ -1,0 +1,804 @@
+{
+ "cases": [
+  {
+   "name": "pick_one_of_two_ids",
+   "holdout": false,
+   "question": "Which account do you want to close, ACC-1001 or ACC-2002?",
+   "user_message": "close one of my accounts",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_account",
+     "parameters": {},
+     "output": {
+      "account_id": "ACC-1001",
+      "status": "active",
+      "balance": 2450.75,
+      "flagged_logins": 3
+     }
+    },
+    {
+     "id": "r2",
+     "command": "get_account",
+     "parameters": {},
+     "output": {
+      "account_id": "ACC-2002",
+      "status": "frozen",
+      "balance": 310.0,
+      "flagged_logins": 0
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "which account",
+      "options_must_include": [
+       "ACC-1001",
+       "ACC-2002"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "status",
+     "balance",
+     "flagged_logins"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "choice_plus_reason",
+   "holdout": false,
+   "question": "Which ticket should I escalate, TCK-100 or TCK-205, and what is the reason?",
+   "user_message": "escalate a ticket",
+   "results": [
+    {
+     "id": "r1",
+     "command": "list_tickets",
+     "parameters": {},
+     "output": {
+      "tickets": [
+       {
+        "ticket_id": "TCK-100",
+        "state": "open",
+        "subject": "Login fails"
+       },
+       {
+        "ticket_id": "TCK-205",
+        "state": "open",
+        "subject": "Slow export"
+       }
+      ]
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "which ticket",
+      "options_must_include": [
+       "TCK-100",
+       "TCK-205"
+      ],
+      "options_must_not_include": []
+     },
+     {
+      "kind": [
+       "text",
+       "longtext"
+      ],
+      "about": "the reason",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 2,
+    "forbid_field_names_or_labels": [
+     "state",
+     "subject"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "pick_one_of_five_in_results",
+   "holdout": false,
+   "question": "Which book would you like to borrow?",
+   "user_message": "I want to borrow a book",
+   "results": [
+    {
+     "id": "r1",
+     "command": "search_books",
+     "parameters": {},
+     "output": {
+      "matches": [
+       {
+        "book_id": "BK-101",
+        "title": "Tidal Maps",
+        "available": true
+       },
+       {
+        "book_id": "BK-102",
+        "title": "Quiet Engines",
+        "available": true
+       },
+       {
+        "book_id": "BK-103",
+        "title": "Garden Logic",
+        "available": true
+       },
+       {
+        "book_id": "BK-104",
+        "title": "Paper Rivers",
+        "available": true
+       },
+       {
+        "book_id": "BK-105",
+        "title": "Night Trains",
+        "available": true
+       }
+      ]
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "which book",
+      "options_must_include": [
+       "BK-101",
+       "BK-102",
+       "BK-103",
+       "BK-104",
+       "BK-105"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "available"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "multichoice_loans",
+   "holdout": false,
+   "question": "Which of your loans should I renew? You can name several.",
+   "user_message": "renew my loans",
+   "results": [
+    {
+     "id": "r1",
+     "command": "list_loans",
+     "parameters": {},
+     "output": {
+      "loans": [
+       {
+        "loan_id": "LN-301",
+        "due": "2026-12-01"
+       },
+       {
+        "loan_id": "LN-302",
+        "due": "2026-12-03"
+       },
+       {
+        "loan_id": "LN-303",
+        "due": "2026-12-09"
+       }
+      ]
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "multichoice",
+      "about": "which loans",
+      "options_must_include": [
+       "LN-301",
+       "LN-302",
+       "LN-303"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "due"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "yes_no_cancel",
+   "holdout": false,
+   "question": "Do you want me to cancel order ORD-5521 now?",
+   "user_message": "cancel my order",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_order",
+     "parameters": {},
+     "output": {
+      "order_id": "ORD-5521",
+      "status": "processing",
+      "total": 64.9
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "boolean",
+      "about": "confirm the cancellation",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "order_id",
+     "status",
+     "total"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "date_reschedule",
+   "holdout": false,
+   "question": "On what date should I move the appointment to?",
+   "user_message": "reschedule my appointment",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_appointment",
+     "parameters": {},
+     "output": {
+      "appointment_id": "APT-77",
+      "date": "2026-12-14",
+      "clinic": "North"
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "date",
+      "about": "new date",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "appointment_id",
+     "clinic"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "quantity",
+   "holdout": false,
+   "question": "How many copies do you want to order?",
+   "user_message": "order the book",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_book",
+     "parameters": {},
+     "output": {
+      "book_id": "BK-101",
+      "title": "Tidal Maps",
+      "stock": 12
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "number",
+      "about": "number of copies",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "stock",
+     "title"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "free_text_reason",
+   "holdout": false,
+   "question": "Please describe why you are disputing this charge.",
+   "user_message": "dispute a charge",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_charge",
+     "parameters": {},
+     "output": {
+      "charge_id": "CH-9001",
+      "amount": 42.0,
+      "merchant": "Corner Cafe"
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": [
+       "text",
+       "longtext"
+      ],
+      "about": "reason for the dispute",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "charge_id",
+     "amount",
+     "merchant"
+    ],
+    "allow_none": true
+   }
+  },
+  {
+   "name": "choice_dict_keys",
+   "holdout": true,
+   "question": "Which payment method should I use for the refund?",
+   "user_message": "refund my order",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_user",
+     "parameters": {},
+     "output": {
+      "user_id": "usr_41",
+      "payment_methods": {
+       "card_8841": {
+        "brand": "visa",
+        "last4": "8841"
+       },
+       "bank_2210": {
+        "type": "bank",
+        "last4": "2210"
+       }
+      }
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "payment method",
+      "options_must_include": [
+       "card_8841",
+       "bank_2210"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "user_id",
+     "brand",
+     "last4"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "json_string_wrapped",
+   "holdout": false,
+   "question": "Should ticket TCK-3301 be reassigned to agent_17 or agent_22?",
+   "user_message": "who should handle my ticket",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_ticket_details",
+     "parameters": {},
+     "output": {
+      "ticket_details": "{\"ticket_id\": \"TCK-3301\", \"status\": \"open\", \"assignee\": \"agent_09\", \"candidates\": [\"agent_17\", \"agent_22\"]}"
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "which agent",
+      "options_must_include": [
+       "agent_17",
+       "agent_22"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "status",
+     "ticket_id"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "no_results_open_text",
+   "holdout": false,
+   "question": "What email address should I send the receipt to?",
+   "user_message": "email me a receipt",
+   "results": [],
+   "expect": {
+    "fields": [
+     {
+      "kind": "text",
+      "about": "an email address",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [],
+    "allow_none": true
+   }
+  },
+  {
+   "name": "words_refund_or_exchange",
+   "holdout": false,
+   "question": "Do you want a refund or an exchange?",
+   "user_message": "I am unhappy with my item",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_order",
+     "parameters": {},
+     "output": {
+      "order_id": "ORD-1212",
+      "status": "delivered"
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "refund or exchange",
+      "options_must_include": [
+       "refund",
+       "exchange"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "order_id",
+     "status"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "rambling_one_ask",
+   "holdout": true,
+   "question": "Thanks for your patience. I have looked at your profile: the account was opened in 2019, there have been two address changes since, the plan is Standard, and the last invoice was paid on time. Before I make the change, I only need one thing from you: what new mailing address should I put on file?",
+   "user_message": "change my address",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_profile",
+     "parameters": {},
+     "output": {
+      "customer_id": "CUS-88",
+      "plan": "Standard",
+      "opened": "2019-03-02",
+      "address_changes": 2,
+      "mailing_address": "4 Old Mill Rd"
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": [
+       "text",
+       "longtext"
+      ],
+      "about": "new mailing address",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "plan",
+     "opened",
+     "address_changes",
+     "customer_id"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "context_values_only",
+   "holdout": false,
+   "question": "Your order ORD-7781 (status shipped, total 54.20) can no longer be changed. Would you like me to cancel it instead?",
+   "user_message": "change my order",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_order",
+     "parameters": {},
+     "output": {
+      "order_id": "ORD-7781",
+      "status": "shipped",
+      "total": 54.2
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "boolean",
+      "about": "cancel instead",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "order_id",
+     "status",
+     "total"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "asked_id_not_in_results",
+   "holdout": true,
+   "question": "What is the confirmation code printed on your receipt?",
+   "user_message": "look up my receipt",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_order",
+     "parameters": {},
+     "output": {
+      "order_id": "ORD-3030",
+      "status": "delivered"
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": [
+       "text",
+       "longtext"
+      ],
+      "about": "confirmation code",
+      "options_must_include": [],
+      "options_must_not_include": [
+       "ORD-3030",
+       "delivered"
+      ]
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "order_id",
+     "status"
+    ],
+    "allow_none": true
+   }
+  },
+  {
+   "name": "quantity_and_date",
+   "holdout": true,
+   "question": "How many seats should I book, and for which date?",
+   "user_message": "book seats for the show",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_show",
+     "parameters": {},
+     "output": {
+      "show_id": "SH-5",
+      "title": "Evening Concert",
+      "seats_left": 40
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "number",
+      "about": "seat count",
+      "options_must_include": [],
+      "options_must_not_include": []
+     },
+     {
+      "kind": "date",
+      "about": "show date",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 2,
+    "forbid_field_names_or_labels": [
+     "show_id",
+     "title",
+     "seats_left"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "three_loans_named",
+   "holdout": false,
+   "question": "Which of your loans is overdue: LN-301, LN-302 or LN-303?",
+   "user_message": "which loan is late",
+   "results": [
+    {
+     "id": "r1",
+     "command": "list_loans",
+     "parameters": {},
+     "output": {
+      "loans": [
+       {
+        "loan_id": "LN-301"
+       },
+       {
+        "loan_id": "LN-302"
+       },
+       {
+        "loan_id": "LN-303"
+       }
+      ]
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "which loan",
+      "options_must_include": [
+       "LN-301",
+       "LN-302",
+       "LN-303"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "multichoice_words",
+   "holdout": false,
+   "question": "Which notifications do you want to turn off: email, sms or push?",
+   "user_message": "stop my notifications",
+   "results": [],
+   "expect": {
+    "fields": [
+     {
+      "kind": "multichoice",
+      "about": "which channels",
+      "options_must_include": [
+       "email",
+       "sms",
+       "push"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "new_value_not_restated",
+   "holdout": false,
+   "question": "What new phone number should I put on file?",
+   "user_message": "update my phone number",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_profile",
+     "parameters": {},
+     "output": {
+      "name": "Jane Roe",
+      "phone": "555-0100",
+      "email": "jane@example.com",
+      "status": "active"
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "text",
+      "about": "new phone number",
+      "options_must_include": [],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "name",
+     "email",
+     "status"
+    ],
+    "allow_none": false
+   }
+  },
+  {
+   "name": "pick_ids_two_results",
+   "holdout": false,
+   "question": "Which of these two orders do you want to return, ORD-8001 or ORD-8002?",
+   "user_message": "return an order",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_order",
+     "parameters": {},
+     "output": {
+      "order_id": "ORD-8001",
+      "status": "delivered",
+      "total": 20.0
+     }
+    },
+    {
+     "id": "r2",
+     "command": "get_order",
+     "parameters": {},
+     "output": {
+      "order_id": "ORD-8002",
+      "status": "delivered",
+      "total": 35.5
+     }
+    }
+   ],
+   "expect": {
+    "fields": [
+     {
+      "kind": "choice",
+      "about": "which order",
+      "options_must_include": [
+       "ORD-8001",
+       "ORD-8002"
+      ],
+      "options_must_not_include": []
+     }
+    ],
+    "max_fields": 1,
+    "forbid_field_names_or_labels": [
+     "status",
+     "total"
+    ],
+    "allow_none": false
+   }
+  }
+ ]
+}

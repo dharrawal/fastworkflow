@@ -215,6 +215,7 @@ class FastWorkflowMCPServer:
                 "description": description,
                 "inputSchema": input_schema,
                 "annotations": {
+                    # A readable default label from the command name; a client may show its own.
                     "title": command_name.replace("_", " ").title(),
                     "readOnlyHint": False,  # Assume tools can modify state
                     "destructiveHint": False,  # Conservative default

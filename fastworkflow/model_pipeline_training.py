@@ -358,13 +358,21 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
             'min': np.min(failed_confidences) if failed_confidences else None,
             'max': np.max(failed_confidences) if failed_confidences else None,
             'mean': np.mean(failed_confidences) if failed_confidences else None,
-            'median': np.median(failed_confidences) if failed_confidences else None
+            'median': np.median(failed_confidences) if failed_confidences else None,
+            'count': len(failed_confidences),
         },
         'successful': {
             'min': np.min(successful_confidences) if successful_confidences else None,
             'max': np.max(successful_confidences) if successful_confidences else None,
             'mean': np.mean(successful_confidences) if successful_confidences else None,
-            'median': np.median(successful_confidences) if successful_confidences else None
+            'median': np.median(successful_confidences) if successful_confidences else None,
+            'count': len(successful_confidences),
+            # The low quantile of correct-row confidences: what the large tier's
+            # ambiguity threshold is built from when there are too few failures.
+            'low_quantile': (
+                float(np.quantile(successful_confidences, CORRECT_CONFIDENCE_LOW_QUANTILE))
+                if successful_confidences else None
+            ),
         }
     }
     return stats, all_confidences, all_predictions, all_labels, failed_cases
@@ -432,8 +440,28 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
 # which tier produced it. The cost is deliberate: more ambiguity turns, traded for
 # the silent misroutes this band makes loud. DistilBERT usage does not change,
 # because escalation reads only the tier threshold, which none of this moves.
+#
+# LARGE TIER SOURCE — the large tier's ambiguity threshold is the mean confidence of
+# the large model's MISCLASSIFIED test rows, floored and capped as above. That mean is
+# a statistic of the model's errors, so it needs errors to exist. With none, or with
+# a handful, it is undefined or noise, and the old code wrote the floor silently: a
+# model that fit the in-distribution test split BETTER got a LOOSER threshold (a head
+# retrained on a regenerated corpus went from 0.738 to exactly 0.5 this way). Below
+# `LARGE_FAILED_ROWS_MIN` misclassified rows the threshold is therefore taken from the
+# other side of the split: the `CORRECT_CONFIDENCE_LOW_QUANTILE` quantile of the
+# correct rows' confidences, i.e. a confidence below which correct predictions are
+# rare, so anything under it is shown as candidates. With `LARGE_FAILED_ROWS_MIN` or
+# more misclassified rows the value is the failed mean exactly as before, so a head
+# that calibrates normally does not move. Both paths are clamped to [floor, cap]; the
+# rule that produced the value is named in `LARGE_RULE_*` and recorded in the
+# per-context held-out report. The tiny tier is untouched.
 # ---------------------------------------------------------------------------
 TIER_AMBIGUITY_MIN_SEPARATION = 0.05
+LARGE_FAILED_ROWS_MIN = 5
+CORRECT_CONFIDENCE_LOW_QUANTILE = 0.10
+LARGE_RULE_FAILED_MEAN = "failed_mean"
+LARGE_RULE_CORRECT_QUANTILE = "correct_quantile"
+LARGE_RULE_FLOOR_NO_STATISTICS = "floor_no_statistics"
 SINGLE_LABEL_RESOLUTION_FLOOR = 0.5
 MAX_AMBIGUITY_THRESHOLD = 0.99
 CERTAIN_TIER_THRESHOLD = 1.0
@@ -493,15 +521,52 @@ def separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats) -> float:
     return min(max(candidates), resolvable_ambiguity_ceiling(tier_threshold))
 
 
+def large_failed_row_count(large_stats) -> int:
+    """Misclassified test rows behind *large_stats*.
+
+    Stats written before `analyze_model_confidence` reported a count carry only the
+    mean: a present mean is read as enough rows, an absent one as none, which is what
+    those stats meant when the failed mean was the only input.
+    """
+    failed = large_stats['failed']
+    count = failed.get('count')
+    if count is not None:
+        return int(count)
+    return 0 if failed['mean'] is None else LARGE_FAILED_ROWS_MIN
+
+
+def large_ambiguous_threshold_and_rule(large_stats) -> tuple:
+    """The large tier's ambiguity threshold and the rule that produced it.
+
+    See "LARGE TIER SOURCE" above the constants. Returns ``(threshold, rule)`` with
+    the threshold always inside ``[SINGLE_LABEL_RESOLUTION_FLOOR,
+    MAX_AMBIGUITY_THRESHOLD]``.
+    """
+    failed_mean = large_stats['failed']['mean']
+    if failed_mean is not None and large_failed_row_count(large_stats) >= LARGE_FAILED_ROWS_MIN:
+        measured, rule = float(failed_mean), LARGE_RULE_FAILED_MEAN
+    else:
+        quantile = large_stats['successful'].get('low_quantile')
+        if quantile is None:
+            measured, rule = 0.0, LARGE_RULE_FLOOR_NO_STATISTICS
+        else:
+            measured, rule = float(quantile), LARGE_RULE_CORRECT_QUANTILE
+    return min(max(measured, SINGLE_LABEL_RESOLUTION_FLOOR), MAX_AMBIGUITY_THRESHOLD), rule
+
+
 def floored_large_ambiguous_threshold(large_stats) -> float:
     """The large tier's ambiguity threshold, never below the single-label floor."""
-    failed_mean = large_stats['failed']['mean']
-    measured = 0.0 if failed_mean is None else float(failed_mean)
-    return min(max(measured, SINGLE_LABEL_RESOLUTION_FLOOR), MAX_AMBIGUITY_THRESHOLD)
+    return large_ambiguous_threshold_and_rule(large_stats)[0]
+
+
+def at_floor_without_wildcard(large_threshold, has_wildcard_class) -> bool:
+    """True when a head known to have no wildcard class publishes its large threshold at the floor."""
+    return has_wildcard_class is False and large_threshold == SINGLE_LABEL_RESOLUTION_FLOOR
 
 
 def write_ambiguity_thresholds(
-    context_artifacts_dir, tier_threshold, tiny_stats, large_stats
+    context_artifacts_dir, tier_threshold, tiny_stats, large_stats,
+    *, has_wildcard_class=None,
 ) -> tuple:
     """Write both ambiguity thresholds for one context and return ``(tiny, large)``.
 
@@ -518,9 +583,27 @@ def write_ambiguity_thresholds(
     published, because aborting `train()` for the whole workflow is a far worse answer
     to a well separated context than a narrow ambiguity band is. That includes a tier
     of exactly 1.0, which keeps only certain predictions and so needs no band.
+
+    ``has_wildcard_class`` is None when the caller does not say (no check) and a bool
+    when it does. A head with NO wildcard / "none of these" class (False) whose large
+    threshold sits exactly at the floor gets one WARNING naming the context and what to
+    do (see `at_floor_without_wildcard`): the threshold is then the only thing standing
+    between a vague request and a confident single label, and a value pinned at the
+    floor means calibration found nothing. The thresholds are still written, because
+    raising would abort training for every later context of the workflow. `train()`
+    passes it and records the same boolean in the held-out report. The warning is meant
+    to become an error once a retrain shows the built-in heads do not trip it
+    (bd fix-1hs8).
     """
     tiny_ambiguous_threshold = separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats)
-    large_ambiguous_threshold = floored_large_ambiguous_threshold(large_stats)
+    large_ambiguous_threshold, large_rule = large_ambiguous_threshold_and_rule(large_stats)
+    if large_rule == LARGE_RULE_CORRECT_QUANTILE:
+        logger.info(
+            f"Large ambiguity threshold for {context_artifacts_dir} comes from the "
+            f"{CORRECT_CONFIDENCE_LOW_QUANTILE:.0%} quantile of correct-row confidences "
+            f"({large_ambiguous_threshold:.4f}): only {large_failed_row_count(large_stats)} "
+            f"misclassified test rows (< {LARGE_FAILED_ROWS_MIN}) to calibrate on."
+        )
 
     if (
         tier_threshold is not None
@@ -536,6 +619,15 @@ def write_ambiguity_thresholds(
         raise ValueError(
             f"ambiguity threshold below the single-label floor "
             f"{SINGLE_LABEL_RESOLUTION_FLOOR} in {context_artifacts_dir}"
+        )
+
+    if at_floor_without_wildcard(large_ambiguous_threshold, has_wildcard_class):
+        logger.warning(
+            f"large ambiguity threshold sits exactly at the single-label floor "
+            f"{SINGLE_LABEL_RESOLUTION_FLOOR} (rule: {large_rule}) in "
+            f"{context_artifacts_dir}, and this head has no wildcard / 'none of these' "
+            f"class to catch vague requests. Add training utterances for this context "
+            f"or give it a wildcard class, then retrain."
         )
 
     os.makedirs(context_artifacts_dir, exist_ok=True)
@@ -616,7 +708,15 @@ class CommandRouter:
         cls._instances_cache[normalised_path] = instance
         return instance
 
+    #: Serialises construction: ``__new__`` caches the instance before ``__init__`` has loaded the
+    #: models, so the server's background warm-up and a first turn could both load one head.
+    _build_lock: ClassVar[threading.RLock] = threading.RLock()
+
     def __init__(self, model_artifacts_folderpath: str):
+        with CommandRouter._build_lock:
+            self._init_once(model_artifacts_folderpath)
+
+    def _init_once(self, model_artifacts_folderpath: str):
         # Avoid re-initialising if we are returning a cached instance.
         if getattr(self, "_initialised", False):
             return
@@ -687,8 +787,40 @@ class CommandRouter:
             "topk_scores": [float(score) for score in results['topk_scores']],
         }
         return list(labels), details
-            
-        
+
+
+def warm_intent_heads(workflow_folderpath: str) -> list[str]:
+    """Load every trained intent head of the workflow, and run one prediction on each, once at server start,
+    so the first turn does not pay for it (``CommandRouter`` builds a ``ModelPipeline``, which loads two
+    checkpoints and their tokenizers, ~0.5-1 s per context; the first prediction also reads the label encoder).
+
+    Loads what the first turn would: the process-wide ``CommandRouter`` cache keyed by
+    ``<folderpath>/___command_info/<context folder>`` (``*`` is the ``global`` folder), the keys the intent
+    detection and gathering paths use, so *workflow_folderpath* must be the one the turn path passes, the
+    ``Workflow``'s resolved ``folderpath``. A folder without a trained head (no tinymodel, label encoder and
+    threshold) is skipped. Returns the context folder names warmed. Never raises: a failure is logged and the
+    turn path meets it again.
+    """
+    warmed: list[str] = []
+    try:
+        root = os.path.join(workflow_folderpath, "___command_info")
+        if not os.path.isdir(root):
+            return warmed
+        markers = ("tinymodel.pth", "label_encoder.pkl", "threshold.json")
+        for name in sorted(os.listdir(root)):
+            folder = os.path.join(root, name)
+            if name in ("versions", "current") or not all(os.path.exists(os.path.join(folder, m)) for m in markers):
+                continue
+            try:
+                CommandRouter(folder).predict_with_details("warm up")
+                warmed.append(name)
+            except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
+                logger.warning(f"intent head warm-up failed for {folder}: {type(error).__name__}: {error}")
+    except Exception as error:  # noqa: BLE001 - warm-up must not stop startup
+        logger.warning(f"intent head warm-up failed for {workflow_folderpath}: {type(error).__name__}: {error}")
+    return warmed
+
+
 class ModelPipeline:
     # ------------------------------------------------------------------
     # Singleton-like caching ------------------------------------------------
@@ -1262,7 +1394,10 @@ def _record_wildcard_context_training(
         reason=(
             "reserved escalation class"
             if included
-            else "no escalation class (the internal CME has no wildcard class)"
+            else (
+                "no escalation class (this context has no foreign commands to supply 'not here' "
+                "rows, or it is the internal CME, which has no wildcard class)"
+            )
         ),
         own_row_count=own_row_count,
         raw_candidate_count=raw_candidate_count,
@@ -1392,6 +1527,36 @@ def cache_context_command_utterances(
 #: Phase 9 step 4 made the sparse_1 construction (one seed) the shipped one; step 1 measured
 #: 8 as ``sparse_8``.
 NOT_HERE_SEEDS = 1
+
+#: Built-in vague / non-committal replies (bd fix-1hs8). A head whose "not here" class would
+#: otherwise have NO rows (a single-context workflow with no core commands has no foreign
+#: command to sample) is seeded from this list, so it still has a class for "none of these" and
+#: a vague reply is not routed confidently to the nearest real command. Domain-neutral on
+#: purpose: hedges, questions back, a contentless improvement request, filler, deferrals,
+#: off-topic and garbage. Used as written, one row each, like every other foreign seed (no
+#: utterance generation). Heads that already have foreign seeds never read it.
+BUILT_IN_VAGUE_REPLIES: tuple[str, ...] = (
+    "I'm still undecided",
+    "why are you asking me that?",
+    "give it a bit more oomph",
+    "well, you see, um",
+    "ask me again later",
+    "sorry, what was the question again?",
+    "blah blah qwerty",
+    "the weather is lovely today",
+    "we'll see how it goes",
+)
+
+#: Times each built-in row is repeated in the training rows. Nine rows against 34-41 rows for
+#: each real command are out-voted (measured, bd fix-1hs8: 5 of 23 held-out vague replies were
+#: still acted on), so the class is repeated to about the size of one real command (9 x 4 = 36).
+#: Part of the training signature, so changing it retrains the head. Applies only to a head
+#: seeded from the built-in list; foreign seeds are never repeated.
+BUILT_IN_VAGUE_WEIGHT = 4
+
+#: The pseudo foreign-command name the built-in rows are recorded under (selection, the head's
+#: not-here samples, its training signature), so the version check sees them as one more source.
+BUILT_IN_VAGUE_SOURCE = "built_in/vague_reply"
 
 #: The shipped construction: what every real training run builds when no experiment
 #: override is in force. ``resolve_reserved_class_arm`` returns it for ``None``.
@@ -1853,6 +2018,9 @@ def not_here_seed_rows(
 ) -> tuple[dict[str, list[str]], int]:
     """``({foreign command: up to N seeds}, available foreign seed count)`` for one head.
 
+    When no foreign command yields a seed, the built-in vague replies stand in under
+    ``BUILT_IN_VAGUE_SOURCE`` (never for the internal CME, which has no class).
+
     A foreign command is every command of the workflow that the head does not label:
     execution commands from the routing definition (never the reserved wildcard, never
     a planning command), then planning commands, whose seeds are read exactly as their
@@ -1887,6 +2055,12 @@ def not_here_seed_rows(
         available += len(seeds)
         picks[name] = resolve_not_here_sample(
             context_name, name, seeds, seeds_per_command, (recorded or {}).get(name))
+
+    if not any(picks.values()) and not is_internal_cme_folder(workflow_folderpath):
+        # No foreign command supplies a row (a single-context workflow without core commands):
+        # the head would have no "not here" class. Seed it from the built-in vague replies.
+        picks[BUILT_IN_VAGUE_SOURCE] = list(BUILT_IN_VAGUE_REPLIES)
+        available += len(BUILT_IN_VAGUE_REPLIES)
     return picks, available
 
 
@@ -2465,8 +2639,13 @@ def train(
         if escalation.not_here_samples is not None:
             used_not_here_samples[ctx_name] = escalation.not_here_samples
         if escalation.included:
+            weight = (
+                BUILT_IN_VAGUE_WEIGHT
+                if set(escalation.not_here_samples or {}) == {BUILT_IN_VAGUE_SOURCE}
+                else 1
+            )
             utterance_command_tuples.extend(
-                list(zip(escalation.rows, [WILDCARD_LABEL] * len(escalation.rows)))
+                list(zip(escalation.rows, [WILDCARD_LABEL] * len(escalation.rows))) * weight
             )
         _record_wildcard_context_training(
             ctx_name,
@@ -2896,8 +3075,10 @@ def train(
         
         # R3: one writer for both ambiguity thresholds, so the separation invariant is
         # established where the files are produced rather than asserted afterwards.
+        has_wildcard_class = bool(escalation.included and escalation.rows)
         tiny_ambiguous_threshold, large_ambiguous_threshold = write_ambiguity_thresholds(
-            os.path.dirname(threshold_path), threshold, tiny_stats, large_stats
+            os.path.dirname(threshold_path), threshold, tiny_stats, large_stats,
+            has_wildcard_class=has_wildcard_class,
         )
         print(
             f"Ambiguity thresholds (R3): tier={threshold:.4f} "
@@ -2926,6 +3107,21 @@ def train(
             seed=seed,
             heldout_personas=heldout_personas,
             notes=split_notes,
+            large_ambiguity={
+                "failed_rows": large_failed_row_count(large_stats),
+                "rule": large_ambiguous_threshold_and_rule(large_stats)[1],
+                "threshold": large_ambiguous_threshold,
+                "has_wildcard_class": has_wildcard_class,
+                "at_floor_without_wildcard": at_floor_without_wildcard(
+                    large_ambiguous_threshold, has_wildcard_class),
+                "wildcard_seeded_from_built_in_vague_replies": bool(
+                    escalation.not_here_samples
+                    and BUILT_IN_VAGUE_SOURCE in escalation.not_here_samples),
+                "built_in_vague_weight": (
+                    BUILT_IN_VAGUE_WEIGHT
+                    if escalation.not_here_samples
+                    and BUILT_IN_VAGUE_SOURCE in escalation.not_here_samples else None),
+            },
         )
         try:
             has_context_benchmark = any(

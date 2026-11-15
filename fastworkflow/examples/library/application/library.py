@@ -7,6 +7,7 @@ the Library they belong to, which is how the workflow climbs from a record to th
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 PAGE_SIZE = 10
 
@@ -52,8 +53,14 @@ class Loan:
 class Library:
     """The root object of the workflow: every book, member and loan."""
 
-    def __init__(self) -> None:
+    def __init__(self, populate: bool = True) -> None:
+        """``populate=False`` builds an empty library, which ``from_state_dict`` then fills."""
         self.branches = list(HOURS)
+        self.books: dict[str, Book] = {}
+        self.members: dict[str, Member] = {}
+        self.loans: list[Loan] = []
+        if not populate:
+            return
         self.books = {book.uid: book for book in [
             Book(self, "b1", "Dune", "Frank Herbert", 3, "Central",
                  notes=["one copy is a large-print edition"]),
@@ -72,6 +79,42 @@ class Library:
             Loan("b3", "m2", "2026-11-05", overdue=False),
             Loan("b4", "m3", "2026-10-18", overdue=True),
         ]
+
+    def to_state_dict(self) -> dict[str, Any]:
+        """Snapshot the whole library as JSON-native data (the back-references are dropped)."""
+        return {
+            "branches": list(self.branches),
+            "books": [
+                {"uid": b.uid, "title": b.title, "author": b.author, "copies": b.copies,
+                 "branch": b.branch, "notes": list(b.notes)}
+                for b in self.books.values()
+            ],
+            "members": [
+                {"uid": m.uid, "name": m.name, "notes": list(m.notes)}
+                for m in self.members.values()
+            ],
+            "loans": [
+                {"book_uid": l.book_uid, "member_uid": l.member_uid, "due": l.due, "overdue": l.overdue}
+                for l in self.loans
+            ],
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: dict[str, Any]) -> "Library":
+        """Rebuild a library from :meth:`to_state_dict`; every book and member points back at it."""
+        library = cls(populate=False)
+        library.branches = list(state["branches"])
+        library.books = {
+            b["uid"]: Book(library, b["uid"], b["title"], b["author"], b["copies"], b["branch"],
+                           notes=list(b["notes"]))
+            for b in state["books"]
+        }
+        library.members = {
+            m["uid"]: Member(library, m["uid"], m["name"], notes=list(m["notes"]))
+            for m in state["members"]
+        }
+        library.loans = [Loan(**loan) for loan in state["loans"]]
+        return library
 
     def find_books(self, query: str) -> list[str]:
         """Uids of the books whose title or author holds the query (case ignored)."""

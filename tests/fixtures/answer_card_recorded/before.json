@@ -1,0 +1,76 @@
+{
+ "model": "bedrock/nvidia.nemotron-nano-3-30b",
+ "note": "raw ChatAdapter completions of ComposeAnswerCard, cache off, temperature 0",
+ "runs": [
+  {
+   "name": "multi_result_turn",
+   "raw": "[[ ## lead ## ]]\nAnn Lee, a gold tier customer with a balance of 120.5, has 3 recent orders.\n\n[[ ## blocks ## ]]\n[{\"kind\":\"stats\",\"title\":\"Recent Orders\",\"ref\":\"r2\",\"fields\":[{\"label\":\"order_ids\",\"ref\":\"r2.order_ids\"},{\"label\":\"statuses\",\"ref\":\"r2.statuses\"},{\"label\":\"total\",\"ref\":\"r2.total\"}]},{\"kind\":\"record\",\"title\":\"Order A100\",\"ref\":\"r2\",\"fields\":[{\"label\":\"order_id\",\"ref\":\"r2.order_ids.0\"},{\"label\":\"status\",\"ref\":\"r2.statuses.0\"}]},{\"kind\":\"record\",\"title\":\"Order A101\",\"ref\":\"r2\",\"fields\":[{\"label\":\"order_id\",\"ref\":\"r2.order_ids.1\"},{\"label\":\"status\",\"ref\":\"r2.statuses.1\"}]},{\"kind\":\"record\",\"title\":\"Order A102\",\"ref\":\"r2\",\"fields\":[{\"label\":\"order_id\",\"ref\":\"r2.order_ids.2\"},{\"label\":\"status\",\"ref\":\"r2.statuses.2\"}]}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 1.3
+  },
+  {
+   "name": "long_prose_one_result",
+   "raw": "[[ ## lead ## ]]\nYou can return most items within 30 days of delivery, with a 5.00 return fee, and refunds typically take 5 to 7 business days.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"record\", \"ref\": \"r1.window_days\", \"fields\": {\"window_days\": 30}}, {\"kind\": \"record\", \"ref\": \"r1.return_fee\", \"fields\": {\"return_fee\": 5.0}}, {\"kind\": \"record\", \"ref\": \"r1.refund_days\", \"fields\": {\"refund_days\": \"5 to 7\"}}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.8
+  },
+  {
+   "name": "list_of_records",
+   "raw": "[[ ## lead ## ]]\nYou have 3 open invoices, totalling 450.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"record\", \"title\": \"Open Invoices\", \"ref\": \"r1.invoices\", \"fields\": [\"status\"], \"stats\": [], \"quote\": \"Open invoices\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.6
+  },
+  {
+   "name": "a_page",
+   "raw": "[[ ## lead ## ]]\nYou have 9 support tickets, with the first four being T-11, T-12, T-13, and T-14.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"stats\", \"title\": \"Support tickets\", \"ref\": \"r1.total\", \"fields\": [\"total\"], \"stats\": [{\"label\": \"Total tickets\", \"ref\": \"r1.total\"}]}, {\"kind\": \"record\", \"title\": \"Ticket IDs\", \"ref\": \"r1.output[0].key\", \"fields\": [\"ticket_ids\"], \"quote\": \"T-11, T-12, T-13, T-14\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.7
+  },
+  {
+   "name": "status_like",
+   "raw": "[[ ## lead ## ]]\nYour refund was approved, reference REF-4410.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"record\", \"ref\": \"r1.status\", \"fields\": [\"status\"], \"quote\": \"approved\"}, {\"kind\": \"record\", \"ref\": \"r1.reference\", \"fields\": [\"reference\"], \"quote\": \"REF-4410\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.6
+  },
+  {
+   "name": "nested_record",
+   "raw": "[[ ## lead ## ]]\nYour account ACC-77 has a daily limit of 500 and a monthly limit of 2000.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"record\", \"title\": \"Limits\", \"ref\": \"r1.limits\", \"fields\": [\"daily\", \"monthly\"], \"stats\": [], \"quote\": \"\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.6
+  },
+  {
+   "name": "nothing_useful_in_result",
+   "raw": "[[ ## lead ## ]]\nI will remind you tomorrow with request_id 8f3a9c1e7b.\n\n[[ ## blocks ## ]]\n[{\"kind\":\"quote\",\"quote\":\"Done, I will remind you tomorrow morning.\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.5
+  },
+  {
+   "name": "supporting_lookup",
+   "raw": "[[ ## lead ## ]]\nThe due amount for invoice INV-9 is 310.25.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"record\", \"ref\": \"r1.amount\", \"fields\": {\"amount\": 310.25}, \"stats\": [], \"quote\": \"310.25\"}, {\"kind\": \"record\", \"ref\": \"r1.due\", \"fields\": {\"due\": \"2025-05-20\"}, \"stats\": [], \"quote\": \"2025-05-20\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.9
+  },
+  {
+   "name": "numbers_that_must_be_copied",
+   "raw": "[[ ## lead ## ]]\nYour last order cost 1,284.50 including tax of 98.75 across 12 items.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"stats\", \"title\": \"Order Summary\", \"ref\": \"r1\", \"fields\": [\"total\", \"tax\", \"items\"], \"stats\": [{\"label\": \"Total\", \"ref\": \"r1.total\"}, {\"label\": \"Tax\", \"ref\": \"r1.tax\"}, {\"label\": \"Items\", \"ref\": \"r1.items\"}]}, {\"kind\": \"record\", \"title\": \"Order Details\", \"ref\": \"r1\", \"fields\": [\"order_id\", \"total\", \"tax\", \"items\"], \"quote\": \"Your last order cost 1,284.50 including tax of 98.75 across 12 items.\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.8
+  },
+  {
+   "name": "empty_results_long_answer",
+   "raw": "[[ ## lead ## ]]\nTo change your shipping address, open your account settings and choose Addresses; you can store up to five addresses and mark one as default.\n\n[[ ## blocks ## ]]\n[{\"kind\": \"quote\", \"quote\": \"To change your shipping address, open your account settings and choose Addresses. Select the address you want to change, edit the fields and save. Changes apply to future orders only; orders that have already shipped keep their original address. If an order is still processing, contact support quickly and ask them to update it before it leaves the warehouse.\"}]\n\n[[ ## completed ## ]]",
+   "calls": 1,
+   "error": null,
+   "latency": 0.6
+  }
+ ]
+}

@@ -171,3 +171,18 @@ def test_clear_live_pending_clears_consultation_cme(todo_workflow_path):
     cme = ctx._consultation_cme.context
     assert cme.get("command_name") is None
     assert cme["NLU_Pipeline_Stage"] == fastworkflow.NLUPipelineStage.INTENT_DETECTION
+
+
+def test_consultation_review_record_is_the_workflow_root_across_contexts_on_one_channel(todo_workflow_path):
+    """fix-1hs8: the wildcard walk goes to the parent until it reaches the root. The review record is that root,
+    and a second context built on the same channel (a restart, a restore) reuses the one workflow and its root:
+    no second root assignment, and the record is still the root so the walk stops there instead of asking the
+    record's context class for a parent it does not have."""
+    channel = f"kk46_{uuid.uuid4().hex[:8]}"
+    first = _make_ctx(todo_workflow_path, channel)
+    second = _make_ctx(todo_workflow_path, channel)
+    assert second._consultation_workflow is first._consultation_workflow
+    workflow = second._consultation_workflow
+    assert workflow.root is not None
+    assert workflow._current_command_context is workflow.root
+    assert workflow._current_command_context_name == "ProposalReview"

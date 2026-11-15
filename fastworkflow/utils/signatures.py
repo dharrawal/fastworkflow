@@ -1466,23 +1466,38 @@ Today's date is {today}.
 
         folderpath = getattr(app_workflow, "folderpath", None)
         identifiers = identifier_patterns(folderpath) if folderpath else ()
-        return planning_commands.option_command(type(cmd_parameters), subject_command_name, identifiers)
+        params_class = cmd_parameters if isinstance(cmd_parameters, type) else type(cmd_parameters)
+        return planning_commands.option_command(params_class, subject_command_name, identifiers)
+
+    def checked_command(self, app_workflow, subject_command_name: str, params_class: type):
+        """The command whose options validation checks: the planning command itself, else the command's
+        ``Input`` options. Known from the parameters class alone, so before the values are extracted."""
+        planning = _planning_command_of(app_workflow, subject_command_name)
+        return planning if planning is not None else self._option_command(
+            app_workflow, subject_command_name, params_class)
 
     def _check_option_arguments(self, command, cmd_parameters: BaseModel,
-                                diagnostics: Optional[Dict[str, Any]]) -> Optional[str]:
+                                diagnostics: Optional[Dict[str, Any]],
+                                verdicts=None) -> Optional[str]:
         """The arguments of the command *command*'s check options, checked against the request (self.command),
         for a command of either kind (2.46, 3.4).
 
         ``check_verdicts`` (one classifier call per ``verify`` field, when a Jev LM is set) and then
         ``check_arguments``' guards; the guarded values are written back onto *cmd_parameters*.
         Returns the refusal's text, or None when every guard passes.
+
+        *verdicts* (a dict, or a Future of one) are the verdicts a caller started early for this request
+        (``extract_arguments``); None runs ``check_verdicts`` here.
         """
         # workflow_agent imports this module (through command_executor), so it is read at call time.
         from fastworkflow.workflow_agent import _jev_lm
 
         raw = {param.name: getattr(cmd_parameters, param.name, None) for param in command.params}
         try:
-            verdicts = planning_commands.check_verdicts(_jev_lm(), command, self.command)
+            if verdicts is None:
+                verdicts = planning_commands.check_verdicts(_jev_lm(), command, self.command)
+            elif hasattr(verdicts, "result"):
+                verdicts = verdicts.result()
             args, notes = planning_commands.check_arguments(command, raw, self.command, verdicts)
         except planning_commands.PlanningCommandCallError as refusal:
             if diagnostics is not None:
@@ -1527,7 +1542,8 @@ Today's date is {today}.
                             app_workflow: fastworkflow.Workflow,
                             subject_command_name: str,
                             cmd_parameters: BaseModel,
-                            diagnostics: Optional[Dict[str, Any]] = None
+                            diagnostics: Optional[Dict[str, Any]] = None,
+                            verdicts=None
                             ) -> Tuple[bool, str, Dict[str, List[str]], List[str]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
@@ -1910,10 +1926,9 @@ Today's date is {today}.
                 is_valid = False
         # One validation step for every command (3.4, The argument path): the options' checks, then the
         # roles, then the Input's validators (the former hook). A command's checks are its option fields (2.46).
-        command = planning if planning is not None else self._option_command(
-            app_workflow, subject_command_name, cmd_parameters)
+        command = self.checked_command(app_workflow, subject_command_name, type(cmd_parameters))
         if is_valid and command.params:
-            guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics)
+            guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics, verdicts)
             if guard_refusal is not None:
                 return (False, guard_refusal, {}, [])
         # The roles of two required str inputs given one value (3.4), as the typed planning call checks them.

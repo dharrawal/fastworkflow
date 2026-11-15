@@ -12,8 +12,10 @@ class Signature:
         branch: str = Field(default="", description="one branch's name; empty for every branch")
 
     class Output(BaseModel):
-        branches: list[str] = Field(description="each branch named, in row order")
-        hours: list[str] = Field(description="each branch's opening hours, in row order")
+        branches: list[str] = Field(description="each branch named, in row order",
+                                    json_schema_extra={"ui": {"table": "hours"}})
+        hours: list[str] = Field(description="each branch's opening hours, in row order",
+                                 json_schema_extra={"ui": {"table": "hours"}})
 
     plain_utterances = [
         "when are you open",

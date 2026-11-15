@@ -965,6 +965,28 @@ class TestPackaging:
         assert elapsed is not None
         assert elapsed < 0.5, f"chatbot import took {elapsed:.3f}s"
 
+    def test_server_import_does_not_load_the_composer(self):
+        """The composer (answer card, question form) needs dspy; the chatbot server and
+        package must stay import-light and never pull it in."""
+        script = textwrap.dedent(
+            """
+            import sys
+            import fastworkflow.run_chatbot
+            import fastworkflow.run_chatbot.server
+            bad = [n for n in ("fastworkflow.run_chatbot.composer", "dspy") if n in sys.modules]
+            print("PRESENT=" + ",".join(bad))
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "PRESENT=\n" in result.stdout + "\n", result.stdout + result.stderr
+
 
 # ----------------------------------------------------------------------
 # Read-only viewer discipline: the debug layer never creates or writes the

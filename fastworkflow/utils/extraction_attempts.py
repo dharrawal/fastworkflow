@@ -6,11 +6,13 @@ attempt, the first included, so every extraction was a temperature-1.0 sample wh
 attempts, the reward function, the threshold, ``fail_count``, the best prediction wins, the first one at or
 above the threshold returns at once) but runs attempt 1 at temperature 0 (``FIRST_ATTEMPT_TEMPERATURE``) with no rollout id override. Only
 the retries (attempts 2..N, which happen when the reward is below the threshold or an attempt raised) use
-BestOfN's diverse sampling: temperature 1.0 and distinct rollout ids.
+BestOfN's diverse sampling: temperature 1.0 and distinct rollout ids. An attempt whose model call timed out (after
+the LM's own retries) ends the loop: sampling again would only wait out the timeout again.
 """
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
+from fastworkflow.utils import dspy_utils
 from fastworkflow.utils.logging import logger
 
 FIRST_ATTEMPT_TEMPERATURE = 0.0  # hard-coded temperature 0 for attempt 1: under test, not yet a decision
@@ -49,6 +51,12 @@ class FirstAttemptGreedy(dspy.BestOfN):
 
             except Exception as e:
                 logger.warning(f"Extraction attempt {idx + 1} failed (rollout id {rid}): {e}")
+                if dspy_utils.is_timeout_error(e):
+                    # The model call timed out on every try it was given (``LLM_NUM_RETRIES_PARAM_EXTRACTION``):
+                    # a sampling retry would be three more of them, and the longest wait of one extraction
+                    # would be three times the one the timeout settings promise. Nothing was extracted:
+                    # the caller's not-given handling applies, as for an attempt that raised on every try.
+                    break
                 if idx > self.fail_count:
                     raise e
                 self.fail_count -= 1

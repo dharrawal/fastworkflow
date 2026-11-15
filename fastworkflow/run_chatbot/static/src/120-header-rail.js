@@ -692,7 +692,7 @@ function refreshConvs(reportFailure) {
        clearing conversations nulls `state.turnKey` before refreshing so the
        "all cleared" state still appears. */
     if (!hierarchyPath.length && !state.turnKey && !sealedPageOwnsDetail()
-        && !archivedConversationsOwnDetail()) { showNavigationTabEmpty(); }
+        && !archivedConversationsOwnDetail() && !experimentViewOwnsDetail()) { showNavigationTabEmpty(); }
   }).catch(function (error) {
     if (requestWasAborted(error) || refresh !== conversationRefresh) { return; }
     var list = document.getElementById("convList"); clear(list);

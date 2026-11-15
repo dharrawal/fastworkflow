@@ -551,24 +551,7 @@ def test_write_previews_removes_orphan_context_preview_and_empty_folder_but_keep
 # ------------------------------------------------------------------
 
 
-@pytest.fixture
-def no_jev_env(monkeypatch):
-    """Ensure ``JEV_API_KEY`` is absent from both ``os.environ`` and ``fastworkflow._env_vars``."""
-    previous = dict(fastworkflow._env_vars)
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    env_vars = {k: v for k, v in previous.items() if k != "JEV_API_KEY"}
-    fastworkflow.init(env_vars=env_vars)
-    workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
-    try:
-        yield
-    finally:
-        fastworkflow.init(env_vars=previous)
-        workflow_agent._jev_lm.cache_clear()
-        workflow_agent._planning_command_matcher.cache_clear()
-
-
-def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, caplog, no_jev_env):
+def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, caplog, no_planner_key):
     folder = _library_workflow(tmp_path)
     workflow_agent._jev_lm.cache_clear()
     workflow_agent._planning_command_matcher.cache_clear()
@@ -590,7 +573,7 @@ def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, ca
                    for r in caplog.records)
 
 
-def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplog, no_jev_env):
+def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplog, no_planner_key):
     empty_planning_commands_folder = _library_workflow(tmp_path / "empty_planning_commands", default_planning_commands=False)
     no_planning_commands_folder = _library_workflow(tmp_path / "no_planning_commands", default_planning_commands=False)
     shutil.rmtree(os.path.join(no_planning_commands_folder, "_commands"))   # no planning commands at all
@@ -606,7 +589,7 @@ def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplo
         assert not any("JEV_API_KEY" in r.getMessage() for r in caplog.records)
 
 
-def test_command_preview_does_not_warn_when_jev_key_is_unset(tmp_path, caplog, no_jev_env):
+def test_command_preview_does_not_warn_when_jev_key_is_unset(tmp_path, caplog, no_planner_key):
     folder = _library_workflow(tmp_path / "wf")
     out = str(tmp_path / "previews")
     workflow_agent._jev_lm.cache_clear()
@@ -683,7 +666,7 @@ def _with_rule_check(tmp_path) -> str:
 
 
 def test_the_jev_info_line_names_the_verify_fields_and_is_logged_once_per_folder(
-        tmp_path, no_jev_env, caplog):
+        tmp_path, no_planner_key, caplog):
     folder = _with_rule_check(tmp_path)
 
     caplog.clear()

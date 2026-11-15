@@ -92,7 +92,7 @@ from pydantic import BaseModel
 from fastworkflow.observation_offloading.finish_check import quote_step_value
 from fastworkflow.utils.python_utils import type_text
 from fastworkflow.field_options import (ConfirmsOptions, CopiedOptions, FieldOptions,  # noqa: F401
-                                        RecordNamedOptions)
+                                        RecordNamedOptions, UiOptions)
 from fastworkflow.command_declarations import (UserApproval, descends_to,  # noqa: F401
                                                user_approval_for_execution)
 from fastworkflow.planning_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
@@ -104,6 +104,7 @@ __all__ = [
     "CopiedOptions",
     "FieldOptions",
     "RecordNamedOptions",
+    "UiOptions",
     "UserApproval",
     "count",
     "count_and_names_read",

@@ -15,7 +15,8 @@ python -m fastworkflow.run_fastapi_mcp \
 
 Other CLI flags: `--host` (default `0.0.0.0`), `--context` (JSON string), `--startup_command`,
 `--startup_action` (JSON file path, or an inline JSON object starting with `{`), `--expect_encrypted_jwt` (enable JWT signature verification;
-off by default for trusted networks). Requires `pip install "fastworkflow[server]"`.
+off by default for trusted networks), `--chat_approval_surface {channel,host}` (the approval surface of the stream and
+assistant endpoints and the MCP tools; default `host`, strict: signed JWT with a user_id, token delivered and returned; `channel` is the lenient plain-`yes` form for local development tools). Requires `pip install "fastworkflow[server]"`.
 
 Interactive docs are served at `/docs` (Swagger) and `/redoc`. CORS is open (`*`) by default —
 tighten `allow_origins` for production.
@@ -116,6 +117,19 @@ onto the running execution and answered `202 {"turn_key":…, "exec_state":"runn
 the consumer already reading them. Poll that key. A *different* query on a busy channel is
 `409 {"detail":…, "reason":"channel_busy", "turn_key":…}`.
 
+**Long turns over MCP.** `timeout_seconds` (default 60) is a delivery deadline: `invoke_assistant` returns 202
+`{turn_key, exec_state:"running"}` and the turn keeps running; `invoke_agent` stays open and adds a `timeout`
+frame. The mount has no read time-out of its own (the in-process client of `mcp_specific.setup_mcp`), so only the
+MCP client's time-out can end a wait. After that, call the `get_turn` tool with the `turn_key` (or `get_latest_turn`
+when no key arrived); both read only the caller's own channel. Never resubmit the query: it joins the running
+turn, and after it has finished it runs again.
+
+**Ending a channel.** When a client is finished with a channel, call `POST /end_session` (the MCP tool `end_session`;
+no arguments, or `{"discard_pending": true}`). It frees the server's live session for that channel (a workflow whose
+state cannot be checkpointed otherwise stays in server memory for the life of the process). Finished turns and history
+stay readable; a pinned workflow's in-memory state is dropped. 409 while a turn runs or a question is pending (unless
+`discard_pending`); repeating it is safe (`ended: false`). The chat page does not need it (it reuses one channel).
+
 **Artifacts.** The terminal `output` carries `command_outputs[*].command_response.artifacts`
 alongside the answer. A value may be inline, or an offloaded reference
 `{"__fw_artifact_ref__":"<id>","size":…,"content_type":"…"}` to be fetched from the store that
@@ -140,6 +154,62 @@ Execute a specific command directly, bypassing intent + parameter extraction.
               "command_parameters": { "order_id": "W123" } },
   "timeout_seconds": 60 }
 ```
+
+### POST /compose_answer_card and POST /compose_question_form  (auth) — optional UI helpers
+Two calls a chat client may make after a turn to show a model-composed card or form. Same bearer token as
+`GET /command_schemas`; they take no session lease, read no session state, and are not MCP tools. The server
+reads the model from `LLM_RESPONSE_GEN` (key `LITELLM_API_KEY_RESPONSE_GEN`); there is no code default, but the shipped
+`fastworkflow.env` template sets it to `mistral/mistral-small-latest`.
+
+```json
+POST /compose_answer_card
+{ "user_message": "where is my order", "answer": "Your order is delivered.", "status": "completed",
+  "use_dspy_cache": false,
+  "results": [ { "id": "r1", "command": "get_order_details", "context": "", "parameters": {},
+                 "output": {"status": "delivered", "total": 186.32}, "titles": {"total": "Total"} } ] }
+```
+```json
+POST /compose_question_form
+{ "question": "Which payment method should I refund to: paypal_5521 or the original?",
+  "user_message": "refund my order", "results": [ /* same shape */ ], "use_dspy_cache": false }
+```
+Both always answer `200` with the verified value, or `null` and a `reason`:
+```json
+{ "card": { "lead": "...", "blocks": [ { "kind": "stats", "stats": [ { "label": "Status", "ref": "r1.status", "tone": "neutral" } ] } ] } }
+{ "form": { "fields": [ { "name": "", "label": "Payment method", "kind": "choice",
+                          "options": [ { "value": "paypal_5521", "label": "paypal_5521" } ],
+                          "required": false, "help": "" } ] } }
+{ "card": null, "reason": "no_model" }        // or "failed", "timeout" (the call took over 30 seconds), or "not_needed"
+```
+- `parts` (optional) is the list of parts of a split turn, as the core recorded it: the `fw_sub_tasks` artifact of the turn's last
+  command output, forwarded as it is: `[{"number": 1, "text": "<the sub-task's request>", "title": "<its heading>", "answered": true,
+  "start": 25, "end": 45}, ...]` (`start` / `end` are character offsets of that part's answer in `answer`, `null` for a part
+  with no answer). Send it only when the turn has it. The server uses it, when it fits `answer`, in place of reading the
+  answer's `### N.` headings; a list that is malformed or does not fit is ignored (never a `422`), and the headings are read as before.
+- `id` is yours (`r1`, `r2`, ...). A `ref` is `<id>.<key>[.<key>...]` into that result's `output`, and the
+  client reads the value from its own copy: the server returns no values. A JSON string held in an `output` field,
+  and a one-key wrapper around a record, are decoded up to 5 levels before refs are made; do the same
+  (`run_chatbot.composer.normalize_output_dict`), or refs will not resolve on your side.
+- The server drops what it cannot ground: a lead or block title or stat label naming a number or ID that is not in
+  the turn's data (the lead becomes `""`; a decimal must be a grounded number, rounded), a block whose `ref` does not
+  resolve (a record or table whose ref is one value becomes a stat; a ref with a list index over a list of records becomes a
+  table over that list), a quote that is not in the answer, a form option that is not a value or dict key in `results` or in the
+  question (an option label naming a different ID than its value is replaced by the value).
+- `not_needed` means the composer answered and chose the plain view: for a form, no field was left or the form gives the user
+  nothing a text box does not (it needs a pick of two or more options, a yes/no or a date); for a card, only a lead that restates
+  the answer was left. It is not an error and is not logged as one: treat it like any `null` (no notice, ask again next turn).
+  Only `no_model` is worth telling the user, once.
+- A card's table block over a whole result is built only from a *page*: an integer `total` (not a boolean) and every list
+  field of one length, with at least two non-empty scalar lists (`run_chatbot.composer._is_page_shape`, the same definition as
+  `observation_offloading.facts.output_page`; the shared fixture `tests/fixtures/page_shape_cases.json` pins it).
+  A table over a list of records, or a table block naming fewer than two columns, shows every column.
+- `use_dspy_cache: false` applies to that one call only. On `/invoke_agent`, `/invoke_agent_stream` and `/invoke_assistant` the argument changes the process-wide cache
+  only on a server started with `--allow_request_cache_toggle` (the chatbot's local server); elsewhere it is ignored, and a value that
+  disagrees with the server is named in the `X-FW-DSPy-Cache` response header. The turn cache is a server-wide
+  setting chosen at start (`FW_LM_CACHE=0`).
+- `422` when `results` has more than 60 entries, `answer` is over 150000 characters or `question` is over 20000 characters. Anything the
+  model does wrong is a `200` with `null`, never a 5xx; keep your deterministic view when you get one.
+- Everything in the request, including command outputs, is sent to the `LLM_RESPONSE_GEN` model. Offer a switch.
 
 ### Conversation management (auth)
 - `POST /new_conversation` — persist the current conversation (generates topic/summary) and start fresh. Use for the **New chat** button.
@@ -206,6 +276,99 @@ text and artifacts live at `command_outputs[*].command_response`. When `command_
 is `"ask_user"`, roles invert: `command_parameters` holds the agent's question and
 the response holds the user's answer; `success=false` means the question is still open.
 
+## Results and waiting turns (what a client renders)
+
+### The result of a command
+A command that declares `Signature.Output` returns it, and `command_outputs[*].command_response.output` holds that
+model as a plain dict; `response` is the same data as JSON text. A command with no `Signature.Output` has `output`
+null. Render `output` rather than parsing `response`. A value can be a JSON string (a workflow may wrap
+`json.dumps(...)` in a one-field `Output`); decode it. `GET /command_schemas` (auth) lists, by qualified command name, `{kind, input, output}`: the `Input` and
+`Output` JSON Schemas, with each field's `title`, `description`, `examples`, `enum`, bounds, the optional `ui` hint
+(`hidden`, `hero`, `format`, `table`, `tones`, `currency` on an `Output` field, `widget` on an `Input` field), `classifier_confirms.meanings`, and
+`available_from` (the commands whose output feeds the field). `kind` is `"execution"` or `"planning"`.
+Cache the listing per connection.
+
+### When a turn is waiting for the user
+A turn waits in one of two shapes. Test for both:
+1. `status` is `"awaiting_user"`: the agent, a planning command, an approval or a review asked. The open question is the
+   last entry of `command_outputs`, with `command_name` `"ask_user"`, the question in `command_parameters`, and
+   `command_response.success` false.
+2. `status` is `"completed"` and the last entry's `command_response.artifacts.awaiting_user` is `true`: the user typed
+   a `/` command that needs approval (nothing ran). The turn is not suspended, but the next message answers it.
+
+### Prompt keys (on the last entry's `command_response.artifacts`)
+A waiting turn's last entry carries `question_kind` and, for four kinds, a payload. These keys are UI protocol, not
+user artifacts: do not list them as artifacts, and they are not on the answered entry's final answer. The server adds
+them to a waiting turn only; once the prompt is answered, `question_kind` stays on its entry but the payload
+keys are left off the turn's final answer.
+
+| `question_kind` | Meaning | Payload key | The next message must be |
+|---|---|---|---|
+| `agent` | the agent asked an open question | none | free text, the answer |
+| `planning_parameter` | an agent's planning command call was refused for an input | `parameter_request` | free text; lines of `<field name>: <value>` (the reply is added to the original request and read by the parameter-extraction model; no code parses it) |
+| `approval` | a command that needs approval is about to run | `approval` | exactly `yes`, `always` or `no` (lower case; `Yes` and `yes please` are not accepted) |
+| `review` | a sub-task or plan review | `review` | `yes`, `no`, or edits (`change 2: goal=...`, `drop 3`; grammar in `review_engine.parse_edits`) |
+| `phase_step` | no-agent mode only (`LLM_AGENT` unset): a planning command paused at a conditional step or at a command step missing one plain value | `phase_step` | for a condition exactly `yes` or `no` (`y`/`true`/`n`/`false` also read; anything else is asked once more); for a missing value the value alone; `cancel` declines and ends the command with its `fw_not_run` stop (`reason` "declined"). The data also carries `later_phases` (the phases after this one; `remaining` is only this phase's rest). While it is pending, every message to `invoke_agent` (`POST /invoke_agent`, the MCP tool) is the reply, a `/`-prefixed one too (the endpoint strips the `/`, as for `ask_user`); to run a separate command meanwhile send it to `invoke_assistant`, which handles it on its own and leaves the question open. No verified identity needed; the chat page shows it as a plain question |
+| `unknown` | the server could not classify it | none | free text; show the entry's text |
+
+```json
+{ "question_kind": "approval",
+  "approval": { "command": "Record/add_note", "parameters": {"text": "Ann"},
+                "origin": "agent", "irreversible": true, "can_always": true } }
+```
+`origin` is `"agent"` or `"user"` (a `/` command); `can_always` is false when the server has no identity to record a
+grant against, so hide "Always allow" and never send `always`.
+
+Under `--chat_approval_surface host` (the default) the response that asks (the stream's `output` frame, `data.approval`, or the
+`/invoke_assistant` body) also carries `{"approval": {"record_id": ..., "token": ...}}` beside the turn fields. It is
+live-only (never in a stored turn or `GET /turns`). Keep it out of the UI and of any log, and send it once as
+`approval_token` on the request that answers the prompt. Under `host` (the default) an unsigned server refuses the command. Under `channel` no token is delivered and
+`approval_token` is ignored. The chat page does exactly this.
+```json
+{ "question_kind": "planning_parameter",
+  "parameter_request": { "command": "Library/book_by_title", "missing": ["title"], "invalid": [], "values": {} } }
+{ "question_kind": "review",
+  "review": { "kind": "sub_tasks", "title": "Sub-tasks", "revision": 0,
+              "items": [ { "goal": "...", "outcome": "...", "inputs": [ { "name": "member", "value": "Emma", "from_subtask": null, "drafted": false } ],
+                           "means": { "kind": "from_scratch", "name": "" }, "check": "" } ],
+              "changes_data": [false] } }
+```
+`review.kind` is `"sub_tasks"` or `"plan"`; a plan's `items` are `{goal, steps: [text]}`. `changes_data[i]` is true when
+item i runs a command that writes data. `revision` rises by one each time an edit re-drafts the review, and a review edit
+re-prompts without a new `ask_user` entry, so re-read the keys on every awaiting turn.
+
+### A failed `/` command (assistant mode)
+A `/` command whose parameters could not be filled, or whose name is ambiguous, answers with the error text and no
+`question_kind` (the turn is not `awaiting_user`). Its last entry's `artifacts` may hold:
+- `parameter_request`: `{"command": "record_values", "missing": ["ratio", "ids"], "invalid": [], "values": {"name": "Bob", "count": 3}}`.
+  `values` are the fields the user did give (no not-given placeholders). Absent when the refusal names no field.
+- `intent_choices`: the qualified command names the message could mean, in order, without duplicates:
+  `["Library/find_book", "Library/find_member"]`.
+
+Neither key is ever sent in agent mode. To answer a `parameter_request`, send `/<command name> name=value ...` (the leaf
+name, without a context prefix); to answer `intent_choices`, send the chosen command's name; `abort` ends the round.
+In assistant mode `name=value` is bound in code (`/add_two_numbers first_num=2 second_num=3`, no model call); XML and
+positional forms remain agent-only, and a leading `/` is dropped before the command name is matched.
+
+### `answer` is the default rendering; the data is there too
+
+The turn's `answer` is the default plain-text rendering. Every part of it that the core writes in code is also available as data, and a client may present from the data and ignore the text. Where a key is listed, it is in `command_outputs[*].command_response.artifacts` of the entry named; the answer text is the same with or without it.
+
+| Text the core writes | Data | Where, and shape |
+|---|---|---|
+| Parts of a multi-part answer (`### N. title` headings, "Part i of n:" labels of a step-cap hand-off) | `fw_sub_tasks` | the turn's last command output; one entry per sub-task: `number`, `text`, `title`, `answered` (the part has text under its heading), `not_run` (`true` only in no-agent mode, for a part with an `fw_not_run` entry: its text is the stop's explanation, not a command's answer; absent otherwise), `start`, `end` (offsets of the part's answer in `answer`), and `runs` only for a part that was continued: `[{index, of, start, end}]`, the offsets of each run's answer after its label |
+| A review or plan proposal and the replies it accepts | `review` with `question_kind: "review"` | the waiting entry; `kind`, `title`, `revision`, `items`, `changes_data`, `reply_forms`: `[{kind: accept/decline/edit/add/drop/switch_plan, reply or pattern or free_text, per_item, separator?, alternatives?}]`, the replies the shown hint promises (the reply reader's own cues are wider); an item whose planning-command match was ambiguous also carries `alternatives: [{name, description}]` (the other plans that fit, at most 3; absent otherwise), and `reply_forms` then ends with a `switch_plan` form `{pattern: "step N: use NAME", alternatives: {"<step>": [names]}}` |
+| An approval question | `approval` with `question_kind: "approval"` | the waiting entry; `command`, `parameters`, `origin`, `irreversible`, `can_always` |
+| A refused planning call or a failed "/" command's missing values | `parameter_request` | `command`, `missing`, `invalid`, `values` |
+| The capability answer to "what can you do?" (written in code) | `capabilities` | one `framework` command output of its own in `command_outputs` (not drawn as a result), equal to the data on the final answer's output; planning commands with their example, the current context's commands, the other-context lines |
+| A planning command that stopped, or a part not run, without an agent model (`LLM_AGENT` unset: no-agent mode) | `fw_not_run` | the turn's last command output (a turn that ran no command carries it on a command output of its own); a list, one entry per stopped part: `kind` (`not_run_here`), `command` (`null` for an ad hoc part), `phase`, `open_step` (`{number, text, kind, reason}`, `null` for an ad hoc part), `done`, `facts`, `remaining`, `suggested_plan` (a numbered continuation written with no model call: the open step, the rest of its phase, each later phase's steps as the template has them, then the line asking the client to write the answer), `means`, `sub_task` (the part's number in a split turn, else `null`), and when they apply `later_phases`, `nested` (the stop of a planning command this one called) and `reason`. `open_step.number` is the step's own number in its phase's plan (as `done` and `remaining` number theirs); `suggested_plan` is renumbered from 1 and `open_step.plan_number` is the open step's place in it; `facts` holds finished phases only. The turn is COMPLETED and its answer is a short explanation written in code; wording the final answer is the client's |
+| An ambiguous "/" command | `intent_choices` | qualified command names, in order |
+| A capability answer written in code (agent mode, a workflow with planning commands) | `capabilities` | the answer's own `CommandResponse` (the `CommandOutput` that `process_message` returns and the CLI shows); it is not in `command_outputs`, which has no entry for that turn. `{planning_commands: [{name, title, example}], commands: [{name, title}], other_contexts: [{context, title, commands, more}]}` |
+| The `what_can_i_do` listing | `capabilities` and `command_response.output` | `{workflow: {name, contexts, context_inheritance}, context, commands: [{name, qualified_name, context, planning, approval_marker, description, parameters, outputs, sample_utterances}]}` |
+| `abort` ("command aborted") | `aborted` and `output` | what it ended: `{stage, command?, command_name?}`; `output` is `{command, command_name}` |
+| `you_misunderstood` | `command_choices` and `output.valid_command_names` | the command names it lists, in its order |
+| A command's own result | `command_response.output` | the typed `Signature.Output` |
+
 ## Workflow file formats
 
 ### Command file (single-file pattern, preferred) — `_commands/<command_name>.py`
@@ -251,10 +414,13 @@ validation fails.
 
 ## Environment variables (set in fastworkflow.env)
 
-LLM model strings (all default to `mistral/mistral-small-latest`):
-`LLM_SYNDATA_GEN`, `LLM_PARAM_EXTRACTION`, `LLM_RESPONSE_GEN`, `LLM_PLANNER`, `LLM_AGENT`,
-`LLM_CONVERSATION_STORE`. Matching keys live in `fastworkflow.passwords.env` as
-`LITELLM_API_KEY_<ROLE>`.
+LLM model strings (the templates default them to `mistral/mistral-small-latest`):
+`LLM_SYNDATA_GEN`, `LLM_PARAM_EXTRACTION`, `LLM_PLANNER`, `LLM_AGENT`, `LLM_CONVERSATION_STORE`. Matching keys live in
+`fastworkflow.passwords.env` as `LITELLM_API_KEY_<ROLE>`.
+
+`LLM_RESPONSE_GEN` (key `LITELLM_API_KEY_RESPONSE_GEN`) is used only by `POST /compose_answer_card` and
+`POST /compose_question_form`. The shipped `fastworkflow.env` template sets it to `mistral/mistral-small-latest` (a Bedrock model needs no key entry: AWS credential chain); unset, those
+endpoints answer `{"card": null, "reason": "no_model"}` / `{"form": null, ...}`.
 
 LiteLLM Proxy: prefix model names with `litellm_proxy/`, set `LITELLM_PROXY_API_BASE` in the env
 file and `LITELLM_PROXY_API_KEY` in the passwords file (per-role keys are then ignored).
