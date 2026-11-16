@@ -183,11 +183,9 @@ def test_held_out_corpus_labels_are_valid_commands():
 
 
 def _proposal_review_model_dir() -> str:
-    model_dir = os.path.join(CONSULTATION, "___command_info", "ProposalReview")
-    threshold = os.path.join(model_dir, "threshold.json")
-    if not os.path.isfile(threshold):
-        pytest.skip("consultation ProposalReview head is not trained")
-    return model_dir
+    """The head's folder. The caller carries ``requires_consultation_head`` (tests/conftest.py), which skips or, with
+    ``FW_REQUIRE_HEADS=1``, fails when it is absent, so the head is here by the time this runs."""
+    return os.path.join(CONSULTATION, "___command_info", "ProposalReview")
 
 
 def _predict_command_short_name(router, text: str) -> str:
@@ -201,6 +199,7 @@ def _predict_command_short_name(router, text: str) -> str:
     return label.split("/")[-1] if "/" in label else label
 
 
+@pytest.mark.requires_consultation_head
 def test_trained_head_scores_held_out_corpus():
     from fastworkflow.model_pipeline_training import CommandRouter
     from fastworkflow.train.artifact_versioning import require_construction_record

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 import os
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -410,6 +410,8 @@ class CommandNamePrediction:
         # parent-context walk where it is given (design 2.18, 3.9 step 4). A null
         # command_name alone cannot tell it from a decline, which is why this exists.
         answered_bare_value: bool = False
+        # The ambiguity prompt's routable candidates (fix-weih.2); set only with error_msg.
+        candidates: Optional[List[str]] = None
 
     def __init__(self, cme_workflow: fastworkflow.Workflow):
         self.cme_workflow = cme_workflow
@@ -670,7 +672,7 @@ class CommandNamePrediction:
         # name guard sees one. "" splits to [], hence the guard.
         tentative_command_name = (
             command.split(None, 1)[0].split("(", 1)[0] if command.strip() else "")
-        normalized_command_name = tentative_command_name.lower()
+        normalized_command_name = tentative_command_name.lstrip("/").lower()
         # The typed token is lowercased, but `command_name_dict` keeps each
         # command's own spelling, so the exact match looks the token up by its
         # lowercase form and resolves to the key as spelled.
@@ -841,7 +843,9 @@ class CommandNamePrediction:
                         # the shape of the record.
                         nlu_trace["reducible"] = True
                         self._store_suggested_commands(self.path, predictions, 1)
-                        return CommandNamePrediction.Output(error_msg=error_msg)
+                        return CommandNamePrediction.Output(
+                            error_msg=error_msg,
+                            candidates=[str(p) for p in predictions if not is_non_routable(p)])
 
         elif nlu_pipeline_stage in (
             NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,

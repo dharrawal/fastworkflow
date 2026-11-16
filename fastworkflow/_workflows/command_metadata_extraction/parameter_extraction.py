@@ -171,12 +171,61 @@ def _unwrap_optional(field_type):
     return field_type, origin
 
 
+def _unique(names) -> list:
+    """*names* without repeats, in first-seen order."""
+    return list(dict.fromkeys(names or []))
+
+
+def _is_not_given(value: Any) -> bool:
+    """Whether *value* is one of the extractor's not-given sentinels."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return value == NOT_FOUND
+    if isinstance(value, int):
+        return value == INVALID_INT_VALUE
+    if isinstance(value, float):
+        return value == INVALID_FLOAT_VALUE
+    return False
+
+
+def parameter_request_for(command_name: str, params: Any, diagnostics: dict) -> Optional[dict]:
+    """The structured form of a failed parameter extraction, or None when no field is to blame.
+
+    ``missing`` and ``invalid`` come from the diagnostics ``validate_parameters`` filled (an invalid
+    field that is also missing is reported once, as missing). ``values`` are the other fields as the
+    user gave them, JSON-safe, without the not-given sentinels. A whole-call refusal names no field,
+    so both lists are empty and there is nothing to ask for field by field: None (fix-weih.2).
+    """
+    missing = _unique(diagnostics.get("missing_fields"))
+    invalid = [name for name in _unique(diagnostics.get("invalid_fields")) if name not in missing]
+    if not missing and not invalid:
+        return None
+    unresolved = set(missing) | set(invalid)
+    try:
+        dumped = params.model_dump(mode="json", warnings=False)
+    except Exception:  # noqa: BLE001 - the artifact is optional; it must not fail the turn
+        logger.warning("parameter_request values could not be dumped", exc_info=True)
+        dumped = {}
+    return {
+        "command": command_name,
+        "missing": missing,
+        "invalid": invalid,
+        "values": {
+            key: value for key, value in dumped.items()
+            if key not in unresolved and not _is_not_given(value)
+        },
+    }
+
+
 class ParameterExtraction:
     class Output(BaseModel):
         parameters_are_valid: bool
         cmd_parameters: Optional[BaseModel] = None
         error_msg: Optional[str] = None
         suggestions: Optional[Dict[str, List[str]]] = None
+        # Structured form of the error, for a human ("/") session only; None in agent mode (fix-weih.2).
+        parameter_request: Optional[Dict[str, Any]] = None
 
     def __init__(self, cme_workflow: fastworkflow.Workflow, app_workflow: fastworkflow.Workflow, command_name: str, command: str):
         self.cme_workflow = cme_workflow
@@ -275,17 +324,17 @@ class ParameterExtraction:
         round_ordinal = self._get_stored_round(self.cme_workflow)
         if round_ordinal is not None:
             diagnostics["retry_round_ordinal"] = round_ordinal
+        # Agentic mode is "not an assistant-mode command, in an agent session". Computed once: it
+        # picks the extraction branch below and gates the parameter_request artifact (fix-weih.2).
+        is_agentic_mode = bool(
+            "is_assistant_mode_command" not in self.cme_workflow.context
+            and "run_as_agent" in self.app_workflow.context
+            and self.app_workflow.context["run_as_agent"]
+        )
         if stored_params:
             new_params = self._extract_and_merge_missing_parameters(stored_params, self.command)
             diagnostics["extraction_method"] = "stored_merge"
         else:
-            # Check if we're in agentic mode (not assistant mode command)
-            is_agentic_mode = (
-                "is_assistant_mode_command" not in self.cme_workflow.context
-                and "run_as_agent" in self.app_workflow.context
-                and self.app_workflow.context["run_as_agent"]
-            )
-
             if is_agentic_mode:
                 # Try regex-based extraction first in agentic mode
                 new_params = self._extract_parameters_from_xml(self.command, command_parameters_class)
@@ -333,10 +382,18 @@ class ParameterExtraction:
                         ),
                         cmd_parameters=new_params)
             else:
-                # Use LLM-based extraction for assistant mode
-                new_params = self._llm_extract(
-                    input_for_param_extraction, command_parameters_class,
-                    app_workflow_folderpath, diagnostics)
+                # Assistant mode ("/" commands): bind a plain ``name=value`` form in
+                # code first (the same signal values as the agent branch); anything
+                # else goes to the LLM as before.
+                new_params = self._extract_parameters_from_key_values(
+                    self.command, command_parameters_class, self.command_name)
+                if new_params is not None:
+                    diagnostics["extraction_method"] = "xml_regex"
+                    diagnostics["deterministic_form"] = "key_value"
+                else:
+                    new_params = self._llm_extract(
+                        input_for_param_extraction, command_parameters_class,
+                        app_workflow_folderpath, diagnostics)
 
         is_valid, error_msg, suggestions, missing_invalid_fields = \
             input_for_param_extraction.validate_parameters(
@@ -381,7 +438,10 @@ class ParameterExtraction:
                 parameters_are_valid=False,
                 error_msg=error_msg,
                 cmd_parameters=new_params,
-                suggestions=suggestions)
+                suggestions=suggestions,
+                parameter_request=(
+                    None if is_agentic_mode
+                    else parameter_request_for(self.command_name, new_params, diagnostics)))
 
         self._clear_parameters(self.cme_workflow)
         return self.Output(
@@ -1277,6 +1337,28 @@ class ExtractedArguments(BaseModel):
     retried: bool = False
 
 
+def _start_argument_checks(app_workflow, extractor, command_name: str, params_class, text: str):
+    """``(future, pool)`` of ``check_verdicts`` for *text*, started in a copy of this thread's context; or
+    ``(None, None)`` when there is no Jev LM or the command has no ``verify`` parameter (nothing to start)."""
+    import concurrent.futures
+    import contextvars
+    from fastworkflow import planning_commands
+    from fastworkflow.workflow_agent import _jev_lm
+
+    lm = _jev_lm()
+    if lm is None:
+        return None, None
+    try:
+        command = extractor.checked_command(app_workflow, command_name, params_class)
+    except Exception as exc:  # noqa: BLE001 - validation resolves it again and raises where it always did
+        logger.debug(f"argument checks not started early: {exc!r}")
+        return None, None
+    if not any(p.verify for p in command.params):
+        return None, None
+    pool = concurrent.futures.ThreadPoolExecutor(1)
+    return pool.submit(contextvars.copy_context().run, planning_commands.check_verdicts, lm, command, text), pool
+
+
 def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, text: str,
                       diagnostics: Optional[dict] = None) -> ExtractedArguments:
     """The shared extractor's arguments for *command_name* on *text*, outside the CME workflow (fix-48np).
@@ -1305,7 +1387,7 @@ def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, te
 
     def validated(params: BaseModel) -> ExtractedArguments:
         valid, message, _, fields = extractor.validate_parameters(
-            app_workflow, command_name, params, diagnostics)
+            app_workflow, command_name, params, diagnostics, checks)
         missing = list(diagnostics.get("missing_fields") or []) if not valid else []
         refusal = None
         if not valid:
@@ -1313,19 +1395,26 @@ def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, te
                 diagnostics.get("invalid_fields") else (message or "").strip()
         return ExtractedArguments(params=params, valid=valid, refusal=refusal, missing=missing)
 
-    result = validated(extraction._llm_extract(extractor, params_class, folder, diagnostics))
-    if result.valid or _planning_command_of(app_workflow, command_name) is None:
-        return result
-    extractor.command = f"{text}\n\n{argument_checks.REFUSED_EXTRACTION_NOTE.format(refusal=result.refusal)}"
+    # The option checks read only the Jev LM, the static command and *text*: start them beside the
+    # extraction (as typed_planning_call does) and join where validation reads them.
+    checks, pool = _start_argument_checks(app_workflow, extractor, command_name, params_class, text)
     try:
-        params = extractor.extract_parameters(params_class, command_name, folder)
-    except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
-        logger.warning(f"argument extraction retry failed: {exc!r}")
-        return result
+        result = validated(extraction._llm_extract(extractor, params_class, folder, diagnostics))
+        if result.valid or _planning_command_of(app_workflow, command_name) is None:
+            return result
+        extractor.command = f"{text}\n\n{argument_checks.REFUSED_EXTRACTION_NOTE.format(refusal=result.refusal)}"
+        try:
+            params = extractor.extract_parameters(params_class, command_name, folder)
+        except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
+            logger.warning(f"argument extraction retry failed: {exc!r}")
+            return result
+        finally:
+            extractor.command = text      # validation reads the request from here
+        diagnostics.pop("missing_fields", None)
+        diagnostics.pop("invalid_fields", None)
+        second = validated(params)
+        second.retried = True
+        return second
     finally:
-        extractor.command = text      # validation reads the request from here
-    diagnostics.pop("missing_fields", None)
-    diagnostics.pop("invalid_fields", None)
-    second = validated(params)
-    second.retried = True
-    return second
+        if pool is not None:
+            pool.shutdown(wait=True)

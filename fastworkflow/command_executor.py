@@ -1,3 +1,4 @@
+import contextlib
 import inspect
 import logging
 from contextlib import nullcontext
@@ -123,7 +124,56 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
     )
 
 
-def _wildcard_command_output(framed: CommandOutput) -> CommandOutput:
+def _pending_before_cme_reply(workflow) -> dict:
+    """What the CME workflow was in the middle of, read before the router runs (an abort clears it): the NLU stage, the
+    command text being processed and the command whose parameters were being extracted. Empty when nothing."""
+    try:
+        context = workflow.context
+        stage = context.get("NLU_Pipeline_Stage")
+        pending = {"stage": getattr(stage, "name", None) if stage is not None else None,
+                   "command": context.get("command"), "command_name": context.get("command_name")}
+        return {key: value for key, value in pending.items() if value is not None}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _cme_reply_artifacts(output, pending: dict | None) -> dict:
+    """Artifacts of the CME replies that were text only: ``aborted`` (what ``abort`` ended, from *pending*, taken before
+    it ran) and ``command_choices`` (the command names ``you_misunderstood`` offers, in the order it lists them);
+    ``capabilities`` for ``what_can_i_do``. Read from the nested command's typed Output."""
+    from fastworkflow.capability_answer import CapabilityListing
+
+    if isinstance(output, CapabilityListing):
+        return {"capabilities": output.model_dump(mode="json")}
+    if getattr(output, "command_name", None) == "abort" and hasattr(output, "command"):
+        return {"aborted": dict(pending or {})}
+    if isinstance(getattr(output, "valid_command_names", None), list):
+        return {"command_choices": list(output.valid_command_names)}
+    return {}
+
+
+def _no_agent_note(route, workflow) -> str:
+    """One plain sentence on a request the deterministic path could not route (an ambiguous intent, or no command), when
+    the session has no agent model (``no_agent_mode``): why it was not planned and what to do. Added here, not in the
+    router's command file, so the internal workflow's training fingerprint (a hash of those files) does not move.
+    Empty in agent mode, for an agent's own call, and for any reply that is not an unrouted request."""
+    if workflow is None or route.handled or route.routed or route.command_name is not None \
+            or route.parameter_request is not None or route.intent_choices:
+        return ""    # a reply that offers candidate commands needs a pick, not an explanation of the mode
+    try:
+        context = workflow.context
+        app_workflow = context.get("app_workflow")
+        agentic = ("is_assistant_mode_command" not in context
+                   and app_workflow is not None and bool(app_workflow.context.get("run_as_agent")))
+        if agentic or not context.get("no_agent_mode"):
+            return ""
+    except Exception:  # noqa: BLE001 - a note is never worth failing a reply
+        return ""
+    from fastworkflow.no_agent_mode import NOT_PLANNED_NOTE
+    return f"\n{NOT_PLANNED_NOTE}"
+
+
+def _wildcard_command_output(framed: CommandOutput, pending: dict | None = None, workflow=None) -> CommandOutput:
     """The turn's CommandOutput for the CME router, built from its typed routing result (fix-3rsq.12.3).
 
     The router (``_workflows/command_metadata_extraction/_commands/wildcard.py``) returns its
@@ -151,9 +201,14 @@ def _wildcard_command_output(framed: CommandOutput) -> CommandOutput:
         artifacts["ran_on_context_clause"] = route.ran_on_context_clause
     if route.reply_intent is not None:
         artifacts["reply_intent"] = route.reply_intent
+    if route.parameter_request is not None:
+        artifacts["parameter_request"] = route.parameter_request
+    if route.intent_choices:
+        artifacts["intent_choices"] = route.intent_choices
+    artifacts.update(_cme_reply_artifacts(route.output, pending))
     return CommandOutput(
         command_response=fastworkflow.CommandResponse(
-            response=route.response,
+            response=route.response + _no_agent_note(route, workflow),
             success=route.routed,
             artifacts=artifacts,
             output=route.output,
@@ -172,12 +227,36 @@ def call_response_generator(response_generator, workflow, command, command_param
         result = response_generator(workflow, command, command_parameters)
     except fastworkflow.Refused as refusal:
         return refusal.as_output()
-    return frame_command_result(
+    framed = frame_command_result(
         result,
         command_name=command_name or type(response_generator).__qualname__,
         output_model=_declared_output_model(type(response_generator)),
         command_parameters=command_parameters,
     )
+    if command_name.endswith(WHAT_CAN_I_DO_COMMAND) and isinstance(result, str):
+        _attach_capability_listing(framed, workflow)
+    return framed
+
+
+#: The CME command whose listing is also data. Its command file is part of the internal workflow's training
+#: fingerprint, so the data is attached here and not in the file (fix-szfq).
+WHAT_CAN_I_DO_COMMAND = "IntentDetection/what_can_i_do"
+
+
+def _attach_capability_listing(framed: CommandOutput, workflow) -> None:
+    """Give a ``what_can_i_do`` answer its listing as data: ``CommandResponse.output`` (a ``CapabilityListing``) and the
+    artifact ``capabilities``. The response text is untouched. Best effort: a listing that cannot be built is absent."""
+    try:
+        from fastworkflow.capability_answer import what_can_i_do_data
+
+        agent_mode = False
+        with contextlib.suppress(Exception):
+            agent_mode = bool(fastworkflow.chat_session and fastworkflow.chat_session.run_as_agent)
+        listing = what_can_i_do_data(workflow, for_agents=agent_mode)
+        framed.command_response.output = listing
+        framed.command_response.artifacts["capabilities"] = listing.model_dump(mode="json")
+    except Exception:  # noqa: BLE001 - never fails the command
+        logging.getLogger(__name__).debug("capability listing not attached", exc_info=True)
 
 
 logger = logging.getLogger(__name__)
@@ -564,9 +643,9 @@ class CommandExecutor(CommandExecutorInterface):
             if planning_name := _resolve_planning_command_name(
                 app_workflow.folderpath, token
             ):
-                refusal = _assistant_planning_refusal(
-                    app_workflow.folderpath, planning_name, app_workflow
-                )
+                # No agent model: the command runs to its first open step instead of being refused up front.
+                refusal = (None if getattr(chat_session, "no_agent_mode", False) is True else
+                           _assistant_planning_refusal(app_workflow.folderpath, planning_name, app_workflow))
                 if refusal is not None:
                     return refusal
 
@@ -616,9 +695,8 @@ class CommandExecutor(CommandExecutorInterface):
         ):
             assistant = "is_assistant_mode_command" in chat_session.cme_workflow._context
             if assistant:
-                refusal = _assistant_planning_refusal(
-                    workflow.folderpath, planning_name, workflow
-                )
+                refusal = (None if getattr(chat_session, "no_agent_mode", False) is True else
+                           _assistant_planning_refusal(workflow.folderpath, planning_name, workflow))
                 if refusal is not None:
                     del chat_session.cme_workflow._context["is_assistant_mode_command"]
                     return refusal
@@ -747,6 +825,7 @@ class CommandExecutor(CommandExecutorInterface):
         # and a child id on the internal CME hop that invoke_command makes — in
         # which case call_scope files it under the enclosing command call.
         call_id = tracing.new_command_call_id()
+        pending = _pending_before_cme_reply(workflow) if action.command_name == "wildcard" else None
 
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow._current_command_context_displayname
@@ -815,7 +894,7 @@ class CommandExecutor(CommandExecutorInterface):
                 raise
             
             if action.command_name == "wildcard":
-                command_output = _wildcard_command_output(command_output)
+                command_output = _wildcard_command_output(command_output, pending, workflow)
 
             # Validate that response_generation_object returns a CommandOutput, not a string
             if not isinstance(command_output, CommandOutput):
@@ -881,7 +960,7 @@ class CommandExecutor(CommandExecutorInterface):
             raise
         
         if action.command_name == "wildcard":
-            command_output = _wildcard_command_output(command_output)
+            command_output = _wildcard_command_output(command_output, pending, workflow)
 
         # Validate that response_generation_object returns a CommandOutput, not a string
         if not isinstance(command_output, CommandOutput):

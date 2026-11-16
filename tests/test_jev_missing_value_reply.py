@@ -270,7 +270,8 @@ def test_the_next_real_answer_after_a_wait_completes_the_command(monkeypatch, je
 
         def extract(self):
             # The merge itself needs the extraction LLM: the stand-in ends the turn here.
-            return SimpleNamespace(parameters_are_valid=False, error_msg="stop here", cmd_parameters=None)
+            return SimpleNamespace(parameters_are_valid=False, error_msg="stop here", cmd_parameters=None,
+                                   parameter_request=None)
 
     monkeypatch.setattr(wildcard, "ParameterExtraction", _Extraction)
     workflow = _pending()

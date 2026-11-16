@@ -28,11 +28,20 @@ class Signature:
                 return self
             if not self.items:
                 raise fastworkflow.Refused("Which steps should I drop?", fields=["items"])
+            from fastworkflow.review_step_refs import bare_step_numbers
+
+            count = len(proposal.items)
             normalized: list[str] = []
             for entry in self.items:
-                normalized.append(
-                    _item_validation.resolve_proposal_step(proposal, str(entry), field_name="items", slot_retry=True)
-                )
+                # One entry may hold a whole list of steps ("2, 3 and 4", "steps 2 to 4"): every number in it is a step
+                # to drop, read by the same grammar the review's other readers use.
+                listed = bare_step_numbers(str(entry), count)
+                if len(listed) > 1:
+                    resolved = [str(number) for number in listed]
+                else:
+                    resolved = [_item_validation.resolve_proposal_step(
+                        proposal, str(entry), field_name="items", slot_retry=True)]
+                normalized.extend(number for number in resolved if number not in normalized)
             self.items = normalized
             return self
 

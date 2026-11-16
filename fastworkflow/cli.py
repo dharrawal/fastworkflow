@@ -291,7 +291,13 @@ def add_run_parser(subparsers):
     parser_run.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
     parser_run.add_argument(
         "--assistant", action="store_true", default=False,
-        help="Run in assistant (non-agentic) mode. Default is agentic mode.",
+        help="Run in assistant (non-agentic) mode. Default is agentic mode, or assistant mode when no agent model (LLM_AGENT) is set.",
+    )
+    parser_run.add_argument(
+        "--timeout_seconds", type=float, default=None,
+        help="Optional per-turn limit in seconds (default: none; the run_fastapi_mcp request field of the same name is "
+             "its server counterpart). Past it the terminal stops waiting and returns to the prompt; the engine cannot "
+             "abort a turn, so it finishes in the background and its result is discarded.",
     )
     parser_run.add_argument(
         "--generate_insights", action="store_true", default=False,
@@ -772,6 +778,35 @@ def add_run_fastapi_mcp_parser(subparsers):
         "--cors_origin", default=None,
         help="Pin CORS to exactly this origin (no wildcard). Default: allow all origins.",
     )
+    parser_run_fastapi_mcp.add_argument(
+        "--expect_encrypted_jwt", action="store_true", default=False,
+        help="Enable JWT signature verification (default: unsigned tokens accepted for trusted networks)",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--cors_loopback_only", action="store_true", default=False,
+        help="Pin CORS to loopback origins only (127.0.0.1/localhost/[::1], any port). "
+             "Takes precedence over --cors_origin.",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--enable_admin_endpoints", action="store_true", default=False,
+        help="Serve /admin/dump_all_conversations and /admin/generate_mcp_token. Off by default; "
+             "while on, both additionally require a Bearer token.",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--allow_request_cache_toggle", action="store_true", default=False,
+        help="Let a request's use_dspy_cache switch the process-wide LLM response cache on or off (the "
+             "memory bound stays in force). Off by default: the argument is ignored and reported in the "
+             "X-FW-DSPy-Cache response header. For a single local user; the cache is otherwise chosen at "
+             "start with FW_LM_CACHE=0.",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--chat_approval_surface", choices=("channel", "host"), default="host",
+        help="Approval surface of /invoke_agent_stream (MCP invoke_agent) and /invoke_assistant. "
+             "'host' (default, strict): the /invoke_agent rule (signed JWT with a user_id via "
+             "--expect_encrypted_jwt, token delivered and returned as approval_token; otherwise an "
+             "approval-gated command is refused). 'channel': a plain yes approves, no token; "
+             "for local development tools only.",
+    )
     parser_run_fastapi_mcp.set_defaults(func=lambda args: run_fastapi_mcp_with_defaults(args))
 
 def train_with_defaults(args):  # sourcery skip: extract-duplicate-method
@@ -942,6 +977,11 @@ def run_fastapi_mcp_with_defaults(args):  # sourcery skip: extract-duplicate-met
         cmd.extend(['--project_folderpath', args.project_folderpath])
     if getattr(args, 'cors_origin', None):
         cmd.extend(['--cors_origin', args.cors_origin])
+    cmd.extend(['--chat_approval_surface', getattr(args, 'chat_approval_surface', 'host')])
+    # store_true flags are appended only when set, so leaving one off gives the server's own default.
+    for flag in ('expect_encrypted_jwt', 'cors_loopback_only', 'enable_admin_endpoints', 'allow_request_cache_toggle'):
+        if getattr(args, flag, False):
+            cmd.append(f'--{flag}')
 
     # Run the subprocess
     return subprocess.run(cmd).returncode

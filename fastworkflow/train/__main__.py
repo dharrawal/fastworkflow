@@ -824,10 +824,13 @@ def _internal_workflow_trained(
     )
     if signature is None:
         return False
-    return not selective_training.changed_commands(
-        signature.command_fingerprints,
-        selective_training.compute_command_fingerprints(workflow_folderpath),
-    )
+    current = selective_training.compute_command_fingerprints(workflow_folderpath)
+    from fastworkflow.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
+
+    if BUILT_IN_VAGUE_SOURCE in signature.command_fingerprints:
+        # A head trained on the built-in vague replies signed them as an input (fix-1hs8).
+        current[BUILT_IN_VAGUE_SOURCE] = selective_training.built_in_vague_fingerprint()
+    return not selective_training.changed_commands(signature.command_fingerprints, current)
 
 
 def is_fast_workflow_trained(fastworkflow_folderpath: str):

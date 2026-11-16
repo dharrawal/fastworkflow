@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow import command_preview, planning_commands, planning_phases, tracing, workflow_agent
-from fastworkflow.planning import phase, run
+from fastworkflow.planning import phase, run, when
 from fastworkflow.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
@@ -107,10 +107,9 @@ def test_a_result_text_is_the_answer_exactly_and_no_phase_writes_one(library_env
     assert result.answer == "Dune: 2 found"
     assert answered == []
     assert library_env.model.asked == []
-    # The last phase is framed to run its steps and finish, not to answer the request (3.16):
-    # code ran its steps, and the agent is asked only to finish; its own final answer is
-    # discarded, so no answer call is made on the request either.
-    assert "Do only these steps, then finish" in library_env.model.closings[-1]["query"]
+    # Code ran every step of the result-driven last phase, so the agent is given no closing
+    # step at all (fix-s70h); no answer call is made on the request either.
+    assert library_env.model.closings == []
     assert all("Answer the request" not in query for query in library_env.model.answers)
     out = _outputs(library_env, command)
     assert len(out) == 1 and out[0].command_response.output is None and out[0].success is True
@@ -494,11 +493,79 @@ def test_a_text_result_means_the_last_phases_agent_is_not_asked_for_an_answer(li
 
     assert result.answer == "the result text"
     assert answered == []
-    # The last phase is framed to run its steps and finish, not to answer the request (3.16).
-    last_phase_query = library_env.model.closings[-1]["query"]
-    assert "Do only these steps, then finish" in last_phase_query
-    assert "Answer the request" not in last_phase_query
+    # Code ran every step, so the last phase's agent is given no step at all (fix-s70h).
+    assert library_env.model.closings == []
+    assert all("Answer the request" not in query for query in library_env.model.answers)
     assert library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_ANSWER) == []
+
+
+def test_a_phased_result_none_gives_the_agent_no_step_and_the_deferred_call_writes_the_answer(
+        library_env, answered):
+    # fix-s70h (b): code ran the only step, __result__ gave no text; no model step is asked for.
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input, find):
+            return None
+
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert result.answer == "written"
+    assert len(answered) == 1
+    assert library_env.model.closings == []
+    assert library_env.model.asked == []
+
+
+def test_a_result_driven_last_phase_with_an_open_step_still_gets_the_agent(library_env, answered):
+    # fix-s70h (c): a step code cannot run is the agent's, so the phase is not skipped.
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title),
+                    when("the member asked for the first book", run("open_book", named=input.title))]
+
+        def __result__(self, input, find):
+            return "the result text"
+
+    library_env.model.run("open_book named=Dune")
+    library_env.model.finish()
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert result.answer == "the result text"
+    assert len(library_env.model.asked) == 2
+    assert library_env.model.steps == []
+
+
+def test_a_flat_call_with_result_keeps_its_closing_step_and_the_agents_answer(library_env, answered):
+    # fix-s70h (d): a flat call is not result-driven; its answer is the agent's.
+    class Plan:
+        def find(self, input):
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input):
+            return None
+
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert len(library_env.model.closings) == 1
+    assert result.answer == "the answer"
+    assert answered == []
+
+
+def test_code_reads_a_listing_step_once_and_the_facts_come_from_that_read(library_env, answered):
+    # fix-s70h (e): no later read of the step after code ran it, so the facts are code's read.
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input, find):
+            return f"{len(find.book_uids)} found"
+
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert result.answer == "2 found"
+    assert len([c for c in library_env.runner.sent if c.startswith("find_book")]) == 1
+    assert library_env.model.closings == [] and library_env.model.asked == []
 
 
 def test_none_from_result_lets_the_model_write_a_last_answer_phase(library_env, answered):

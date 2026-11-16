@@ -64,6 +64,17 @@ def archive_for_path(db_path: str) -> RuntimeHandleArchive:
         return _archives_by_path.setdefault(key, created)
 
 
+def mark_pruned(db_path: str) -> None:
+    """Record that *db_path* is pruned (or about to be) by this process.
+
+    A trace sink calls this where it prunes at startup, so the first agent
+    build does not prune the same database again inside the user's first turn.
+    """
+    key = os.path.abspath(os.path.expanduser(str(db_path)))
+    with _lock:
+        _pruned_paths.add(key)
+
+
 def prune_once(db_path: str) -> bool:
     """Prune the observability database at *db_path*, at most once per process.
 
@@ -72,9 +83,12 @@ def prune_once(db_path: str) -> bool:
     it: a context built with ``tracing.NoOpTraceSink()`` would grow its offload
     tables without bound. The agent builds a new archive object per agent, so
     the guard is per PATH, or every build would re-prune a large database on
-    its first turn. Where a sink already pruned at startup this second pass
-    finds nothing to delete. Returns whether this call ran the prune; a failure
-    is logged and never raised, because an agent must still be built.
+    its first turn. A trace sink that prunes at startup marks its path with
+    ``mark_pruned``, and then this returns False without pruning: a large
+    store would otherwise be pruned a second time, slowly, while the user
+    waits for the first turn. With no sink on the path this prunes once.
+    Returns whether this call ran the prune; a failure is logged and never
+    raised, because an agent must still be built.
     """
     key = os.path.abspath(os.path.expanduser(str(db_path)))
     with _lock:

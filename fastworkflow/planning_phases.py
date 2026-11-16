@@ -1851,6 +1851,102 @@ def code_step(step: Any, parameters_class: Any) -> Optional[str]:
     return _code_step(step, parameters_class)[0]
 
 
+_CONDITION_LEAD_RE = re.compile(r"^\s*(?:only\s+when|only\s+if|if|when)\s+", re.IGNORECASE)
+#: Option keys of an Input field that mark a value that must be FOUND (a listing's row, a record's name, text copied
+#: from the command text): such a value is not one a client can simply be asked for.
+_FOUND_VALUE_OPTIONS = ("from_command_output", "record_named_in_command_text", "command_text_after_command_name",
+                        "copied_from_command_text", "converted_from_command_text")
+
+
+def conditional_decision(step_text: str, number: int, commands: Iterable[str], core_commands: Iterable[str],
+                         parameters: Callable[[str], list],
+                         pick: Optional[Callable[[Any], Optional[str]]] = None) -> Optional[tuple[str, str]]:
+    """``(condition, inner)`` of a conditional step a client can decide (no-agent mode), or None.
+
+    A step ``only when <condition>, <command step>`` (the ``when()`` helper's text; ``if``/``when`` open one too) is
+    decided by a yes or a no. *inner* is the text after the condition that code can run as a step of its own
+    (``plan_code_steps`` gives it a command, or *pick* finds the row it opens by name); the leftmost comma after which
+    that holds ends the condition. None when no part of the step is a step code can run: the step stays free work.
+    """
+    lead = _CONDITION_LEAD_RE.match(step_text or "")
+    if lead is None:
+        return None
+    body = step_text[lead.end():]
+    commands, core_commands = list(commands), list(core_commands)
+    for match in re.finditer(r",\s+", body):
+        condition, inner = body[:match.start()].strip(), body[match.end():].strip()
+        if not condition or not inner:
+            continue
+        read = plan_code_steps(f"{number}. {inner}", commands, core_commands, parameters)
+        if len(read) != 1:
+            continue
+        step, command, _ = read[0]
+        # A step that opens a row by name has no command until code reads the listing: it is runnable when *pick* finds one.
+        if command or (command is None and pick is not None and step.kind == finish_check.KIND_COMMAND
+                       and pick(step)):
+            return condition, inner
+    return None
+
+
+def _plain_field_type(annotation: Any) -> bool:
+    """Whether *annotation* is a plain value a client can type: ``str``, ``int``, ``float``, ``bool``, an Enum or a
+    Literal (``Optional`` of one included)."""
+    import enum
+
+    origin = get_origin(annotation)
+    if origin in (Union, getattr(types, "UnionType", Union)):
+        arguments = [a for a in get_args(annotation) if a is not type(None)]
+        return len(arguments) == 1 and _plain_field_type(arguments[0])
+    if origin is typing.Literal:
+        return True
+    return isinstance(annotation, type) and (annotation in (str, int, float, bool) or issubclass(annotation, enum.Enum))
+
+
+def missing_value_field(step: Any, parameters: Callable[[str], list]) -> Optional[dict[str, Any]]:
+    """The one plain required value a command step leaves out (no-agent mode), or None.
+
+    ``{"field", "type", "description"}`` when *step* (a ``finish_check`` command step) names a command with one
+    parameters class, a single required field the step does not give, and that field is a plain value (``str``,
+    ``int``, ``float``, ``bool``, an Enum or a Literal) that is not found from a listing or a record's name. More than one
+    missing field, a field of another kind, or a command whose classes differ by context: None (free work).
+    """
+    if step.kind != finish_check.KIND_COMMAND or not step.command:
+        return None
+    classes = [cls for cls in parameters(step.command)]
+    if len(classes) != 1 or classes[0] is None:
+        return None
+    fields = getattr(classes[0], "model_fields", None) or {}
+    clean = step.text.replace("`", " ").replace("*", " ")
+    first = _WORD_RE.search(clean)
+    if first is None or first.group(0) != step.command:
+        return None
+    chain = finish_check.step_chain(step.text[first.end():]).strip()
+    given = set(finish_check.step_arguments(" " + chain)) if chain else set()
+    given |= {m.group(1) for m in finish_check._ARGUMENT_KEY_RE.finditer(chain)} if chain else set()
+    missing = [name for name, info in fields.items() if info.is_required() and name not in given]
+    if len(missing) != 1:
+        return None
+    info = fields[missing[0]]
+    extra = info.json_schema_extra if isinstance(info.json_schema_extra, dict) else {}
+    if any(key in extra for key in _FOUND_VALUE_OPTIONS) or not _plain_field_type(info.annotation):
+        return None
+    return {"field": missing[0], "type": type_text(info.annotation), "description": info.description or ""}
+
+
+def step_with_value(step_text: str, field: str, value: str) -> str:
+    """*step_text* with ``field=value`` written right after its command's chain (before any note in parentheses),
+    the value quoted as a builder writes it (``quote_step_value``)."""
+    clean = (step_text or "").replace("`", " ").replace("*", " ")
+    first = _WORD_RE.search(clean)
+    if first is None:
+        return f"{step_text} {field}={finish_check.quote_step_value(value)}"
+    rest = clean[first.end():]
+    chain = finish_check.step_chain(rest)
+    body = chain.rstrip()
+    return (f"{clean[:first.end()]}{body} {field}={finish_check.quote_step_value(value)}"
+            f"{chain[len(body):]}{rest[len(chain):]}")
+
+
 _PICK_NAMED_RE = re.compile(r"\bwith the (?:uid|id) of the (.+?) match\b", re.IGNORECASE)
 
 
@@ -2262,7 +2358,8 @@ class CodeSteps:
                  runs: Callable[[int], list], commands: Iterable[str],
                  core_commands: Iterable[str], own_steps: int, answers: bool,
                  call_runs: Optional[Callable[[], list]] = None,
-                 planning: Optional[Mapping[str, Any]] = None):
+                 planning: Optional[Mapping[str, Any]] = None,
+                 resume: Optional[Mapping[str, Any]] = None):
         import fastworkflow
 
         self.workflow, self.runs, self.answers = workflow, runs, answers
@@ -2271,8 +2368,18 @@ class CodeSteps:
         # A step naming a planning command is a command step too: code runs it through the
         # agent's command tool, with the planning command's Input as its parameters (3.5).
         self._parameters = parameter_classes(routing, planning)
-        read = plan_code_steps(plan_text, commands, core_commands, self._parameters)
+        self._commands, self._core_commands = list(commands), list(core_commands)
+        read = plan_code_steps(plan_text, self._commands, self._core_commands, self._parameters)
         self.items = read[:own_steps]
+        if resume:
+            # A paused phase carries on (no-agent mode, a decision step the client answered): the steps before the
+            # decided one ran before the pause, and the decided step is replaced by the text the answer made of it
+            # ("" skips it).
+            for position, (step, command, reason) in enumerate(self.items):
+                if step.number < resume["number"]:
+                    self.items[position] = (step, "", "ran before the pause")
+                elif step.number == resume["number"]:
+                    self.items[position] = (self.replacement_item(step, resume.get("text") or ""))
         # The first planner-written step after the phase's own that runs anything.
         self._after = next((step for step, command, _ in read[own_steps:] if command != ""),
                            None)
@@ -2295,6 +2402,16 @@ class CodeSteps:
         #: What the agent is told when code stopped on a full-list step at ``CODE_MAX_PAGES``
         #: pages (``_page_cap``); "" otherwise.
         self.page_hint = ""
+
+    def replacement_item(self, step: Any, text: str) -> tuple[Any, Optional[str], str]:
+        """``(step, command, reason)`` for open *step* replaced by *text* (a step of its own number, read as
+        ``plan_code_steps`` reads a step); ``text`` "" passes the step over. The command is None when code cannot run it."""
+        if not text:
+            return (step, "", "skipped by the client")
+        read = plan_code_steps(f"{step.number}. {text}", self._commands, self._core_commands, self._parameters)
+        if len(read) != 1:
+            return (step, None, "not a step")
+        return (read[0][0], read[0][1], "decided")
 
     @property
     def runs_any(self) -> bool:

@@ -1,0 +1,1007 @@
+{
+ "answers": {
+  "Also change step 2 to a short joke": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.567743182182312,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/add",
+    "topk_labels": [
+     "ProposalReview/add",
+     "ProposalReview/edit",
+     "ProposalReview/look_up"
+    ],
+    "topk_scores": [
+     0.567743182182312,
+     0.1067042276263237,
+     0.08141099661588669
+    ]
+   },
+   "labels": [
+    "ProposalReview/add"
+   ]
+  },
+  "DrChrono onboarding status": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.48034408688545227,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/confirm",
+     "ProposalReview/add"
+    ],
+    "topk_scores": [
+     0.48034408688545227,
+     0.21837715804576874,
+     0.08062823861837387
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/confirm",
+    "ProposalReview/add"
+   ]
+  },
+  "I don't know": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5581248998641968,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "wildcard",
+    "topk_labels": [
+     "wildcard",
+     "ProposalReview/drop",
+     "ProposalReview/edit"
+    ],
+    "topk_scores": [
+     0.5581248998641968,
+     0.10186717659235,
+     0.09243109077215195
+    ]
+   },
+   "labels": [
+    "wildcard"
+   ]
+  },
+  "I don't know whether IT Support is a unit or a group; use your best judgment": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.9473158717155457,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/decline",
+     "ProposalReview/confirm"
+    ],
+    "topk_scores": [
+     0.9473158717155457,
+     0.014499606564640999,
+     0.00862848199903965
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit"
+   ]
+  },
+  "I'm happy with that": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.5705565214157104,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "wildcard",
+    "topk_labels": [
+     "wildcard",
+     "ProposalReview/decline",
+     "ProposalReview/confirm"
+    ],
+    "topk_scores": [
+     0.5705565214157104,
+     0.1900792270898819,
+     0.18777714669704437
+    ]
+   },
+   "labels": [
+    "wildcard",
+    "ProposalReview/decline",
+    "ProposalReview/confirm"
+   ]
+  },
+  "Lewis and Sons is a company": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.49594488739967346,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/confirm",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.49594488739967346,
+     0.28249648213386536,
+     0.07449142634868622
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/confirm",
+    "ProposalReview/decline"
+   ]
+  },
+  "No, that is one name. Make it a single step for 'Kline and Sons Ltd' and drop the second step.": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.541802167892456,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/edit",
+     "ProposalReview/look_up"
+    ],
+    "topk_scores": [
+     0.541802167892456,
+     0.27281489968299866,
+     0.06454203277826309
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop",
+    "ProposalReview/edit",
+    "ProposalReview/look_up"
+   ]
+  },
+  "Not just people: I want the kinds of records on file in the directory": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.8925235271453857,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/decline",
+     "ProposalReview/confirm"
+    ],
+    "topk_scores": [
+     0.8925235271453857,
+     0.03402949497103691,
+     0.021964190527796745
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit"
+   ]
+  },
+  "Please remove step 2's status filter.": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.2800658345222473,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/look_up",
+     "ProposalReview/drop"
+    ],
+    "topk_scores": [
+     0.2800658345222473,
+     0.2691825330257416,
+     0.17249436676502228
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/look_up",
+    "ProposalReview/drop"
+   ]
+  },
+  "Remove step 2; 'Sons Ltd' is part of the name in step 1, not a separate entity.": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.7926943302154541,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/drop",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.7926943302154541,
+     0.09783932566642761,
+     0.033352531492710114
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit"
+   ]
+  },
+  "Steps 3 and 4 repeat steps 1 and 2. Please remove steps 3 and 4; everything else is fine.": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.8545364141464233,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/look_up",
+     "ProposalReview/edit"
+    ],
+    "topk_scores": [
+     0.8545364141464233,
+     0.05056764557957649,
+     0.03316742926836014
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop"
+   ]
+  },
+  "This is one recertification request. Step 1 already covers it all, so please drop steps 2, 3 and 4 and keep only step 1.": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.3882230818271637,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/edit",
+     "ProposalReview/look_up"
+    ],
+    "topk_scores": [
+     0.3882230818271637,
+     0.373658686876297,
+     0.11585687845945358
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop",
+    "ProposalReview/edit",
+    "ProposalReview/look_up"
+   ]
+  },
+  "Yes, but also list which findings are driving her risk": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5536836981773376,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/drop",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.5536836981773376,
+     0.08860207349061966,
+     0.08836597949266434
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit"
+   ]
+  },
+  "apply the same overview fix to each step": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.6162711381912231,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/add",
+     "ProposalReview/look_up"
+    ],
+    "topk_scores": [
+     0.6162711381912231,
+     0.26470649242401123,
+     0.04727591201663017
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/add",
+    "ProposalReview/look_up"
+   ]
+  },
+  "asdf": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.3761788010597229,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/confirm",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "ProposalReview/edit",
+     "parameter_value"
+    ],
+    "topk_scores": [
+     0.3761788010597229,
+     0.20589040219783783,
+     0.18958213925361633
+    ]
+   },
+   "labels": [
+    "ProposalReview/confirm",
+    "ProposalReview/edit",
+    "parameter_value"
+   ]
+  },
+  "cancel the third one": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.25936177372932434,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/decline",
+     "ProposalReview/edit"
+    ],
+    "topk_scores": [
+     0.25936177372932434,
+     0.22287847101688385,
+     0.2114003598690033
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop",
+    "ProposalReview/decline",
+    "ProposalReview/edit"
+   ]
+  },
+  "change step 2 to a shorter joke": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5230464339256287,
+    "confident": false,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/add",
+    "topk_labels": [
+     "ProposalReview/add",
+     "ProposalReview/edit",
+     "ProposalReview/drop"
+    ],
+    "topk_scores": [
+     0.5230464339256287,
+     0.11736789345741272,
+     0.09821072220802307
+    ]
+   },
+   "labels": [
+    "ProposalReview/add",
+    "ProposalReview/edit",
+    "ProposalReview/drop"
+   ]
+  },
+  "cut step 3 down to five results": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.9219815135002136,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/edit",
+     "ProposalReview/look_up"
+    ],
+    "topk_scores": [
+     0.9219815135002136,
+     0.01892915926873684,
+     0.015353182330727577
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop"
+   ]
+  },
+  "fine, but drop the last one": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.32502877712249756,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/edit",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.32502877712249756,
+     0.19920392334461212,
+     0.1653885394334793
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop",
+    "ProposalReview/edit",
+    "ProposalReview/decline"
+   ]
+  },
+  "go back and change step 2": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.8249881267547607,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/look_up",
+     "ProposalReview/edit"
+    ],
+    "topk_scores": [
+     0.8249881267547607,
+     0.08632853627204895,
+     0.026832956820726395
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop"
+   ]
+  },
+  "hell no": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5950911641120911,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/confirm",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.5950911641120911,
+     0.11279457062482834,
+     0.09169665724039078
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline"
+   ]
+  },
+  "hmm": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.6412097811698914,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/confirm",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "ProposalReview/decline",
+     "ProposalReview/add"
+    ],
+    "topk_scores": [
+     0.6412097811698914,
+     0.11222504079341888,
+     0.06454049050807953
+    ]
+   },
+   "labels": [
+    "ProposalReview/confirm"
+   ]
+  },
+  "hmm not sure": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.5203679800033569,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/confirm",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "ProposalReview/decline",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.5203679800033569,
+     0.26875168085098267,
+     0.10348984599113464
+    ]
+   },
+   "labels": [
+    "ProposalReview/confirm",
+    "ProposalReview/decline",
+    "wildcard"
+   ]
+  },
+  "hold on": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.4755793511867523,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/confirm",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.4755793511867523,
+     0.35823649168014526,
+     0.05894489958882332
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline",
+    "ProposalReview/confirm",
+    "wildcard"
+   ]
+  },
+  "in step 1 make the branch Central and drop step 2": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5379766821861267,
+    "confident": false,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/drop",
+     "ProposalReview/add"
+    ],
+    "topk_scores": [
+     0.5379766821861267,
+     0.12689776718616486,
+     0.08629283308982849
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/drop",
+    "ProposalReview/add"
+   ]
+  },
+  "just do it": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5529241561889648,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/confirm",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.5529241561889648,
+     0.11052201688289642,
+     0.09584666788578033
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline"
+   ]
+  },
+  "look up step 1": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.625864565372467,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/look_up",
+    "topk_labels": [
+     "ProposalReview/look_up",
+     "ProposalReview/drop",
+     "ProposalReview/add"
+    ],
+    "topk_scores": [
+     0.625864565372467,
+     0.09048638492822647,
+     0.06518850475549698
+    ]
+   },
+   "labels": [
+    "ProposalReview/look_up"
+   ]
+  },
+  "make it about trains instead": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.5232409834861755,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/confirm",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.5232409834861755,
+     0.1935790777206421,
+     0.19156156480312347
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/confirm",
+    "ProposalReview/decline"
+   ]
+  },
+  "make it better somehow": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.4402613639831543,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/confirm",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "ProposalReview/decline",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.4402613639831543,
+     0.3080786168575287,
+     0.1516767293214798
+    ]
+   },
+   "labels": [
+    "ProposalReview/confirm",
+    "ProposalReview/decline",
+    "wildcard"
+   ]
+  },
+  "make step 2 shorter; use the library": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.9353675246238708,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/drop",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.9353675246238708,
+     0.015539887361228466,
+     0.013466318137943745
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit"
+   ]
+  },
+  "make the joke shorter": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.6711539030075073,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/confirm",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.6711539030075073,
+     0.1385195553302765,
+     0.0735674649477005
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline",
+    "ProposalReview/confirm",
+    "wildcard"
+   ]
+  },
+  "nah, it's fine, go ahead": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5623278021812439,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/confirm",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "ProposalReview/decline",
+     "ProposalReview/add"
+    ],
+    "topk_scores": [
+     0.5623278021812439,
+     0.16656628251075745,
+     0.06118599697947502
+    ]
+   },
+   "labels": [
+    "ProposalReview/confirm"
+   ]
+  },
+  "never mind": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.6165081262588501,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/confirm",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.6165081262588501,
+     0.09996028244495392,
+     0.08017446845769882
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline"
+   ]
+  },
+  "no, change the second one to weekly": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.6810808777809143,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/add",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.6810808777809143,
+     0.09971081465482712,
+     0.07168112695217133
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/add",
+    "ProposalReview/decline"
+   ]
+  },
+  "skip step 2 if there are no results": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.839855432510376,
+    "confident": true,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/edit",
+     "ProposalReview/look_up"
+    ],
+    "topk_scores": [
+     0.839855432510376,
+     0.049317046999931335,
+     0.03870232403278351
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop"
+   ]
+  },
+  "something feels off": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.5640621781349182,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/confirm",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "wildcard",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.5640621781349182,
+     0.2005455493927002,
+     0.11389970779418945
+    ]
+   },
+   "labels": [
+    "ProposalReview/confirm",
+    "wildcard",
+    "ProposalReview/decline"
+   ]
+  },
+  "stop after step 2": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.7545846104621887,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/drop",
+    "topk_labels": [
+     "ProposalReview/drop",
+     "ProposalReview/edit",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.7545846104621887,
+     0.05728702247142792,
+     0.054761726409196854
+    ]
+   },
+   "labels": [
+    "ProposalReview/drop",
+    "ProposalReview/edit",
+    "ProposalReview/decline"
+   ]
+  },
+  "unclear one": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.6310412883758545,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/edit",
+     "ProposalReview/confirm"
+    ],
+    "topk_scores": [
+     0.6310412883758545,
+     0.17864996194839478,
+     0.11611480265855789
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline",
+    "ProposalReview/edit",
+    "ProposalReview/confirm"
+   ]
+  },
+  "unclear two": {
+   "details": {
+    "ambiguous_threshold": 0.7647250294685364,
+    "confidence": 0.5235016942024231,
+    "confident": false,
+    "model_tier": "large",
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/confirm",
+     "ProposalReview/edit"
+    ],
+    "topk_scores": [
+     0.5235016942024231,
+     0.17975571751594543,
+     0.17434298992156982
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline",
+    "ProposalReview/confirm",
+    "ProposalReview/edit"
+   ]
+  },
+  "use Library/count_books": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.4942411184310913,
+    "confident": false,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/add",
+     "ProposalReview/drop"
+    ],
+    "topk_scores": [
+     0.4942411184310913,
+     0.09947337955236435,
+     0.09254974871873856
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/add",
+    "ProposalReview/drop"
+   ]
+  },
+  "use book_by_title for the second part": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.518688440322876,
+    "confident": false,
+    "model_tier": "tiny",
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/drop",
+     "wildcard"
+    ],
+    "topk_scores": [
+     0.518688440322876,
+     0.09432560205459595,
+     0.08892044425010681
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/drop",
+    "wildcard"
+   ]
+  },
+  "we do not need the joke": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5057627558708191,
+    "confident": false,
+    "model_tier": "tiny",
+    "top_label": "wildcard",
+    "topk_labels": [
+     "wildcard",
+     "ProposalReview/edit",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.5057627558708191,
+     0.1295524537563324,
+     0.1221521645784378
+    ]
+   },
+   "labels": [
+    "wildcard",
+    "ProposalReview/edit",
+    "ProposalReview/decline"
+   ]
+  },
+  "what do you think?": {
+   "details": {
+    "ambiguous_threshold": 0.5380302568015299,
+    "confidence": 0.5972851514816284,
+    "confident": true,
+    "model_tier": "tiny",
+    "top_label": "wildcard",
+    "topk_labels": [
+     "wildcard",
+     "ProposalReview/look_up",
+     "ProposalReview/drop"
+    ],
+    "topk_scores": [
+     0.5972851514816284,
+     0.11115964502096176,
+     0.09386225044727325
+    ]
+   },
+   "labels": [
+    "wildcard"
+   ]
+  }
+ },
+ "metadata": {
+  "head": "consultation/ProposalReview",
+  "head_version_id": "20261113T163953Z-d2aecd",
+  "re_record": "pytest --record-review-router <the files that use recorded_review_router>",
+  "recorded_at": "2026-11-15",
+  "what": "CommandRouter.predict_with_details(reply) of the real head: labels and details as returned."
+ }
+}

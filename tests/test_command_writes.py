@@ -11,17 +11,22 @@ import json
 import os
 
 import pytest
+from pydantic import Field
 
 import fastworkflow
 from fastworkflow import command_writes, tracing
 from fastworkflow.command_declarations import CommandDeclarationError
 from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.planning import phase, run, when
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import _what_can_i_do
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_step_helpers import (
     LIBRARY,
     _library_workflow,
+    FoundBooks,
+    OpenedBook,
+    _build_planning_command,
     _make_library_runner_env,
     _real_planning_command,
 )
@@ -73,11 +78,28 @@ def test_a_read_only_planning_command_refuses_a_note_its_phase_does_not_name(wri
     # The recorded failure (fix-48np.1, L2): inside author_books, the phase agent added "the cover is
     # torn" to a book. Here the agent finishes the find phase, then, on a book its book phase opened,
     # adds a note no step names. Without the declaration the note lands on the book (Persuasion, b4).
+    # fix-s70h: a result-driven last phase whose every step code ran takes no model step, so the real
+    # author_books never asks the agent; this read-only copy of it adds an open step ("when ...") that
+    # code cannot run, which is the agent's, so the agent is asked and attempts the write there.
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.author)]
+
+        @phase(over="find.book_uids", max_items=5, noun="books")
+        def book(self, uid) -> OpenedBook:
+            return [run("open_book", book_uid=uid),
+                    when("the member asked to annotate the book", run("open_book", book_uid=uid))]
+
+        def __result__(self, input, book):
+            return "the books were opened"
+
     before = _notes(writes_env)
     writes_env.model.finish()
     writes_env.model.run('add_note text="the spine is cracked"')
     writes_env.model.finish()
-    writes_env.planning_command = _real_planning_command(AUTHOR_BOOKS, "_commands/Library/author_books.py").command
+    writes_env.model.finish()
+    writes_env.planning_command = _build_planning_command(
+        Plan, {"author": (str, Field(description="the author's name"))})
     writes_env.args = {"author": "Austen"}
 
     result = writes_env.ctx.process_turn("show every Austen book in the library")

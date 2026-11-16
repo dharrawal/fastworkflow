@@ -20,7 +20,105 @@ def lm_cache_enabled() -> bool:
     return fastworkflow.get_env_var("FW_LM_CACHE", default="1") not in ("0", "false", "False")
 
 
+#: The model timeout of every role without its own setting, in seconds (``LLM_TIMEOUT_SECONDS``).
+DEFAULT_LLM_TIMEOUT_SECONDS = 120.0
+
+#: Roles whose built-in limits differ from the global one, as ``{role env var: (timeout seconds, retries)}``.
+#: Parameter extraction answers in under 4 s when it answers; a provider request that stalls past 20 s
+#: will not answer, and one retry of a fresh request usually does (fix-vdaj). The retries are DSPy's: the
+#: timeout is per attempt, a failed attempt waits 1 s, then 2 s (``dspy.clients.execution._delay``), so
+#: 20 s x (1 + 2) + 3 s = 63 s is the longest one call can hold a turn.
+ROLE_LIMIT_DEFAULTS: dict[str, tuple[float, int]] = {"LLM_PARAM_EXTRACTION": (20.0, 2)}
+
+_WARNED_LIMITS: set[tuple[str, str]] = set()
+
+
+def _limit_setting(name: str, parse, default):
+    """``name`` from the env (env files first, then the process: ``get_env_var``), parsed by ``parse``
+    (which raises ``ValueError`` for a value out of range); unset is ``default``, and a value that does
+    not parse logs one warning and is ``default``."""
+    raw = fastworkflow.get_env_var(name, default="")
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return parse(str(raw).strip())
+    except ValueError:
+        if (name, str(raw)) not in _WARNED_LIMITS:
+            _WARNED_LIMITS.add((name, str(raw)))
+            logger.warning(f"{name}={raw!r} is not a valid setting; using {default}")
+        return default
+
+
+def _positive_seconds(text: str) -> float:
+    value = float(text)
+    if not value > 0 or value == float("inf"):
+        raise ValueError(text)
+    return value
+
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise ValueError(text)
+    return value
+
+
+def role_limits(model_env_var: str) -> tuple[float, Optional[int]]:
+    """``(timeout seconds per attempt, retries)`` for the role whose model is ``model_env_var``.
+
+    ``LLM_TIMEOUT_SECONDS_<ROLE>`` and ``LLM_NUM_RETRIES_<ROLE>``, ``<ROLE>`` being the name after ``LLM_`` (the
+    suffix of ``LITELLM_API_KEY_<ROLE>``): ``LLM_TIMEOUT_SECONDS_PARAM_EXTRACTION``. Without them the role's
+    ``ROLE_LIMIT_DEFAULTS`` entry applies (parameter extraction: 20 s, 2 retries); a role with no entry takes
+    ``LLM_TIMEOUT_SECONDS`` (default 120) and the retries are ``None``, DSPy's own default. A value that is not a
+    positive number of seconds, or not a non-negative integer, logs a warning and the default applies.
+    """
+    role = model_env_var[4:] if model_env_var.startswith("LLM_") else model_env_var
+    built_in = ROLE_LIMIT_DEFAULTS.get(model_env_var)
+    if built_in is not None:
+        timeout_default, retries_default = built_in
+    else:
+        timeout_default = _limit_setting("LLM_TIMEOUT_SECONDS", _positive_seconds, DEFAULT_LLM_TIMEOUT_SECONDS)
+        retries_default = None
+    return (
+        _limit_setting(f"LLM_TIMEOUT_SECONDS_{role}", _positive_seconds, timeout_default),
+        _limit_setting(f"LLM_NUM_RETRIES_{role}", _non_negative_int, retries_default),
+    )
+
+
+def is_timeout_error(error: BaseException) -> bool:
+    """Whether ``error``, or anything it was raised from, is a model request that timed out.
+
+    DSPy raises ``LMTimeoutError`` when LiteLLM times out (Bedrock and the other LiteLLM routes) and
+    ``LMTransportError`` ("read timed out ...") from its own client (``openai/`` and the other native routes);
+    both carry the cause. Checked by type, then by the words "timed out" in the message.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (TimeoutError, litellm.Timeout)):
+            return True
+        if type(error).__name__ in ("LMTimeoutError", "TimeoutError", "ReadTimeout", "APITimeoutError"):
+            return True
+        if "timed out" in str(error).lower():
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
+    """The role's LM, tagged with the role (``fastworkflow_role``) so a model-call span can say whose it is.
+
+    ``_build_lm`` builds it; see there for the arguments and the routing.
+    """
+    lm = _build_lm(model_env_var, api_key_env_var, **kwargs)
+    try:
+        lm.fastworkflow_role = model_env_var
+    except Exception:  # noqa: BLE001 - a tag is an extra: an LM that refuses it is still the role's LM
+        pass
+    return lm
+
+
+def _build_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     """
     Get the dspy LM object.
     
@@ -68,8 +166,10 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     if not lm_cache_enabled():
         kwargs.setdefault("cache", False)
     # Without one, a provider request that stalls blocks the turn for minutes.
-    kwargs.setdefault(
-        "timeout", float(fastworkflow.get_env_var("LLM_TIMEOUT_SECONDS", default="120")))
+    timeout_s, num_retries = role_limits(model_env_var)
+    kwargs.setdefault("timeout", timeout_s)
+    if num_retries is not None:
+        kwargs.setdefault("num_retries", num_retries)
 
     model = fastworkflow.get_env_var(model_env_var)
     if not model:

@@ -1,7 +1,6 @@
-"""End-to-end consultation reply policy (fix-kk46.7): trained head, real CME, scripted planner only."""
+"""End-to-end consultation reply policy (fix-kk46.7): the head's recorded answers, real CME, scripted planner only."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import dspy
@@ -24,14 +23,11 @@ LIBRARY = Path(fastworkflow.__file__).resolve().parent / "examples" / "library"
 DROP = "ProposalReview/drop"
 
 
-def _head_trained() -> bool:
-    return os.path.isfile(os.path.join(CONSULTATION, "___command_info", "ProposalReview", "threshold.json"))
-
-
-pytestmark = [
-    pytest.mark.usefixtures("initialized_fastworkflow", "no_live_model", "no_draft_extraction"),
-    pytest.mark.skipif(not _head_trained(), reason="consultation ProposalReview head is not trained"),
-]
+# The reader's tests run on the head's RECORDED answers (tests/recorded_router.py), so they need no trained head and
+# run on a clean checkout. What the head itself gets right is asserted behind ``requires_consultation_head``
+# (tests/test_consultation_workflow.py, tests/test_built_in_vague_replies.py, tests/test_review_reply_router_recording.py).
+pytestmark = pytest.mark.usefixtures(
+    "initialized_fastworkflow", "no_live_model", "no_draft_extraction", "recorded_review_router")
 
 
 @pytest.fixture(autouse=True)

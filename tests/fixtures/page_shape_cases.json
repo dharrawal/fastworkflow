@@ -1,0 +1,15 @@
+[
+  {"name": "a page: an integer total and lists of one length", "output": {"ids": ["a", "b"], "titles": ["A", "B"], "total": 5}, "is_page": true, "table_worthy": true},
+  {"name": "a page with a single list", "output": {"ids": ["a", "b"], "total": 2}, "is_page": true, "table_worthy": false},
+  {"name": "an integer total with an empty list is still a page", "output": {"ids": [], "total": 0}, "is_page": true, "table_worthy": false},
+  {"name": "no total: two lists of one length are not a page", "output": {"owners": ["x", "y"], "managers": ["p", "q"]}, "is_page": false, "table_worthy": false},
+  {"name": "a boolean total does not count", "output": {"ids": ["a"], "titles": ["A"], "total": true}, "is_page": false, "table_worthy": false},
+  {"name": "a string total does not count", "output": {"ids": ["a"], "titles": ["A"], "total": "1"}, "is_page": false, "table_worthy": false},
+  {"name": "lists of different lengths are not a page", "output": {"ids": ["a", "b"], "titles": ["A"], "total": 2}, "is_page": false, "table_worthy": false},
+  {"name": "an integer total and no list is not a page", "output": {"total": 3, "name": "x"}, "is_page": false, "table_worthy": false},
+  {"name": "no lists and no total", "output": {"name": "x"}, "is_page": false, "table_worthy": false},
+  {"name": "a list of objects counts as a list field", "output": {"rows": [{"a": 1}, {"a": 2}], "ids": ["a", "b"], "total": 2}, "is_page": true, "table_worthy": false},
+  {"name": "an object list of another length breaks the page", "output": {"rows": [{"a": 1}], "ids": ["a", "b"], "total": 2}, "is_page": false, "table_worthy": false},
+  {"name": "two empty lists and a total: a page, but no columns for a table", "output": {"ids": [], "titles": [], "total": 0}, "is_page": true, "table_worthy": false},
+  {"name": "a page of one row and two columns", "output": {"ids": ["a"], "titles": ["A"], "total": 1}, "is_page": true, "table_worthy": true}
+]

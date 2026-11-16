@@ -647,6 +647,8 @@ def compute_context_signatures(
     sparse = sparse_arm(reserved_class_arm)
     if sparse and universe is None:
         universe = set().union(*context_commands.values()) if context_commands else set()
+    from fastworkflow.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
+
     signatures: dict[str, ContextSignature] = {}
     for context_name in context_names:
         own = context_commands.get(context_name, set())
@@ -657,6 +659,11 @@ def compute_context_signatures(
                 command for command in (universe or set())
                 if command not in own and command.split("/")[-1] != WILDCARD_LABEL
             }
+
+        samples = (not_here_samples_by_context or {}).get(context_name) if sparse else None
+        if samples and BUILT_IN_VAGUE_SOURCE in samples:
+            # The head has no foreign seed, so its class is the built-in vague replies (fix-1hs8).
+            wildcard_sources.add(BUILT_IN_VAGUE_SOURCE)
 
         signatures[context_name] = ContextSignature(
             context_name=context_name,
@@ -695,6 +702,20 @@ def compute_planning_fingerprints(workflow_folderpath: str) -> dict[str, Command
     return fingerprints
 
 
+def built_in_vague_fingerprint() -> CommandFingerprint:
+    """The fingerprint of the built-in vague replies (a head's training input, fix-1hs8), by their text."""
+    from fastworkflow.model_pipeline_training import (
+        BUILT_IN_VAGUE_REPLIES,
+        BUILT_IN_VAGUE_SOURCE,
+        BUILT_IN_VAGUE_WEIGHT,
+    )
+
+    return CommandFingerprint(
+        command_name=BUILT_IN_VAGUE_SOURCE, source_path=None,
+        source_sha256=_sha256_strings([*BUILT_IN_VAGUE_REPLIES, f"weight={BUILT_IN_VAGUE_WEIGHT}"]),
+        seed_utterances_sha256=None)
+
+
 def compute_training_signature(
     workflow_folderpath: str,
     context_names: Iterable[str],
@@ -716,7 +737,10 @@ def compute_training_signature(
     context_commands, unresolved = build_context_maps(
         workflow_folderpath, contexts, head_scope=head_scope)
 
-    from fastworkflow.model_pipeline_training import not_here_construction
+    from fastworkflow.model_pipeline_training import (
+        BUILT_IN_VAGUE_SOURCE,
+        not_here_construction,
+    )
 
     from fastworkflow.model_pipeline_training import arm_for_workflow
 
@@ -742,6 +766,13 @@ def compute_training_signature(
             )
             for context_name in contexts
         }
+
+    if any(BUILT_IN_VAGUE_SOURCE in (samples or {})
+           for samples in (not_here_samples_by_context or {}).values()):
+        # A head seeded from the built-in vague replies: they are a training input like a planning
+        # command file, fingerprinted by their text so editing the list retrains that head.
+        command_fingerprints = {
+            **command_fingerprints, BUILT_IN_VAGUE_SOURCE: built_in_vague_fingerprint()}
 
     signature = TrainingSignature(
         format_version=ARTIFACT_FORMAT_VERSION,

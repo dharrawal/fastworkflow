@@ -407,8 +407,9 @@ def _plan_span(sink):
 
 
 def test_a_matched_planning_command_with_params_is_planned_as_a_call_and_expanded(tmp_path, workflow_env,
-                                                                                    monkeypatch):
+                                                                                    monkeypatch, no_planner_key):
     workflow_env()
+    # no_planner_key: a live Jev's field-given check would reset the scripted count to its default
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(REQUEST)
@@ -1038,8 +1039,9 @@ def test_a_planning_command_file_with_plan_loads_and_keeps_its_flat_steps(tmp_pa
     assert command.template == _command(tmp_path / "flat", LOOKUP).template
 
 
-def test_a_phased_planning_command_call_hands_its_phases_to_the_runner(tmp_path, workflow_env, monkeypatch):
+def test_a_phased_planning_command_call_hands_its_phases_to_the_runner(tmp_path, workflow_env, monkeypatch, no_planner_key):
     workflow_env()
+    # no_planner_key: a live Jev's field-given check would reset the scripted count to its default
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(REQUEST)

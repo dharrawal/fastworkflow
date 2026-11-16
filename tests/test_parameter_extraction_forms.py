@@ -143,11 +143,23 @@ def test_xml_records_no_deterministic_form(harness):
     assert "deterministic_form" not in diagnostics
 
 
-def test_assistant_mode_does_not_parse_in_code(harness, monkeypatch):
+def test_assistant_mode_parses_only_key_value_in_code(harness, monkeypatch):
     # Which path runs, not the argument checks (fix-qjf4, which would refuse the made-up answer).
     monkeypatch.setitem(fastworkflow._env_vars, "FW_EXTRACTION_ARGUMENT_CHECKS", "off")
     output, diagnostics, _ = harness(
         _FindParams, f"{FIND}: find_book query=Ann", agent=False,
+        llm_result=lambda cls: cls(query="from llm"))
+    assert output.cmd_parameters.query == "Ann"
+    assert diagnostics["extraction_method"] == "xml_regex"
+    assert diagnostics["deterministic_form"] == "key_value"
+
+
+@pytest.mark.parametrize("form", ["find_book Ann Lee", "find_book <query>Ann</query>"])
+def test_assistant_mode_sends_other_forms_to_the_llm(harness, monkeypatch, form):
+    # The positional and XML forms stay agent-only (fix-weih.1).
+    monkeypatch.setitem(fastworkflow._env_vars, "FW_EXTRACTION_ARGUMENT_CHECKS", "off")
+    output, diagnostics, _ = harness(
+        _FindParams, f"{FIND}: {form}", agent=False,
         llm_result=lambda cls: cls(query="from llm"))
     assert output.cmd_parameters.query == "from llm"
     assert diagnostics["extraction_method"] == "llm"

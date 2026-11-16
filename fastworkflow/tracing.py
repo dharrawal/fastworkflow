@@ -385,7 +385,36 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # when the validation step runs, with ran=False when the Input declares no validator (no facts to report).
 # The key and the attribute set are unchanged; a span recorded before this carries the same keys with the
 # hook's meaning.
-SPAN_CONTRACT_VERSION = 41
+# v42: fw.ask_user v2 (fix-4da9) -- `user_responses`: the ordered list of every reply the question took, the final
+# one last. A review (plan or sub-task approval) can take several replies before it settles, and `user_response`
+# keeps only the final one. `user_response` is unchanged. A span recorded before this has no `user_responses`.
+#
+# v43: fw.compose v1 (new; fix-weih.28) -- one span per compose call of the run_chatbot page (POST /compose_answer_card,
+# POST /compose_question_form). It carries the counts and reason codes of the composer's INFO log line, the model id,
+# the outcome and the duration, and never user text, result values or raw model output. It is written by the server
+# after the turn finished, filed under the turn's trace id when the page sent the turn key (parent: the turn root)
+# and under its own `compose-<id>` trace otherwise. A span recorded before this does not exist.
+#
+# v44: fw.llm.call v2 (fix-vdaj) -- what a stalled call needed to be seen without inference. `role` (the model role the
+# LM was built for: LLM_PARAM_EXTRACTION, LLM_AGENT, ...; absent for an LM not built by get_lm), `timeout_s` (the
+# per-attempt timeout in effect), `num_retries` (the retries configured; DSPy makes up to num_retries + 1 attempts),
+# `outcome` ("ok", "timeout" or "error"), `timed_out` (a timeout anywhere in the exception's cause chain) and
+# `exception_type` (the class name of the failure; `exception` keeps the repr). The attempts actually made are NOT
+# recorded: DSPy retries inside one call and its callbacks fire once around all the attempts, so the library does not
+# expose the count. A span recorded before this carries none of the six keys.
+#
+# v45: fw.compose v2 (fix-weih.35) -- `answer_chars` (the length of the answer the page sent, which every composer
+# check reads in full) and `excerpt_chars` (the length of the excerpt the model was shown instead of the whole answer;
+# 0 when it saw the whole answer). They are the two numbers the composer's INFO line already carried for a long answer.
+# Null for a question form. A span recorded before this carries neither key.
+#
+# v46: fw.turn v5 (fix-1ma8.1) -- `subtask_plan_ambiguity`: one record per sub-task of the turn's draft whose
+# planning-command match was ambiguous (another planning command cleared the shortlist floor and the winner was not a clear
+# leader): `subtask` (its number), `means` (the winner, as the review shows it) and `alternatives` (the names of the other
+# plans that fit). Names only, never user text or scores. Recorded whether or not the review was opened (an unattended
+# turn runs the winner and carries the record). Null when none was ambiguous. A span recorded before this carries no
+# such key.
+SPAN_CONTRACT_VERSION = 46
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -469,6 +498,10 @@ SPAN_DISTILLATION_PASS = "fw.distillation.pass"
 # One span per approval-binding transition (approval_binding._audit).
 SPAN_APPROVAL = "fw.approval"
 
+# One span per compose call of the run_chatbot page (the answer card and the question form). Written by the
+# server after the turn finished; see ``fastworkflow.run_fastapi_mcp.compose_trace``.
+SPAN_COMPOSE = "fw.compose"
+
 # The attribute a pass-stamping producer records, and the one
 # `comparison.discover_pass_selectors` / `selection_api.DEFAULT_PASS_ATTRIBUTE`
 # already look for. Dotted like a span name rather than named `pass` because it
@@ -521,8 +554,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v2: `unattended` (the turn ran with no ask_user tool).
     # v3: `subtask_review` (SPAN_CONTRACT_VERSION v35): the sub-task review gate's outcome for the turn.
     # v4: `subtask_bindings` (SPAN_CONTRACT_VERSION v37): shown == run per bound sub-task (fix-48np.1).
+    # v5: `subtask_plan_ambiguity` (SPAN_CONTRACT_VERSION v46): the sub-tasks whose planning-command match was ambiguous.
     SPAN_TURN: SpanContract(
-        version=4,
+        version=5,
         attributes=frozenset(
             {
                 "turn_key",
@@ -537,6 +571,39 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "context_mutations",
                 "subtask_review",
                 "subtask_bindings",
+                "subtask_plan_ambiguity",
+            }
+        ),
+    ),
+    # v1: one per compose call (SPAN_CONTRACT_VERSION v43). Counts, reason codes and short labels only.
+    # v2: `answer_chars` and `excerpt_chars` (SPAN_CONTRACT_VERSION v45): the answer's length and the excerpt's.
+    SPAN_COMPOSE: SpanContract(
+        version=2,
+        attributes=frozenset(
+            {
+                "compose_kind",
+                "outcome",
+                "results",
+                "model",
+                "duration_ms",
+                "turn_attached",
+                "digest_chars",
+                "answer_chars",
+                "excerpt_chars",
+                "collapsed",
+                "sections_kept",
+                "sections_proposed",
+                "blocks_kept",
+                "blocks_proposed",
+                "lead",
+                "drops",
+                "retry",
+                "sections_unnested",
+                "refs_repaired",
+                "sections_merged",
+                "truncated",
+                "token_limit",
+                "second_pass",
             }
         ),
     ),
@@ -564,10 +631,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    # v2: `user_responses` (SPAN_CONTRACT_VERSION v42): all replies of the question in order, the final one last.
     SPAN_ASK_USER: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
-            {"agent_query", "attempt", "user_response", "human_wait_ms"}
+            {"agent_query", "attempt", "user_response", "user_responses", "human_wait_ms"}
         ),
     ),
     # v3: the four auto-navigation keys (v2) are gone with the
@@ -937,7 +1005,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         ),
     ),
     SPAN_LLM_CALL: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "module",
@@ -960,6 +1028,12 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "provider_response",
                 "usage_capture",
                 "exception",
+                "role",
+                "timeout_s",
+                "num_retries",
+                "outcome",
+                "timed_out",
+                "exception_type",
             }
         ),
     ),

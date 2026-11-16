@@ -70,6 +70,7 @@ PUBLIC = (
     ("CopiedOptions", "_TypedDictMeta", "fastworkflow.field_options"),
     ("FieldOptions", "_TypedDictMeta", "fastworkflow.field_options"),
     ("RecordNamedOptions", "_TypedDictMeta", "fastworkflow.field_options"),
+    ("UiOptions", "_TypedDictMeta", "fastworkflow.field_options"),
     ("descends_to", "function", "fastworkflow.command_declarations"),
     ("get_active_workflow", "function", "fastworkflow.active_workflow"),
     ("get_env_var", "function", "fastworkflow"),

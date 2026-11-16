@@ -6956,6 +6956,15 @@ class SQLiteTraceSink:
         self._writer.start()
         # Opportunistic bounded prune at sink startup [R12]; the writer repeats
         # it every `_PRUNE_INTERVAL_S` (`_maybe_prune`).
+        # Registered first, so the agent build's once-per-path prune
+        # (`observation_offloading.state.prune_once`) does not repeat this one
+        # inside the first turn. Imported here: that module imports this one.
+        try:
+            from fastworkflow.observation_offloading import state as offload_state
+
+            offload_state.mark_pruned(self.store.db_path)
+        except Exception as exc:  # the guard is an optimisation only
+            logger.debug(f"Could not register startup prune: {exc!r}")
         try:
             self.store.prune()
         except Exception as exc:

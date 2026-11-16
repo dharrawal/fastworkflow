@@ -28,6 +28,10 @@ which you have.
 - Don't use Mock fixtures — all tests are integration tests against real components
 - Use the real test workflows in `tests/example_workflow/`, `tests/hello_world_workflow/`, and `tests/todo_list_workflow/`
 - Do NOT remove pytest tests without explicit user approval
+- A test that asserts behaviour without the optional planner (`JEV_API_KEY`) must use the `no_planner_key` fixture
+  from `tests/conftest.py` (`@pytest.mark.usefixtures("no_planner_key")` or a fixture argument). `monkeypatch.delenv`
+  alone is not enough: `get_env_var` reads the loaded env files first and the planner LM and matcher are
+  `lru_cache`d. When the planner becomes mandatory, the tests that use this fixture are retired.
 
 ### Never run two full suites at once
 
@@ -63,11 +67,27 @@ scripts require it from there by path). On the owner's box that is
 `~/.cache/fw-jsdom`; the location is configuration, so nothing in the repo
 assumes it. Pass test files to narrow the run, `--list` to see what would run.
 
+### The consultation head: one marker, one switch, one recording
+
+The built-in consultation workflow's `ProposalReview` intent head is local and gitignored, so a clean checkout and CI
+have none. Tests that assert the head's own quality (the held-out corpus score, the "a trained head asks again on a
+vague reply" class, the drift test) carry `@pytest.mark.requires_consultation_head` (`tests/conftest.py`): they skip
+with a reason naming the missing head and how to get it (`fastworkflow train` on the consultation workflow path), and
+`FW_REQUIRE_HEADS=1` in the process environment (read directly, not from env files) turns that skip into a failure.
+The session header names the head's current version id. Tests of the review's reply READER do not need the head: they
+run on the head's recorded answer for each reply (`tests/recorded_router.py`, fixture `recorded_review_router`,
+recordings in `tests/fixtures/review_reply_router_answers.json`), placed in `CommandRouter._instances_cache` where
+production looks the router up; a reply with no recording fails loudly. After a retrain, run
+`test_recorded_router_matches_the_head` (it lists drifted replies), then re-record with
+`pytest --record-review-router tests/test_consultation_reply_policy.py tests/test_built_in_vague_replies.py tests/test_round1_handoff.py`
+and review the fixture diff. Other example heads (hello_world, library) still skip ad hoc.
+
 ## fastworkflow CLI
 
 Run `fastworkflow --help` for the full command list (`examples`, `train`, `run`, `build`, `refine`, `run_fastapi_mcp`). Non-obvious behavior:
 - `run` defaults to agent mode; `--assistant` runs deterministic mode.
 - Prefix a command with `/` at the interactive prompt to force deterministic (non-agentic) execution.
+- `run` prompt: `//cancel` cancels a pending question, review or approval (`ChatSession.cancel_pending_prompt`); Ctrl-C or `--timeout_seconds N` (default off) stops waiting on a turn, which finishes in the background with its output discarded (`ChatSession.abandon_turn`, `turn_gate.py`, `run/turn_wait.py`).
 - `train` validates seed coverage and duplicate capabilities, reuses generated-data caches,
   and automatically chooses selective or full retraining. `--regenerate-utterances` is the
   only training-policy override.
@@ -98,6 +118,10 @@ Two env files per workflow (see `fastworkflow/examples/fastworkflow.env` for a t
 
 Key models (all default to `mistral/mistral-small-latest`): `LLM_SYNDATA_GEN`, `LLM_PARAM_EXTRACTION`, `LLM_PLANNER`, `LLM_AGENT`, `LLM_CONVERSATION_STORE`.
 
+`LLM_AGENT` unset (or empty) is **no-agent mode** (`fastworkflow/no_agent_mode.py`; the one decision is `agent_model_specified()`), for a server whose client is itself an agent. The routing classifier, parameter extraction, `LLM_PLANNER` (splitter and text planner) and Jev stay in use, so **`JEV_API_KEY` is then mandatory**: neither set is a startup problem (`command_preview.load_problems(folder, runtime=True)`, which `fastworkflow run` and the server ask for and `fastworkflow train` does not; `fastworkflow run` prints it and exits 1, and the server raises a startup error; `train` is unaffected). A single command and a predefined planning command run; a planning command runs its code steps. A DECISION step pauses it like ask_user and resumes on the reply (`_suspend_for_decision`, `_read_decision_reply` in `workflow_execution_context.py`; the state is `_phase_run["decision"]` plus a minimal agent stash, serialised like any suspension; the turn is `awaiting_user`, `question_kind` `phase_step`, data in `artifacts.phase_step`): a conditional step whose inner step code can run (yes runs it through `CodeSteps`, no skips it) or a command step missing one plain required value (the reply is the value, validated as a code-written step); unclear reply asked once more then the stop, `cancel` declines (stop with reason "declined"); only on an attended turn of the agent path with no blocking queue. At any other open step (a prose step, a value that must be found, a failed step, no path, the page cap) or where its answer would need a model (no `__result__` text), it ends as a COMPLETED turn carrying the stop as data, the artifact `fw_not_run` (a list, one entry per stopped part: `kind` "not_run_here", `command`, `phase`, `open_step`, `done`, `facts`, `remaining`, `suggested_plan`, `means`, `sub_task`); an ad hoc part (no planning command matched) is not run and comes back as the same entry with the planner's text plan and `available_plans` (additive: `{name, description, closest}` for the planning commands available here (the lookup path the matcher chooses from, `workflow_agent.planning_names_on_path`), the matcher's closest ones first, then the rest; `no_agent_mode.available_plans`), an ad hoc entry's own `request` text, and `use_plan` (optional on `/invoke_agent`, `/invoke_agent_stream` and the MCP `invoke_agent`; `WorkflowExecutionContext.process_turn(use_plan=)`, checked by `check_use_plan`, `UsePlanError`) that runs one request as one unsplit part with that planning command pinned (no matcher call; the chat page's plan buttons send it), through the round-1 draft for that plan (`draft_round1_proposal(pinned_plan=)`) and then NOT the sub-task review: the intent is settled, so it asks the plan's parameter question (`_ask_plan_parameters`: `question_kind` `planning_parameter`, `parameter_request` with `confirm`, `description` and every parameter with its drafted value and state; a plan with no parameters, or an unattended turn, runs as drafted; replies read strictly by `no_agent_mode.read_parameter_reply`: yes, `name: value` lines, a bare value when one is open, cancel) while the matched route keeps its review; in no-agent mode a required value still unbound is asked for through the refusal question path (`WorkflowExecutionContext.refusal_question_for`, for a matched plan and the typed call too): one question names every missing or refused argument (`planning_commands.argument_gaps`, `parameter_request.missing`/`invalid`/`values`), the draft keeps the values the checks stand behind, it keeps asking while each reply makes progress, a reply with none is asked once more then the part ends as not run naming exactly what is missing (`no_agent_mode.MAX_NO_PROGRESS`), `cancel` declines, and the progress is saved with the session state (`refusal_progress`); with an agent model the refusal is asked once as before, and its code-written answer text leads with that no matching plan was found, then lists them (markdown, at most 12 and a count of the rest; a later ad hoc part of a split turn with the same plans lists only its own closest and points to the part that lists them all). `fastworkflow run` with no agent model starts in deterministic (assistant) mode and says so. The contexts that serve users ask for the mode (`detect_no_agent_mode`: `ChatSession`, the FastAPI session); one built without asking never enters it. Tests use the `no_agent_model` fixture (`tests/conftest.py`). With `LLM_AGENT` set nothing changes.
+
+`LLM_RESPONSE_GEN` (key `LITELLM_API_KEY_RESPONSE_GEN`) is the model of `fastworkflow/run_chatbot/composer.py`: the `run_chatbot` composed answer card and `ask_user` question form (`POST /compose_answer_card`, `POST /compose_question_form`). The shipped `fastworkflow.env` template sets it to `mistral/mistral-small-latest` (key in `fastworkflow.passwords.env`; a Bedrock model needs no `LITELLM_API_KEY_*` entry, it authenticates from the AWS credential chain), and the code has no fallback. Unset, so everything deterministic still works and the composed card and form are absent. The card request takes up to 60 results and an answer of up to 150,000 characters (the question form: 20,000); the model reads the whole answer up to 20,000 characters and above that an excerpt of about 12,000 (every `### N.` heading with the opening of its part), while every check reads the full text; results may carry the recorded request part (`sub_task`), used for the log diagnostics only (the union of it and the parts); the request may carry `parts`, the parts of a split turn as the core recorded them (the `fw_sub_tasks` artifact of the turn's last command output: number, request text, title, answered, offsets of each part's answer in the answer text), and what the model reads and the section caps come from the answered parts when they are sent and fit the answer, else from the `### N.` headings, with the same result; the model writes `lead` and `sections` (at least 5, one per part of a multi-part request up to a safety ceiling of 24, with 4 blocks each; the output budget grows with the section cap, 1800 tokens up to 5 sections and 250 more per section after); the page adds the 8-row table cap and a footer line for every primary result group no block shows. See the README section "Chat: drive the workflow from the browser".
+
 LiteLLM Proxy: prefix model names with `litellm_proxy/` and set `LITELLM_PROXY_API_BASE`.
 
 Optional settings for planning commands (`_commands/<name>.py` files; see
@@ -111,6 +135,20 @@ Optional settings for planning commands (`_commands/<name>.py` files; see
 - `FW_TURN_MAX_STEPS` (optional, default 400). The most model steps the nested planning-command calls of
   one turn may take together; it resets each turn. A value that is not a positive integer logs a
   warning and the default applies (`plan_frame.turn_max_steps`).
+- `FW_SUBTASK_WORKERS` (optional, default 4). After a request is split, the per-sub-task model calls that do
+  not read each other (the referent, the planning-command match, the argument draft) wait on the model together,
+  at most this many at once, and the results keep sub-task order. 1 runs them one after another; a single
+  sub-task never uses a pool. A value that is not a positive integer logs a warning and the default applies
+  (`subtask_pool.worker_limit`). Set 1 for a model that cannot take parallel calls or a test that scripts one model
+  in call order.
+- `LLM_TIMEOUT_SECONDS` (optional, default 120), `LLM_TIMEOUT_SECONDS_<ROLE>` and `LLM_NUM_RETRIES_<ROLE>`
+  (optional; `<ROLE>` is the name after `LLM_`, as in `LITELLM_API_KEY_<ROLE>`). The model timeout is per attempt,
+  and DSPy makes up to retries + 1 attempts (a failed one waits 1 s, then 2 s). Parameter extraction has
+  built-in limits of 20 s and 2 retries (longest wait 63 s); every other role takes `LLM_TIMEOUT_SECONDS` and
+  DSPy's 3 retries unless its own setting is given (`dspy_utils.role_limits`). A value that is not a positive
+  number (a non-negative integer for retries) logs a warning and the default applies. An extraction that times
+  out leaves its parameters not given; the `fw.llm.call` span records `role`, `timeout_s`, `num_retries`,
+  `outcome` and `timed_out`, not the attempts made (DSPy does not expose them).
 
 Planning command previews: `fastworkflow command preview <workflow_folder>` writes one markdown preview
 per planning command to `<workflow_folder>/../docs/planning_command_previews/`. With `--check` it writes

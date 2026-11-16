@@ -956,7 +956,9 @@ prompting. The only rejection mechanism is the ambiguity threshold in
 `CommandRouter.predict` (`model_pipeline_training.py:321-334`), and for retail it is
 **0.2395 / 0.3392** — anything clearing ~24–34% confidence executes. Those thresholds are not
 a calibrated operating point; they are computed at `:1174-1190` as the *mean confidence of
-misclassified test samples*, a descriptive statistic of the training run.
+misclassified test samples*, a descriptive statistic of the training run. (Written at that commit. Since fix-1hs8
+the large tier takes the 10th percentile of correct-row confidences when fewer than 5 test rows are misclassified;
+the failed mean is unchanged otherwise.)
 
 ### M4 — seeding cannot make training reproducible while an LLM generates the data
 

@@ -1,0 +1,337 @@
+{
+ "cases": [
+  {
+   "name": "multi_result_turn",
+   "user_message": "Look up Ann Lee and show her recent orders.",
+   "answer": "Ann Lee is a gold tier customer with a balance of 120.5. She has 3 recent orders: A100 shipped, A101 delivered and A102 pending.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_customer",
+     "parameters": {
+      "name": "Ann Lee"
+     },
+     "output": {
+      "name": "Ann Lee",
+      "tier": "gold",
+      "balance": 120.5,
+      "email": "ann@example.com"
+     }
+    },
+    {
+     "id": "r2",
+     "command": "list_orders",
+     "parameters": {
+      "customer": "Ann Lee"
+     },
+     "output": {
+      "order_ids": [
+       "A100",
+       "A101",
+       "A102"
+      ],
+      "statuses": [
+       "shipped",
+       "delivered",
+       "pending"
+      ],
+      "total": 3
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1",
+     "r2"
+    ],
+    "forbid": [],
+    "allow_plain": false,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "long_prose_one_result",
+   "user_message": "What is your return policy?",
+   "answer": "You can return most items within 30 days of delivery as long as they are unused and in their original packaging. Refunds go back to the original payment method and usually take 5 to 7 business days to appear after we receive the item. Items that were custom made, perishable or marked final sale cannot be returned. If an item arrives damaged, contact us within 7 days and we will send a replacement at no cost. A return shipping fee of 5.00 applies to returns that are not caused by our error.\n\nLet me know if you would like me to start a return for a specific order.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_policy",
+     "parameters": {
+      "topic": "returns"
+     },
+     "output": {
+      "policy_name": "returns",
+      "window_days": 30,
+      "return_fee": 5.0,
+      "refund_days": "5 to 7"
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1"
+    ],
+    "forbid": [],
+    "allow_plain": true,
+    "lead_only_ok": true
+   }
+  },
+  {
+   "name": "list_of_records",
+   "user_message": "Show my open invoices.",
+   "answer": "You have 3 open invoices, totalling 450.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "list_invoices",
+     "parameters": {},
+     "output": {
+      "invoices": [
+       {
+        "number": "INV-1",
+        "due": "2025-03-01",
+        "amount": 100
+       },
+       {
+        "number": "INV-2",
+        "due": "2025-03-15",
+        "amount": 150
+       },
+       {
+        "number": "INV-3",
+        "due": "2025-04-01",
+        "amount": 200
+       }
+      ],
+      "count": 3
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1.invoices",
+     "r1.count"
+    ],
+    "forbid": [],
+    "allow_plain": false,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "a_page",
+   "user_message": "List my support tickets.",
+   "answer": "Here are the first 4 of your 9 support tickets.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "list_tickets",
+     "parameters": {
+      "page": 1
+     },
+     "output": {
+      "ticket_ids": [
+       "T-11",
+       "T-12",
+       "T-13",
+       "T-14"
+      ],
+      "titles": [
+       "Login fails",
+       "Export slow",
+       "Billing error",
+       "Typo on page"
+      ],
+      "total": 9
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1"
+    ],
+    "forbid": [],
+    "allow_plain": false,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "status_like",
+   "user_message": "Was my refund approved?",
+   "answer": "Yes, your refund was approved. The reference is REF-4410.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_refund_status",
+     "parameters": {
+      "refund": "REF-4410"
+     },
+     "output": {
+      "status": "approved",
+      "reference": "REF-4410"
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1.status",
+     "r1.reference"
+    ],
+    "forbid": [],
+    "allow_plain": true,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "nested_record",
+   "user_message": "Show the limits on my account.",
+   "answer": "Your account ACC-77 is owned by Dana Fox with a daily limit of 500 and a monthly limit of 2000.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_account",
+     "parameters": {
+      "id": "ACC-77"
+     },
+     "output": {
+      "account": {
+       "id": "ACC-77",
+       "owner": {
+        "name": "Dana Fox",
+        "tier": "silver"
+       },
+       "limits": {
+        "daily": 500,
+        "monthly": 2000
+       }
+      }
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1.account",
+     "r1.account.limits",
+     "r1.account.owner",
+     "r1.limits",
+     "r1.owner",
+     "r1.id"
+    ],
+    "forbid": [],
+    "allow_plain": true,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "nothing_useful_in_result",
+   "user_message": "Send me a reminder tomorrow.",
+   "answer": "Done, I will remind you tomorrow morning.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "schedule_reminder",
+     "parameters": {
+      "when": "tomorrow"
+     },
+     "output": {
+      "request_id": "8f3a9c1e7b",
+      "cursor": null,
+      "trace": {
+       "hops": 2,
+       "cache": "miss"
+      }
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [],
+    "forbid": [
+     "r1"
+    ],
+    "allow_plain": true,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "supporting_lookup",
+   "user_message": "What is the due amount on invoice INV-9?",
+   "answer": "Invoice INV-9 is for 310.25 and is due on 2025-05-20.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_invoice",
+     "parameters": {
+      "number": "INV-9"
+     },
+     "output": {
+      "number": "INV-9",
+      "amount": 310.25,
+      "due": "2025-05-20",
+      "paid": false
+     }
+    },
+    {
+     "id": "r2",
+     "command": "find_customer_id",
+     "parameters": {
+      "invoice": "INV-9"
+     },
+     "output": {
+      "customer_id": "C-5521",
+      "shard": "eu-2"
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1"
+    ],
+    "forbid": [
+     "r2"
+    ],
+    "allow_plain": true,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "numbers_that_must_be_copied",
+   "user_message": "What did my last order cost?",
+   "answer": "Your last order cost 1,284.50 including tax of 98.75, across 12 items.",
+   "results": [
+    {
+     "id": "r1",
+     "command": "get_order",
+     "parameters": {
+      "order": "O-9"
+     },
+     "output": {
+      "order_id": "O-9",
+      "total": 1284.5,
+      "tax": 98.75,
+      "items": 12
+     }
+    }
+   ],
+   "expect": {
+    "relevant": [
+     "r1"
+    ],
+    "forbid": [],
+    "allow_plain": true,
+    "lead_only_ok": false
+   }
+  },
+  {
+   "name": "empty_results_long_answer",
+   "user_message": "How do I change my shipping address?",
+   "answer": "To change your shipping address, open your account settings and choose Addresses. Select the address you want to change, edit the fields and save. Changes apply to future orders only; orders that have already shipped keep their original address. If an order is still processing, contact support quickly and ask them to update it before it leaves the warehouse.\n\nYou can store up to five addresses and mark one of them as the default.",
+   "results": [],
+   "expect": {
+    "relevant": [],
+    "forbid": [],
+    "allow_plain": true,
+    "lead_only_ok": true
+   }
+  }
+ ]
+}

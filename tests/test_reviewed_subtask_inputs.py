@@ -50,11 +50,16 @@ class _ScriptedLM(DummyLM):
 
 
 @pytest.fixture(autouse=True)
-def drafting(monkeypatch):
-    """Drafting on (the tests about drafting off turn it off again), Jev's field check off, and the extractor scripted."""
+def drafting(monkeypatch, no_planner_key):
+    """Drafting on (the tests about drafting off turn it off again), Jev's field check off, and the extractor scripted.
+    No Jev key (``no_planner_key``): the developer environment's optional ``JEV_API_KEY`` would put a live Jev
+    on the path."""
     monkeypatch.setenv(review_proposals.DRAFT_ARGUMENTS_ENV_VAR, "on")
+    # One extractor LM is scripted in CALL order across the sub-tasks: drafts run one after another here (fix-awg8).
+    monkeypatch.setenv("FW_SUBTASK_WORKERS", "1")
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
     monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
+    yield
 
 
 @pytest.fixture
@@ -418,8 +423,7 @@ def test_an_id_the_review_left_unbound_is_found_at_run_time_and_recorded(gated, 
     gated.ctx.process_turn("change 1: means=plain:Library/open_book")
     assert _subtask(record, 1).inputs == [] and "Library/open_book" in _subtask(record, 1).means.name
 
-    gated.script.steps = ([("finish", {}),
-                           ("execute_workflow_query", {"command": "find_book query=Dune Messiah"}),
+    gated.script.steps = ([("execute_workflow_query", {"command": "find_book query=Dune Messiah"}),
                            ("execute_workflow_query", {"command": "open_book book_uid=b2"}),
                            ("finish", {})] + [("finish", {})] * 16)
     out = gated.ctx.process_turn("accept")

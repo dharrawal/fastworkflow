@@ -404,15 +404,23 @@ def test_the_command_metadata_key_pairing_is_the_irregular_one():
 
 
 def test_the_orphan_role_var_is_snapshotted_but_not_an_active_role():
-    """LLM_RESPONSE_GEN is in every env file and AGENTS.md, and no Python reads
-    it. A setting an operator believes is in effect belongs in the record; it
-    does not belong in the active-role set."""
+    """LLM_RESPONSE_GEN was an orphan until run_chatbot.composer began reading it, so it is
+    an active role now: snapshotted under `roles`, with its own key variable, and
+    no longer an orphan. `ORPHAN_ROLE_VARS` is empty until another unread setting
+    turns up."""
     provenance = capture_model_provenance(
-        {"LLM_RESPONSE_GEN": "vendor/unused", "LLM_AGENT": "vendor/real"}
+        {
+            "LLM_RESPONSE_GEN": "vendor/composer",
+            "LITELLM_API_KEY_RESPONSE_GEN": "secret",
+            "LLM_AGENT": "vendor/real",
+        }
     )
-    assert provenance.orphan_role_vars == {"LLM_RESPONSE_GEN": "vendor/unused"}
-    assert "LLM_RESPONSE_GEN" not in provenance.roles
-    assert set(ORPHAN_ROLE_VARS) == {"LLM_RESPONSE_GEN"}
+    assert provenance.orphan_role_vars == {}
+    assert provenance.roles["LLM_RESPONSE_GEN"].model == "vendor/composer"
+    assert provenance.roles["LLM_RESPONSE_GEN"].api_key_fingerprint is not None
+    assert provenance.model_identifiers["LLM_RESPONSE_GEN"] == "vendor/composer"
+    assert dict(LLM_ROLE_VARS)["LLM_RESPONSE_GEN"] == "LITELLM_API_KEY_RESPONSE_GEN"
+    assert ORPHAN_ROLE_VARS == ()
 
 
 def test_api_keys_are_fingerprinted_never_recorded():

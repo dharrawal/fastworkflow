@@ -16,6 +16,8 @@ import pytest
 import fastworkflow
 from fastworkflow import context_budget
 from fastworkflow.observability import store as observability_store
+from tests import consultation_head, recorded_router
+from tests.recorded_router import recorded_review_router  # noqa: F401  (fixture, shared by the reader tests)
 # Add the project root to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -144,8 +146,54 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.slow)
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--record-review-router", action="store_true", default=False, dest="record_review_router",
+        help="re-record tests/fixtures/review_reply_router_answers.json from the real consultation head "
+             "(see tests/recorded_router.py)",
+    )
+
+
+def pytest_report_header(config):
+    """Name the consultation head's current version in the session header, so a red after a retrain is attributable."""
+    return consultation_head.head_status_line()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    recorded_router.write_recording_if_requested(session.config)
+
+
+def _head_marker_and_absent(item) -> bool:
+    return item.get_closest_marker("requires_consultation_head") is not None and not consultation_head.head_trained()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """``requires_consultation_head``: skip, before any fixture, when the local head is absent.
+
+    With ``FW_REQUIRE_HEADS=1`` the test is not skipped: ``pytest_runtest_call`` fails it, so it reports FAILED
+    (not an error in setup) and its message names what is missing.
+    """
+    if _head_marker_and_absent(item) and not consultation_head.heads_required():
+        pytest.skip(consultation_head.missing_head_message())
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item):
+    if _head_marker_and_absent(item) and consultation_head.heads_required():
+        pytest.fail(
+            f"{consultation_head.REQUIRE_HEADS_ENV} is set and {consultation_head.missing_head_message()}",
+            pytrace=False,
+        )
+
+
 def pytest_configure(config):
     """Configure pytest markers."""
+    config.addinivalue_line(
+        "markers",
+        "requires_consultation_head: asserts the built-in consultation ProposalReview intent head's own quality; "
+        "skips when the local (gitignored) head is not trained, fails instead when FW_REQUIRE_HEADS=1",
+    )
     config.addinivalue_line(
         "markers", "integration: mark test as integration test"
     )
@@ -172,11 +220,62 @@ def reference_agent_window(monkeypatch):
     machine (or the repo-root ``.env`` litellm loads) names. This pins it to
     ``context_budget``'s calibration model, whose window is the reference.
     """
-    monkeypatch.delenv(context_budget.MODEL_CONTEXT_TOKENS_ENV, raising=False)
+    # ``context_budget.env_value`` reads the loaded env files before the process
+    # environment, and a developer's ``LLM_AGENT``, window or budget override
+    # (``FW_TRAJECTORY_MAX_BYTES`` ...) may sit in either, so none of them may
+    # reach a test that asserts the reference values.
+    pinned_names = {context_budget.MODEL_CONTEXT_TOKENS_ENV, context_budget.AGENT_MODEL_ENV,
+                    *(spec.override_env for spec in context_budget.BUDGETS if spec.override_env)}
+    for name in pinned_names:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(fastworkflow, "_env_vars",
+                        {name: value for name, value in fastworkflow._env_vars.items() if name not in pinned_names})
     monkeypatch.setenv(context_budget.AGENT_MODEL_ENV, "cerebras/gpt-oss-120b")
     context_budget.reset_cache()
     yield
     context_budget.reset_cache()
+
+
+@pytest.fixture
+def no_planner_key(monkeypatch):
+    """A process with no optional planner (Jev) key, for tests that assert behaviour without one.
+
+    ``fastworkflow.get_env_var`` reads the loaded env files before the process environment, so the key is removed
+    from both; the planner LM and the planning-command matcher are ``lru_cache``d, so both caches are dropped
+    before the test (an earlier test that had a key may have filled them) and after it (so this test leaks nothing).
+    When the planner becomes mandatory, the tests that use this fixture are retired.
+    """
+    from fastworkflow import workflow_agent
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    monkeypatch.setattr(fastworkflow, "_env_vars",
+                        {name: value for name, value in fastworkflow._env_vars.items() if name != "JEV_API_KEY"})
+    def drop_caches():
+        # A test may have stubbed either with a plain function (monkeypatch, undone after this fixture), which has no cache.
+        for planner_function in (workflow_agent._jev_lm, workflow_agent._planning_command_matcher):
+            getattr(planner_function, "cache_clear", lambda: None)()
+
+    drop_caches()
+    yield
+    drop_caches()
+
+
+@pytest.fixture
+def no_agent_model(monkeypatch):
+    """A process with no ReAct agent model (``LLM_AGENT``), for tests that assert no-agent mode.
+
+    ``fastworkflow.get_env_var`` reads the loaded env files before the process environment, so ``LLM_AGENT`` is removed
+    from both; and the execution contexts these tests build do not ask for the mode (an embedder that scripts its own
+    agent LM must not be switched into it), so the class default that asks for it is switched on for the test. Nothing
+    is cached, so nothing is dropped. With the agent model set, this fixture is not used: the rest of the suite is
+    that proof.
+    """
+    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+
+    monkeypatch.delenv("LLM_AGENT", raising=False)
+    monkeypatch.setattr(fastworkflow, "_env_vars",
+                        {name: value for name, value in fastworkflow._env_vars.items() if name != "LLM_AGENT"})
+    monkeypatch.setattr(WorkflowExecutionContext, "detect_no_agent_mode", True)
+    yield
 
 
 @pytest.fixture

@@ -13,8 +13,10 @@ class Signature:
 
     class Output(BaseModel):
         member_uids: list[str] = Field(description="the uid of each member found, in row order; "
-                                                   "open_member takes one")
-        names: list[str] = Field(description="the name of each member found, in row order")
+                                                   "open_member takes one",
+                                       json_schema_extra={"ui": {"table": "members"}})
+        names: list[str] = Field(description="the name of each member found, in row order",
+                                 json_schema_extra={"ui": {"table": "members"}})
         total: int = Field(description="how many members match")
 
     plain_utterances = [

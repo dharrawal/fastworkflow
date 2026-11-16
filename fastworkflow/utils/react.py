@@ -56,6 +56,10 @@ class fastWorkflowReAct(Module):
     # The steps code runs before the loop (``planning_phases.CodeSteps``), for the next
     # forward() only: set by the caller per run, taken (and cleared) by forward().
     code_steps: Any = None
+    # No-agent mode (fastworkflow.no_agent_mode): set by the caller before each run. The run takes no model
+    # step: code runs the steps it can, and the run then ends (``_finish_run``) with an empty answer, leaving
+    # ``last_code.stop`` for the caller to read.
+    no_model: bool = False
     # The conversation's policy (``fastworkflow.policy_runtime.AgentPolicy``), set by
     # ``policy_loader.attach_policy`` when the workflow has _policy/table.py; None
     # otherwise, and then nothing below changes behaviour.
@@ -288,6 +292,12 @@ class fastWorkflowReAct(Module):
 
         Returns the suspended Prediction when the loop suspends, else the run's prediction.
         """
+        if self.no_model:
+            # No agent model: code has run what it can (or nothing), and no model step follows.
+            self._exhausted_last_run = False
+            return dspy.Prediction(
+                trajectory=self.trajectory, exhausted=False,
+                **{name: "" for name in self.signature.output_fields})
         go_on = source is None or source.stop != "stopped"
         if go_on and source is not None and source.finished and not source.answers:
             # Every step ran by code and the run's answer is not shown: it ends here with

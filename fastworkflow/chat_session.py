@@ -13,9 +13,10 @@ import litellm
 
 import fastworkflow
 from fastworkflow import active_workflow
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.workflow_execution_context import CommandCancelledError, WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.startup_progress import StartupProgress
+from fastworkflow.turn_gate import GatedQueue, MessageQueue, TurnGate
 
 
 class SessionStatus(Enum):
@@ -102,6 +103,7 @@ class ChatSession:
         self,
         run_as_agent: bool = False,
         generate_insights: bool = False,
+        detect_no_agent_mode: bool = False,
     ):
         """
         Initialize a chat session.
@@ -111,6 +113,8 @@ class ChatSession:
                          If False (default), use traditional command execution.
             generate_insights: If True, enable teacher/student insights distillation
                          on each agent turn (Topology A / CLI only).
+            detect_no_agent_mode: If True, an unset agent model (``LLM_AGENT``) puts the session in no-agent mode
+                         (``fastworkflow.no_agent_mode``). ``fastworkflow run`` sets it.
 
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
@@ -119,6 +123,7 @@ class ChatSession:
         self._core = WorkflowExecutionContext(
             run_as_agent=run_as_agent,
             generate_insights=generate_insights,
+            detect_no_agent_mode=detect_no_agent_mode,
         )
         # CLI identity [R17]: a synthetic per-session channel so CLI turns are
         # attributable in the observability store (conversation ids are minted
@@ -129,9 +134,11 @@ class ChatSession:
         )
 
         # Create queues for user messages and command outputs (CLI transport)
-        self._user_message_queue = Queue()
-        self._command_output_queue = Queue()
-        self._command_trace_queue = Queue()
+        # Gated queues: the terminal can stop waiting on a turn and have its output dropped (see turn_gate).
+        self._gate = TurnGate()
+        self._user_message_queue = MessageQueue(self._gate)
+        self._command_output_queue = GatedQueue(self._gate)
+        self._command_trace_queue = GatedQueue(self._gate)
         self._core.set_transport_queues(
             user_message_queue=self._user_message_queue,
             command_output_queue=self._command_output_queue,
@@ -301,6 +308,11 @@ class ChatSession:
         return self._core.run_as_agent
 
     @property
+    def no_agent_mode(self) -> bool:
+        """True when the agent model (``LLM_AGENT``) is not specified and this session detects the mode."""
+        return self._core.no_agent_mode
+
+    @property
     def _distillation_insights_count(self) -> int:
         """Number of insights extracted so far in insights-distillation mode."""
         return self._core._distillation_insights_count
@@ -316,6 +328,93 @@ class ChatSession:
     @property
     def command_trace_queue(self) -> Queue:
         return self._command_trace_queue
+
+    @property
+    def interrupted_turn_running(self) -> bool:
+        """True while a turn the terminal stopped waiting on is still running (its output is being dropped)."""
+        return self._gate.muted
+
+    def abandon_turn(self) -> bool:
+        """Stop waiting on the running turn (Ctrl-C or a deadline at the terminal).
+
+        The engine cannot abort a turn in flight, so the turn runs to its end in the worker thread: its commands'
+        side effects still happen. Guaranteed: nothing it outputs reaches the queues (what it already put is
+        cleared, the rest is dropped), it can never block on ``ask_user`` (that read cancels the turn through the
+        engine's ``CommandCancelledError``), and the next message runs only after it finishes, in order.
+        False when the turn had already ended (its sentinel is queued): nothing is abandoned.
+        """
+        return self._gate.abandon(self._command_trace_queue, self._command_output_queue)
+
+    def _deliver_if_unsent(self, output) -> None:
+        """Give the terminal a turn's output when the turn put none on the queues.
+
+        A reply to an approval or review, and the approval management messages (``/approvals``), are answered in
+        ``_execute_message`` without the queue puts a command's run makes, so the terminal waited for a sentinel that
+        never came. A turn that put its sentinel (every command path does) is left alone.
+        """
+        if self._gate.sentinels == 0 and output is not None:
+            self._core._maybe_enqueue_output(output)
+            self._core._maybe_enqueue_trace_sentinel()
+
+    def _pending_cancel_reply(self) -> Optional[tuple[str, str]]:
+        """What is pending on the session once no turn is running, as ``(kind, the engine reply that cancels it)``.
+
+        The one classification ``//cancel`` and the cleanup of an abandoned turn share: an open approval or plan
+        review is answered ``no`` (the chat page's Decline / Cancel), an open command (a missing value, an
+        ambiguous command) ``abort`` (the page's Cancel on those forms). None when nothing is pending. A blocked
+        ``ask_user`` read is not here: it is ended by ``MessageQueue.post_cancel``.
+        """
+        from fastworkflow import approval_binding
+
+        workflow = self._core.app_workflow
+        if workflow is not None and (approval_binding.active_approvals(workflow)
+                                     or approval_binding.active_reviews(workflow)):
+            return "review", "no"
+        if self._core.has_open_command():
+            return "clarification", "abort"
+        return None
+
+    def cancel_pending_prompt(self) -> Optional[str]:
+        """Cancel what the session is waiting on, the way the chat page's Cancel does; the kind, or None.
+
+        * ``"question"``: a blocked ``ask_user`` read ends through the engine's ``CommandCancelledError``
+          (the turn's "Command cancelled" output, suspension cleared).
+        * ``"review"``: an open approval or plan review is answered ``no``.
+        * ``"clarification"``: an open command is answered ``abort``.
+
+        The reply goes through the user message queue, so the turn that results is read like any other.
+        None when nothing is pending, or when an interrupted turn is still finishing (it has no prompt).
+        """
+        if self._gate.muted:
+            return None
+        if self._user_message_queue.post_cancel():
+            return "question"
+        if (pending := self._pending_cancel_reply()) is None:
+            return None
+        self._user_message_queue.put(pending[1])
+        return pending[0]
+
+    def _cancel_unseen_prompts(self) -> None:
+        """An abandoned turn just ended. What it left pending was never shown to the user, so the next message must
+        not be read as its answer (a ``yes`` would approve an unseen write): cancel it here, in the worker, before the
+        next queued message is taken, with the replies ``//cancel`` sends. Its output is dropped with the turn's."""
+        for _ in range(3):
+            if (pending := self._pending_cancel_reply()) is None:
+                return
+            self._gate.cancelled_unseen = True
+            self._gate.begin_turn()
+            try:
+                output = self._core._execute_message(pending[1])
+                self._core.finalize_turn_for_observability(output)
+            except Exception:  # noqa: BLE001 - cleanup must never kill the worker
+                logger.warning("could not cancel the prompt an interrupted turn left pending", exc_info=True)
+                return
+
+    def take_cancelled_unseen_notice(self) -> bool:
+        """True once after a question of an interrupted turn was cancelled unseen (for the one-line notice)."""
+        with self._gate.lock:
+            seen, self._gate.cancelled_unseen = self._gate.cancelled_unseen, False
+        return seen
 
     @property
     def workflow_is_complete(self) -> bool:
@@ -402,15 +501,31 @@ class ChatSession:
                 not self.workflow_is_complete or self._keep_alive
             ) and self._status != SessionStatus.STOPPING:
                 try:
-                    message = self.user_message_queue.get()
+                    message = self.user_message_queue.idle_get()
 
-                    if isinstance(message, fastworkflow.Action):
-                        last_output = self._core.process_action(message)
-                    else:
-                        last_output = self._core._execute_message(message)
-                    # Emit the turn record/root-span close for observability;
-                    # the CLI transport itself still rides the queues.
-                    self._core.finalize_turn_for_observability(last_output)
+                    self._gate.begin_turn()
+                    try:
+                        if isinstance(message, fastworkflow.Action):
+                            try:
+                                last_output = self._core.process_action(message)
+                            except CommandCancelledError as exc:
+                                # An action has no message path to convert this (``_execute_message`` does): a
+                                # cancelled question must end the action, not the worker thread.
+                                self._core._reset_agent_suspension()
+                                last_output = self._core._command_cancelled_output(str(exc))
+                        else:
+                            last_output = self._core._execute_message(message)
+                        # Emit the turn record/root-span close for observability;
+                        # the CLI transport itself still rides the queues.
+                        self._deliver_if_unsent(last_output)
+                        self._core.finalize_turn_for_observability(last_output)
+                    finally:
+                        try:
+                            if self._gate.muted:
+                                self._cancel_unseen_prompts()
+                        finally:
+                            # An abandoned turn's output was dropped while it ran; with it over, drop no more.
+                            self._gate.turn_finished()
 
                 except Empty:
                     continue

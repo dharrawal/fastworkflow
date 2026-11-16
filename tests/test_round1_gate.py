@@ -238,10 +238,7 @@ def test_a_host_surface_turn_runs_the_draft_unreviewed(gated, monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated, monkeypatch):
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    monkeypatch.setattr(fastworkflow, "_env_vars",
-                        {name: value for name, value in fastworkflow._env_vars.items() if name != "JEV_API_KEY"})
+def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated, monkeypatch, no_planner_key):
     calls: list = []
 
     def refuse_jev(*args, **kwargs):
@@ -249,12 +246,8 @@ def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated,
         raise AssertionError("Jev was called without JEV_API_KEY")
 
     monkeypatch.setattr(workflow_agent, "TypeSafe", refuse_jev)
-    workflow_agent._planning_command_matcher.cache_clear()
-    try:
-        assert workflow_agent._jev_lm() is None
-        draft = review_proposals.draft_round1_proposal(gated.wf, [EMMA, JOKE])
-    finally:
-        workflow_agent._planning_command_matcher.cache_clear()
+    assert workflow_agent._jev_lm() is None
+    draft = review_proposals.draft_round1_proposal(gated.wf, [EMMA, JOKE])
     assert calls == []
     assert draft.items[0].means.name == "Library/book_by_title"
 

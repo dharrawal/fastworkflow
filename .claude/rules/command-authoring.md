@@ -175,7 +175,9 @@ short-circuits. Because the validator is your code, you tune it by passing argum
 ## `command_text_after_command_name`: binding `command value` without the LLM
 
 In agent mode, parameters are parsed in code before the LLM is asked: XML tags, then
-`name=value` pairs, then the form `command_name value`. That last form binds the text after the command
+`name=value` pairs, then the form `command_name value`. In assistant mode ("/" commands) the
+`name=value` form is also parsed in code before the LLM, while the XML and `command_name value` forms
+remain agent-mode only. The `command_name value` form binds the text after the command
 name to one target field:
 
 - the field marked `json_schema_extra={"command_text_after_command_name": True}`, or, with no mark,
@@ -205,6 +207,89 @@ A lone value that binds to no field (`command_name value` where the LLM fills no
 is refused with a message naming the parameters that could take it, instead of running
 the command with its defaults.
 
+
+## How run_chatbot renders commands (zero hints + optional `ui`)
+
+`fastworkflow run_chatbot` draws a command's result and its parameter form from the schemas that
+`GET /command_schemas` serves (each command's `Input` and `Output` JSON Schema). With no hints at all the chat is
+already presentable; write these, which you write anyway, to improve it:
+
+- `Field(title=..., description=..., examples=[...])`. A `title` is the label; without one the field name is made
+  readable (`order_uid` becomes "Order UID"). `description` is the tooltip on a result label and the help line under a
+  form field. For a text `Input` field `examples[0]` is the placeholder.
+- `from_command_output`. When a later command of the same turn reads a field from an earlier command's `Output`, the
+  earlier result is folded under "Supporting lookups" and the later one is the card.
+- `classifier_confirms={"meanings": {value: meaning}}` on a `Literal`. The "/" parameter form shows each choice as
+  `value - meaning`.
+- **A field's name never decides how it is drawn.** Type and shape give the plain default (a stat strip of short
+  scalars, a table for lists of records); everything else is a hint you declare. An `Output` field named `status` or
+  `state` is plain text unless it carries `format="badge"`. In the results panel several same-length lists form a table only
+  by a `table` group you declare (an int `total` beside equal lists no longer makes one there; the answer card still
+  infers a table from that until the next step, fix-sush step 4). When a field the user is asked for has a type the parameter form cannot draw (an object),
+  that prompt stays plain text.
+
+Optional presentation hints go in `json_schema_extra` under one key, `ui`, with an optional TypedDict
+(`FieldOptions(ui=UiOptions(...))`, both exported from `fastworkflow` and `fastworkflow.planning`). A hint changes
+presentation only: no check, extraction or plan reads it.
+
+| `ui` option | On | Value | Effect |
+|---|---|---|---|
+| `title` | any field (a `Field(title=...)` argument, not a `ui` option) | text | the label; without it the field name is made readable |
+| `hidden` | `Signature.Output` field | `True` | left out of the result card (still in the JSON) |
+| `hero` | `Signature.Output` scalar field | `True` | pinned to the stat strip |
+| `format` | `Signature.Output` field | `"currency"`, `"percent"`, `"code"` or `"badge"` | `currency` shows a number with grouping and two decimals in the browser's locale, with no currency symbol (`1,234.50`), `percent` adds `%`, `code` uses monospace, `badge` a status chip (toned only for generic words such as ok, done, pending, failed, rejected; any other value is neutral) |
+| `tones` | `Signature.Output` `str`, `Literal` or `Enum` field (or a list of one) with `format="badge"` | a dict of value to `"good"`, `"warning"`, `"bad"` or `"neutral"` | the badge takes the author's tone; any value not in the map keeps the generic vocabulary |
+| `currency` | `Signature.Output` `int` or `float` field (or a list of one) with `format="currency"` | a three-letter ISO 4217 code, `"USD"` | the number is shown with that currency (symbol, digits) by the browser's `Intl.NumberFormat`; a code the browser rejects, or none, shows the plain grouped number |
+| `table` | `Signature.Output` list-of-scalars field | a group name, a simple identifier (`"rows"`) | the list fields of one output with the same group name are the columns of one table, in field order |
+| `widget` | `Signature.Input` field | `"textarea"` on a `str`, `"radio"` on a `Literal` | a multi-line box; radio buttons even for more than five choices |
+
+```python
+class Output(BaseModel):
+    total: float = Field(description="Order total",
+                         json_schema_extra=FieldOptions(ui=UiOptions(hero=True, format="currency")))
+    raw_payload: str = Field(default="", json_schema_extra={"ui": {"hidden": True}})
+```
+
+`ui` is checked when the workflow loads. A `ui` value that is not a dict, is empty, or is `False`; an unknown option (the
+error suggests the closest: `did you mean 'widget'?`); `hidden` or `hero` that is not `True`; a `format` or `widget`
+outside the lists above; an `Output` option on an `Input` (`hero`, `hidden`, `format`) or `widget` on an `Output`;
+`"textarea"` on a field that is not a `str` (`Optional[str]` is fine); and `"radio"` on a field that is not a `Literal` all fail
+with a message naming the field and what is accepted. `table` is refused when the name is not a simple identifier, on a field that
+is not a list of `str`, `int`, `float`, `bool` or `Literal` values (`Optional` of such a list is fine; a list of objects is
+refused, those already draw their own table), together with `hero`, on an `Input`, or when its group has fewer than two
+fields or fewer than two that are not `hidden` (a `hidden` member still counts for alignment and is not drawn).
+
+`tones` keys are the value as text, matched case-insensitively after trimming (an `Enum` member by its value, so `Level.LOW = 1`
+is keyed `"1"`); on a `Literal` or `Enum` a key that is not a declared value fails the load, so a typo is caught; an empty map,
+a tone other than the four, a key that is empty, two keys that differ only by case or spaces, a `bool` or `int` field (drawn as
+yes/no or a number, never a text badge) and a missing `format="badge"` are refused. `currency` is stored as written and
+upper-cased by the page; it is refused unless the field is an `int` or `float` with `format="currency"` and the code is exactly
+three letters (no list of currencies is kept, so an unknown but well-formed code is accepted and the browser decides). Both are
+refused on an `Input`. A workflow that declares neither renders as before.
+
+`table` is how parallel lists become one table in the results panel; nothing infers it from a field name or from equal
+lengths. (The answer card still infers one from an int `total` beside lists of one length, until the next step.) At render time a group draws a table only when every member is present and the members
+share one length of at least 1; with unequal lengths, a missing or null member, or no rows the members render as bullet lists,
+never trimmed or padded. Lists outside any group are drawn as plain lists. The panel never infers columns from equal lengths alone: two undeclared
+lists of equal length, or two declared groups of equal length, are not merged.
+
+To find the outputs that need the hint, `fastworkflow command preview <workflow> --check` prints a `notice:` (not a
+warning or an error, and it never changes the exit status) for each command whose `Output` has two or more visible
+list-of-scalar fields in no `table` group: those lists are drawn as separate lists unless you declare them as one table
+with the `table` hint. Declare the group where the lists are index-aligned by construction; where they are not, nothing
+needs to change (there is no hint that says "separate on purpose", so the notice stays).
+
+```python
+branches: list[str] = Field(json_schema_extra={"ui": {"table": "hours"}})
+hours: list[str] = Field(json_schema_extra={"ui": {"table": "hours"}})
+``` A mistake on an `Input` fails the command's load. A mistake on an
+`Output` is reported as a field-source error by `fastworkflow command preview <workflow> --check` and skips the command at
+load.
+
+A "/" parameter form also needs your cooperation in two places. A `str` field with `format="password"` (or `writeOnly`)
+is drawn masked; its value is sent as ordinary chat text when the user clicks Run, so it is recorded in the
+transcript. Do not put a real secret in a "/" command's `Input`. An `Optional[bool]` field is a three-way choice
+(unset, yes, no), so leaving it unset is not the same as `False`.
 
 ## Context Model (`context_inheritance_model.json`)
 

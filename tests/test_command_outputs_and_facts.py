@@ -712,3 +712,64 @@ def test_a_facts_models_own_validator_still_fails_the_fill():
     with pytest.raises(FactsError, match="lists nothing"):
         fill(FoundSome, [page([], total=0)])
     assert fill(FoundSome, [page(["b1"], total=1)]).listed.book_uids == ["b1"]
+
+
+# ----------------------------------------------------------------------
+# A step that is not a full-list step reads the first page of a paged command
+# ----------------------------------------------------------------------
+
+
+class CountedShelf:
+    class Input(BaseModel):
+        filter: Optional[str] = None
+        start: Optional[int] = None
+
+    class Output(BaseModel):
+        book_uids: list[str]
+        count: Optional[int] = None
+
+
+class Counted(BaseModel):
+    shelf: CountedShelf.Output
+
+
+def counted_page(uids, count=None, **parameters):
+    return run("Shelf/counted_shelf", parameters=parameters,
+               output={"book_uids": uids, "count": count})
+
+
+def counted(runs, plan_text="counted_shelf: find the books"):
+    return fill_typed_phase_output(Counted, runs, signatures={"Shelf/counted_shelf": CountedShelf},
+                                   plan_text=plan_text).shelf
+
+
+def test_without_a_full_list_phrase_paging_repeats_read_the_first_page_for_its_count():
+    runs = [counted_page(["b1", "b2"], count=0), counted_page(["b3"], start=2)]
+    assert counted(runs) == CountedShelf.Output(book_uids=["b1", "b2"], count=0)
+    # The order the pages were read in does not matter; a re-read of page 1 is the latest read.
+    assert counted(runs[::-1]).count == 0
+    reread = [counted_page(["b1"], count=4), counted_page(["b3"], start=2),
+              counted_page(["b1", "b2"], count=5, start=0)]
+    assert counted(reread).count == 5
+
+
+def test_with_a_full_list_phrase_the_pages_still_merge_as_before():
+    runs = [counted_page(["b1", "b2"], count=0), counted_page(["b3"], start=2)]
+    assert counted(runs, plan_text="counted_shelf: full list") == CountedShelf.Output(
+        book_uids=["b1", "b2", "b3"], count=0)
+
+
+def test_runs_that_differ_in_a_non_paging_parameter_keep_the_last_run():
+    runs = [counted_page(["b1", "b2"], count=2, filter="a"),
+            counted_page(["b9"], count=1, filter="b")]
+    assert counted(runs) == CountedShelf.Output(book_uids=["b9"], count=1)
+    # A later page of a differently filtered run is not paging-only either.
+    mixed = [counted_page(["b1"], count=3), counted_page(["b9"], count=None, filter="b", start=1)]
+    assert counted(mixed) == CountedShelf.Output(book_uids=["b9"], count=None)
+
+
+def test_a_single_run_is_read_as_before():
+    assert counted([counted_page(["b1"], count=1)]).count == 1
+    assert counted([counted_page(["b3"], start=2)]).count is None
+    # Paging-only repeats none of which is the first page: the latest run, as before.
+    assert counted([counted_page(["b3"], start=2), counted_page(["b5"], start=4)]).book_uids == ["b5"]

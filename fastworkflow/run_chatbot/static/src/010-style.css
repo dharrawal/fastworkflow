@@ -534,20 +534,201 @@ button.newConv:hover { filter: brightness(1.1); }
    share one baseline. Everything else in the message stays full width above. */
 .chatMsg { display: flex; flex-wrap: wrap; align-items: baseline; }
 .chatMsg > * { flex: 1 0 100%; min-width: 0; }
-.chatMsg > .meta { flex: 1 1 auto; order: 1; }
-.chatMsg > .artifactsLinkRow {
-  flex: 0 0 auto; order: 2; display: flex; align-items: baseline;
-  margin: 4px 0 0 12px; line-height: 16px;
+/* Turn footer [fix-weih.32]: the results link (left), the status with "view
+   trace" (centre) and the artifacts toggle (right) on one line. The outer
+   tracks are equal, so the centre stays centred whatever the side widths, and
+   an empty slot still holds its place. Below 560px the three stack in the same
+   order, left aligned, and an empty slot takes no room. */
+.turnFooter { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  column-gap: 12px; align-items: baseline; margin-top: 4px; line-height: 16px; }
+.turnFooterSlot { min-width: 0; overflow-wrap: anywhere; }
+.turnFooterLeft { grid-column: 1; justify-self: start; }
+.turnFooterCentre { grid-column: 2; justify-self: center; }
+.turnFooterRight { grid-column: 3; justify-self: end; display: flex; align-items: baseline; }
+.turnFooter .meta, .turnFooter .resultsLinkRow { margin-top: 0; }
+.turnFooter .meta { justify-content: center; }
+@media (max-width: 560px) {
+  .turnFooter { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .turnFooterLeft, .turnFooterCentre, .turnFooterRight { grid-column: 1; justify-self: start; }
+  .turnFooterSlot:empty { display: none; }
+  .turnFooter .meta { justify-content: flex-start; }
 }
-.artifactsLink {
+/* Results card [fix-weih.4]: structured command outputs, shown in a panel
+   behind a link under the answer [fix-weih.24]. */
+.results { margin: 0; font-size: 12.5px; overflow-wrap: anywhere; }
+.resultsLinkRow { display: flex; flex-wrap: wrap; gap: 4px 12px;
+  align-items: baseline; line-height: 16px; }
+.resultsPanel { display: flex; flex-direction: column; min-width: 0;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--panel); box-shadow: var(--shadow); color: var(--text); }
+.resultsPanel[hidden] { display: none; }
+.resultsPanelHead { display: flex; align-items: baseline; gap: 10px; flex: 0 0 auto; }
+.resultsPanelTitle { color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .05em; }
+.resultsClose { margin-left: auto; background: transparent; border: 1px solid transparent;
+  box-shadow: none; min-height: 0; padding: 0 8px; font-size: 18px; line-height: 1.3;
+  color: var(--muted); }
+.resultsClose:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
+.resultsPanelBody { flex: 1 1 auto; min-height: 0; overflow: auto; margin-top: 6px; }
+/* Open and wide enough: the panel sits to the right of the answer on the same
+   grid row. The row is as tall as the answer (the panel's own content does not
+   size it: contain: size), at least 200px, and the panel body scrolls inside. */
+.chatMsg.resultsOpen { max-width: 100%; display: grid; column-gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+.chatMsg.resultsOpen > * { grid-column: 1 / -1; }
+.chatMsg.resultsOpen > .bubble { grid-column: 1; }
+.chatMsg.resultsOpen > .resultsPanel { grid-column: 2; align-self: stretch;
+  contain: size; min-height: 200px; }
+/* No room side by side: below the answer at full width. */
+@media (max-width: 760px) {
+  .chatMsg.resultsOpen { display: flex; }
+  .chatMsg.resultsOpen > .resultsPanel { contain: none; min-height: 0;
+    max-height: 70vh; margin-top: 6px; }
+}
+.results .rHead { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.results .rTitle { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.results .rChip { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; }
+.results .rChip[aria-pressed="true"] { background: var(--accent-soft);
+  border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.results .rPanel[hidden], .results .rStage [hidden] { display: none; }
+.results .rBar { display: flex; justify-content: flex-end; margin: 2px 0 4px; }
+.results .rJson { font-size: 11px; padding: 1px 8px; }
+.results .rJson[aria-pressed="true"] { background: var(--accent-soft);
+  border-color: var(--accent); color: var(--accent-ink); }
+.results dl { margin: 0 0 8px; }
+.results .cardStats { display: flex; flex-wrap: wrap; gap: 8px; }
+.results .cardStat { flex: 0 1 auto; min-width: 96px; padding: 6px 12px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); }
+.results .cardStat dt { color: var(--muted); font-size: 11px; }
+.results .cardStat dd { margin: 0; font-size: 17px; font-weight: 600; }
+.results .cardStat.tone-good { border-color: var(--ok); }
+.results .cardStat.tone-bad { border-color: var(--fail); }
+.results .cardStat.tone-warning { border-color: var(--warn-border); }
+.results .rKv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; }
+.results .rKv dt { color: var(--muted); }
+.results .rKv dd { margin: 0; }
+.results .rBadge { display: inline-block; padding: 0 9px; border-radius: 999px;
+  border: 1px solid var(--border); font-size: 12px; font-weight: 600; background: var(--code-bg); }
+.results .rBadge.tone-good { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.results .rBadge.tone-bad { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
+.results .rBadge.tone-warning { background: var(--warn-bg); border-color: var(--warn-border); }
+.results .rCode { background: var(--code-bg); border-radius: 4px; padding: 0 4px; }
+.results .rSection { margin: 6px 0; }
+.results .rLabel { color: var(--muted); font-size: 11px; font-weight: 600; margin-bottom: 3px; }
+.results .rSection .rSection { margin-left: 10px; padding-left: 8px; border-left: 2px solid var(--border); }
+.results .rList { margin: 2px 0; padding-left: 20px; }
+.results .rNone { color: var(--muted); font-style: italic; }
+.results .rTableWrap { overflow-x: auto; max-width: 100%; margin: 4px 0; }
+.results .rTable { border-collapse: collapse; width: 100%; }
+.results .rTable th, .results .rTable td { border: 1px solid var(--border);
+  padding: 3px 8px; text-align: left; vertical-align: top; }
+.results .rTable th { background: var(--code-bg); font-weight: 600; }
+.results .rTable th.num, .results .rTable td.num { text-align: right;
+  font-variant-numeric: tabular-nums; }
+.results .rMore { margin-top: 4px; font-size: 11.5px; }
+.results .supportingResults { margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 4px; }
+.chatMsg .bubble .answerToggle { display: block; margin-top: 6px; font-size: 11.5px;
+  padding: 1px 8px; background: none; color: var(--accent-ink); }
+.chatMsg .bubble .answerRest[hidden], .chatMsg .bubble .answerCard[hidden] { display: none; }
+.chatMsg .bubble .answerRest { overflow-wrap: anywhere; }
+.chatMsg .bubble.md .answerRest:not(.md) { white-space: pre-wrap; }
+/* composed answer card [fix-weih.10] */
+.chatMsg .bubble .answerCard { display: flex; flex-direction: column; gap: 8px; }
+.chatMsg .bubble .cardLead { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.chatMsg .bubble .cardRest:not(.md) { white-space: pre-wrap; }
+.answerCard .cardBlockTitle { color: var(--muted); font-size: 11px; font-weight: 600; margin-bottom: 3px; }
+.answerCard dl { margin: 0; }
+.answerCard .cardStats { display: flex; flex-wrap: wrap; gap: 8px; }
+.answerCard .cardStat { flex: 0 1 auto; min-width: 96px; padding: 6px 12px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); }
+.answerCard .cardStat dt { color: var(--muted); font-size: 11px; }
+.answerCard .cardStat dd { margin: 0; font-size: 17px; font-weight: 600; }
+.answerCard .cardStat.tone-good { border-color: var(--ok); }
+.answerCard .cardStat.tone-bad { border-color: var(--fail); }
+.answerCard .cardStat.tone-warning { border-color: var(--warn-border); }
+.answerCard .rKv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 12.5px; }
+.answerCard .rKv dt { color: var(--muted); }
+.answerCard .rKv dd { margin: 0; }
+.answerCard .rBadge { display: inline-block; padding: 0 9px; border-radius: 999px;
+  border: 1px solid var(--border); font-size: 12px; font-weight: 600; background: var(--code-bg); }
+.answerCard .rBadge.tone-good { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.answerCard .rBadge.tone-bad { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
+.answerCard .rBadge.tone-warning { background: var(--warn-bg); border-color: var(--warn-border); }
+.answerCard .rCode { background: var(--code-bg); border-radius: 4px; padding: 0 4px; }
+.answerCard .rTableWrap { overflow-x: auto; max-width: 100%; }
+.answerCard .rTable { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.answerCard .rTable th, .answerCard .rTable td { border: 1px solid var(--border);
+  padding: 3px 8px; text-align: left; vertical-align: top; }
+.answerCard .rTable th { background: var(--code-bg); font-weight: 600; }
+.answerCard .rTable th.num, .answerCard .rTable td.num { text-align: right;
+  font-variant-numeric: tabular-nums; }
+.answerCard .rMore { margin-top: 4px; font-size: 11.5px; }
+.answerCard .cardSection { display: flex; flex-direction: column; gap: 6px; }
+.answerCard .cardSection + .cardSection { border-top: 1px solid var(--border); padding-top: 8px; }
+.answerCard .cardSectionHeading { margin: 0; font-size: 13.5px; line-height: 1.3; }
+.answerCard .cardVerdict { margin: 0; overflow-wrap: anywhere; }
+.answerCard .cardMore { display: block; margin-top: 4px; font-size: 11.5px; color: var(--muted); }
+.answerCard button.cardMore { background: none; color: var(--accent-ink); padding: 1px 8px; }
+.answerCard .cardFooter { display: flex; flex-direction: column; gap: 2px; border-top: 1px dashed var(--border); padding-top: 6px; }
+.answerCard .cardFooterLink { font-size: 11.5px; padding: 1px 8px; background: none; color: var(--accent-ink); }
+.answerCard .cardQuote { margin: 0; padding: 4px 10px; border-left: 3px solid var(--accent);
+  background: var(--accent-soft); overflow-wrap: anywhere; }
+.answerCard .cardQuote.tone-warning { border-left-color: var(--warn-border); background: var(--warn-bg); }
+.answerCard .cardQuote.tone-danger { border-left-color: var(--fail); background: var(--fail-soft); }
+.answerCard .cardQuote.tone-success { border-left-color: var(--ok); background: var(--ok-soft); }
+.chatMsg .cardStatusRow { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.cardStatus { color: var(--muted); font-size: 11.5px; font-style: italic; }
+.cardNotice { color: var(--muted); font-size: 11.5px; }   /* a skip that is by design or no fault of the turn: calm, no error colour [fix-weih.34] */
+.artifactsLink, .resultsLink {
   appearance: none; background: none; border: none; box-shadow: none; min-height: 0; padding: 0;
   color: var(--accent-ink); cursor: pointer; text-decoration: underline;
   font-family: inherit; font-size: 11px; font-weight: 400; font-style: normal;
   line-height: 16px; letter-spacing: normal;
 }
-.artifactsLink::after { content: " ▸"; font: inherit; text-decoration: none; }
-.artifactsLink[aria-expanded="true"]::after { content: " ◂"; }
-.artifactsLink:hover:not(:disabled) { background: none; border-color: transparent; }
+.artifactsLink::after, .resultsLink::after { content: " ▸"; font: inherit; text-decoration: none; }
+.artifactsLink[aria-expanded="true"]::after, .resultsLink[aria-expanded="true"]::after { content: " ◂"; }
+.artifactsLink:hover:not(:disabled), .resultsLink:hover:not(:disabled) { background: none; border-color: transparent; }
+/* parameter form and intent pills [fix-weih.5] */
+.chatMsg.hasForm { max-width: min(100%, 640px); }
+.chatMsg.hasForm .bubble { white-space: normal; }
+.paramForm { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.paramForm.disabled { opacity: .6; }
+.paramTitle { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.paramFields { display: flex; flex-direction: column; gap: 10px; }
+.paramField { display: flex; flex-direction: column; gap: 3px; padding-left: 8px;
+  border-left: 3px solid transparent; }
+.paramField.asked { border-left-color: var(--bar-human); }
+.paramLabel, .paramCheck { font-weight: 600; font-size: 12.5px; }
+.paramCheck { display: flex; align-items: center; gap: 6px; }
+.paramReq { color: var(--fail); }
+.paramInput, .paramSelect, .paramOther { width: 100%; box-sizing: border-box; margin-top: 0;
+  font-size: 13px; }
+.paramField textarea.paramInput { resize: vertical; font: inherit; }
+.paramInput[aria-invalid="true"], .paramSelect[aria-invalid="true"],
+.paramChoices[aria-invalid="true"] { border-color: var(--bar-human); }
+.paramChoices { display: flex; flex-direction: column; gap: 3px; }
+.paramChoices[aria-invalid="true"] { border: 1px solid var(--bar-human); border-radius: 6px;
+  padding: 4px 6px; }
+.paramOpt { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+.paramOptValue { color: var(--muted); font-size: 11.5px; }
+.paramOpt .paramOther { flex: 1; width: auto; }
+.paramHelp { color: var(--muted); font-size: 11.5px; }
+.paramState { color: var(--bar-human); font-size: 11.5px; font-weight: 600; }
+.paramState[hidden] { display: none; }
+.paramSecret .paramSecretNote { font-style: italic; }
+.paramStatus { color: var(--bar-human); font-size: 11.5px; font-weight: 600; margin-top: 6px; }
+.paramActions, .intentActions, .intentPills { display: flex; flex-wrap: wrap; gap: 8px; }
+.paramBtn.ghost, .intentChoices button.ghost { background: transparent; border-color: transparent;
+  color: var(--muted); }
+.paramDetails { margin-top: 10px; }
+.paramDetailsBody { margin-top: 4px; color: var(--muted); font-size: 12px; white-space: pre-wrap;
+  overflow-wrap: anywhere; }
+.intentChoices { display: flex; flex-direction: column; gap: 8px; }
+.intentLabel { font-weight: 600; }
+.intentPill { border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent-ink); }
+.intentPill:disabled { background: var(--panel); border-color: var(--border); color: var(--muted); }
 /* Placed by tmPlaceArtifactPanel; fixed so the chat log, or the turn detail
    pane, cannot clip it. */
 .artifacts {
@@ -1070,6 +1251,62 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
   margin-right: calc(-1 * (var(--detail-pad) + var(--record-nav-gutter)));
   padding-right: calc(var(--detail-pad) + var(--record-nav-gutter));
 }
+/* approval card [fix-weih.12] */
+.approvalCard { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.approvalCard.disabled { opacity: .6; }
+.approvalTitle { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.approvalCard .rKv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px;
+  font-size: 12.5px; margin: 0; }
+.approvalCard .rKv dt { color: var(--muted); }
+.approvalCard .rKv dd { margin: 0; overflow-wrap: anywhere; }
+.approvalIrreversible { padding: 5px 8px; border: 1px solid var(--fail); border-radius: 6px;
+  background: var(--fail-soft); color: var(--fail); font-weight: 600; font-size: 12.5px; }
+.approvalIrreversible::before { content: "\26A0\00a0"; }
+.approvalText { white-space: pre-wrap; overflow-wrap: anywhere; }
+.approvalCard .approvalActions button.ghost { background: transparent; border-color: transparent;
+  color: var(--muted); }
+/* review form [fix-weih.13] */
+.reviewForm { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.reviewForm.disabled { opacity: .6; }
+.reviewRevision { padding: 6px 8px; border: 1px solid var(--warn-border); border-radius: 6px;
+  background: var(--warn-bg); font-weight: 600; font-size: 12.5px; }
+.reviewTitle { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.reviewSteps { display: flex; flex-direction: column; gap: 10px; }
+.reviewStep { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px;
+  border: 1px solid var(--border); border-left: 3px solid var(--bar-command); border-radius: 6px; }
+.reviewStep.skipped { border-left-color: var(--bar-other); opacity: .65; }
+.reviewStepHead { display: flex; align-items: center; gap: 8px; }
+.reviewNum { font-weight: 600; color: var(--muted); }
+.reviewBadge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--fail);
+  background: var(--fail-soft); color: var(--fail); font-size: 11px; font-weight: 600; }
+.reviewField { display: flex; flex-direction: column; gap: 2px; }
+.reviewLabel { font-weight: 600; font-size: 12px; }
+.reviewDrafted { color: var(--muted); font-weight: 400; }
+.reviewInput { width: 100%; box-sizing: border-box; margin-top: 0; font-size: 13px; }
+.reviewInput[aria-invalid="true"] { border-color: var(--bar-human); }
+/* a wrapping one-line field that grows in height (JS sets height; fix-weih.31, .33) */
+textarea.fitText { display: block; font: inherit; line-height: 1.4; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; resize: none; overflow-y: hidden;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; min-height: 0; }
+textarea.fitText:disabled { cursor: default; }
+/* the other growing one-line fields keep the 13px of the inputs they replaced [fix-weih.33] */
+textarea.fitText:not(.reviewGoal) { font-size: 13px; }
+.paramField textarea.paramInput.fitText { resize: none; }
+.reviewFieldNote { color: var(--bar-human); font-size: 11.5px; font-weight: 600; }
+.reviewFieldNote[hidden], .reviewGuard[hidden] { display: none; }
+.reviewFixed { color: var(--muted); }
+.reviewPlanSelect { width: 100%; }
+.reviewMeans, .reviewOutcome, .reviewGuard { color: var(--muted); font-size: 12px; }
+.reviewPlanSteps { margin: 0; padding-left: 20px; color: var(--muted); font-size: 12px; }
+.reviewSkip { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.reviewDetails { margin-top: 10px; }
+/* question form [fix-weih.11] */
+.questionText { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 8px; }
+.chatMsg .questionStatus { margin-top: 6px; color: var(--muted); font-size: 11.5px; font-style: italic; }
+.chatMsg .questionStatus.questionNotice { font-style: normal; }
+/* turn stage and elapsed time in the live panel [fix-kq49] */
+.chatMsg .activity .actStage { color: var(--muted); font-style: italic; }
+.chatMsg .activity .actElapsed { color: var(--muted); font-variant-numeric: tabular-nums; }
 @media (max-width: 700px) {
   .headerActions { width: 100%; justify-content: space-between; }
   header > .pill { display: none; }
@@ -1077,3 +1314,20 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
   .wfRow { grid-template-columns: minmax(74px, 1fr) minmax(40px, 1fr) minmax(64px, 1fr); }
   :root { --record-nav-gutter: 35px; }
 }
+/* Plan choices under a part that was not run [fix-1ma8.6]. */
+.planChoices { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.planHead { font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
+.planList { display: flex; flex-direction: column; gap: 6px; }
+.planBtn { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; text-align: left;
+  border-radius: 10px; background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); }
+.planBtn[hidden] { display: none; }
+.planBtn .planName { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.planBtn .planTag { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.planBtn .planDesc { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+.planBtn:disabled { background: var(--panel); border-color: var(--border); color: var(--muted); }
+.planMore { align-self: flex-start; margin-top: 6px; background: transparent; border-color: transparent;
+  color: var(--muted); font-size: 12px; }
+/* A chosen plan's parameter form: the plan's name and description, read-only, above its fields. */
+.planChosen { margin-bottom: 8px; }
+.planChosenName { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.planChosenDesc { color: var(--muted); font-size: 12px; }

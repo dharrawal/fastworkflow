@@ -228,6 +228,11 @@ class HeldoutReport(BaseModel):
     seed: int = DEFAULT_SEED
     heldout_personas: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    #: How the large tier's ambiguity threshold was calibrated: ``failed_rows`` (misclassified
+    #: test rows it had), ``rule`` (`failed_mean`, `correct_quantile` or
+    #: `floor_no_statistics`), the published ``threshold`` and whether the head has a wildcard
+    #: class. None for reports written before this field existed.
+    large_ambiguity: dict | None = None
 
 
 class BenchmarkCase(BaseModel):

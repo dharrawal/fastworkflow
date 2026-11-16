@@ -547,10 +547,12 @@ def _plan_planning_command(ctx, wf, lm, request, command):
 
 
 def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_path, workflow_env,
-                                                                                       monkeypatch):
+                                                                                       monkeypatch, no_planner_key):
     workflow_env()
-    command = _example(tmp_path)
+    # A developer's JEV_API_KEY would run the classifier check of ``kind`` and may turn 'group' into 'unit'
+    # (a live model); this test pins the typed call's plan, so it runs keyless (no_planner_key).
     request = "Who is in Payroll? Is Ann Lee one of them?"
+    command = _example(tmp_path)
 
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)

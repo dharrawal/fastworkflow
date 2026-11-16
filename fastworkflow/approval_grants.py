@@ -52,13 +52,28 @@ def local_user() -> str:
         return "local"
 
 
+#: Channel-surface origins that have their own grant identity. "" (the CLI, embedding hosts, experiment runners)
+#: keeps the legacy ``channel:<os user>`` key, so every stored grant stays valid there and nothing is migrated.
+ORIGIN_CHAT = "chat"
+CHANNEL_ORIGINS = (ORIGIN_CHAT,)
+
+
 def identity_key(surface: Any, channel: str) -> Optional[str]:
-    """The user a grant belongs to, or None when the surface cannot name one (fail closed)."""
+    """The user a grant belongs to, or None when the surface cannot name one (fail closed).
+
+    A channel surface with an origin gets ``channel:<os user>:<origin>``, so a grant made on that origin
+    does not apply on another one (the CLI, say) and the reverse (fix-d6no). An origin this module does not know has no identity.
+    """
     if getattr(surface, "kind", "channel") == "host":
         if surface.satisfies_end_user():
             return f"end_user:{surface.uid}"
         return None
-    return f"channel:{local_user()}"
+    origin = getattr(surface, "origin", "") or ""
+    if not origin:
+        return f"channel:{local_user()}"
+    if origin not in CHANNEL_ORIGINS:
+        return None
+    return f"channel:{local_user()}:{origin}"
 
 
 def _read() -> dict:

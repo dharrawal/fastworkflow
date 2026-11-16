@@ -12,6 +12,15 @@ var expNav = 0;
 function expNavToken() { return ++expNav; }
 function expNavStale(token) { return token !== expNav; }
 
+/* An experiment or task view is opened from the rail, a deep link or a test
+   before the first navigation read has landed, so no rail selection holds it
+   yet. Like the sealed page, it keeps #detail from the rail's background
+   refresh until a later navigation gesture takes a newer token. */
+var experimentViewNav = 0;
+function experimentViewOwnsDetail() {
+  return experimentViewNav !== 0 && !expNavStale(experimentViewNav);
+}
+
 function expCrumbs(container, trail) {
   var bar = el("div", "crumbs");
   trail.forEach(function (step, i) {
@@ -129,6 +138,7 @@ function expStatusPill(status) {
 function showExperiment(experimentId) {
   focusHierarchy(experimentNodeMatches(experimentId));
   var nav = expNavToken();
+  experimentViewNav = nav;
   writePageLink({experiment: experimentId});
   state.experimentId = experimentId;
   state.experimentTask = null;
@@ -414,6 +424,7 @@ function showExperimentTask(experimentId, taskId, label) {
     renderHierarchy();
   }
   var nav = expNavToken();
+  experimentViewNav = nav;
   writePageLink({experiment: experimentId, task: taskId,
     view: taskView === "runs" ? null : taskView});
   state.experimentId = experimentId;

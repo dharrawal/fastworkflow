@@ -19,7 +19,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import review_engine, review_proposals
-from fastworkflow.review_engine import CONFIRMED
+from fastworkflow.review_engine import CONFIRMED, REVISED
 from fastworkflow.turn import TurnStatus
 from fastworkflow.typed_phase_facts import _command_qname_from_class
 from fastworkflow.utils.python_utils import get_module
@@ -98,3 +98,32 @@ def test_an_accepted_review_takes_no_model_step_after_its_code_steps_and_is_not_
 
     assert gated.script.steps == []                                 # every scripted step was used, none left over
     assert issued == ["review_subtasks"]                            # the accept runs review_proposal once, not again
+
+
+# ----------------------------------------------------------------------
+# (c) fix-4da9: the ask_user span of a review that took several replies carries every one of them
+# ----------------------------------------------------------------------
+
+
+def test_the_ask_user_span_of_a_review_carries_every_reply_in_order(gated, monkeypatch):
+    from fastworkflow import tracing
+
+    _split_into(monkeypatch, [EMMA, JOKE])
+    assert gated.ctx.process_turn(f"{EMMA} and {JOKE}").status is TurnStatus.AWAITING_USER
+    record = _open_review(gated)
+    edit = "change 2: inputs=Ann Lee"
+    again = gated.ctx.process_turn(edit)                     # an edit: the review stays open for another reply
+    assert again.status is TurnStatus.AWAITING_USER
+    assert record.state == REVISED
+    gated.script.steps = [("finish", {})] * 2
+    assert gated.ctx.process_turn("accept").status is TurnStatus.COMPLETED
+    assert record.state == CONFIRMED
+
+    closed = [span for span in gated.sink.spans
+              if span.name == tracing.SPAN_ASK_USER and span.end_ns is not None]
+    assert len(closed) == 1
+    attributes = closed[0].attributes
+    assert attributes["user_responses"] == [edit, "accept"]
+    assert attributes["user_response"] == "accept"           # the existing attribute keeps the final reply
+    assert closed[0].attributes[tracing.ATTR_SPAN_CONTRACT_VERSION] == tracing.SPAN_CONTRACTS[
+        tracing.SPAN_ASK_USER].version

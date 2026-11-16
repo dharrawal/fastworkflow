@@ -22,6 +22,7 @@ from dspy.utils.callback_context import ACTIVE_CALL_ID
 from pydantic import BaseModel
 
 from fastworkflow import tracing
+from fastworkflow.utils import dspy_utils
 
 
 CAPTURE_MODULE_DECORATOR = "module_decorator"
@@ -461,6 +462,7 @@ class DSPyObservabilityCallback(BaseCallback):
             attributes["prompt"] = _json_text(prompt)
         if payload:
             attributes["call_kwargs"] = _json_text(payload)
+        attributes.update(_call_limits(instance))
         if chain := _module_chain(frames):
             attributes["module_chain"] = chain
         if identity is not None and identity.inputs:
@@ -538,14 +540,40 @@ class DSPyObservabilityCallback(BaseCallback):
         reasoning = _reasoning_from([outputs, response])
         if reasoning is not None:
             attributes["reasoning"] = _json_text(reasoning)
+        timed_out = exception is not None and dspy_utils.is_timeout_error(exception)
+        attributes["timed_out"] = timed_out
+        attributes["outcome"] = "ok" if exception is None else ("timeout" if timed_out else "error")
         if exception is not None:
             attributes["exception"] = repr(exception)
+            attributes["exception_type"] = type(exception).__name__
         tracing.end_span(
             host,
             span,
             status=tracing.STATUS_ERROR if exception is not None else tracing.STATUS_OK,
             attributes=attributes,
         )
+
+
+def _call_limits(instance: Any) -> dict[str, Any]:
+    """The role, the per-attempt timeout and the retries the LM was built with, for the model-call span.
+
+    One ``fw.llm.call`` span is one public LM call: DSPy retries inside it (``dspy.clients.execution``) and its
+    callbacks fire once around all the attempts, so the number of attempts actually made is not observable
+    here; ``timeout_s`` x (``num_retries`` + 1) bounds the wait. An LM built without them (a test double, the Jev
+    LM) records only what it has.
+    """
+    limits: dict[str, Any] = {}
+    role = getattr(instance, "fastworkflow_role", None)
+    if isinstance(role, str) and role:
+        limits["role"] = role
+    kwargs = getattr(instance, "kwargs", None)
+    timeout = kwargs.get("timeout") if isinstance(kwargs, Mapping) else None
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        limits["timeout_s"] = float(timeout)
+    retries = getattr(instance, "num_retries", None)
+    if isinstance(retries, int) and not isinstance(retries, bool):
+        limits["num_retries"] = retries
+    return limits
 
 
 _OBSERVABILITY_CALLBACK = DSPyObservabilityCallback()

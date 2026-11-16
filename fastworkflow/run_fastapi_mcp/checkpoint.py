@@ -347,6 +347,44 @@ def warn_pinned_once(channel_id: str, workflow_path: str, reason: str) -> None:
     )
 
 
+def contexts_without_state_hook(workflow_path: str) -> list[str]:
+    """Context classes of a workflow that have no ``get_state`` hook, read statically (nothing is instantiated).
+
+    A session whose current or root context is one of these is pinned: never evicted, so never bounded.
+    Whether a given session holds one is only known at run time, so this lists every context the workflow
+    declares; a context that declares ``get_state`` (returning a dict or ``fastworkflow.EPHEMERAL``) is not
+    listed. Returns [] when the workflow's contexts cannot be read (the startup warning is advisory).
+    """
+    try:
+        context_model = fastworkflow.CommandContextModel.load(workflow_path)
+        names = sorted(
+            name for name in context_model._command_contexts
+            if name not in ("*", "IntentDetection")
+        )
+        missing = []
+        for name in names:
+            hooks = context_model.get_context_class(name, fastworkflow.ModuleType.CONTEXT_CLASS)
+            if hooks is None or not hasattr(hooks, "get_state"):
+                missing.append(name)
+        return missing
+    except Exception as exc:  # noqa: BLE001 - advisory only; never block startup
+        logger.debug(f"Could not list contexts without a get_state hook ({type(exc).__name__}: {exc})")
+        return []
+
+
+def startup_pinning_warning(workflow_path: str) -> Optional[str]:
+    """The one-line startup warning for a workflow with contexts that lack ``get_state``, or None."""
+    missing = contexts_without_state_hook(workflow_path)
+    if not missing:
+        return None
+    return (
+        f"context class(es) {', '.join(missing)} have no get_state hook, so a session holding one of them "
+        "is pinned and will never be evicted (the live-session cap is only a target). Implement get_state / "
+        "from_state in _commands/<Context>/_<Context>.py, or return fastworkflow.EPHEMERAL to declare it "
+        "deliberate; clients can release a channel with POST /end_session."
+    )
+
+
 def reset_warnings() -> None:
     _pin_warned.clear()
     serialization_hooks.reset_warnings()

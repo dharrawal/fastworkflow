@@ -1,0 +1,127 @@
+{
+ "label": "final",
+ "model": "bedrock/nvidia.nemotron-nano-3-30b",
+ "note": "raw ChatAdapter completions of the final prompt, cache off, temperature 0",
+ "runs": [
+  {
+   "name": "pick_one_of_two_ids",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"account_id\", \"label\": \"Account to close\", \"kind\": \"choice\", \"options\": [{\"value\": \"ACC-1001\", \"label\": \"ACC-1001\"}, {\"value\": \"ACC-2002\", \"label\": \"ACC-2002\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 1.0
+  },
+  {
+   "name": "choice_plus_reason",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"ticket\", \"label\": \"Ticket to escalate\", \"kind\": \"choice\", \"options\": [{\"value\": \"TCK-100\", \"label\": \"TCK-100\"}, {\"value\": \"TCK-205\", \"label\": \"TCK-205\"}], \"required\": false, \"help\": \"\"}, {\"name\": \"reason\", \"label\": \"Reason\", \"kind\": \"text\", \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "pick_one_of_five_in_results",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"book_id\", \"label\": \"Book to borrow\", \"kind\": \"choice\", \"options\": [{\"value\": \"BK-101\", \"label\": \"BK-101\"}, {\"value\": \"BK-102\", \"label\": \"BK-102\"}, {\"value\": \"BK-103\", \"label\": \"BK-103\"}, {\"value\": \"BK-104\", \"label\": \"BK-104\"}, {\"value\": \"BK-105\", \"label\": \"BK-105\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.9
+  },
+  {
+   "name": "multichoice_loans",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"loans\", \"label\": \"Loans to renew\", \"kind\": \"multichoice\", \"options\": [{\"value\": \"LN-301\", \"label\": \"LN-301\"}, {\"value\": \"LN-302\", \"label\": \"LN-302\"}, {\"value\": \"LN-303\", \"label\": \"LN-303\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "yes_no_cancel",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"cancel\", \"label\": \"Cancel order\", \"kind\": \"boolean\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "date_reschedule",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"date\", \"label\": \"date\", \"kind\": \"date\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "quantity",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"quantity\", \"label\": \"Number of copies\", \"kind\": \"number\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "free_text_reason",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"description\", \"label\": \"Reason for dispute\", \"kind\": \"longtext\", \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "choice_dict_keys",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"payment_method\", \"label\": \"Payment method\", \"kind\": \"choice\", \"options\": [{\"value\": \"card_8841\", \"label\": \"card_8841\"}, {\"value\": \"bank_2210\", \"label\": \"bank_2210\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "json_string_wrapped",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"assignee\", \"label\": \"assignee\", \"kind\": \"choice\", \"options\": [{\"value\": \"agent_17\", \"label\": \"agent_17\"}, {\"value\": \"agent_22\", \"label\": \"agent_22\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "no_results_open_text",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"email\", \"label\": \"Email address\", \"kind\": \"text\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "words_refund_or_exchange",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"refund_or_exchange\", \"label\": \"refund or exchange\", \"kind\": \"choice\", \"options\": [{\"value\": \"refund\", \"label\": \"refund\"}, {\"value\": \"exchange\", \"label\": \"exchange\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "rambling_one_ask",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"mailing_address\", \"label\": \"New mailing address\", \"kind\": \"text\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "context_values_only",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"cancel\", \"label\": \"Cancel order\", \"kind\": \"boolean\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "asked_id_not_in_results",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"confirmation_code\", \"label\": \"confirmation code\", \"kind\": \"text\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.5
+  },
+  {
+   "name": "quantity_and_date",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"quantity\", \"label\": \"Number of seats\", \"kind\": \"number\", \"options\": [], \"required\": false, \"help\": \"\"}, {\"name\": \"date\", \"label\": \"Date\", \"kind\": \"date\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "three_loans_named",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"loan\", \"label\": \"Loan\", \"kind\": \"choice\", \"options\": [{\"value\": \"LN-301\", \"label\": \"LN-301\"}, {\"value\": \"LN-302\", \"label\": \"LN-302\"}, {\"value\": \"LN-303\", \"label\": \"LN-303\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.7
+  },
+  {
+   "name": "multichoice_words",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"notifications\", \"label\": \"Notifications to turn off\", \"kind\": \"multichoice\", \"options\": [{\"value\": \"email\", \"label\": \"email\"}, {\"value\": \"sms\", \"label\": \"sms\"}, {\"value\": \"push\", \"label\": \"push\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.8
+  },
+  {
+   "name": "new_value_not_restated",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"phone\", \"label\": \"phone number\", \"kind\": \"text\", \"options\": [], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  },
+  {
+   "name": "pick_ids_two_results",
+   "raw": "[[ ## form_fields ## ]]\n[{\"name\": \"order_id\", \"label\": \"Order to return\", \"kind\": \"choice\", \"options\": [{\"value\": \"ORD-8001\", \"label\": \"ORD-8001\"}, {\"value\": \"ORD-8002\", \"label\": \"ORD-8002\"}], \"required\": false, \"help\": \"\"}]\n[[ ## completed ## ]]",
+   "live_pass": true,
+   "latency": 0.6
+  }
+ ]
+}

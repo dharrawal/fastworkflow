@@ -27,6 +27,7 @@ import dspy
 
 import fastworkflow
 from fastworkflow import state_paths, tracing
+from fastworkflow.observability.store import SQLiteTraceSink
 from fastworkflow.observation_offloading.agent import (
     build_tool_agent,
     open_handle_archive,
@@ -35,7 +36,10 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
 )
-from fastworkflow.observation_offloading.state import reset_observation_state
+from fastworkflow.observation_offloading.state import (
+    prune_once,
+    reset_observation_state,
+)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
@@ -171,6 +175,43 @@ class ArchiveOpenPrunesOncePerPath(StateRoot):
         self.assertTrue(any("could not prune" in line for line in logged.output))
         self.assertEqual(evidence_rows(self.db_path, "turn-guarded"), 1)
         self.assertIsNotNone(opened.get(scope_for("turn-guarded"), "O1"))
+
+
+class PruneOnceGuard(StateRoot):
+    """``prune_once`` and a sink's startup prune share one per-path guard."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.db_path = state_paths.observability_db("")
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+
+    def test_a_sink_startup_prune_makes_prune_once_a_no_op(self) -> None:
+        sink = SQLiteTraceSink(self.db_path)
+        self.addCleanup(sink.close)
+        plant_aged_turn(self.db_path, "turn-after-sink-prune")
+
+        self.assertFalse(prune_once(self.db_path))
+
+        self.assertEqual(evidence_rows(self.db_path, "turn-after-sink-prune"), 1)
+
+    def test_with_no_sink_prune_once_prunes_once(self) -> None:
+        plant_aged_turn(self.db_path, "turn-old")
+
+        self.assertTrue(prune_once(self.db_path))
+        self.assertEqual(evidence_rows(self.db_path, "turn-old"), 0)
+        plant_aged_turn(self.db_path, "turn-second")
+
+        self.assertFalse(prune_once(self.db_path))
+        self.assertEqual(evidence_rows(self.db_path, "turn-second"), 1)
+
+    def test_two_spellings_of_one_path_share_the_guard_with_a_sink(self) -> None:
+        respelled = os.path.join(
+            os.path.dirname(self.db_path), ".", os.path.basename(self.db_path)
+        )
+        sink = SQLiteTraceSink(respelled)
+        self.addCleanup(sink.close)
+
+        self.assertFalse(prune_once(self.db_path))
 
 
 class NoOpSinkAgentTurn(StateRoot):

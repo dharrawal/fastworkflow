@@ -279,7 +279,7 @@ def test_an_awaiting_user_turn_reports_its_question_in_the_answer():
 
 
 def test_a_deferred_turn_reports_only_its_polling_handle():
-    """Nothing to project yet, so the 202 body stays the handle plus exec_state."""
+    """Nothing to project yet, so the 202 body stays the handle plus exec_state (and, since fix-1ma8, progress)."""
     execn = TurnExecution(
         turn_key=fastworkflow.mint_turn_key(),
         channel_id=_channel("defer"),
@@ -291,7 +291,9 @@ def test_a_deferred_turn_reports_only_its_polling_handle():
     code, body = render_turn_response(execn)
 
     assert code == 202
+    progress = body.pop("progress")           # additive (fix-1ma8): elapsed time and the latest frame, from memory
     assert body == {"turn_key": execn.turn_key, "exec_state": "running"}
+    assert progress["frames"] == 0 and progress["elapsed_seconds"] >= 0 and "last_frame" not in progress
 
 
 # ---------------------------------------------------------------------------

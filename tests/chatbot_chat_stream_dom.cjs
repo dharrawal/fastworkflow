@@ -105,8 +105,8 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   const order = Array.from(live.children).map(n => n.className);
   assert.ok(order.indexOf('activity') < order.indexOf('bubble'),
     'the activity reads above the answer: ' + JSON.stringify(order));
-  assert.ok(order.indexOf('bubble') < order.indexOf('artifactsLinkRow'),
-    'the artifacts link sits below the answer: ' + JSON.stringify(order));
+  assert.ok(order.indexOf('bubble') < order.indexOf('turnFooter'),
+    'the artifacts link (in the turn footer) sits below the answer: ' + JSON.stringify(order));
 
   /* Artifacts wait behind one link, and open beside the answer one at a time. */
   const link = live.querySelector('.artifactsLink');
@@ -196,7 +196,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   const older = w.tmRenderStoredTurn(
     {turn_key: turnKey, status: 'completed', success: true, answer: 'older answer'}, false);
   const button = Array.from(older.querySelectorAll('button'))
-    .find(b => b.textContent === 'show artifacts');
+    .find(b => b.textContent === 'show results and artifacts');
   assert.ok(button, 'an older restored turn should offer its artifacts on request');
   assert.ok(!older.querySelector('.artifacts'));
   button.click();
@@ -204,7 +204,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
 
   /* The status line stays last: artifacts belong above it, not after it. */
   const kids = Array.from(stored.children).map(n => n.className);
-  assert.ok(kids.indexOf('artifacts') < kids.indexOf('meta'),
+  assert.ok(kids.indexOf('artifacts') < kids.indexOf('turnFooter'),
     'artifacts rendered below the status line: ' + JSON.stringify(kids));
 
   /* ---- recovery reads the turn, it never re-runs it --------------------

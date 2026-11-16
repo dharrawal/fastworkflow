@@ -178,6 +178,21 @@ class CommandOutput(BaseModel):
     # scope and ``ran_in_context_clause`` is "" for a root with no printable identity.
     ran_in_context_name: Optional[str] = None
     ran_in_context_clause: Optional[str] = None
+    # True when the command is the framework's own (a file of ``fastworkflow/_framework_commands``, the
+    # metadata's ``framework`` flag): machinery the framework runs for itself, such as the plan and
+    # sub-task reviews, not an application result. A semantic fact about the command, set from its
+    # metadata when the output is recorded on the turn; it says nothing about how any client shows
+    # it. Optional with a default for the same §12.2 reason as ``ask_user_entry``: None means "written
+    # before this field existed" (a hand-built output, an old record), True and False are authoritative.
+    framework: Optional[bool] = None
+    # The request part this output was produced for: the 1-based number of the sub-task the framework
+    # executed it under, the same number the turn's answer gives that part in its ``### N.`` heading. Nested
+    # planning-command outputs carry the number of the sub-task that called them. None when the turn was not
+    # split into several sub-tasks, for outputs that belong to no part (the plan and sub-task reviews) and for
+    # records written before the field existed. A semantic fact about the execution, not a display instruction.
+    # A sub-task that itself covers several items is one part. Set when the output is recorded on the turn,
+    # never parsed from text; a value already set is kept.
+    sub_task: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -501,6 +516,7 @@ _LAZY_ATTRS = {
     "CopiedOptions": ("fastworkflow.field_options", "CopiedOptions"),
     "RecordNamedOptions": ("fastworkflow.field_options", "RecordNamedOptions"),
     "ConfirmsOptions": ("fastworkflow.field_options", "ConfirmsOptions"),
+    "UiOptions": ("fastworkflow.field_options", "UiOptions"),
 }
 
 __all__ = (
@@ -556,6 +572,7 @@ __all__ = (
     "CopiedOptions",
     "RecordNamedOptions",
     "ConfirmsOptions",
+    "UiOptions",
     "get_active_workflow",
     "get_env_var",
     "get_fastworkflow_package_path",

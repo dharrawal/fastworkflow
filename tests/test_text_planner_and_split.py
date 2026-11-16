@@ -263,6 +263,33 @@ def test_a_split_that_refers_back_to_the_request_is_retried_once():
         "Audit each of them in Finance.", "Sweep Hubbard."]
 
 
+def test_a_brace_placeholder_not_in_the_request_is_visibly_broken():
+    from fastworkflow.workflow_agent import _visibly_broken
+
+    subtasks = ["{SOME_NAME} carries more risk; list the findings.", "Sweep Hubbard."]
+    assert _visibly_broken(subtasks, "compare Ada and Ben")
+    assert _visibly_broken(["Check {some name} today.", "Sweep Hubbard."], "compare Ada and Ben")
+    # the same text in the user's own request is theirs, not the model's
+    assert not _visibly_broken(subtasks, "compare {SOME_NAME} and Ben")
+    # ordinary sub-tasks, empty braces and JSON-ish text (no letter right after the brace) are not flagged
+    assert not _visibly_broken(["Audit Alice.", "Sweep Hubbard."], "the request")
+    assert not _visibly_broken(["Set {} to 5.", 'Send {"a": 1} and {1}.'], "the request")
+
+
+def test_a_placeholder_that_survives_the_retry_leaves_the_request_whole():
+    query = "Audit Alice and Bob in Finance. Also sweep Hubbard."
+    placeholder = {"reasoning": "r", "subtasks": "1. {HIGHER_RISK_PERSON} carries more risk; list the findings.\n2. Sweep Hubbard."}
+    named = {"reasoning": "r", "subtasks": "1. Audit Alice and Bob in Finance.\n2. Also sweep Hubbard."}
+    # fixed by the retry: the retry's split is used
+    assert _split_with_query(query, placeholder, named) == ["Audit Alice and Bob in Finance.", "Also sweep Hubbard."]
+    # it survives both attempts: the request whole
+    assert _split_with_query(query, placeholder, placeholder) == [query]
+    # a placeholder the request itself holds is not the model's
+    own = "{HIGHER_RISK_PERSON} carries more risk; list the findings. Also sweep Hubbard."
+    assert _split_with_query(own, placeholder) == [
+        "{HIGHER_RISK_PERSON} carries more risk; list the findings.", "Sweep Hubbard."]
+
+
 def test_a_single_sub_task_is_the_request_as_the_user_wrote_it():
     # The model's rewrite of a one-job request dropped its leading record phrase: the request comes back whole.
     query = ("For Ada Ng's card, list the fines it carries with the payments that would clear them, and every "
@@ -281,7 +308,8 @@ def test_a_numbered_list_written_inline_after_reasoning_gives_one_sub_task_per_i
         "Renew the loan of Ada Ng and check its fines.", "List the holds of Ben Ito."]
 
 
-def test_a_clause_the_model_wrote_twice_in_one_sub_task_is_written_once():
+def test_a_clause_the_model_wrote_twice_in_one_sub_task_is_written_once(monkeypatch, no_planner_key):
+    # (no_planner_key: a live Jev would also resolve referents and append '(for ...)')
     query = ("Ada Ng has asked for the reading room pass: check the pass and what Ada Ng can reach today. "
              "Ben Ito has asked for the same pass: check it too.")
     answer = {"reasoning": "r", "subtasks": (
@@ -951,10 +979,10 @@ def test_match_planning_command_only_returns_a_confident_planning_command_pick(t
     assert match() is None
 
 
-def test_no_jev_key_means_no_matcher_and_no_template(tmp_path, workflow_env, monkeypatch):
+@pytest.mark.usefixtures("no_planner_key")
+def test_no_jev_key_means_no_matcher_and_no_template(tmp_path, workflow_env):
     from fastworkflow import workflow_agent
 
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
     workflow_env()
     folder = _planning_command_folder(tmp_path)
     assert workflow_agent._planning_command_matcher(folder) is None
@@ -1095,9 +1123,8 @@ def _leaves(name):
 
 
 @pytest.fixture
-def no_jev(monkeypatch):
+def no_jev(no_planner_key):
     from fastworkflow import workflow_agent
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
     assert workflow_agent._jev_lm() is None, "this test needs a process without a Jev key"
 
 

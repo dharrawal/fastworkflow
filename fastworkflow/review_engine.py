@@ -33,7 +33,7 @@ import secrets
 import string
 import time
 import uuid
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from typing import Any, Callable, ClassVar, Optional, Sequence, Union
 
@@ -122,6 +122,10 @@ class Surface:
     kind: str = "channel"
     verified: bool = False
     uid: Optional[str] = None
+    #: Where a channel-surface caller came from, set only by the server's own construction of the surface
+    #: (never by a request): "" is the CLI, an embedding host and the experiment runners (the legacy
+    #: standing-approval key); "chat" is the run_chatbot server's channel surface (fix-d6no).
+    origin: str = ""
 
     @property
     def required_identity(self) -> str:
@@ -640,6 +644,63 @@ SUB_TASK_STRUCTURED_UNREADABLE_REPLY = (
     f"I couldn't tell what to change. {SUB_TASK_STRUCTURED_PROMPT_HINT}"
 )
 
+#: The replies each prompt hint promises, as data (fix-szfq). One entry per hint constant above, in the order the hint
+#: text names them; a ``reply`` is the literal word the hint says to send, a ``pattern`` the edit form it spells
+#: (``N`` is the number shown), ``per_item`` is True for a form that names an item, ``free_text`` for "tell me what to
+#: change". These are what the HINT TEXT promises: the reply reader's own cues (``_ACCEPT_PHRASES``, ``_DECLINE_PHRASES``,
+#: the edit parsers) are separate and wider, and are not derived from this table.
+REPLY_FORMS_OF_HINT: tuple[tuple[str, tuple[dict[str, Any], ...]], ...] = (
+    (SUB_TASK_STRUCTURED_PROMPT_HINT, (
+        {"kind": "accept", "reply": "accept"},
+        {"kind": "decline", "reply": "no"},
+        {"kind": "edit", "pattern": "change N: inputs=key=value", "per_item": True},
+        {"kind": "edit", "pattern": "change N: goal=text", "per_item": True},
+        {"kind": "add", "pattern": "add after N: goal=text", "per_item": True},
+        {"kind": "drop", "pattern": "drop N", "per_item": True},
+    )),
+    (SUB_TASK_PROMPT_HINT, (
+        {"kind": "accept", "reply": "yes"},
+        {"kind": "edit", "free_text": True, "per_item": False},
+    )),
+    (PROMPT_HINT, (
+        {"kind": "accept", "reply": "accept"},
+        {"kind": "decline", "reply": "no"},
+        {"kind": "edit", "pattern": "change N: field=value", "per_item": True},
+        {"kind": "drop", "pattern": "drop N", "per_item": True},
+    )),
+)
+
+#: What separates several edits in one reply, where the hint says so (every hint with an edit pattern).
+REPLY_EDIT_SEPARATOR = ";"
+
+
+def reply_forms(rendering: str, proposal: Proposal, *, structured: bool = False) -> list[dict[str, Any]]:
+    """The reply forms the hint of the prompt shown (*rendering*) promises, as data, in the hint's order.
+
+    The hint is found in *rendering* (the text the user was shown, which ends with it); a text that carries none
+    (a refusal message) falls back to the hint ``prompt_for`` would pick for *proposal* and *structured*. Each form is
+    ``{kind, reply | pattern | free_text, per_item}``, and an edit form with a pattern also carries ``separator``."""
+    from fastworkflow.review_proposals import SubTaskProposal
+
+    chosen = next((forms for hint, forms in REPLY_FORMS_OF_HINT if hint in (rendering or "")), None)
+    if chosen is None:
+        hint = ((SUB_TASK_STRUCTURED_PROMPT_HINT if structured else SUB_TASK_PROMPT_HINT)
+                if isinstance(proposal, SubTaskProposal) else PROMPT_HINT)
+        chosen = next(forms for text, forms in REPLY_FORMS_OF_HINT if text == hint)
+    forms = [{**form, **({"separator": REPLY_EDIT_SEPARATOR} if "pattern" in form else {})} for form in chosen]
+    if alternatives := _plan_alternatives_of(proposal):
+        # bd fix-1ma8.1: a step whose planning-command match was ambiguous can be switched to another plan by name.
+        forms.append({"kind": "switch_plan", "pattern": "step N: use NAME", "per_item": True,
+                      "separator": REPLY_EDIT_SEPARATOR, "alternatives": alternatives})
+    return forms
+
+
+def _plan_alternatives_of(proposal: Proposal) -> dict[str, list[str]]:
+    """``{step number as text: the names of the other plans that fit it}`` for the steps of a sub-task review that have any."""
+    return {str(number): [each.name for each in getattr(item, "alternatives", ())]
+            for number, item in enumerate(getattr(proposal, "items", None) or (), 1) if getattr(item, "alternatives", None)}
+
+
 _KNOWN_SUBTASK_INPUT_KEYS = frozenset({
     "name", "kind", "fact", "tag", "action", "right", "person", "person_a", "person_b",
     "unit", "control", "family", "scope", "explain", "include_risk", "with_login_only",
@@ -653,17 +714,23 @@ def _step_count_message(count: int) -> str:
     return f"There are only {count} {label}."
 
 
-def prompt_for(proposal: Proposal, workflow: Any = None, *, structured: bool = False) -> str:
+def _no_agent_of(host: Any) -> bool:
+    """Whether *host* (the session a review is on) is in no-agent mode; False for anything else."""
+    return getattr(host, "no_agent_mode", False) is True
+
+
+def prompt_for(proposal: Proposal, workflow: Any = None, *, structured: bool = False, no_agent: bool = False) -> str:
     from fastworkflow.review_proposals import SubTaskProposal
 
     folder = getattr(workflow, "folderpath", None) if workflow is not None else None
     if isinstance(proposal, SubTaskProposal):
         hint = SUB_TASK_STRUCTURED_PROMPT_HINT if structured else SUB_TASK_PROMPT_HINT
-        return f"{proposal.user_rendering(folder)}\n{hint}"
+        return f"{proposal.user_rendering(folder, no_agent=no_agent)}\n{hint}"
     return f"{proposal.rendering()}\n{PROMPT_HINT}"
 
 
-def _structured_error_prompt(proposal: Proposal, workflow: Any = None, message: str = "") -> str:
+def _structured_error_prompt(proposal: Proposal, workflow: Any = None, message: str = "", *,
+                             no_agent: bool = False) -> str:
     from fastworkflow.review_proposals import SubTaskProposal
 
     if isinstance(proposal, SubTaskProposal):
@@ -672,13 +739,19 @@ def _structured_error_prompt(proposal: Proposal, workflow: Any = None, message: 
         else:
             header = message
         folder = getattr(workflow, "folderpath", None) if workflow is not None else None
-        current_steps = proposal.user_rendering(folder).replace("Sub-tasks:", "Current steps:", 1)
+        current_steps = proposal.user_rendering(folder, no_agent=no_agent).replace("Sub-tasks:", "Current steps:", 1)
         return f"{header}\n{current_steps}\n{SUB_TASK_STRUCTURED_PROMPT_HINT}"
     return message or PROMPT_HINT
 
 
+def _input_signature(inputs: Any) -> list[tuple]:
+    """What an input list says, for comparing two of them: each input's name, value and source sub-task."""
+    return [(each.name, each.value, each.from_subtask) for each in inputs]
+
+
 def _normalize_parsed_subtask_edits(proposal: Proposal, edits: list[Edit]) -> list[Edit]:
-    from fastworkflow.review_proposals import SubTaskProposal, merge_subtask_input_edit
+    from fastworkflow.review_proposals import (
+        SubTaskProposal, merge_subtask_input_edit, unreadable_input_value)
 
     if not isinstance(proposal, SubTaskProposal):
         return edits
@@ -705,18 +778,49 @@ def _normalize_parsed_subtask_edits(proposal: Proposal, edits: list[Edit]) -> li
     for index, positions in inputs_positions.items():
         if len(positions) <= 1:
             continue
-        merged_inputs = list(proposal.items[index - 1].inputs)
-        for position in positions:
-            merged_inputs = merge_subtask_input_edit(merged_inputs, normalized[position].value)
-        normalized[positions[0]] = Change(
-            index=index,
-            field="inputs",
-            value=", ".join(item.render() for item in merged_inputs),
-        )
+        if not 1 <= index <= len(proposal.items):
+            continue  # apply_edits refuses it ("There are only N steps"), so nothing is merged for it
+        values = [normalized[position].value for position in positions]
+        if any(unreadable_input_value(value) for value in values):
+            continue  # left as written: apply_edits refuses it with the message (fix-2vyv)
+        existing = list(proposal.items[index - 1].inputs)
+        merged_inputs = existing
+        for value in values:
+            merged_inputs = merge_subtask_input_edit(merged_inputs, value)
+        joined = ", ".join(item.render() for item in merged_inputs)
+        if _input_signature(merge_subtask_input_edit(existing, joined)) != _input_signature(merged_inputs):
+            # The merge cannot be written back as one text without losing a part (a goal, outcome, means or check
+            # input, a quoted value that would split again, a cleared input): leave the edits as written, one per
+            # input. apply_edits applies them in order, each over the one before, and nothing is dropped (fix-2vyv).
+            continue
+        normalized[positions[0]] = Change(index=index, field="inputs", value=joined)
         to_remove.update(positions[1:])
     if not to_remove:
         return normalized
     return [edit for position, edit in enumerate(normalized) if position not in to_remove]
+
+
+def _refuse_dropped_input_parts(proposal: Proposal, edits: list[Edit]) -> None:
+    """Typed edits only (fix-j6xa): refuse a packed ``inputs`` edit whose part named like a step field would be dropped.
+
+    ``change 1: inputs=member=Z, check=x`` is what a person typed, so losing ``check=x`` without a word is refused with
+    the part named. (A model's reading of a plain-language reply is not checked: it echoes the shown step's means and
+    outcome into its inputs text, and dropping those is what keeps that reading correct.)
+    """
+    from fastworkflow.review_proposals import SubTaskProposal, dropped_input_part, merge_subtask_input_edit
+
+    if not isinstance(proposal, SubTaskProposal):
+        return
+    current = {number: list(item.inputs) for number, item in enumerate(proposal.items, 1)}
+    for edit in edits:
+        if not (isinstance(edit, Change) and edit.field == "inputs" and edit.index in current):
+            continue
+        if (lost := dropped_input_part(current[edit.index], edit.value)) is not None:
+            raise EditRefused(
+                f"Item {edit.index}: '{lost}' inside a list of inputs would be dropped, not read as an input. "
+                f"Give it as its own edit: 'change {edit.index}: inputs={lost}' sets an input of that name, "
+                f"'change {edit.index}: {lost}' changes the step's field of that name.")
+        current[edit.index] = merge_subtask_input_edit(current[edit.index], edit.value)
 
 
 # ----------------------------------------------------------------------
@@ -913,6 +1017,10 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
     def claim_inputs(number: int, value: str) -> None:
         if number in whole_item:
             raise EditRefused(f"Item {number} is named by more than one edit.")
+        from fastworkflow.review_proposals import unreadable_input_value
+
+        if (problem := unreadable_input_value(value)) is not None:
+            raise EditRefused(f"Item {number}: {problem}")
         for claim in _inputs_claim_keys(number, value):
             if claim == "inputs":
                 for key in field_change:
@@ -998,6 +1106,8 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
             changed[position] = item_model.model_validate(data)
         except ValidationError as exc:
             detail = exc.errors()[0]["msg"]
+            if edit.value.strip().lower() == "none":
+                detail += " ('none' means no value, so it cannot be the text of this field)"
             raise EditRefused(f"{edit.field} of item {edit.index} is not valid: {detail}.") from exc
 
     dropped = {edit.index for edit in edits if isinstance(edit, Drop)}
@@ -1073,6 +1183,8 @@ class ReplyDecision:
     reason: str
     edits: tuple = ()
     message: str = ""
+    #: Why the reader did not act on the classifier's answer (the polarity guard, bd fix-blui); empty otherwise.
+    note: str = ""
 
 
 #: A model-based reader of free-text replies: ``(text, proposal) -> list of typed edits``. Not registered by
@@ -1117,6 +1229,16 @@ def _consultation_planning_names(app_workflow: Any) -> tuple[str, ...]:
     return tuple(sorted(planning_commands.resolve_field_sources(folder).planning_commands))
 
 
+def _routed_to_command(w_out: Any) -> bool:
+    """True when the wildcard result routes on to a named command.
+
+    An answer flagged routed with no command name (an ambiguous or wildcard head answer that
+    the framework still reports as handled) names nothing to run, so it is unrouted: the reader
+    asks again instead of acting (bd fix-1hs8; the reply "nope" used to raise ValueError).
+    """
+    return bool(getattr(w_out, "routed", False)) and bool(getattr(w_out, "command_name", None))
+
+
 def _slot_question(proposal: Proposal) -> str:
     return f"Which of the {len(proposal.items)} steps do you mean?"
 
@@ -1152,11 +1274,19 @@ def _validate_edits_decision(
     *,
     reason: str,
     text: str | None = None,
+    workflow: Any = None,
 ) -> ReplyDecision:
     try:
         edited = apply_edits(proposal, list(edits))
     except EditRefused as refused:
         return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+    if workflow is not None and reason == READ_REASON:
+        # Edits a model read from free text may set an enumerated input outside its choices (fix-j9qk): refused through
+        # the same path as any invalid edit, so the user is asked again. Typed and form edits are not checked here.
+        from fastworkflow.review_proposals import refused_choice_message
+
+        if (message := refused_choice_message(workflow, edited)) is not None:
+            return ReplyDecision(Verdict.REFUSE, "edits refused", message=message)
     if reason == READ_REASON and edited.binding() == proposal.binding():
         if text and _affirmative_accept_cue(text):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
@@ -1220,15 +1350,150 @@ def _scrub_benign_confirm_phrases(text: str) -> str:
     return _NO_EFFECT_QUALIFIER.sub("", _BENIGN_BUT_NOT_APPLIED.sub("", text or ""))
 
 
+_EDIT_CLAUSE = re.compile(r"^(?:change\s+\d+\s*:?\s*[A-Za-z_]\w*\s*=|drop\s+\d+$|add\s+after\s+\d+)", re.IGNORECASE)
+
+
+def _has_edit_clause(text: str) -> bool:
+    """True when a ``;`` or new-line clause of *text* opens as a typed edit (``change N: field=``, ``drop N``,
+    ``add after N``): the person wrote an edit, so no accept cue in the reply may swallow it (fix-2vyv)."""
+    return any(_EDIT_CLAUSE.match(piece.strip()) for piece in re.split(r"[;\n]", text or ""))
+
+
 def _affirmative_accept_cue(text: str) -> bool:
+    """Whether *text* accepts the proposal. A reply with a typed edit clause never does: a cue inside an edit's value
+    (``change 1: goal=Run it as shown``) is part of the value, and a cue beside an edit would drop the edit unread, so
+    such a reply goes to the edit reader, which applies it or asks again. Send an acceptance on its own."""
     scrubbed = _scrub_benign_confirm_phrases(text)
+    if _has_edit_clause(scrubbed):
+        return False
     if _AFFIRMATIVE_PARAPHRASE.search(scrubbed):
+        return True
+    if _WHOLE_ACCEPT.match(_lexical(text)) and not _NO_COMMA_CHANGE.match(text or ""):
         return True
     if _CONFIRM_CORRECTIVE.search(scrubbed):
         return False
     if _AFFIRMATIVE_ACCEPT_PREFIX.match(scrubbed):
         return True
     return False
+
+
+# ---- plain accept and decline cues, and the polarity guard (bd fix-blui) --------------------------------------
+# A cue is anchored: the WHOLE reply (after lower-casing, dropping apostrophes and punctuation, and reading a
+# thumbs-up emoji as the word ``thumbsup``) is one cue phrase, optionally followed by courtesy words, never a phrase
+# found somewhere inside a sentence. ``go`` does not match ``go back and change step 2``, ``pass`` does not match
+# ``pass the id to step 3``, ``stop`` does not match ``stop after step 2``, ``fine`` does not match ``fine, but drop
+# the last one``: the rest of the reply is not a courtesy word, so the reply is not a cue and goes on to the
+# classifier and the edit reader. No fuzzy or typo matching: the reader has no typo mechanism, and a misspelling
+# asks again (``proced``).
+
+_THUMBS_UP = re.compile("\U0001F44D[\U0001F3FB-\U0001F3FF]?️?")
+_APOSTROPHES = re.compile("['’`´]")
+
+
+def _lexical(text: str, *, scrub: bool = False) -> str:
+    """*text* as space-separated lower-case words: apostrophes dropped, other punctuation a space, a thumbs-up
+    emoji the word ``thumbsup``."""
+    value = _scrub_benign_confirm_phrases(text) if scrub else (text or "")
+    value = _APOSTROPHES.sub("", _THUMBS_UP.sub(" thumbsup ", value.lower()))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value).split())
+
+
+def _alternation(phrases: Sequence[str]) -> str:
+    return "|".join(re.escape(p) for p in sorted(phrases, key=len, reverse=True))
+
+
+_ACCEPT_PHRASES = (
+    "do it", "run it", "ship it", "go", "go for it", "lets go", "lets do it", "proceed", "continue", "carry on",
+    "make it so", "lgtm", "all good", "that works", "works for me", "fine", "its fine", "thats fine", "k", "kk",
+    "nothing to change", "nothing needs to change", "no changes", "no change", "no edits", "no objections",
+    "no problem", "no problems", "as is", "run as is", "run it as is", "run the plan as is",
+    "dont change anything", "thumbsup",
+)
+_ACCEPT_TAIL = (
+    "please", "thanks", "thank you", "thx", "ty", "now", "thumbsup", "go ahead", "ahead", "proceed", "continue",
+    "with it", "do it", "run it", "needed", "as is", "to me",
+)
+_WHOLE_ACCEPT = re.compile(
+    rf"^(?:please\s+)?(?:{_alternation(_ACCEPT_PHRASES)})(?:\s+(?:{_alternation(_ACCEPT_TAIL)}))*$")
+#: ``no, change the second one`` reads as the words ``no change ...``; the comma is the difference, and it is an edit.
+_NO_COMMA_CHANGE = re.compile(r"^\W*no\s*[,;:\-–—]\s*change", re.I)
+
+_DECLINE_PHRASES = (
+    "no", "nope", "nah", "nay", "no thanks", "no thank you", "cancel", "stop", "abort", "dont", "do not", "ill pass",
+    "pass", "not now", "never mind", "nevermind", "scratch that", "scratch that plan", "forget it", "reject",
+    "decline", "discard",
+)
+_DECLINE_TAIL = (
+    "please", "thanks", "thank you", "thx", "it", "this", "that", "plan", "the plan", "this plan", "that plan",
+    "now", "for now", "right now", "anyway", "at all", "run it", "run this", "run that", "run the plan",
+    "run this plan", "run",
+)
+_WHOLE_DECLINE = re.compile(
+    rf"^(?:please\s+)?(?:{_alternation(_DECLINE_PHRASES)})"
+    rf"(?:\s+(?:{_alternation(_DECLINE_PHRASES + _DECLINE_TAIL)}))*$")
+
+
+def _plain_decline_cue(text: str) -> bool:
+    """Whether the whole of *text* is a plain decline (``no``, ``nope``, ``no thanks``, ``cancel``, ``dont run it``,
+    ``ill pass``, ``scratch that plan``). ``no changes, go ahead`` and ``no, change the second one`` are not."""
+    return bool(_WHOLE_DECLINE.match(_lexical(text)))
+
+
+# The polarity guard reads words ANYWHERE in the reply, deliberately wider than the cues above: a false hit only
+# makes the reader ask again, never act.
+_ACCEPT_SIGNAL_PHRASES = (
+    "no changes", "no change", "no edits", "no objections", "no problem", "no problems", "nothing to change",
+    "nothing needs to change", "dont change anything", "do not change anything", "go ahead", "do it", "run it",
+    "ship it", "lets go", "lets do it", "go for it", "make it so", "carry on", "looks good", "sounds good",
+    "all good", "that works", "works for me", "as is", "its fine", "thats fine", "yes", "yep", "yeah",
+    "yup", "ok", "okay", "sure", "fine", "great", "perfect", "agreed", "correct", "approve", "approved", "accept",
+    "accepted", "confirm", "confirmed", "proceed", "continue", "lgtm", "thumbsup", "k", "kk",
+)
+_ACCEPT_SIGNAL = re.compile(rf"\b(?:{_alternation(_ACCEPT_SIGNAL_PHRASES)})\b")
+#: Accept phrases that contain a decline word (``no changes``); removed before the decline words are looked for.
+_ACCEPT_HIDES_DECLINE = re.compile(
+    r"\b(?:no changes?|no edits|no objections|no problems?|dont change anything|do not change anything)\b")
+#: ``dont run it``: the action words there are part of the refusal, not an accept word.
+_NEGATED_ACTION = re.compile(r"\b(?:dont|do not)\s+(?:run|do|ship)\s+(?:it|this|that)\b")
+_DECLINE_SIGNAL = re.compile(
+    r"\b(?:no|nope|nah|nay|cancel|stop|abort|dont|do not|never mind|nevermind|scratch that|forget it|reject|"
+    r"decline|discard|ill pass|pass|not now|not yet|no thanks)\b")
+#: A reply that hedges or defers is no decision either way.
+_HEDGE_SIGNAL = re.compile(
+    r"\b(?:hm+|um+|uh+|maybe|perhaps|possibly|not sure|unsure|idk|dunno|i guess|i dont know|dont know|"
+    r"later|tomorrow|tonight|wait|hold on|hold off)\b")
+#: A reply that names one step or item is about an edit, not about the whole plan.
+_STEP_REFERENCE = re.compile(
+    r"\b(?:steps?|items?|tasks?)\s*#?\d+\b|\bafter\s+step\b|"
+    r"\b(?:first|second|third|fourth|fifth|last|next|previous|\d+(?:st|nd|rd|th))\s+(?:one|step|item|task)\b")
+
+
+def _reply_polarity(text: str) -> tuple[bool, bool, bool]:
+    """(has an accept word, has a decline word, hedges or defers) by a conservative lexical test over *text*."""
+    lexical = _lexical(text, scrub=True)
+    accept = bool(_ACCEPT_SIGNAL.search(_NEGATED_ACTION.sub(" ", lexical)))
+    decline = bool(_DECLINE_SIGNAL.search(_ACCEPT_HIDES_DECLINE.sub(" ", lexical)))
+    return accept, decline, bool(_HEDGE_SIGNAL.search(lexical))
+
+
+def _polarity_conflict(text: str, routed: str) -> str:
+    """Why the reader must not act on the classifier's ``confirm`` or ``decline`` for *text* (empty: it may).
+
+    A routed decline on a reply that holds an accept word, a routed confirm on one that holds a decline word, a
+    reply holding both, a hedge or a deferral, and a routed decline on a reply about one step: none is acted on; the
+    reader asks again, the way it does for an unrouted reply. A reply with no signal is acted on as before."""
+    accept, decline, hedge = _reply_polarity(text)
+    if hedge:
+        return f"routed {routed} on a hedging or deferring reply"
+    if accept and decline:
+        return f"routed {routed} on a reply with both an accept and a decline word"
+    if routed == "decline" and accept:
+        return "routed decline on an affirmative reply"
+    if routed == "confirm" and decline:
+        return "routed confirm on a negative reply"
+    if routed == "decline" and _STEP_REFERENCE.search(_lexical(text)):
+        return "routed decline on a reply about one step"
+    return ""
 
 
 def _affirmative_unrouted_confirm(text: str) -> bool:
@@ -1286,6 +1551,93 @@ def _compound_drop_edit(text: str, routed_items: Optional[Sequence[Any]] = None)
     return False
 
 
+def _accept_with_switch_decision(proposal: Proposal, text: str) -> Optional["ReplyDecision"]:
+    """An accept cue followed by a plan name (``yes use B``) on a review with an ambiguous step is that switch, not an
+    accept (bd fix-1ma8.1). Returns None, and reads nothing, for a review with no step that has alternatives: its accept
+    path is exactly what it was. A bare accept cue never gets here (``word in ("accept", "yes")`` returns first, and a
+    cue with no text after it has nothing to read)."""
+    if not any(getattr(item, "alternatives", None) for item in getattr(proposal, "items", ())):
+        return None
+    from fastworkflow.review_plan_switch import read_accept_with_switch
+
+    decision = read_accept_with_switch(proposal, text)
+    if decision is None or decision.verdict is not Verdict.EDIT:
+        return decision
+    try:
+        apply_edits(proposal, list(decision.edits))
+    except EditRefused as refused:
+        return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+    return decision
+
+
+def switch_clause_in_goal_message(clause: str) -> str:
+    return (f'I read "{clause}" as part of a step\'s goal, but it asks to switch a plan. Reply "step N: use <plan name>" '
+            "on its own, or say what the step should do.")
+
+
+def _refuse_switch_clause_in_goal(edits: list, text: str) -> None:
+    """Refuse a typed edit whose goal is, or ends with, an explicit switch clause of the reply (``change 6: goal=show it,
+    step 7: use NAME``): the clause is a plan switch, not goal text (bd fix-1ma8.1)."""
+    from fastworkflow.review_plan_switch import goal_copies_switch_clause
+
+    for edit in edits:
+        goal = (edit.value if isinstance(edit, Change) and edit.field == "goal"
+                else (edit.values or {}).get("goal", "") if isinstance(edit, Add) else "")
+        if goal and (clause := goal_copies_switch_clause(goal, text)):
+            raise EditRefused(switch_clause_in_goal_message(clause))
+
+
+def _switch_clauses_decision(proposal: Proposal, text: str, workflow: Any, read_rest: Callable[[str], "ReplyDecision"],
+                             ) -> Optional["ReplyDecision"]:
+    """The decision for a reply that holds an explicit plan-switch clause (``step N: use NAME``, ...), or None when it holds
+    none (bd fix-1ma8.1). The clauses are read one by one (``review_plan_switch.split_switch_clauses``): a switch clause is
+    decided here and never reaches the free-text reader; the other clauses go to *read_rest* (the policy's own reading of
+    any reply). A question about a switch (unknown name, no such step, which plan) asks again and applies nothing. When the
+    other clauses are not read as edits (a question, a refusal) that decision is returned and the switch is not applied
+    either: the plan stays as it was. Read after the accept and decline cues, so an accept never gets here."""
+    from fastworkflow.review_plan_switch import split_switch_clauses
+
+    split = split_switch_clauses(proposal, text, workflow)
+    if split is None:
+        return None
+    if split.ask is not None:
+        return split.ask
+    edits = list(split.edits)
+    reason = "plan switch"
+    if split.remainder.strip():
+        rest = read_rest(split.remainder)
+        if rest.verdict is Verdict.EDIT:
+            edits += list(rest.edits)
+            reason = rest.reason
+        elif rest.verdict is not Verdict.CONFIRM:       # a bare accept word among the clauses adds nothing to the switch
+            return rest
+    try:
+        apply_edits(proposal, edits)
+    except EditRefused as refused:
+        return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+    return ReplyDecision(Verdict.EDIT, reason, edits=tuple(edits))
+
+
+def _plan_switch_decision(proposal: Proposal, text: str) -> Optional["ReplyDecision"]:
+    """The decision for a reply that switches an ambiguous step's plan (``use B``, ``step N: use B``, ...), or None when the
+    reply is not one (bd fix-1ma8.1; ``review_plan_switch``). Read after the accept and decline cues and before the
+    typed-edit reader; a review with no ambiguous step never gets here past its first line. The switch is validated as
+    any typed edit is: a refusal leaves the record as it was."""
+    from fastworkflow.review_plan_switch import read_accept_with_switch, read_plan_switch
+
+    decision = read_plan_switch(proposal, text)
+    if decision is None:
+        # ``yes, but use B for step 2``: an accept word the accept cue did not take as an accept (a "but"), then a switch.
+        decision = read_accept_with_switch(proposal, text)
+    if decision is None or decision.verdict is not Verdict.EDIT:
+        return decision
+    try:
+        apply_edits(proposal, list(decision.edits))
+    except EditRefused as refused:
+        return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+    return decision
+
+
 class ProposalReplyPolicy:
     """The sub_tasks and plan kinds: accept, no, or typed edits (deterministic first, then the reader).
 
@@ -1320,9 +1672,16 @@ class ProposalReplyPolicy:
         if word in ("accept", "yes"):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if _affirmative_accept_cue(text):
+            if sub_task_review and (switched := _accept_with_switch_decision(proposal, text)) is not None:
+                return switched
             return ReplyDecision(Verdict.CONFIRM, "accepted")
-        if word in ("no", "decline"):
+        if word in ("no", "decline") or _plain_decline_cue(text):
             return ReplyDecision(Verdict.DECLINE, "declined")
+        if sub_task_review and (clauses := _switch_clauses_decision(
+                proposal, text, self._app_workflow, lambda rest: self.decide(proposal, rest))) is not None:
+            return clauses                            # an explicit switch clause is decided here, never by the reader
+        if sub_task_review and (switched := _plan_switch_decision(proposal, text)) is not None:
+            return switched
         try:
             edits = parse_edits(text)
             edits = _normalize_parsed_subtask_edits(proposal, edits)
@@ -1346,8 +1705,11 @@ class ProposalReplyPolicy:
                 apply_edits(proposal, edits)
             except EditRefused as refused:
                 return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
-            return _validate_edits_decision(proposal, tuple(edits), reason=READ_REASON, text=text)
+            return _validate_edits_decision(
+                proposal, tuple(edits), reason=READ_REASON, text=text, workflow=self._app_workflow)
         try:
+            _refuse_dropped_input_parts(proposal, edits)
+            _refuse_switch_clause_in_goal(edits, text)
             apply_edits(proposal, edits)           # validate only; the caller applies
         except EditRefused as exc:
             return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(exc))
@@ -1367,9 +1729,17 @@ class ProposalReplyPolicy:
             if word in ("accept", "yes"):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
             if _affirmative_accept_cue(text):
+                if (switched := _accept_with_switch_decision(proposal, text)) is not None:
+                    return switched
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
-            if word in ("no", "decline"):
+            if word in ("no", "decline") or _plain_decline_cue(text):
                 return ReplyDecision(Verdict.DECLINE, "declined")
+            if (clauses := _switch_clauses_decision(
+                    proposal, text, self._app_workflow,
+                    lambda rest: self._decide_with_consultation(proposal, rest, rest.lower()))) is not None:
+                return clauses                        # an explicit switch clause is decided here, never by the head or reader
+            if (switched := _plan_switch_decision(proposal, text)) is not None:
+                return switched
             try:
                 edits = parse_edits(text)
                 edits = _normalize_parsed_subtask_edits(proposal, edits)
@@ -1377,6 +1747,8 @@ class ProposalReplyPolicy:
                 pass
             else:
                 try:
+                    _refuse_dropped_input_parts(proposal, edits)
+                    _refuse_switch_clause_in_goal(edits, text)
                     apply_edits(proposal, edits)
                 except EditRefused as refused:
                     return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
@@ -1429,6 +1801,7 @@ class ProposalReplyPolicy:
     ) -> ReplyDecision:
         from fastworkflow.command_executor import CommandExecutor
         from fastworkflow._workflows.consultation._item_validation import explicit_out_of_range_step
+        from fastworkflow.review_proposals import certain_removals
 
         _prepare_consultation_workflow(self, proposal)
         slot_question = _slot_question(proposal)
@@ -1446,7 +1819,7 @@ class ProposalReplyPolicy:
                 return handled
             was_in_slot = False
 
-        if getattr(w_out, "routed", False):
+        if _routed_to_command(w_out):
             return self._handle_routed_consultation(proposal, text, w_out, slot_question)
 
         pending_name = self._consultation_cme.context.get("command_name")
@@ -1467,12 +1840,16 @@ class ProposalReplyPolicy:
                 _clear_consultation_cme_continuation(self._consultation_cme)
                 edit = Drop(index=1) if pending_name.endswith("/drop") else LookUp(index=1)
                 return _validate_edits_decision(proposal, (edit,), reason="typed edits")
+            if pending_name.endswith("/drop") and (named := certain_removals(proposal, text)):
+                # The reply names the steps to remove by number: no need to ask which.
+                _clear_consultation_cme_continuation(self._consultation_cme)
+                return self._drop_decision(proposal, text, named)
             self._consultation_cme.context["missing_value_question"] = slot_question
             return ReplyDecision(Verdict.REPROMPT, "item slot", message=slot_question)
 
         if (
             not was_in_slot
-            and not getattr(w_out, "routed", False)
+            and not _routed_to_command(w_out)
             and _unrouted_consultation_confirm(text)
         ):
             _clear_consultation_cme_continuation(self._consultation_cme)
@@ -1505,11 +1882,11 @@ class ProposalReplyPolicy:
         if intent == "misunderstood":
             _clear_consultation_cme_continuation(self._consultation_cme)
             return self._edit_fallback(proposal, text, slot_question)
-        if intent == "answer" and not getattr(w_out, "routed", False):
+        if intent == "answer" and not _routed_to_command(w_out):
             self._consultation_cme.context["missing_value_question"] = slot_question
             return ReplyDecision(Verdict.REPROMPT, "slot retry", message=slot_question)
         if intent == "different_command":
-            if getattr(w_out, "routed", False):
+            if _routed_to_command(w_out):
                 return self._handle_routed_consultation(proposal, text, w_out, slot_question)
             if initial_word in ("accept", "yes"):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
@@ -1562,7 +1939,8 @@ class ProposalReplyPolicy:
             _clear_consultation_cme_continuation(self._consultation_cme)
             return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
         _clear_consultation_cme_continuation(self._consultation_cme)
-        return _validate_edits_decision(proposal, edits, reason=READ_REASON, text=text)
+        return _validate_edits_decision(
+            proposal, edits, reason=READ_REASON, text=text, workflow=self._app_workflow)
 
     def _perform_consultation_command(self, command_name: str, command: str, input_obj: Any) -> Any:
         from fastworkflow.command_executor import call_response_generator
@@ -1608,11 +1986,15 @@ class ProposalReplyPolicy:
         if name.endswith("/confirm"):
             if _CONFIRM_CORRECTIVE.search(_scrub_benign_confirm_phrases(text)):
                 return self._edit_fallback(proposal, text, slot_question)
+            if conflict := _polarity_conflict(text, "confirm"):
+                return self._ask_again_on_conflict(proposal, text, slot_question, conflict)
             _clear_consultation_cme_continuation(self._consultation_cme)
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if name.endswith("/decline"):
             if _DECLINE_CORRECTIVE.search(text) or _DROP_CUE.search(text):
                 return self._edit_fallback(proposal, text, slot_question)
+            if conflict := _polarity_conflict(text, "decline"):
+                return self._ask_again_on_conflict(proposal, text, slot_question, conflict)
             _clear_consultation_cme_continuation(self._consultation_cme)
             return ReplyDecision(Verdict.DECLINE, "declined")
         if name.endswith("/drop"):
@@ -1622,8 +2004,7 @@ class ProposalReplyPolicy:
                     proposal, text, slot_question, preserve_drop_items=drop_items or None
                 )
             _clear_consultation_cme_continuation(self._consultation_cme)
-            edits = tuple(Drop(index=int(item)) for item in routed.items)
-            return _validate_edits_decision(proposal, edits, reason="typed edits")
+            return self._drop_decision(proposal, text, drop_items)
         if name.endswith("/add"):
             _clear_consultation_cme_continuation(self._consultation_cme)
             after = len(proposal.items) if routed.after is None else int(routed.after)
@@ -1637,6 +2018,27 @@ class ProposalReplyPolicy:
             return self._reply_from_edit_output(proposal, text, routed, slot_question)
         _clear_consultation_cme_continuation(self._consultation_cme)
         return self._edit_fallback(proposal, text, slot_question)
+
+    def _drop_decision(self, proposal: Proposal, text: str, items: list) -> ReplyDecision:
+        """Drops for the steps a routed drop (or the slot) names, held to the reply's own step numbers: a list the
+        extractor read short is completed, a step the reply says to keep is not dropped, an unclear one asks again."""
+        from fastworkflow.review_proposals import reconcile_dropped_items
+
+        try:
+            numbers = reconcile_dropped_items(proposal, [str(item) for item in items], text)
+        except EditRefused as refused:
+            return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
+        return _validate_edits_decision(
+            proposal, tuple(Drop(index=number) for number in numbers), reason="typed edits")
+
+    def _ask_again_on_conflict(
+        self, proposal: Proposal, text: str, slot_question: str, conflict: str
+    ) -> ReplyDecision:
+        """The classifier's confirm or decline is not acted on (the polarity guard, bd fix-blui): the reply takes
+        the path of an unrouted one, and the decision records why."""
+        logger.info("review reply %r not acted on: %s", text, conflict)
+        decision = self._edit_fallback(proposal, text, slot_question)
+        return replace(decision, note=f"polarity guard: {conflict}")
 
     def _edit_fallback(
         self,
@@ -1658,8 +2060,7 @@ class ProposalReplyPolicy:
         if routed is None:
             if preserve_drop_items:
                 _clear_consultation_cme_continuation(self._consultation_cme)
-                edits = tuple(Drop(index=int(item)) for item in preserve_drop_items)
-                return _validate_edits_decision(proposal, edits, reason="typed edits")
+                return self._drop_decision(proposal, text, preserve_drop_items)
             return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
         decision = self._reply_from_edit_output(proposal, text, routed, slot_question)
         if preserve_drop_items and (
@@ -1667,8 +2068,7 @@ class ProposalReplyPolicy:
             or (decision.verdict == Verdict.REPROMPT and decision.reason == "not read as edits")
         ):
             _clear_consultation_cme_continuation(self._consultation_cme)
-            edits = tuple(Drop(index=int(item)) for item in preserve_drop_items)
-            return _validate_edits_decision(proposal, edits, reason="typed edits")
+            return self._drop_decision(proposal, text, preserve_drop_items)
         return decision
 
 
@@ -1724,7 +2124,7 @@ def open_review(host: Any, store: ReviewStore, proposal: Proposal, *, surface: S
     # items_text: the request's items as the planning step passed them. The accepted run re-executes with the
     # same text, so the run the phase archives carries the step's own parameters (the finish check matches them).
     binding = {**proposal.binding(), "channel": store.channel, "task": store.task, "items_text": items_text}
-    text = prompt_for(proposal, _prompt_workflow(host, store))
+    text = prompt_for(proposal, _prompt_workflow(host, store), no_agent=_no_agent_of(host))
     ttl_turns, ttl_seconds = ttl_for_kind(proposal.kind)
     record = ReviewRecord(
         id=uuid.uuid4().hex, token_hash="", command=proposal.spec, annotation=None, raw_command="",
@@ -1796,7 +2196,7 @@ def reply_to_proposal(
         record.fingerprint = fingerprint(record.binding)   # the record's fingerprint covers its channel and task too
         record.revision += 1
         record.rendering = prompt_for(
-            edited, _prompt_workflow(host, store), structured=producing_q3_or_later)
+            edited, _prompt_workflow(host, store), structured=producing_q3_or_later, no_agent=_no_agent_of(host))
         record.rendering_hash = rendering_hash(record.rendering)
         transition(host, store, record, REVISED, reason=f"revision {record.revision}: {decision.reason}",
                    surface=surface, outcome="revised")
@@ -1819,6 +2219,7 @@ def reply_to_proposal(
                     proposal,
                     _prompt_workflow(host, store),
                     decision.message or SUB_TASK_UNREADABLE_REPLY,
+                    no_agent=_no_agent_of(host),
                 ),
             )
     return ReviewReply(False, decision.message or PROMPT_HINT)

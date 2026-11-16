@@ -209,6 +209,7 @@ the request with Unicode dashes folded to "-" (see ``check_arguments``).
 from __future__ import annotations
 
 import difflib
+import enum
 import functools
 import inspect
 import json
@@ -230,7 +231,7 @@ from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint
 from fastworkflow.field_options import (
     CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, CONVERTED_FROM_COMMAND_TEXT, COMMAND_TEXT_AFTER_COMMAND_NAME,
-    COPIED_FROM_COMMAND_TEXT, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT)
+    COPIED_FROM_COMMAND_TEXT, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT, UI)
 from fastworkflow.planning_command_json_schema_internal import (
     HAND_WRITTEN_AVAILABLE_FROM_KEY as _HAND_WRITTEN_AVAILABLE_FROM_KEY,
     PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS as _PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS,
@@ -313,6 +314,9 @@ class PlanningCommandInputError(PlanningCommandCallError):
     def __init__(self, message: str = "", fields=()):
         super().__init__(message)
         self.fields: tuple[str, ...] = tuple(fields)
+        #: Every argument the call is missing or has refused (``ArgumentGaps``), when the raiser worked them out;
+        #: ``check_arguments`` itself stops at the first one.
+        self.gaps: "ArgumentGaps | None" = None
 
 
 #: The refusal of one argument: ``name=<value repr> <why>`` (see ``check_arguments``).
@@ -402,8 +406,12 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     It names the recipe's input and says what is wrong with it, in plain words: the request
     does not say it, the value the planner took is not in the request, or it is not one of the
     allowed values. A refusal that names no input (a rule the planning command's own hook or Input raised)
-    is put in its own words.
+    is put in its own words. When the call is missing or has refused several arguments (``refusal.gaps``), one
+    question names them all (``gaps_question``).
     """
+    gaps = refusal_gaps(command, refusal)
+    if len(gaps.names) > 1:
+        return gaps_question(command, gaps)
     task = command.name.replace("_", " ")
     text = str(refusal)
     if refusal.fields:
@@ -441,6 +449,107 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     return f"I can't run {task} yet: {detail}. What should I change?"
 
 
+@dataclass(frozen=True)
+class ArgumentGaps:
+    """What a planning command call still lacks: the required arguments missing, the ones refused as invalid (each with
+    why), and the checked values of the others (the ones to keep)."""
+
+    missing: tuple[str, ...] = ()
+    invalid: tuple[tuple[str, str], ...] = ()
+    values: dict = field(default_factory=dict, compare=False)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys([*self.missing, *(name for name, _ in self.invalid)]))
+
+    def describe(self) -> str:
+        """The gaps in a plain phrase: ``missing required argument a, b`` / ``c=... is not ...`` (the not-run reason)."""
+        parts = []
+        if self.missing:
+            parts.append(f"missing required argument{'s' if len(self.missing) > 1 else ''} {', '.join(self.missing)}")
+        parts.extend(f"{name} {why}" for name, why in self.invalid)
+        return "; ".join(parts)
+
+
+def _refusal_gap(command: PlanningCommandCommand, refusal: PlanningCommandInputError):
+    """``(name, "missing" | "invalid", why)`` of the one argument a ``check_arguments`` refusal names, else None."""
+    text = str(refusal)
+    if match := _MISSING_ARGUMENT.match(text):
+        return match["name"], "missing", ""
+    match = _ARGUMENT_REFUSAL.match(text)
+    if match and any(p.name == match["name"] for p in command.params):
+        if match["why"] in (PLACEHOLDER_WHY, PRONOUN_WHY, KIND_WORD_WHY):
+            return match["name"], "missing", ""
+        return match["name"], "invalid", match["why"]
+    return None
+
+
+def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None = None) -> ArgumentGaps:
+    """Every required argument *raw* leaves missing or refused (``check_arguments`` stops at the first): the guards run
+    again with each gap's parameter left out, until they pass or refuse something that names no argument. The values
+    of the other arguments, as the guards checked them, are kept in ``values`` (the ones the request gave, not defaults).
+    No model call."""
+    missing: list[str] = []
+    invalid: list[tuple[str, str]] = []
+    work = command
+    args: dict = {}
+    while True:
+        try:
+            args, _ = check_arguments(work, raw, request, verdicts)
+            break
+        except PlanningCommandInputError as refused:
+            gap = _refusal_gap(work, refused)
+            if gap is None:
+                break
+            name, kind, why = gap
+            (missing.append(name) if kind == "missing" else invalid.append((name, why)))
+            work = replace(work, params=tuple(p for p in work.params if p.name != name))
+        except PlanningCommandCallError:
+            break
+    kept = {name: value for name, value in args.items() if not _empty(raw.get(name)) and name not in missing
+            and name not in {n for n, _ in invalid}}
+    return ArgumentGaps(missing=tuple(missing), invalid=tuple(invalid), values=kept)
+
+
+def refusal_gaps(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> ArgumentGaps:
+    """The gaps a refusal stands for: its own ``gaps`` when the raiser worked them out, else the one argument it names
+    (a hook's ``Refused(field=...)`` names invalid ones)."""
+    if refusal.gaps is not None:
+        return refusal.gaps
+    if refusal.fields:
+        return ArgumentGaps(invalid=tuple((name, str(refusal)) for name in dict.fromkeys(refusal.fields)))
+    gap = _refusal_gap(command, refusal)
+    if gap is None:
+        return ArgumentGaps()
+    name, kind, why = gap
+    return ArgumentGaps(missing=(name,)) if kind == "missing" else ArgumentGaps(invalid=((name, why),))
+
+
+def gaps_question(command: PlanningCommandCommand, gaps: ArgumentGaps) -> str:
+    """One question for every argument a call lacks: the ones the request does not give, then the ones refused (why)."""
+    task = command.name.replace("_", " ")
+
+    def label(name: str) -> str:
+        return name.replace("_", " ")
+
+    def joined(names) -> str:
+        names = [label(n) for n in names]
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+    parts = []
+    if gaps.missing:
+        parts.append(f"your request does not give the {joined(gaps.missing)}")
+    parts.extend(f"the {label(name)} {why}" for name, why in gaps.invalid)
+    names = list(gaps.names)
+    if len(names) == 1:
+        ask = f"Which {label(names[0])} should I use?"
+    else:
+        example = "; ".join(f"{name}: ..." for name in names[:2])
+        ask = (f"What should the {joined(names)} be? Give each on its own line as name: value "
+               f"({example}).")
+    return f"I can't run {task} yet: {'; '.join(parts)}. {ask}"
+
+
 def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> bool:
     """Whether a refused planning command call is something to ask the user: the refusal names one of
     the command's inputs (``Refused(..., field=...)`` from the hook, a missing argument, or a guard's
@@ -451,13 +560,31 @@ def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCom
     command, not a value the user can supply. The turn then plans the request with the text planner,
     as an unattended turn does, instead of putting the rule to the user.
     """
-    if refusal.fields:
+    if refusal.fields or (refusal.gaps is not None and refusal.gaps.names):
         return True
     text = str(refusal)
     if _MISSING_ARGUMENT.match(text):
         return True
     match = _ARGUMENT_REFUSAL.match(text)
     return match is not None and any(p.name == match["name"] for p in command.params)
+
+
+def planning_refusal_parameter_request(
+    command: PlanningCommandCommand, refusal: PlanningCommandInputError,
+) -> Optional[dict]:
+    """The refused inputs of a planning command call as data, for a client that renders a form:
+    ``{"command", "missing", "invalid", "values"}``, or None when the refusal names no input of the command.
+
+    ``missing`` and ``invalid`` list every argument the call lacks (``refusal.gaps`` when the raiser worked them out,
+    else the one the refusal names); ``values`` is what the call already has for the others (kept, not asked again).
+    The shapes ``refusal_question`` reads: ``Refused(field=...)`` from the hook (``fields``), a missing argument, and a
+    guard's refusal of one argument (a placeholder, pronoun or kind word reads as missing; any other reason as invalid).
+    """
+    gaps = refusal_gaps(command, refusal)
+    if not gaps.names:
+        return None
+    return {"command": command.name, "missing": list(gaps.missing), "invalid": [name for name, _ in gaps.invalid],
+            "values": {name: str(value) for name, value in gaps.values.items()}}
 
 
 # ---------------------------------------------------------------- the parsed planning command
@@ -879,6 +1006,231 @@ def _ignore_words(name: str, where: str, key: str, value) -> tuple[str, ...]:
     return tuple(value)
 
 
+#: The options of ``ui`` (``field_options.UiOptions``), and the values ``format`` and ``widget`` take.
+UI_OPTIONS = ("hidden", "hero", "format", "widget", "table", "tones", "currency")
+UI_FORMATS = ("currency", "percent", "code", "badge")
+#: ``ui.tones`` values: the meaning of a badge's colour, which a client may draw as it likes (good, warning, bad, neutral).
+UI_TONES = ("good", "warning", "bad", "neutral")
+#: ``ui.currency``: the shape of an ISO 4217 code. No list of currencies is kept here; a client that does not know
+#: a well-formed code falls back to a plain number.
+UI_CURRENCY_CODE = re.compile(r"[A-Za-z]{3}")
+UI_WIDGETS = ("textarea", "radio")
+#: ``ui.table`` names a group of ``Signature.Output`` list fields drawn as the columns of one table.
+UI_TABLE_GROUP = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _table_column_item(annotation) -> bool:
+    """Whether *annotation* is a list of scalars (``list[str|int|float|bool|Literal[...]]``, or ``Optional`` of
+    it) a ``ui.table`` column may be."""
+    if get_origin(annotation) in (Union, UnionType) and type(None) in get_args(annotation):
+        inner = [a for a in get_args(annotation) if a is not type(None)]
+        if len(inner) != 1:
+            return False
+        annotation = inner[0]
+    if get_origin(annotation) is not list:
+        return False
+    args = get_args(annotation)
+    return len(args) == 1 and (args[0] in (str, int, float, bool) or get_origin(args[0]) is Literal)
+
+
+def check_table_groups(output_cls, where: str = "Signature.Output") -> list[str]:
+    """The load problems of the ``ui.table`` declarations of one ``Signature.Output``, as messages.
+
+    A column field is a list of scalars (``list[str]``, ``list[int]``, ``list[float]``, ``list[bool]`` or
+    ``list[Literal[...]]``, optionally ``Optional``); a list of objects is refused. A group has at least two
+    member fields, and at least two that are not ``hidden`` (a hidden member is still a column for
+    alignment but is not shown). The syntax of each ``ui.table`` value is checked by ``check_ui_option``."""
+    problems: list[str] = []
+    members: dict[str, list[tuple[str, bool]]] = {}
+    refused: set[str] = set()    # a group with a refused column is reported once, for that column
+    for field_name, info in output_cls.model_fields.items():
+        extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+        hint = extra.get(UI)
+        if not isinstance(hint, dict) or "table" not in hint:
+            continue
+        group = hint["table"]
+        if not isinstance(group, str) or not UI_TABLE_GROUP.fullmatch(group):
+            continue    # reported by check_ui_option
+        if not _table_column_item(info.annotation):
+            problems.append(str(_field_error(where, field_name, f"{UI}.table is for a list of str, int, float, bool or "
+                                             f"Literal values; {python_utils.type_text(info.annotation)} is not one")))
+            refused.add(group)
+            continue
+        members.setdefault(group, []).append((field_name, hint.get("hidden") is True))
+    for group, fields in members.items():
+        if group in refused:
+            continue
+        names = ", ".join(repr(n) for n, _ in fields)
+        if len(fields) < 2:
+            problems.append(f"{where}: {UI}.table group {group!r} has one field ({names}); a table needs at least "
+                            "two list fields with the same group name, so give the other column the same name or "
+                            "leave the key out")
+        elif sum(1 for _, hidden in fields if not hidden) < 2:
+            problems.append(f"{where}: {UI}.table group {group!r} ({names}) has fewer than two visible fields; "
+                            f"a hidden field is a column for alignment only, so leave {UI}.hidden off one more field "
+                            "or leave the key out")
+    return problems
+
+
+def ungrouped_list_notices(output_cls, command: str) -> list[str]:
+    """Notices (never errors) for one ``Signature.Output``: two or more visible list-of-scalar fields that belong
+    to no ``ui.table`` group. Nothing about a field's name is read; the type and the declared hints decide.
+
+    A page draws such lists as separate lists. The author who means them as the columns of one table declares
+    ``json_schema_extra={"ui": {"table": "<group>"}}`` on each of them (the same group name)."""
+    loose: list[str] = []
+    for field_name, info in output_cls.model_fields.items():
+        extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+        hint = extra.get(UI)
+        hint = hint if isinstance(hint, dict) else {}
+        if "table" in hint or hint.get("hidden") is True or not _table_column_item(info.annotation):
+            continue
+        loose.append(field_name)
+    if len(loose) < 2:
+        return []
+    names = ", ".join(repr(n) for n in loose)
+    return [f"notice: {command} output fields {names} are lists drawn as separate lists; if they are the "
+            "parallel columns of one table (item i of each list describes the same row), declare it on each of "
+            f"them with json_schema_extra={{\"{UI}\": {{\"table\": \"<group name>\"}}}}, the same group name on every "
+            "column; otherwise nothing needs to change"]
+
+
+def _ui_value_annotation(annotation):
+    """*annotation* without ``Optional`` and one ``list`` level: what a ``ui.tones`` or ``ui.currency`` value is."""
+    for _ in range(2):
+        if get_origin(annotation) in (Union, UnionType):
+            inner = [a for a in get_args(annotation) if a is not type(None)]
+            if len(inner) != 1:
+                return annotation
+            annotation = inner[0]
+        if get_origin(annotation) is list and len(get_args(annotation)) == 1:
+            annotation = get_args(annotation)[0]
+    return annotation
+
+
+def check_ui_value_options(output_cls, where: str = "Signature.Output") -> list[str]:
+    """The load problems of ``ui.tones`` and ``ui.currency`` against the field types of one ``Signature.Output``.
+
+    ``tones`` is for a ``str``, a ``Literal`` or an ``Enum`` (or a list of one; a ``bool`` is drawn as yes/no, never a
+    badge), and on a ``Literal`` or ``Enum`` every key must be one of the declared values (compared as text,
+    case-insensitively after trimming). ``currency`` is for an ``int`` or a ``float`` (or a list of one). The syntax of
+    each option is checked by ``check_ui_option``."""
+    problems: list[str] = []
+    for field_name, info in output_cls.model_fields.items():
+        extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+        hint = extra.get(UI)
+        if not isinstance(hint, dict):
+            continue
+        inner = _ui_value_annotation(info.annotation)
+        shown = python_utils.type_text(info.annotation)
+        tones = hint.get("tones")
+        if isinstance(tones, dict) and hint.get("format") == "badge":
+            declared = None
+            if get_origin(inner) is Literal:
+                declared = list(get_args(inner))
+            elif inspect.isclass(inner) and issubclass(inner, enum.Enum):
+                declared = [member.value for member in inner]
+            if declared is not None and declared and all(isinstance(v, bool) for v in declared):
+                declared = False
+            if declared is False or not (inner is str or declared is not None):
+                problems.append(str(_field_error(where, field_name, f"{UI}.tones is for a str, Literal or Enum value "
+                                                 f"(or a list of one); {shown} is not one")))
+                continue
+            if declared is not None:
+                known = {str(v).strip().lower() for v in declared}
+                for text in tones:
+                    if isinstance(text, str) and text.strip().lower() not in known:
+                        problems.append(str(_field_error(
+                            where, field_name, f"{UI}.tones key {text!r} is not one of the declared values "
+                            f"{', '.join(repr(str(v)) for v in declared)}")))
+        code = hint.get("currency")
+        if code is not None and hint.get("format") == "currency" and inner not in (int, float):
+            problems.append(str(_field_error(where, field_name, f"{UI}.currency is for an int or float value (or a list "
+                                             f"of one); {shown} is not one")))
+    return problems
+
+
+def check_ui_option(name: str, extra, where: str, *, kind: str = "other", on_output: bool = False) -> None:
+    """The load check of a field's ``ui`` hint (``field_options.UiOptions``); a no-op when *extra* has no ``ui`` key.
+
+    ``ui`` is a presentation hint for any client that renders results or collects input: no check, extraction or plan reads it. It must be a non-empty dict of
+    ``hidden``, ``hero``, ``format`` (a ``Signature.Output`` field) or ``widget`` (a ``Signature.Input`` field,
+    *on_output* False; ``"textarea"`` needs *kind* ``str``, ``"radio"`` needs ``enum``, from ``_option_kind``)."""
+    if UI not in extra:
+        return
+    value = extra[UI]
+    takes = "hidden, hero, format, table, tones or currency on a Signature.Output field, widget on a Signature.Input field"
+    if value is False:
+        raise _field_error(where, name, f"{UI}: False is not a value; leave the key out to turn it off")
+    if not isinstance(value, dict):
+        raise _field_error(where, name, f"{UI} must be a dict of {takes}; got {_shown(value)}")
+    if not value:
+        raise _field_error(where, name, f"{UI} is empty; give {takes}, or leave the key out")
+    for key in value:
+        if key not in UI_OPTIONS:
+            close = _closest(key, UI_OPTIONS)
+            hint = f"did you mean {close!r}?" if close else f"its options are {', '.join(UI_OPTIONS)}"
+            raise _field_error(where, name, f"{UI} has unknown option {key!r}; {hint}")
+    if on_output:
+        if "widget" in value:
+            raise _field_error(where, name, f"{UI}.widget is for a Signature.Input field; on a Signature.Output "
+                               "field use hidden, hero, format, table, tones or currency, or leave the key out")
+        for key in ("hidden", "hero"):
+            if key in value and value[key] is not True:
+                if value[key] is False:
+                    raise _field_error(where, name, f"{UI}.{key}: False is not a value; leave the key out to turn it off")
+                raise _field_error(where, name, f"{UI}.{key} must be True; got {_shown(value[key])}")
+        if "format" in value and value["format"] not in UI_FORMATS:
+            raise _field_error(where, name, f"{UI}.format must be one of {', '.join(map(repr, UI_FORMATS))}; "
+                               f"got {_shown(value['format'])}")
+        if "tones" in value:
+            tones = value["tones"]
+            if value.get("format") != "badge":
+                raise _field_error(where, name, f"{UI}.tones needs {UI}.format \"badge\" on the same field")
+            if not isinstance(tones, dict) or not tones:
+                raise _field_error(where, name, f"{UI}.tones must be a non-empty dict of value -> tone, such as "
+                                   f"{{\"delivered\": \"good\"}}; got {_shown(tones)}")
+            seen: dict[str, str] = {}
+            for text, tone in tones.items():
+                if not isinstance(text, str) or not text.strip():
+                    raise _field_error(where, name, f"{UI}.tones keys must be non-empty text; got {_shown(text)}")
+                if tone not in UI_TONES:
+                    raise _field_error(where, name, f"{UI}.tones tone for {text!r} must be one of "
+                                       f"{', '.join(map(repr, UI_TONES))}; got {_shown(tone)}")
+                folded = text.strip().lower()
+                if folded in seen:
+                    raise _field_error(where, name, f"{UI}.tones keys {seen[folded]!r} and {text!r} are the same "
+                                       "value (keys match case-insensitively after trimming); write it once")
+                seen[folded] = text
+        if "currency" in value:
+            code = value["currency"]
+            if value.get("format") != "currency":
+                raise _field_error(where, name, f"{UI}.currency needs {UI}.format \"currency\" on the same field")
+            if not isinstance(code, str) or not UI_CURRENCY_CODE.fullmatch(code):
+                raise _field_error(where, name, f"{UI}.currency must be a three-letter ISO 4217 code such as "
+                                   f"\"USD\"; got {_shown(code)}")
+        if "table" in value:
+            group = value["table"]
+            if not isinstance(group, str) or not UI_TABLE_GROUP.fullmatch(group):
+                raise _field_error(where, name, f"{UI}.table must be a group name, a simple identifier such as "
+                                   f"\"rows\" (letters, digits and underscores, not starting with a digit); got {_shown(group)}")
+            if "hero" in value:
+                raise _field_error(where, name, f"{UI}.hero marks a scalar as the one to show first and {UI}.table makes "
+                                   "a list a column of a table; one field cannot be both, so write one")
+        return
+    for key in ("hidden", "hero", "format", "table", "tones", "currency"):
+        if key in value:
+            raise _field_error(where, name, f"{UI}.{key} is for a Signature.Output field; on a Signature.Input "
+                               "field use widget, or leave the key out")
+    widget = value["widget"]
+    if widget not in UI_WIDGETS:
+        raise _field_error(where, name, f"{UI}.widget must be \"textarea\" or \"radio\"; got {_shown(widget)}")
+    if widget == "textarea" and kind != "str":
+        raise option_error(where, f'{UI}.widget "textarea"', name, kind, "a str")
+    if widget == "radio" and kind != "enum":
+        raise option_error(where, f'{UI}.widget "radio"', name, kind, "a Literal of text values")
+
+
 def check_option_spec(name: str, options: dict, where: str, *, kind: str = "other",
                       planning: bool = False) -> dict:
     """The ``_parse_param`` spec of a field's option keys (spec 2.1 to 2.6), read from its ``json_schema_extra``.
@@ -890,6 +1242,7 @@ def check_option_spec(name: str, options: dict, where: str, *, kind: str = "othe
     here (*kind*: the coarse type from ``_option_kind``). ``from_command_output``, ``converted_from_command_text``
     and ``command_text_after_command_name`` are read where they are used; their shape is checked here."""
     spec: dict = {}
+    check_ui_option(name, options, where, kind=kind)
     copied = _option_value(name, where, options, COPIED_FROM_COMMAND_TEXT, ("ignore",))
     record = _option_value(name, where, options, RECORD_NAMED_IN_COMMAND_TEXT, ("ignore",))
     confirms = _option_value(name, where, options, CLASSIFIER_CONFIRMS, ("meanings",))
@@ -2017,6 +2370,13 @@ def resolve_signature_field_sources(
                     severity="error",
                     command=command_name,
                 ))
+            try:
+                check_ui_option(field_name, extra, "Signature.Output", on_output=True)
+            except PlanningCommandFormatError as error:
+                problems.append(FieldSourceProblem(file=file_path, message=str(error), severity="error",
+                                                   command=command_name))
+        problems.extend(FieldSourceProblem(file=file_path, message=message, severity="error", command=command_name)
+                        for message in (*check_table_groups(output_cls), *check_ui_value_options(output_cls)))
 
     # 2. Check facts models in phase_outputs for from_command_output (distinct from fact_from)
     for model in phase_outputs:
@@ -4152,7 +4512,13 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
         try:
             args, notes = checked(raw)
         except PlanningCommandInputError as refused_again:
-            args, notes = _typed_fallback(command, request, available_commands, raw, refused_again, checked)
+            try:
+                args, notes = _typed_fallback(command, request, available_commands, raw, refused_again, checked)
+            except PlanningCommandInputError as final:
+                # ``check_arguments`` stops at the first gap: work out every one, so the question names them all
+                # and the values the call already has are kept.
+                final.gaps = argument_gaps(command, raw, request, verdicts)
+                raise
         notes.insert(0, f"first call refused, planned again: {refused}")
     steps = expand(command, args)
     prediction = dspy.ChainOfThought(step_signature(command))(

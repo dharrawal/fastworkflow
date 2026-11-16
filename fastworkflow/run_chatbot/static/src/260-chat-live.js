@@ -168,7 +168,7 @@ function tmApplyStreamFrame(frame, activity, sink) {
   }
 }
 
-function tmStreamTurn(text, pending) {
+function tmStreamTurn(text, pending, usePlan) {
   /* One live turn over /invoke_agent_stream. The execution key arrives on the
      response head, so a body that dies mid-turn is recovered by polling that
      key — never by submitting the query again, which would be a second turn
@@ -193,6 +193,7 @@ function tmStreamTurn(text, pending) {
 
   function finalize(out) {
     if (tm.epoch !== epoch) { return; }
+    tmApprovalTokenRemember(out);
     if (out.logical_turn_key) { out.turn_key = out.logical_turn_key; }
     finished = true;
     activity.setState(
@@ -228,9 +229,13 @@ function tmStreamTurn(text, pending) {
   }
 
   activity.setState("running");
-  tmFetch("/invoke_agent_stream", { user_query: text, timeout_seconds: 300,
-                                   use_dspy_cache: document.getElementById("useDspyCache").checked,
-                                   unattended: document.getElementById("unattended").checked })
+  var streamBody = { user_query: text, timeout_seconds: 300,
+                     use_dspy_cache: document.getElementById("useDspyCache").checked,
+                     unattended: document.getElementById("unattended").checked };
+  var streamToken = tmApprovalTokenFor(text);
+  if (streamToken) { streamBody.approval_token = streamToken; }
+  if (usePlan) { streamBody.use_plan = usePlan; }
+  tmFetch("/invoke_agent_stream", streamBody)
     .then(function (r) {
       turnKey = r.headers.get("X-FW-Turn-Key") || null;
       if (r.status === 202) {
@@ -260,6 +265,14 @@ function tmStreamTurn(text, pending) {
           "Reconnect (Advanced panel) to mint new tokens.");
         done();
         return null;
+      }
+      if (r.status === 400) {
+        /* A refused request (an unknown plan, or a question waiting): no turn began, so say why. */
+        return r.json().catch(function () { return {}; }).then(function (data) {
+          activity.setState("refused");
+          tmRenderError(pending, String((data && data.detail) || "The server refused the request (HTTP 400)."));
+          done();
+        });
       }
       if (!r.ok || !r.body || !r.body.getReader) {
         /* No readable body (an error response, or an environment without
@@ -502,6 +515,7 @@ function tmComposerState() {
 function tmClearLog(placeholder) {
   var log = document.getElementById("chatLog");
   tmOpenArtifacts = null;
+  tmApprovalTokenClear();   /* a held approval token belongs to the conversation that was cleared */
   clear(log);
   if (placeholder) {
     log.appendChild(el("div", "empty", placeholder));
@@ -543,6 +557,10 @@ function tmRenderStoredTurn(turn, autoloadArtifacts) {
     tmBubble("user", turn.user_message);
   }
   var agent = tmBubble("agent", "…");
+  agent.dataset.userMessage = turn.user_message || "";
+  agent.dataset.deterministic = (turn.user_message || "").trim().charAt(0) === "/" ? "1" : "";
+  agent.dataset.restored = "1";
+  agent.dataset.pendingRecord = "1";   /* results arrive with the stored record [fix-weih.10] */
   tmRenderTurn(agent, {
     turn_key: turn.turn_key,
     status: turn.status,
@@ -550,11 +568,11 @@ function tmRenderStoredTurn(turn, autoloadArtifacts) {
     answer: turn.answer,
     command_outputs: []
   });
-  tmAttachStoredArtifacts(agent, turn.turn_key, autoloadArtifacts);
+  tmAttachStoredArtifacts(agent, turn.turn_key, autoloadArtifacts, turn);
   return agent;
 }
 
-function tmAttachStoredArtifacts(bubbleMsg, turnKey, autoload) {
+function tmAttachStoredArtifacts(bubbleMsg, turnKey, autoload, turn) {
   /* The turn list carries no artifacts — only the stored record does — so a
      reopened conversation fetches it per turn. Reading a history of hundreds
      of turns must not be hundreds of round trips, so only the most recent
@@ -575,6 +593,22 @@ function tmAttachStoredArtifacts(bubbleMsg, turnKey, autoload) {
         var record = (data.turn && data.turn.record) || {};
         var outputs = (record.turn_output || {}).command_outputs || [];
         bubbleMsg.removeChild(slot);
+        /* The same record carries the structured results, so restoring them
+           costs no further request [fix-weih.4]. */
+        var stored = {
+          turn_key: turnKey,
+          status: turn ? turn.status : (record.turn_output || {}).status,
+          answer: turn ? turn.answer : (record.turn_output || {}).answer,
+          command_outputs: outputs
+        };
+        tmRenderResults(bubbleMsg, stored);
+        /* The record is here, so this turn may now compose its card. */
+        bubbleMsg.dataset.pendingRecord = "";
+        tmComposeCard(bubbleMsg, stored);
+        /* Prompts that may show on a restored turn (not the built-in parameter
+           form or pills) see the stored outputs and status [fix-weih.5]. */
+        tmRenderPromptForms(bubbleMsg, stored);
+        tmRenderPlanChoices(bubbleMsg, stored);
         /* Say where this came from: it is the recorded turn, not a live one. */
         tmRenderArtifacts(bubbleMsg, outputs, "from the stored record of this turn");
       })
@@ -590,7 +624,7 @@ function tmAttachStoredArtifacts(bubbleMsg, turnKey, autoload) {
   }
 
   if (autoload) { load(); return; }
-  var button = el("button", "traceLink", "show artifacts");
+  var button = el("button", "traceLink", "show results and artifacts");
   button.addEventListener("click", function () {
     slot.removeChild(button);
     load();
@@ -682,6 +716,8 @@ function tmConnect() {
       }
       if (!pasted && got.data.access_token) { tm.token = got.data.access_token; }
       tm.connected = true;
+      tmLoadCommandSchemas();
+      tm.composeUnavailable = false;
       deadServerAnnounced = false;
       var note = (tm.managed && session && session.server_note)
         ? " (" + session.server_note + ")" : "";
@@ -796,33 +832,43 @@ document.getElementById("tConnect").addEventListener("click", function () {
 function tmSend() {
   var input = document.getElementById("chatInput");
   var text = input.value.trim();
+  var usePlan = tm.nextUsePlan || null;
+  tm.nextUsePlan = null;
   if (!text || !tm.connected || tm.busy) { return; }
   var reuseLabel = tmReuseLabel(text);
   input.value = "";
   tmSizeComposer();
   tmClearReuse();
   tm.busy = true;
+  tmDisableLiveForms();
   tmComposerState();
   var sent = tmBubble("user", text);
   if (reuseLabel) { sent.appendChild(el("div", "reuseNote", reuseLabel)); }
-  /* "/"-prefixed → deterministic execution via /invoke_assistant */
-  var deterministic = text.charAt(0) === "/";
+  if (usePlan) { sent.appendChild(el("div", "reuseNote", "Run with the plan " + usePlan)); }
+  /* "/"-prefixed → deterministic execution via /invoke_assistant; a chosen plan is always an agent-path request */
+  var deterministic = !usePlan && text.charAt(0) === "/";
   var path = deterministic ? "/invoke_assistant" : "/invoke_agent";
   var pending = tmBubble("agent", deterministic ? "running command…" : "thinking…");
+  pending.dataset.deterministic = deterministic ? "1" : "";
+  pending.dataset.userMessage = text;
   if (!deterministic) {
     /* Agent turns stream: the interactions arrive as they happen instead of
        appearing all at once when the turn is already over. */
-    tmStreamTurn(text, pending);
+    tmStreamTurn(text, pending, usePlan);
     return;
   }
-  tmFetch(path, { user_query: text, timeout_seconds: 60,
-                  use_dspy_cache: document.getElementById("useDspyCache").checked,
-                  unattended: document.getElementById("unattended").checked })
+  var assistantBody = { user_query: text, timeout_seconds: 60,
+                        use_dspy_cache: document.getElementById("useDspyCache").checked,
+                        unattended: document.getElementById("unattended").checked };
+  var assistantToken = tmApprovalTokenFor(text);
+  if (assistantToken) { assistantBody.approval_token = assistantToken; }
+  tmFetch(path, assistantBody)
     .then(function (r) {
       return r.json().then(function (data) { return { status: r.status, data: data }; });
     })
     .then(function (got) {
       if (got.status === 200) {
+        tmApprovalTokenRemember(got.data);
         tmRenderTurn(pending, got.data);
         tm.busy = false; tmComposerState();
       } else if (got.status === 202 && got.data.turn_key) {

@@ -626,7 +626,9 @@ answer and no model call. The last phase and the extra-steps phase still go on i
 agent's loop from code's last step (fix-hia1.34): the model takes at least one step,
 weighing the outputs code got, and finishes (the finish check reads that finish) or runs
 a command the request needs that the plan lacked; then the answer call every executor
-run ends with. The budget is the agent's, as above; no code step runs again. The last
+run ends with. The exception is the last phase of a phased command with `__result__`: its
+answer is `__result__`'s (or the deferred answer call's), so once code has run every step
+that phase takes no model step at all (a flat call, whose answer is the agent's, keeps it). The budget is the agent's, as above; no code step runs again. The last
 phase's framing then says "Every step below has run (by code); ..." in place of "Do these
 steps", with the copy rule answer-only phases get (`phase_query(code_ran_all=True)`, given
 to the loop as `CodeSteps.done_inputs`). Fan-out items whose answer is not shown run the
