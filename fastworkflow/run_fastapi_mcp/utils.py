@@ -339,6 +339,22 @@ class InvokeRequest(BaseModel):
     approval_token: Optional[str] = None
 
 
+class AgentInvokeRequest(InvokeRequest):
+    """Request to invoke the agent (``/invoke_agent``, ``/invoke_agent_stream``): an ``InvokeRequest`` that may also
+    name the plan to use."""
+    use_plan: Optional[str] = Field(
+        default=None,
+        description=(
+            "A planning command available here, by the name an fw_not_run entry's available_plans lists. "
+            "user_query is then run as ONE part (not split) bound to that planning command, and no "
+            "review: the turn asks for the plan's parameter values (every parameter, the drafted values shown; yes runs, "
+            "'name: value' lines change them, cancel stops; a required value still missing is asked for). Send it with the entry's own `request` "
+            "text to run a part that was not run here. An unknown name, or one not available here, "
+            "is refused with 400. Omit for an ordinary request."
+        ),
+    )
+
+
 class EndSessionRequest(BaseModel):
     """Optional body of POST /end_session. The channel is the token's; it is never a parameter."""
     discard_pending: bool = Field(
@@ -1475,6 +1491,7 @@ async def run_process_turn(
     approval_surface: "approval_binding.Surface | None" = None,
     approval_token: Optional[str] = None,
     delivered: Optional[dict] = None,
+    use_plan: Optional[str] = None,
 ) -> fastworkflow.TurnOutput:
     """Run one logical turn in a thread pool with timeout (Topology B).
 
@@ -1489,7 +1506,8 @@ async def run_process_turn(
         # the whole transport edge speaks (and captures the full turn).
         output = ctx.process_turn(
             message, unattended=unattended,
-            **turn_approval_kwargs(approval_surface, approval_token))
+            **turn_approval_kwargs(approval_surface, approval_token),
+            **({"use_plan": use_plan} if use_plan else {}))
         if delivered is not None:
             delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
         return output
@@ -1599,6 +1617,7 @@ async def run_process_message_with_trace_stream(
     approval_surface: "approval_binding.Surface | None" = None,
     approval_token: Optional[str] = None,
     delivered: Optional[dict] = None,
+    use_plan: Optional[str] = None,
 ) -> fastworkflow.TurnOutput:
     """
     Run one logical turn in an executor while draining command_trace_queue concurrently.
@@ -1616,13 +1635,14 @@ async def run_process_message_with_trace_stream(
         return await run_process_turn(
             runtime, message, timeout_seconds, session_manager,
             unattended=unattended, approval_surface=approval_surface,
-            approval_token=approval_token, delivered=delivered,
+            approval_token=approval_token, delivered=delivered, use_plan=use_plan,
         )
 
     def _run() -> fastworkflow.TurnOutput:
         output = ctx.process_turn(
             message, unattended=unattended,
-            **turn_approval_kwargs(approval_surface, approval_token))
+            **turn_approval_kwargs(approval_surface, approval_token),
+            **({"use_plan": use_plan} if use_plan else {}))
         if delivered is not None:
             delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
         return output

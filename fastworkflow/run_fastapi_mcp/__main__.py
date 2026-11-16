@@ -58,6 +58,7 @@ import fastworkflow
 from fastworkflow import approval_binding, state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
+from fastworkflow.workflow_execution_context import UsePlanError
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -85,6 +86,7 @@ from .utils import (
     TokenResponse,
     InitializeResponse,
     SessionData,
+    AgentInvokeRequest,
     InvokeRequest,
     apply_dspy_cache_choice,
     with_cache_notice,
@@ -1965,6 +1967,19 @@ async def refresh_token(
         ) from e
 
 
+def _use_plan_refusal(ctx, use_plan: Optional[str]) -> Optional[JSONResponse]:
+    """The 400 answer for a ``use_plan`` the session cannot honour (an unknown planning command, one outside the current
+    context, or a question waiting for its reply); None when it is absent or fine."""
+    if not use_plan:
+        return None
+    try:
+        ctx.check_use_plan(use_plan)
+    except UsePlanError as error:
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                            content={"detail": str(error), "reason": "use_plan_refused"})
+    return None
+
+
 @app.post(
     "/invoke_agent",
     operation_id="rest_invoke_agent",
@@ -1980,7 +1995,7 @@ async def refresh_token(
     }
 )
 async def invoke_agent(
-    request: InvokeRequest,
+    request: AgentInvokeRequest,
     session: SessionData = Depends(get_session_and_ensure_runtime)
 ) -> JSONResponse:
     """
@@ -2001,6 +2016,8 @@ async def invoke_agent(
                 )
 
             ctx = runtime.execution_context
+            if bad_plan := _use_plan_refusal(ctx, request.use_plan):
+                return bad_plan
             user_query = request.user_query.lstrip('/')
             # Approval binding (ADR-EXP-025): an HTTP or MCP request is a host surface. Its identity
             # is verified only when the JWT signature is checked (owner answer 2).
@@ -2010,7 +2027,8 @@ async def invoke_agent(
             def _work():
                 output = ctx.process_turn(
                     user_query, unattended=request.unattended,
-                    approval_surface=approval_surface, approval_token=request.approval_token)
+                    approval_surface=approval_surface, approval_token=request.approval_token,
+                    **({"use_plan": request.use_plan} if request.use_plan else {}))
                 delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
                 _hand_live_extras_to_execution(channel_id, delivered)
                 return output
@@ -2020,7 +2038,8 @@ async def invoke_agent(
                 kind="invoke_agent",
                 work_fn=_work,
                 # A retry differing only in `unattended` is a different turn.
-                idempotency_args=(user_query, *(("unattended",) if request.unattended else ())),
+                idempotency_args=(user_query, *(("unattended",) if request.unattended else ()),
+                                  *(("use_plan", request.use_plan) if request.use_plan else ())),
                 wait_seconds=request.timeout_seconds,
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
@@ -2077,7 +2096,7 @@ async def invoke_agent(
     }
 )
 async def invoke_agent_stream(
-    request: InvokeRequest,
+    request: AgentInvokeRequest,
     session: SessionData = Depends(get_session_and_ensure_runtime)
 ):
     """
@@ -2140,6 +2159,9 @@ async def invoke_agent_stream(
                 content={"detail": f"User session not found: {channel_id}"}
             )
 
+        if bad_plan := _use_plan_refusal(runtime.execution_context, request.use_plan):
+            return bad_plan
+
         # Events are queued by the owning turn and drained by the response body.
         # Separating them is the point: a client that disconnects stops draining,
         # while the turn runs to completion and retires itself normally. The
@@ -2190,6 +2212,7 @@ async def invoke_agent_stream(
                 approval_surface=chat_surface,
                 approval_token=request.approval_token,
                 delivered=delivered,
+                use_plan=request.use_plan,
             )
             # The token rides this one live frame only: it is merged into the frame, never into the
             # TurnOutput, so the stored record and GET /turns never hold it. The queue is drained once
@@ -2271,6 +2294,7 @@ async def invoke_agent_stream(
                 idempotency_key=compute_idempotency_key(
                     channel_id, "invoke_agent_stream", request.user_query,
                     *(("unattended",) if request.unattended else ()),
+                    *(("use_plan", request.use_plan) if request.use_plan else ()),
                 ),
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,

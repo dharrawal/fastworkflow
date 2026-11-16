@@ -96,6 +96,10 @@ TURN_PARTS_ARTIFACT = "fw_sub_tasks"
 
 #: The artifact key under which the turn lists its stopped or refused parts (no-agent mode; ``fastworkflow.no_agent_mode``).
 NOT_RUN_ARTIFACT = no_agent_mode.NOT_RUN_ARTIFACT
+
+
+class UsePlanError(ValueError):
+    """A ``use_plan`` that names no planning command available here, or is sent while a question waits."""
 #: The artifact key under which a pending prompt of a paused planning command's decision step carries its data.
 PHASE_STEP_ARTIFACT = no_agent_mode.PHASE_STEP_ARTIFACT
 
@@ -439,6 +443,15 @@ class WorkflowExecutionContext:
         # Unattended turn: nobody is there to answer, so the agent has no
         # ask_user for the whole logical turn. Set when the turn begins.
         self._turn_unattended: bool = False
+        # The planning command the client chose for this turn's one part (``process_turn(use_plan=...)``), and the one
+        # named for the turn that begins next (read by ``_begin_turn``).
+        self._turn_use_plan: Optional[str] = None
+        # No agent model: the questions about a planning command's missing arguments this turn has put (see
+        # ``refusal_question_for``): {command, open (the names asked about last), stalled (replies with no progress), asks};
+        # and why the last refusal ended the part (read when no question could be asked).
+        self._refusal_progress: Optional[dict[str, Any]] = None
+        self._refusal_stop_reason: str = ""
+        self._next_use_plan: Optional[str] = None
         # The sub-task review gate's state for the turn (fix-3rsq.plan-review.2.2/.2.6/.2.8): the marker the turn span
         # carries, and the plan the gate built (the accepted one after a review; the draft when no one could answer).
         self._turn_subtask_review: str = "not_applicable"
@@ -884,6 +897,8 @@ class WorkflowExecutionContext:
         self._turn_started_at = datetime.now(timezone.utc)
         self._turn_user_message = user_message
         self._turn_unattended = bool(unattended)
+        self._turn_use_plan, self._next_use_plan = self._next_use_plan, None
+        self._refusal_progress, self._refusal_stop_reason = None, ""
         self._turn_subtask_review = "not_applicable"
         self._turn_subtask_plan = None
         self._turn_subtask_bindings = []
@@ -1585,6 +1600,9 @@ class WorkflowExecutionContext:
             "pending_clarification_request": self._pending_clarification_request,
             "skill_refusal_pending": self._planning_command_refusal_pending,
             "skill_refusal_answered": self._planning_command_refusal_answered,
+            "use_plan": self._turn_use_plan,
+            "refusal_progress": self._refusal_progress,
+            "pending_refusal_request": self._pending_refusal_request if self._planning_command_refusal_pending else None,
             "subtasks": list(turn.subtasks),
             "subtask_origins": list(turn.origins),
             "subtask_index": turn.subtask_index,
@@ -1690,6 +1708,9 @@ class WorkflowExecutionContext:
         # Absent from blobs written before a refused planning command call could suspend a turn.
         self._planning_command_refusal_pending = bool(state.get("skill_refusal_pending"))
         self._planning_command_refusal_answered = bool(state.get("skill_refusal_answered"))
+        self._turn_use_plan = state.get("use_plan") or None
+        self._refusal_progress = dict(state["refusal_progress"]) if state.get("refusal_progress") else None
+        self._pending_refusal_request = state.get("pending_refusal_request") or self._pending_refusal_request
         # Absent from blobs written before sub-task splitting; the defaults mean "not split".
         turn = self._turn_frame()
         turn.subtasks = list(state.get("subtasks") or [])
@@ -2144,9 +2165,16 @@ class WorkflowExecutionContext:
         self, message: str, *, unattended: bool = False,
         approval_surface: "approval_binding.Surface | None" = None,
         approval_token: Optional[str] = None,
+        use_plan: Optional[str] = None,
     ) -> "fastworkflow.TurnOutput":
         """
         Execute one user message synchronously and return the public TurnOutput.
+
+        ``use_plan`` names a planning command available here (as ``fw_not_run``'s ``available_plans`` lists
+        them): the message is then ONE part, not split, and its planning-command match is that command, so the turn
+        goes on as a turn Jev matched it would (arguments drafted from the message, a missing required one asked
+        for, the command's steps). Raises ``UsePlanError`` for a name that is not a planning command of the current
+        context, and when the message answers a waiting question (a reply starts no turn).
 
         ``unattended=True`` runs the turn with no one to answer: the agent's
         ask_user tool is removed for the whole logical turn. It applies to the
@@ -2158,6 +2186,8 @@ class WorkflowExecutionContext:
         full internal TurnResult is built and projected onto the slim public
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
+        self.check_use_plan(use_plan)
+        self._next_use_plan = use_plan or None
         self._note_approval_inbound(approval_surface, approval_token, unattended)
         try:
             command_output = self._execute_message(message, unattended=unattended)
@@ -2176,6 +2206,15 @@ class WorkflowExecutionContext:
         approval_binding.clear_inbound(self._app_workflow)
         turn_result = self._build_turn_result(command_output)
         return turn_result.turn_output
+
+    def check_use_plan(self, use_plan: Optional[str]) -> None:
+        """Refuse a ``use_plan`` that cannot be honoured, before the turn begins (``UsePlanError``)."""
+        if not use_plan:
+            return
+        if self._app_workflow is None or use_plan not in no_agent_mode.plan_names(self._app_workflow):
+            raise UsePlanError(f"use_plan {use_plan!r} is not a planning command available here")
+        if self._awaiting_user:
+            raise UsePlanError("use_plan cannot be sent while a question is waiting for its reply; answer it first")
 
     @dspy_logger.observe_dspy_calls
     def _execute_message(
@@ -2905,7 +2944,7 @@ class WorkflowExecutionContext:
         # A workflow with planning commands answers a plain "what can you do?" in code, with no model call.
         from fastworkflow.capability_answer import capability_turn
 
-        if self._app_workflow and (capable := capability_turn(
+        if self._app_workflow and not self._turn_use_plan and (capable := capability_turn(
                 message, self._app_workflow, self._cme_workflow.folderpath)) is not None:
             # The listing as data rides on the prediction; _finalize_agent_output puts it in the answer's artifacts.
             return dspy.Prediction(final_answer=capable[0], exhausted=False, capabilities=capable[1])
@@ -2918,7 +2957,8 @@ class WorkflowExecutionContext:
         # conversation input, never prepended to the request: the merge returns the request itself as the one job,
         # so a prepended summary became the sub-task's goal, and its names changed how the request merged
         # (fix-bydz). An unsplit request still runs on refined_user_query (_run_turn_subtasks).
-        subtasks = split_into_subtasks(
+        # A message sent with ``use_plan`` is one part: the client named the part and its plan, so it is not split.
+        subtasks = [message] if self._turn_use_plan else split_into_subtasks(
             message,
             conversation=self._conversation_context(self.conversation_history),
             planner_lm=getattr(self, "_current_planner_lm", None),
@@ -2988,7 +3028,10 @@ class WorkflowExecutionContext:
         from fastworkflow import review_proposals, turn_progress
 
         workflow = self._app_workflow
-        path = review_proposals.fast_path_for(workflow, subtasks)
+        pinned = self._turn_use_plan
+        # A pinned plan (``use_plan``) is not a fast path: the client chose the plan, not its arguments, so the part is
+        # drafted for that plan and goes through the review gate as a part the matcher picked that plan for.
+        path = None if pinned else review_proposals.fast_path_for(workflow, subtasks)
         if (path is not None and self.no_agent_mode and path.is_planning
                 and path.reason == review_proposals.FAST_HEAD_CONFIDENT
                 and review_proposals.jev_says_none(workflow, subtasks[0])):
@@ -3010,13 +3053,27 @@ class WorkflowExecutionContext:
         draft = review_proposals.draft_round1_proposal(
             workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None),
             confident_only=self.no_agent_mode,
-            none_veto=not self.no_agent_mode and self._subtask_no_answerer())
+            none_veto=not self.no_agent_mode and self._subtask_no_answerer(),
+            pinned_plan=pinned)
+        if pinned:
+            # The client chose the plan, so the intent is settled: there is no goal or step to review, only the plan's
+            # parameter values. They are asked as a parameter question (every parameter, the drafted values prefilled),
+            # not as the sub-task review (``_ask_plan_parameters``); nothing is asked when the plan has no parameters or
+            # nobody can answer, and the part then runs as drafted.
+            draft = self._overlay_given(draft)
+            self._turn_subtask_plan = draft
+            self._turn_plan_ambiguity = []
+            self._turn_subtask_review = "not_reviewed"
+            return self._ask_plan_parameters(draft.items[0], subtasks[0])
         self._turn_subtask_plan = draft
         self._turn_plan_ambiguity = review_proposals.plan_ambiguity_record(draft)
         turn_progress.emit(turn_progress.STAGE_REVIEW)
         nothing_runs = self.no_agent_mode and all(
             item.means.kind == review_proposals.MEANS_FROM_SCRATCH for item in draft.items)
-        if nothing_runs or self._subtask_no_answerer():
+        # No agent model: the re-run after the user answered a question about a missing value is not reviewed again (the
+        # part was reviewed before it was asked, and the answer is the user's own).
+        answered = self.no_agent_mode and self._planning_command_refusal_answered
+        if nothing_runs or answered or self._subtask_no_answerer():
             # Owner decision 2: no one can answer (or, in no-agent mode, nothing would run, so there is nothing to
             # approve), so the draft is recorded as not reviewed and the turn carries on.
             # The draft runs as proposed: its goals and bound means drive the run (_run_subtasks_from).
@@ -3140,7 +3197,17 @@ class WorkflowExecutionContext:
         # The match is memoised for the turn (review_proposals.planning_match): the gate's draft asked it already.
         planning_distribution: dict[str, float] = {}
         plan_template, planning_command = "", None
-        if self._app_workflow is not None:
+        if self._app_workflow is not None and self._turn_use_plan:
+            # The client's choice (``use_plan``) is the match: the matcher is never called on this turn. A bound call
+            # (a refusal's fall-back) names its own command below.
+            from fastworkflow.workflow_agent import _template_text, load_planning_command_map
+
+            planning_command = (load_planning_command_map(self._app_workflow.folderpath).get(self._turn_use_plan)
+                                if bound_command is None else None)
+            if planning_command is not None:
+                plan_template = _template_text(planning_command.template)
+                planning_distribution = {self._turn_use_plan: 1.0}
+        elif self._app_workflow is not None:
             plan_template, planning_command, planning_distribution = review_proposals.planning_match(
                 self._app_workflow, template_text or query)
         if template_text is not None and template_text != query:
@@ -3176,11 +3243,20 @@ class WorkflowExecutionContext:
         if self.no_agent_mode:
             # No agent model: nothing here may run the free agent. The planner's text plan (a planner model call,
             # made above) is the suggestion; none when the planner made none.
+            if planning_command is not None and bound_command is None and self._refusal_stop_reason:
+                # A planning command matched this part but its call was refused and cannot be asked about: it is that
+                # command that was not run, for the arguments that are missing.
+                return self._not_run_part(
+                    command=planning_command.name, means="planning",
+                    reason=f"it cannot run as planned ({self._refusal_stop_reason}), and the agent model that would "
+                           "take over is not set (LLM_AGENT)")
             origin = self._origins[self._subtask_index] if getattr(self, "_origins", None) else 0
             item = self._bound_item(origin)
             means = item.means.kind if item is not None else "from_scratch"
             return self._not_run_part(
                 command=bound_command, means=means,
+                # An ad hoc part lists the plans available here, the matcher's closest ones first.
+                plans_for=planning_distribution if bound_command is None else None,
                 reason=("no planning command or command fits it, so it needs free planning, which is not run "
                         "without an agent model (LLM_AGENT)" if bound_command is None else
                         f"the agent model that would carry out {bound_command} from its inputs is not set (LLM_AGENT)"),
@@ -4003,16 +4079,180 @@ class WorkflowExecutionContext:
         state.pop("decision", None)
         return "go", {"number": decision["number"], "text": text}
 
-    def _not_run_part(self, *, command: Optional[str], reason: str, means: str, suggested_plan: str = ""):
+    def _overlay_given(self, draft):
+        """The draft with the values the user already gave for the pinned plan (``_refusal_progress["given"]``) as its
+        inputs: they are the user's own, and win over what the extractor read."""
+        from fastworkflow import review_proposals
+
+        given = (self._refusal_progress or {}).get("given") or {}
+        if not given or not draft.items:
+            return draft
+        item = draft.items[0]
+        kept = {each.name: each for each in item.inputs if each.name not in given}
+        inputs = [*kept.values(), *(review_proposals.SubTaskInput(name=name, value=str(value), drafted=False)
+                                    for name, value in given.items())]
+        return draft.model_copy(update={"items": [item.model_copy(update={"inputs": inputs}), *draft.items[1:]]})
+
+    def _plan_question(self, command, shown: dict, gaps, retry: str = "") -> tuple[str, dict]:
+        """``(question, parameter_request)`` presenting EVERY parameter of the pinned plan: its name and description, each
+        parameter with the value drafted for it (when the checks stand behind it) or what it still lacks, and how to reply.
+        The data names the same (``parameter_request``: command, description, ``parameters``, missing, invalid, values,
+        ``confirm``), so a client can show a form with the values prefilled."""
+        from fastworkflow import review_proposals
+
+        description = review_proposals.planning_descriptions(self._app_workflow.folderpath).get(command.name, "")
+        missing, invalid = set(gaps.missing), {name for name, _ in gaps.invalid}
+        parameters, lines = [], []
+        for p in command.params:
+            state = "missing" if p.name in missing else ("invalid" if p.name in invalid else None)
+            value = None if state else shown.get(p.name)
+            parameters.append({"name": p.name, "required": bool(p.required), "value": value, "state": state,
+                               "description": p.desc})
+            label = f"{p.name} ({'required' if p.required else 'optional'})"
+            lines.append(f"- {label}: " + (str(value) if value not in (None, "") else
+                                           ("not given" if state != "invalid" else "not usable")))
+        text = (f"{retry}You chose the planning command {command.name}" + (f": {description.rstrip('.')}" if description else "")
+                + ".\nIts parameters:\n" + "\n".join(lines)
+                + "\nReply with one name: value line for each value to set or change, or yes to run with the values shown"
+                + (" (the ones not given must be given first)" if missing or invalid else "")
+                + "; cancel stops.")
+        request = {"command": command.name, "description": description, "confirm": True, "parameters": parameters,
+                   "missing": [n for n in (p.name for p in command.params) if n in missing],
+                   "invalid": [n for n in (p.name for p in command.params) if n in invalid],
+                   "values": {name: str(value) for name, value in shown.items() if name not in missing | invalid}}
+        return text, request
+
+    def _pending_refusal_request_for(self, progress: dict) -> Optional[dict]:
+        """The parameter request of the question in *progress*, rebuilt (a question asked again keeps its data)."""
+        from fastworkflow import planning_commands
+
+        command = planning_commands.planning_command(self._app_workflow.folderpath, progress["command"])
+        if command is None:
+            return None
+        gaps = planning_commands.argument_gaps(
+            command, {p.name: (progress.get("given") or {}).get(p.name) for p in command.params}, progress["base"])
+        return self._plan_question(command, dict(progress.get("given") or {}), gaps)[1]
+
+    def _ask_plan_parameters(self, item, message: str):
+        """A pinned plan's parameter question (instead of a review): the suspended prediction, or None when the part runs
+        now (the plan has no parameters, nobody can answer, or the parameters were shown already this turn)."""
+        from fastworkflow import planning_commands, workflow_agent
+
+        command = planning_commands.planning_command(self._app_workflow.folderpath, item.means.name)
+        progress = self._refusal_progress
+        if command is None or not command.params or (progress and progress.get("command") == command.name):
+            return None
+        ran = any(not (getattr(o, "framework", False) or o.command_name == "ask_user"
+                       or self._is_framework_command(o.command_name)) for o in self._turn_outputs)
+        if ran or not workflow_agent._refusal_may_ask_attended_no_answer_check(self):
+            return None
+        raw = {p.name: next((each.value for each in item.inputs if each.name == p.name and each.value is not None), None)
+               for p in command.params}
+        gaps = planning_commands.argument_gaps(command, raw, message)
+        shown = {name: value for name, value in raw.items() if value is not None and name not in gaps.names}
+        question, request = self._plan_question(command, shown, gaps)
+        self._refusal_progress = {"command": command.name, "open": list(gaps.names), "stalled": 0, "asks": 1,
+                                  "base": message, "given": dict(shown), "question": question,
+                                  "params": [p.name for p in command.params]}
+        self._planning_command_refusal_pending = True
+        self._pending_refusal_request = request
+        return dspy.Prediction(suspended=True, clarification=question, exhausted=False)
+
+    def _ask_about_refusal(self, command, refusal: str, gaps=None):
+        """No agent model: the question for a bound planning command whose arguments are still refused after the review
+        (required values left unbound, or not in the request), or None when it cannot be asked (see
+        ``refusal_question_for``). It suspends the turn as a refused typed planning call does
+        (``_call_agent_for_query``): the reply re-runs the turn from its request with the reply after it
+        (``_rerun_after_planning_command_refusal``), and the part is not reviewed again."""
+        from fastworkflow import planning_commands
+
+        if command is None:
+            return None
+        error = planning_commands.PlanningCommandInputError(refusal)
+        error.gaps = gaps
+        question = self.refusal_question_for(command, error)
+        if question is None:
+            return None
+        self._planning_command_refusal_pending = True
+        request = planning_commands.planning_refusal_parameter_request(command, error)
+        if self._turn_use_plan and gaps is not None:
+            # A pinned plan keeps presenting every parameter, with the values obtained so far.
+            progress = self._refusal_progress
+            retry = "That did not give a value I could use. " if progress and progress.get("stalled") else ""
+            question, request = self._plan_question(command, dict(gaps.values), gaps, retry)
+            progress["given"] = {**(progress.get("given") or {}), **{k: str(v) for k, v in gaps.values.items()}}
+            progress["question"], progress["params"] = question, [p.name for p in command.params]
+        self._pending_refusal_request = request
+        return dspy.Prediction(suspended=True, clarification=question, exhausted=False)
+
+    def refusal_question_for(self, command, refusal) -> Optional[str]:
+        """No agent model: the question to put to the user about a refused planning command call, or None when it is not
+        to be asked (the part then ends as not run, with ``_refusal_stop_reason`` naming what is missing).
+
+        One question names every argument the call lacks (``refusal.gaps``, else the one the refusal names). It is asked
+        while the turn is attended and has run nothing of its own (the review's plumbing does not count, and a repeated
+        run of a side effect is never risked), and keeps being asked while each reply makes progress: at least one
+        argument asked about last time is no longer missing. A reply that makes none is asked once more
+        (``MAX_NO_PROGRESS`` in a row ends the part), as a decision step asks again once. The values already obtained stay in
+        the request the re-run reads (and the draft keeps the ones the checks stand behind), so only what is still missing
+        is asked."""
+        from fastworkflow import planning_commands, workflow_agent
+
+        gaps = planning_commands.refusal_gaps(command, refusal)
+        self._refusal_stop_reason = gaps.describe() or str(refusal)
+        ran = any(not (getattr(output, "framework", False) or output.command_name == "ask_user"
+                       or self._is_framework_command(output.command_name))
+                  for output in self._turn_outputs)
+        if (ran or not workflow_agent._refusal_may_ask_attended_no_answer_check(self)
+                or not planning_commands.refusal_names_an_input(command, refusal)):
+            return None
+        names = list(gaps.names)
+        progress = self._refusal_progress
+        retry = ""
+        if progress is not None and progress.get("command") == command.name and not progress.get("open") \
+                and not progress.get("stalled"):
+            # The parameters were all shown with nothing missing (a confirmation) and the run then refused something: a
+            # first question about it.
+            progress["open"], progress["asks"] = names, int(progress.get("asks", 1)) + 1
+        elif progress is not None and progress.get("command") == command.name:
+            progressed = bool(set(progress.get("open") or ()) - set(names))
+            progress["stalled"] = 0 if progressed else int(progress.get("stalled", 0)) + 1
+            if progress["stalled"] >= no_agent_mode.MAX_NO_PROGRESS:
+                return None
+            progress["open"], progress["asks"] = names, int(progress.get("asks", 1)) + 1
+            if not progressed:
+                retry = "That did not give a value I could use. "
+        else:
+            self._refusal_progress = {"command": command.name, "open": names, "stalled": 0, "asks": 1}
+        return retry + planning_commands.refusal_question(command, refusal)
+
+    def _not_run_part(self, *, command: Optional[str], reason: str, means: str, suggested_plan: str = "",
+                      plans_for: Optional[dict[str, float]] = None):
         """The sub-task's result for a part that is not run here (no-agent mode): an ad hoc part, or a bound
         command that could not start, with the planner's text plan when one was made. Recorded for the turn's
-        ``fw_not_run`` list."""
+        ``fw_not_run`` list.
+
+        *plans_for* marks an ad hoc part (the matcher's distribution for it, possibly empty): the entry then lists the
+        planning commands available here (``available_plans``), and the answer text says so. A later ad hoc part
+        of the turn with the same plans lists only its own closest ones and points to the part that lists them all."""
+        plans = (no_agent_mode.available_plans(self._app_workflow, plans_for)
+                 if plans_for is not None and command is None else None)
+        turn = self._turn_frame()
+        split = len(set(turn.origins)) > 1
+        origin = turn.origins[turn.subtask_index] if split and 0 <= turn.subtask_index < len(turn.origins) else 0
+        request = (str(self._original_text(origin) if split else self._turn_user_message or "") if plans is not None else None)
         entry = no_agent_mode.stop_entry(
             command=command, phase=None, open_step=None, done=[], facts={}, remaining=[],
-            suggested_plan=suggested_plan, means=means, sub_task=self._executing_sub_task(), reason=reason)
+            suggested_plan=suggested_plan, means=means, sub_task=self._executing_sub_task(), reason=reason,
+            available_plans=plans, request=request)
         logger.info("sub-task not run without an agent model (%s): %s", means, reason)
+        listed_in = next((earlier.get("sub_task") for earlier in self._turn_not_run
+                          if plans and earlier.get("sub_task") is not None
+                          and {p["name"] for p in earlier.get("available_plans") or []} == {p["name"] for p in plans}
+                          and earlier.get("sub_task") != entry["sub_task"]), None)
         self._turn_not_run.append(entry)
-        return dspy.Prediction(final_answer=no_agent_mode.explanation(entry), exhausted=False, not_run_here=entry)
+        return dspy.Prediction(final_answer=no_agent_mode.explanation(entry, listed_in), exhausted=False,
+                               not_run_here=entry)
 
     # ------------------------------------------------------------------
     # Planning commands as nested frames (design 3.5)
@@ -4832,10 +5072,16 @@ class WorkflowExecutionContext:
                 origin + 1, item, reviewed, None if refusal is not None else checked.args,
                 f"refused, the agent ran it instead: {refusal}" if refusal is not None else None))
         if refusal is not None and self.no_agent_mode:
+            # Every argument still missing or refused (the checks stop at the first), from the values the review bound.
+            gaps = (planning_commands.argument_gaps(
+                command, dict(reviewed.values) if reviewed is not None else dict(resolved.named),
+                "\n\n".join([query, *self._subtask_answers])) if command is not None else None)
+            if (asked := self._ask_about_refusal(command, refusal, gaps)) is not None:
+                return asked
             return self._not_run_part(
                 command=name, means=review_proposals.MEANS_PLANNING,
-                reason=f"it cannot run as planned ({refusal}), and the agent model that would take over is not set "
-                       "(LLM_AGENT)")
+                reason=f"it cannot run as planned ({self._refusal_stop_reason or refusal}), and the agent model that "
+                       "would take over is not set (LLM_AGENT)")
         if refusal is not None:
             return self._call_agent_for_query(
                 f"{query}\n\nThe planning command {name} cannot run as planned: {refusal}.",
@@ -5208,6 +5454,42 @@ class WorkflowExecutionContext:
         self._pending_refusal_request = None
         self._planning_command_refusal_answered = True
         self._reset_agent_suspension()
+        progress = self._refusal_progress
+        if self._turn_use_plan and progress and progress.get("base") is not None:
+            kind, values = no_agent_mode.read_parameter_reply(reply, progress.get("params") or (), progress.get("open") or ())
+            if kind == "unclear":
+                # Strict: a reply that is not a value, yes or cancel is asked again once, then the part ends.
+                progress["stalled"] = int(progress.get("stalled", 0)) + 1
+                if progress["stalled"] < no_agent_mode.MAX_NO_PROGRESS:
+                    self._planning_command_refusal_pending = True
+                    retry = "That did not give a value I could use. "
+                    question = retry + str(progress.get("question") or "").removeprefix(retry)
+                    request = self._pending_refusal_request_for(progress)
+                    self._pending_refusal_request = request
+                    return self._settle_agent_result(message, dspy.Prediction(
+                        suspended=True, clarification=question, exhausted=False))
+                open_names = list(progress.get("open") or ())
+                return self._settle_agent_result(message, self._not_run_part(
+                    command=progress.get("command"), means="planning",
+                    reason=(f"it cannot run as planned (missing required argument{'s' if len(open_names) > 1 else ''} "
+                            f"{', '.join(open_names)}), and no usable reply was given" if open_names else
+                            "its parameters were not confirmed: no usable reply was given")))
+            if kind == "decline":
+                open_names = list(progress.get("open") or ())
+                return self._settle_agent_result(message, self._not_run_part(
+                    command=progress.get("command"), means="planning",
+                    reason="it was declined" + (f" while its arguments {', '.join(open_names)} were still missing"
+                                                if open_names else "")))
+            progress["given"] = {**(progress.get("given") or {}), **values}
+            message = progress["base"] + "".join(f"\n{name}: {value}" for name, value in progress["given"].items())
+            return self._settle_agent_result(message, self._run_agent(message))
+        if self.no_agent_mode and no_agent_mode.declines(reply):
+            # ``cancel`` declines, as it does for every other question: the part is not run, and says so.
+            progress = self._refusal_progress or {}
+            return self._settle_agent_result(message, self._not_run_part(
+                command=progress.get("command"), means="planning",
+                reason=f"it was declined while its arguments {', '.join(progress.get('open') or ()) or 'were'} "
+                       "still missing" if progress.get("open") else "it was declined"))
         return self._settle_agent_result(message, self._run_agent(message))
 
     def _approval_state_payload(self) -> Optional[dict]:

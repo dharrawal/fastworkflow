@@ -528,7 +528,7 @@ function tmRenderTurn(bubbleMsg, out) {
   tmDropResultsUi(bubbleMsg);
   bubble.classList.remove("md");
   var answer = out.answer || "(no answer)";
-  appendMarkdown(bubble, answer);
+  appendMarkdown(bubble, tmPlansAnswer(out, answer));
   /* The whole answer stays in the bubble. Structured results go behind a link
      under it, in a panel beside it [fix-weih.4, fix-weih.24]. */
   tmRenderResults(bubbleMsg, out);
@@ -548,6 +548,7 @@ function tmRenderTurn(bubbleMsg, out) {
     else { bubbleMsg.appendChild(lineNode); }
   });
   tmRenderPromptForms(bubbleMsg, out);
+  tmRenderPlanChoices(bubbleMsg, out);
   tmRenderArtifacts(bubbleMsg, out.command_outputs);
   var meta = el("div", "meta");
   var statusTxt = turnOutcome(out.status, out.failure_reason).text +

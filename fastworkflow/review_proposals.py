@@ -489,6 +489,8 @@ class SubTaskProposal(Proposal):
                 # No agent model: this item will not be run here (its review entry is ``not_run_here``).
                 write_badge = NOT_RUN_HERE_SUFFIX
             lines.append(f"{index}. {item.goal}{suffix}{write_badge}")
+            if item.check and item.means.kind == MEANS_PLANNING and (note := _check_line(index, item)):
+                lines.append(f"   {note}")
             if item.alternatives:
                 lines.append(other_plans_line(index, item))
         return "\n".join(lines)
@@ -602,6 +604,23 @@ class PlanGoal(BaseModel):
 
     goal: str
     steps: list[str] = Field(default_factory=list)
+
+
+def _check_line(index: int, item: "SubTask") -> str:
+    """The review line for a planning means whose drafted arguments the framework refuses: what is missing and how to
+    give it (the reply grammar the review reads), else the refusal in its own words."""
+    match = re.match(r"^missing required arguments? (\w+(?:, \w+)*)$", item.check)
+    if match:
+        given = {each.name for each in item.inputs if each.value or each.from_subtask}
+        names = [name for name in match.group(1).split(", ") if name not in given]
+        if not names:
+            return ""             # the user has given them since the draft: the draft's note is stale
+        quoted = " and ".join(repr(name) for name in names)
+        replies = "; ".join(f"change {index}: {name}=..." for name in names)
+        return (f"Cannot run yet: the required value{'s' if len(names) > 1 else ''} {quoted} "
+                f"{'are' if len(names) > 1 else 'is'} missing. "
+                f'Reply "{replies}" to give {"them" if len(names) > 1 else "it"}.')
+    return f"Cannot run as shown: {item.check}."
 
 
 @register_proposal
@@ -778,6 +797,10 @@ def _planning_descriptions(folder: str) -> dict[str, str]:
             for name, description, _ in load_planning_commands(folder)}
 
 
+#: The public name of ``_planning_descriptions`` (no-agent mode lists the plans of a context with it).
+planning_descriptions = _planning_descriptions
+
+
 def _candidates_for_subtask(workflow, sub_task: str, *, exclude: Optional[set[str]] = None) -> list[Candidate]:
     """Per-sub-task candidate means for the round-1 builder (``draft_round1_proposal``, look_up, add)."""
     from fastworkflow import planning_commands, run_listing
@@ -895,7 +918,7 @@ def confident_means(workflow, sub_task: str, means: Means) -> bool:
 
 
 def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None, *, confident_only: bool = False,
-                          none_veto: bool = False) -> SubTaskProposal:
+                          none_veto: bool = False, pinned_plan: Optional[str] = None) -> SubTaskProposal:
     """The draft round-1 proposal for a split result, from real candidates (fix-3rsq.plan-review.2.3).
 
     Per sub-task, the candidates are: the heads' planning and execution top-k (``run_listing.head_candidates``), the
@@ -914,13 +937,20 @@ def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None, *, con
     made, so no model call is added.
     """
     total = len(subtasks)
-    prefetched = _prefetch_matches(workflow, subtasks)
-    candidates = {}
-    for number, sub_task in enumerate(subtasks, 1):
-        if not prefetched:
-            turn_progress.emit(turn_progress.STAGE_MATCH, number, total)
-        candidates[number] = _candidates_for_subtask(workflow, sub_task)
-    proposal = build_round1_proposal(subtasks, candidates)
+    if pinned_plan:
+        # The client chose the plan (``use_plan``) for this one part: no match, no candidates, no alternatives (it is
+        # chosen), and no confidence bar (the choice stands); its inputs are drafted below as for any planning means.
+        proposal = SubTaskProposal(items=[
+            SubTask(goal=sub_task, means=Means(kind=MEANS_PLANNING, name=pinned_plan)) for sub_task in subtasks])
+        none_veto = confident_only = False
+    else:
+        prefetched = _prefetch_matches(workflow, subtasks)
+        candidates = {}
+        for number, sub_task in enumerate(subtasks, 1):
+            if not prefetched:
+                turn_progress.emit(turn_progress.STAGE_MATCH, number, total)
+            candidates[number] = _candidates_for_subtask(workflow, sub_task)
+        proposal = build_round1_proposal(subtasks, candidates)
     if none_veto and not confident_only:
         from fastworkflow import run_listing
         from fastworkflow.workflow_agent import PLANNING_NONE_VETO_THRESHOLD
@@ -1226,7 +1256,8 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
     if not result.valid and not covered:
         filled = _typed_fallback_values(workflow, item, sub_task, values, result.refusal, planner_lm)
         if filled is None:
-            return DraftedInputs(inputs=tuple(inputs), refusal=result.refusal)
+            kept, refusal = _partial_inputs(workflow, item, sub_task, values, fields, from_earlier, result.refusal)
+            return DraftedInputs(inputs=tuple(inputs + kept), refusal=refusal)
         values = filled
     for name, info in fields.items():
         value = values.get(name)
@@ -1234,6 +1265,35 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
             continue
         inputs.append(SubTaskInput(name=name, value=_input_text(value), drafted=True))
     return DraftedInputs(inputs=tuple(inputs))
+
+
+def _partial_inputs(workflow, item: SubTask, sub_task: str, values: dict, fields, from_earlier: dict,
+                    refusal: Optional[str]) -> tuple[list[SubTaskInput], Optional[str]]:
+    """The inputs of a planning means whose draft is refused, and the refusal: the values the checks stand behind are
+    kept (the review shows them, and the run uses them), the missing or refused ones are left out and named in the
+    refusal (``planning_commands.argument_gaps``). A refusal that names no argument (a rule of the planning command)
+    keeps no value, as before."""
+    from fastworkflow import planning_commands
+
+    if item.means.kind != MEANS_PLANNING:
+        return [], refusal
+    command = planning_commands.planning_command(workflow.folderpath, item.means.name)
+    if command is None:
+        return [], refusal
+    try:
+        raw = {p.name: planning_commands._given_or_none(values.get(p.name)) for p in command.params}
+        gaps = planning_commands.argument_gaps(command, raw, sub_task)
+    except Exception as exc:  # noqa: BLE001 - the draft is advisory
+        logger.warning("could not tell which arguments of %s are still missing (%s: %s)", item.means.name,
+                       type(exc).__name__, exc)
+        return [], refusal
+    if not gaps.names:
+        return [], refusal
+    kept = [SubTaskInput(name=name, value=_input_text(value), drafted=True)
+            for name, value in gaps.values.items() if name in fields and name not in from_earlier]
+    if gaps.missing and not gaps.invalid:
+        refusal = "missing required argument " + ", ".join(gaps.missing)
+    return kept, refusal
 
 
 def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict, refusal: Optional[str],

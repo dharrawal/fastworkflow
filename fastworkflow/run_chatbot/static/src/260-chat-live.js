@@ -168,7 +168,7 @@ function tmApplyStreamFrame(frame, activity, sink) {
   }
 }
 
-function tmStreamTurn(text, pending) {
+function tmStreamTurn(text, pending, usePlan) {
   /* One live turn over /invoke_agent_stream. The execution key arrives on the
      response head, so a body that dies mid-turn is recovered by polling that
      key — never by submitting the query again, which would be a second turn
@@ -234,6 +234,7 @@ function tmStreamTurn(text, pending) {
                      unattended: document.getElementById("unattended").checked };
   var streamToken = tmApprovalTokenFor(text);
   if (streamToken) { streamBody.approval_token = streamToken; }
+  if (usePlan) { streamBody.use_plan = usePlan; }
   tmFetch("/invoke_agent_stream", streamBody)
     .then(function (r) {
       turnKey = r.headers.get("X-FW-Turn-Key") || null;
@@ -264,6 +265,14 @@ function tmStreamTurn(text, pending) {
           "Reconnect (Advanced panel) to mint new tokens.");
         done();
         return null;
+      }
+      if (r.status === 400) {
+        /* A refused request (an unknown plan, or a question waiting): no turn began, so say why. */
+        return r.json().catch(function () { return {}; }).then(function (data) {
+          activity.setState("refused");
+          tmRenderError(pending, String((data && data.detail) || "The server refused the request (HTTP 400)."));
+          done();
+        });
       }
       if (!r.ok || !r.body || !r.body.getReader) {
         /* No readable body (an error response, or an environment without
@@ -599,6 +608,7 @@ function tmAttachStoredArtifacts(bubbleMsg, turnKey, autoload, turn) {
         /* Prompts that may show on a restored turn (not the built-in parameter
            form or pills) see the stored outputs and status [fix-weih.5]. */
         tmRenderPromptForms(bubbleMsg, stored);
+        tmRenderPlanChoices(bubbleMsg, stored);
         /* Say where this came from: it is the recorded turn, not a live one. */
         tmRenderArtifacts(bubbleMsg, outputs, "from the stored record of this turn");
       })
@@ -822,6 +832,8 @@ document.getElementById("tConnect").addEventListener("click", function () {
 function tmSend() {
   var input = document.getElementById("chatInput");
   var text = input.value.trim();
+  var usePlan = tm.nextUsePlan || null;
+  tm.nextUsePlan = null;
   if (!text || !tm.connected || tm.busy) { return; }
   var reuseLabel = tmReuseLabel(text);
   input.value = "";
@@ -832,8 +844,9 @@ function tmSend() {
   tmComposerState();
   var sent = tmBubble("user", text);
   if (reuseLabel) { sent.appendChild(el("div", "reuseNote", reuseLabel)); }
-  /* "/"-prefixed → deterministic execution via /invoke_assistant */
-  var deterministic = text.charAt(0) === "/";
+  if (usePlan) { sent.appendChild(el("div", "reuseNote", "Run with the plan " + usePlan)); }
+  /* "/"-prefixed → deterministic execution via /invoke_assistant; a chosen plan is always an agent-path request */
+  var deterministic = !usePlan && text.charAt(0) === "/";
   var path = deterministic ? "/invoke_assistant" : "/invoke_agent";
   var pending = tmBubble("agent", deterministic ? "running command…" : "thinking…");
   pending.dataset.deterministic = deterministic ? "1" : "";
@@ -841,7 +854,7 @@ function tmSend() {
   if (!deterministic) {
     /* Agent turns stream: the interactions arrive as they happen instead of
        appearing all at once when the turn is already over. */
-    tmStreamTurn(text, pending);
+    tmStreamTurn(text, pending, usePlan);
     return;
   }
   var assistantBody = { user_query: text, timeout_seconds: 60,

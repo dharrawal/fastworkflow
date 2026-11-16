@@ -950,6 +950,15 @@ def _refusal_may_ask_attended(chat_session_obj) -> bool:
     )
 
 
+def _refusal_may_ask_attended_no_answer_check(chat_session_obj) -> bool:
+    """``_refusal_may_ask_attended`` without the "already asked once" rule: no agent model keeps asking while each reply
+    makes progress (``WorkflowExecutionContext.refusal_question_for`` counts it)."""
+    return (
+        getattr(chat_session_obj, "_turn_unattended", True) is False
+        and getattr(chat_session_obj, "user_message_queue", True) is None
+    )
+
+
 def _planning_command_refusal_may_ask(chat_session_obj) -> bool:
     """Whether a refused planning command call may be put to the user, suspending the turn (Topology B).
 
@@ -974,6 +983,9 @@ def planning_command_refusal_to_ask(chat_session_obj, command: PlanningCommandCo
     give. A refusal that names no input says the command does not fit the request, which the user
     cannot fix by answering, so it is not put to them.
     """
+    if getattr(chat_session_obj, "no_agent_mode", False):
+        # No agent model: one question for every missing argument, asked again while the replies make progress.
+        return chat_session_obj.refusal_question_for(command, refusal)
     if not _planning_command_refusal_may_ask(chat_session_obj):
         return None
     if not refusal_names_an_input(command, refusal):
@@ -1846,6 +1858,24 @@ def planning_scopes(workflow) -> tuple[str, ...]:
             break
         obj = parent
     return lookup_scopes(folder, names)
+
+
+def planning_names_on_path(workflow) -> list[str]:
+    """The planning commands the matcher could choose from for *workflow*'s current state, in lookup order: the
+    commands of each scope of ``planning_scopes`` (nearest scope first, the root's last), each scope's by name.
+
+    The one source of "the plans available here": ``match_planning_command`` offers exactly these, scope by scope, so a
+    listing of them, and the check of a plan a client names, can never disagree with what the matcher could have picked.
+    """
+    if workflow is None or not getattr(workflow, "folderpath", None):
+        return []
+    by_scope: dict[str, list[str]] = {}
+    for name, _, _ in load_planning_commands(workflow.folderpath):
+        by_scope.setdefault(_planning_scope(name), []).append(name)
+    names: list[str] = []
+    for scope in dict.fromkeys(planning_scopes(workflow)):
+        names.extend(sorted(by_scope.get(scope, ())))
+    return names
 
 
 #: The planning command matcher shows at most this many of a planning command's ``plain_utterances`` (its first

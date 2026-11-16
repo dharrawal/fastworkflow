@@ -18,6 +18,7 @@ are all still used. In this mode:
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 import fastworkflow
@@ -52,6 +53,9 @@ PHASE_STEP_ARTIFACT = "phase_step"
 DECLINE_REPLY = "cancel"
 #: A decision question is asked once more after a reply that cannot be read; the second one ends with the stop.
 MAX_DECISION_ASKS = 2
+#: A question about a planning command's missing arguments is asked again once after a reply that gives none of them;
+#: this many replies in a row with no progress end the part.
+MAX_NO_PROGRESS = 2
 
 MODE_BANNER = ("No agent model is set (LLM_AGENT): running in deterministic mode. Ad hoc requests are not planned "
                "here; planning commands run to their first open step.")
@@ -114,7 +118,9 @@ def numbered(lines: list[str]) -> str:
 def stop_entry(*, command: Optional[str], phase: Optional[str], open_step: Optional[dict[str, Any]],
                done: list[str], facts: Any, remaining: list[str], suggested_plan: str, means: str,
                sub_task: Optional[int] = None, later_phases: Optional[list[str]] = None,
-               nested: Optional[dict[str, Any]] = None, reason: Optional[str] = None) -> dict[str, Any]:
+               nested: Optional[dict[str, Any]] = None, reason: Optional[str] = None,
+               available_plans: Optional[list[dict[str, Any]]] = None,
+               request: Optional[str] = None) -> dict[str, Any]:
     """One stop, the shape a client reads (``fw_not_run`` is a list of these).
 
     ``command`` is the planning or plain command (None for an ad hoc part); ``phase`` the phase that stopped (None
@@ -124,7 +130,10 @@ def stop_entry(*, command: Optional[str], phase: Optional[str], open_step: Optio
     carry out; ``means`` the sub-task's means kind. ``sub_task`` is the part's number in a split turn,
     ``later_phases`` the phases after the stopped one (their steps are planned from facts not yet found), and
     ``nested`` the stop of a nested planning command that this one stopped on, and ``reason`` why a part with
-    no open step (an ad hoc part, a command that could not be started) was not run.
+    no open step (an ad hoc part, a command that could not be started) was not run. ``available_plans`` is
+    only for an ad hoc part: the planning commands available here, ``{name, description, closest}`` each
+    (the closest ones to the part first, see ``available_plans``), and ``request`` the part's own request text (what a
+    client sends back with ``use_plan`` to run the part bound to one of them).
     """
     entry: dict[str, Any] = {
         "kind": KIND_NOT_RUN_HERE,
@@ -144,7 +153,81 @@ def stop_entry(*, command: Optional[str], phase: Optional[str], open_step: Optio
         entry["nested"] = nested
     if reason:
         entry["reason"] = reason
+    if available_plans is not None:
+        entry["available_plans"] = list(available_plans)
+    if request is not None:
+        entry["request"] = request
     return entry
+
+
+#: The most plans an ad hoc part's answer text lists (the data, ``available_plans``, lists them all).
+AD_HOC_LIST_CAP = 12
+
+
+def available_plans(workflow: Any, distribution: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:
+    """The planning commands available here (those on *workflow*'s lookup path, the set the matcher chooses from), each ``{name, description, closest}``: the closest ones
+    to the part first (the matcher's *distribution* over its options, at or above ``run_listing.UNSURE_CANDIDATE_FLOOR``,
+    at most ``review_proposals.MAX_PLAN_ALTERNATIVES``, most probable first), then the rest by name.
+
+    The names are ``workflow_agent.planning_names_on_path`` (the active context, its bases, the live ancestors' contexts and
+    the root's, nearest first, each by name: exactly what the matcher offers), the descriptions the matcher's
+    (``review_proposals.planning_descriptions``). Empty when none is available here.
+    """
+    from fastworkflow import review_proposals, run_listing, workflow_agent
+
+    if workflow is None:
+        return []
+    folder = workflow.folderpath
+    names = workflow_agent.planning_names_on_path(workflow)
+    if not names:
+        return []
+    descriptions = review_proposals.planning_descriptions(folder)
+    ranked = sorted(((name, float(p)) for name, p in (distribution or {}).items() if name in names),
+                    key=lambda pair: (-pair[1], pair[0]))
+    closest = [name for name, p in ranked if p >= run_listing.UNSURE_CANDIDATE_FLOOR][
+        :review_proposals.MAX_PLAN_ALTERNATIVES]
+    ordered = closest + sorted(name for name in names if name not in closest)
+    return [{"name": name, "description": descriptions.get(name, ""), "closest": name in closest}
+            for name in ordered]
+
+
+def plan_names(workflow: Any) -> list[str]:
+    """The names of the planning commands available here: the ones ``use_plan`` may name."""
+    return [plan["name"] for plan in available_plans(workflow)]
+
+
+def _plan_line(plan: dict[str, Any]) -> str:
+    return f"- `{plan['name']}`" + (f": {plan['description']}" if plan.get("description") else "")
+
+
+def ad_hoc_explanation(entry: dict[str, Any], listed_in: Optional[int] = None) -> str:
+    """The code-written answer text of an ad hoc part (no planning command or command fits it): that no matching plan was
+    found, that free planning is not available here, then the planning commands available here (markdown lists,
+    the closest first and labelled, the rest after, at most ``AD_HOC_LIST_CAP`` in all), and the pointer to the suggested
+    plan. *listed_in*: the number of an earlier part of the turn that already lists the same plans in full; this part
+    then lists only its own closest ones and points there."""
+    plans = entry.get("available_plans") or []
+    lines = ["No matching plan was found for this part. Free planning is not available on this server, because no "
+             "agent model is set (LLM_AGENT)."]
+    closest = [plan for plan in plans if plan.get("closest")]
+    rest = [plan for plan in plans if not plan.get("closest")]
+    if not plans:
+        lines.append("No planning commands are available here.")
+    else:
+        if closest:
+            lines.append("The closest planning commands available here:\n" + "\n".join(map(_plan_line, closest)))
+        if rest and listed_in is not None:
+            lines.append(f"The other planning commands available here are listed under part {listed_in}.")
+        elif rest:
+            shown = rest[:max(AD_HOC_LIST_CAP - len(closest), 0)]
+            head = "Other planning commands available here:" if closest else "Planning commands available here:"
+            block = head + "\n" + "\n".join(map(_plan_line, shown))
+            if len(rest) > len(shown):
+                block += (f"\n\nand {len(rest) - len(shown)} more; `what can i do` lists everything.")
+            lines.append(block)
+    lines.append("A suggested plan is in the data (fw_not_run)." if entry.get("suggested_plan")
+                 else "No plan could be suggested.")
+    return "\n\n".join(lines)
 
 
 def ran_note(answer: str, command: str) -> str:
@@ -153,11 +236,13 @@ def ran_note(answer: str, command: str) -> str:
     return f"{answer}\n\n(Ran {command}.)" if answer else f"Ran {command}."
 
 
-def explanation(entry: dict[str, Any]) -> str:
+def explanation(entry: dict[str, Any], listed_in: Optional[int] = None) -> str:
     """The short, plain, code-written answer text of a stop: what ran, where it stopped and why, and that the
     remaining steps are in the data. The wording of the final answer is the client's."""
     command = entry.get("command")
     open_step = entry.get("open_step")
+    if open_step is None and command is None and "available_plans" in entry:
+        return ad_hoc_explanation(entry, listed_in)
     if open_step is None:
         reason = entry.get("reason") or ("this part needs free planning, which is not run without an agent model "
                                          "(LLM_AGENT)")
@@ -199,6 +284,34 @@ def read_yes_no(reply: str) -> Optional[bool]:
 def declines(reply: str) -> bool:
     """Whether the whole reply declines to decide: cancel, abort, stop, decline, never mind."""
     return _bare(reply) in _DECLINE
+
+
+_ACCEPT = frozenset({"yes", "y", "ok", "okay", "run", "run it", "go", "confirm", "true"})
+_PARAMETER_LINE = re.compile(r"^\s*([A-Za-z_]\w*)\s*[:=]\s*(.*?)\s*$")
+
+
+def read_parameter_reply(reply: str, names, open_names) -> tuple[str, dict[str, str]]:
+    """How a reply to a chosen plan's parameter question reads, strictly: ``("decline", {})`` for cancel and its synonyms,
+    ``("accept", {})`` for yes (run with the values shown), ``("values", {name: value})`` for ``name: value`` (or
+    ``name=value``) lines of the plan's own parameters, one per line, or for a bare value when exactly one parameter is
+    still open; anything else is ``("unclear", {})``. No model reads it."""
+    word = _bare(reply)
+    if word in _DECLINE:
+        return "decline", {}
+    if word in _ACCEPT:
+        return "accept", {}
+    known = {str(name).lower(): str(name) for name in names}
+    values: dict[str, str] = {}
+    for line in str(reply or "").splitlines():
+        match = _PARAMETER_LINE.match(line)
+        if match and match.group(1).lower() in known and match.group(2):
+            values[known[match.group(1).lower()]] = match.group(2)
+    if values:
+        return "values", values
+    open_names = list(open_names)
+    if len(open_names) == 1 and str(reply or "").strip():
+        return "values", {open_names[0]: str(reply).strip()}
+    return "unclear", {}
 
 
 def decision_question(entry: dict[str, Any], decision: dict[str, Any], *, retry: str = "") -> str:

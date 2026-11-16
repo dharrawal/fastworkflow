@@ -314,6 +314,9 @@ class PlanningCommandInputError(PlanningCommandCallError):
     def __init__(self, message: str = "", fields=()):
         super().__init__(message)
         self.fields: tuple[str, ...] = tuple(fields)
+        #: Every argument the call is missing or has refused (``ArgumentGaps``), when the raiser worked them out;
+        #: ``check_arguments`` itself stops at the first one.
+        self.gaps: "ArgumentGaps | None" = None
 
 
 #: The refusal of one argument: ``name=<value repr> <why>`` (see ``check_arguments``).
@@ -403,8 +406,12 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     It names the recipe's input and says what is wrong with it, in plain words: the request
     does not say it, the value the planner took is not in the request, or it is not one of the
     allowed values. A refusal that names no input (a rule the planning command's own hook or Input raised)
-    is put in its own words.
+    is put in its own words. When the call is missing or has refused several arguments (``refusal.gaps``), one
+    question names them all (``gaps_question``).
     """
+    gaps = refusal_gaps(command, refusal)
+    if len(gaps.names) > 1:
+        return gaps_question(command, gaps)
     task = command.name.replace("_", " ")
     text = str(refusal)
     if refusal.fields:
@@ -442,6 +449,107 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     return f"I can't run {task} yet: {detail}. What should I change?"
 
 
+@dataclass(frozen=True)
+class ArgumentGaps:
+    """What a planning command call still lacks: the required arguments missing, the ones refused as invalid (each with
+    why), and the checked values of the others (the ones to keep)."""
+
+    missing: tuple[str, ...] = ()
+    invalid: tuple[tuple[str, str], ...] = ()
+    values: dict = field(default_factory=dict, compare=False)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys([*self.missing, *(name for name, _ in self.invalid)]))
+
+    def describe(self) -> str:
+        """The gaps in a plain phrase: ``missing required argument a, b`` / ``c=... is not ...`` (the not-run reason)."""
+        parts = []
+        if self.missing:
+            parts.append(f"missing required argument{'s' if len(self.missing) > 1 else ''} {', '.join(self.missing)}")
+        parts.extend(f"{name} {why}" for name, why in self.invalid)
+        return "; ".join(parts)
+
+
+def _refusal_gap(command: PlanningCommandCommand, refusal: PlanningCommandInputError):
+    """``(name, "missing" | "invalid", why)`` of the one argument a ``check_arguments`` refusal names, else None."""
+    text = str(refusal)
+    if match := _MISSING_ARGUMENT.match(text):
+        return match["name"], "missing", ""
+    match = _ARGUMENT_REFUSAL.match(text)
+    if match and any(p.name == match["name"] for p in command.params):
+        if match["why"] in (PLACEHOLDER_WHY, PRONOUN_WHY, KIND_WORD_WHY):
+            return match["name"], "missing", ""
+        return match["name"], "invalid", match["why"]
+    return None
+
+
+def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None = None) -> ArgumentGaps:
+    """Every required argument *raw* leaves missing or refused (``check_arguments`` stops at the first): the guards run
+    again with each gap's parameter left out, until they pass or refuse something that names no argument. The values
+    of the other arguments, as the guards checked them, are kept in ``values`` (the ones the request gave, not defaults).
+    No model call."""
+    missing: list[str] = []
+    invalid: list[tuple[str, str]] = []
+    work = command
+    args: dict = {}
+    while True:
+        try:
+            args, _ = check_arguments(work, raw, request, verdicts)
+            break
+        except PlanningCommandInputError as refused:
+            gap = _refusal_gap(work, refused)
+            if gap is None:
+                break
+            name, kind, why = gap
+            (missing.append(name) if kind == "missing" else invalid.append((name, why)))
+            work = replace(work, params=tuple(p for p in work.params if p.name != name))
+        except PlanningCommandCallError:
+            break
+    kept = {name: value for name, value in args.items() if not _empty(raw.get(name)) and name not in missing
+            and name not in {n for n, _ in invalid}}
+    return ArgumentGaps(missing=tuple(missing), invalid=tuple(invalid), values=kept)
+
+
+def refusal_gaps(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> ArgumentGaps:
+    """The gaps a refusal stands for: its own ``gaps`` when the raiser worked them out, else the one argument it names
+    (a hook's ``Refused(field=...)`` names invalid ones)."""
+    if refusal.gaps is not None:
+        return refusal.gaps
+    if refusal.fields:
+        return ArgumentGaps(invalid=tuple((name, str(refusal)) for name in dict.fromkeys(refusal.fields)))
+    gap = _refusal_gap(command, refusal)
+    if gap is None:
+        return ArgumentGaps()
+    name, kind, why = gap
+    return ArgumentGaps(missing=(name,)) if kind == "missing" else ArgumentGaps(invalid=((name, why),))
+
+
+def gaps_question(command: PlanningCommandCommand, gaps: ArgumentGaps) -> str:
+    """One question for every argument a call lacks: the ones the request does not give, then the ones refused (why)."""
+    task = command.name.replace("_", " ")
+
+    def label(name: str) -> str:
+        return name.replace("_", " ")
+
+    def joined(names) -> str:
+        names = [label(n) for n in names]
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+    parts = []
+    if gaps.missing:
+        parts.append(f"your request does not give the {joined(gaps.missing)}")
+    parts.extend(f"the {label(name)} {why}" for name, why in gaps.invalid)
+    names = list(gaps.names)
+    if len(names) == 1:
+        ask = f"Which {label(names[0])} should I use?"
+    else:
+        example = "; ".join(f"{name}: ..." for name in names[:2])
+        ask = (f"What should the {joined(names)} be? Give each on its own line as name: value "
+               f"({example}).")
+    return f"I can't run {task} yet: {'; '.join(parts)}. {ask}"
+
+
 def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> bool:
     """Whether a refused planning command call is something to ask the user: the refusal names one of
     the command's inputs (``Refused(..., field=...)`` from the hook, a missing argument, or a guard's
@@ -452,7 +560,7 @@ def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCom
     command, not a value the user can supply. The turn then plans the request with the text planner,
     as an unattended turn does, instead of putting the rule to the user.
     """
-    if refusal.fields:
+    if refusal.fields or (refusal.gaps is not None and refusal.gaps.names):
         return True
     text = str(refusal)
     if _MISSING_ARGUMENT.match(text):
@@ -464,26 +572,19 @@ def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCom
 def planning_refusal_parameter_request(
     command: PlanningCommandCommand, refusal: PlanningCommandInputError,
 ) -> Optional[dict]:
-    """The refused input of a planning command call as data, for a client that renders a form:
+    """The refused inputs of a planning command call as data, for a client that renders a form:
     ``{"command", "missing", "invalid", "values"}``, or None when the refusal names no input of the command.
 
-    The same three shapes ``refusal_question`` reads: ``Refused(field=...)`` from the hook (``fields``),
-    a missing argument, and a guard's refusal of one argument (a placeholder, pronoun or kind word reads
-    as missing; any other reason as invalid).
+    ``missing`` and ``invalid`` list every argument the call lacks (``refusal.gaps`` when the raiser worked them out,
+    else the one the refusal names); ``values`` is what the call already has for the others (kept, not asked again).
+    The shapes ``refusal_question`` reads: ``Refused(field=...)`` from the hook (``fields``), a missing argument, and a
+    guard's refusal of one argument (a placeholder, pronoun or kind word reads as missing; any other reason as invalid).
     """
-    if refusal.fields:
-        missing: list[str] = []
-        invalid = list(dict.fromkeys(refusal.fields))
-    elif match := _MISSING_ARGUMENT.match(str(refusal)):
-        missing, invalid = [match["name"]], []
-    elif (match := _ARGUMENT_REFUSAL.match(str(refusal))) and any(p.name == match["name"] for p in command.params):
-        if match["why"] in (PLACEHOLDER_WHY, PRONOUN_WHY, KIND_WORD_WHY):
-            missing, invalid = [match["name"]], []
-        else:
-            missing, invalid = [], [match["name"]]
-    else:
+    gaps = refusal_gaps(command, refusal)
+    if not gaps.names:
         return None
-    return {"command": command.name, "missing": missing, "invalid": invalid, "values": {}}
+    return {"command": command.name, "missing": list(gaps.missing), "invalid": [name for name, _ in gaps.invalid],
+            "values": {name: str(value) for name, value in gaps.values.items()}}
 
 
 # ---------------------------------------------------------------- the parsed planning command
@@ -4411,7 +4512,13 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
         try:
             args, notes = checked(raw)
         except PlanningCommandInputError as refused_again:
-            args, notes = _typed_fallback(command, request, available_commands, raw, refused_again, checked)
+            try:
+                args, notes = _typed_fallback(command, request, available_commands, raw, refused_again, checked)
+            except PlanningCommandInputError as final:
+                # ``check_arguments`` stops at the first gap: work out every one, so the question names them all
+                # and the values the call already has are kept.
+                final.gaps = argument_gaps(command, raw, request, verdicts)
+                raise
         notes.insert(0, f"first call refused, planned again: {refused}")
     steps = expand(command, args)
     prediction = dspy.ChainOfThought(step_signature(command))(

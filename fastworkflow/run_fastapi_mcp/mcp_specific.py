@@ -79,7 +79,9 @@ TOOL_DESCRIPTIONS = {
         "while it runs you get {exec_state: 'running', reason: 'duplicate_submission'}, and once it has finished "
         "it runs the request a second time. When you are finished with the channel, call end_session. "
         "Without an agent model on the server a turn may carry the artifact fw_not_run on its last command output: "
-        "the parts not run here, with a suggested plan for you to carry out. " + _TURN_WAIT_HELP
+        "the parts not run here, with a suggested plan for you to carry out; an ad hoc part's entry also lists the "
+        "planning commands available here (available_plans) and its own request text (request): to run "
+        "that part with one of them, call invoke_agent again with user_query = request and use_plan = that name. " + _TURN_WAIT_HELP
     ),
     "get_turn": (
         "Fetch the status or result of a turn you started, by its turn_key (execution key or logical key). Use it "
@@ -163,6 +165,14 @@ ARGUMENT_DESCRIPTIONS = {
     "approval_token": (
         "Only when replying to an approval question that delivered a token (result.approval.token): send it back "
         "unchanged. Otherwise omit."
+    ),
+    "use_plan": (
+        "invoke_agent only. A planning command available here, by the name an fw_not_run entry's "
+        "available_plans lists (send that entry's `request` as user_query): the request is run as ONE part bound to "
+        "that planning command; the plan is settled, so no review opens: the turn is awaiting_user on a "
+        "planning_parameter question listing every parameter of the plan with its drafted value (reply yes to run with them, "
+        "one 'name: value' line per value to set or change, or cancel), and again while a required value is still missing. An unknown name or one not available here is an isError result. "
+        "Omit for an ordinary request."
     ),
     "use_dspy_cache": (
         "Leave unset. Honoured only by a server started with --allow_request_cache_toggle; ignored elsewhere."

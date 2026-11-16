@@ -633,12 +633,15 @@ function tmRegisterLiveForm(live) {
 /* A reply is ordinary chat text through the composer, so it is recorded
    verbatim. A draft already in the composer is put back afterwards. Refuses
    (returns false) while a turn runs or nothing is connected. */
-function tmSendChatText(text) {
+function tmSendChatText(text, opts) {
   if (!tm.connected || tm.busy) { return false; }
   var input = document.getElementById("chatInput");
   var draft = input.value;
   input.value = text;
+  /* opts.usePlan: the planning command to run this one message with (fw_not_run's plan buttons). */
+  tm.nextUsePlan = opts && opts.usePlan ? String(opts.usePlan) : null;
   tmSend();
+  tm.nextUsePlan = null;
   var sent = input.value === "";
   input.value = draft;
   tmSizeComposer();

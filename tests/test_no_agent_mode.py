@@ -217,7 +217,8 @@ def test_an_ad_hoc_request_is_not_run_and_returns_the_planners_text_plan(library
     assert stop["done"] == [] and stop["remaining"] == [] and stop["facts"] == {}
     assert stop["suggested_plan"] == PLAN_TEXT
     assert result.answer == no_agent_mode.explanation(stop)
-    assert "needs free planning" in result.answer and "was not run here" in result.answer
+    assert result.answer.startswith("No matching plan was found for this part. Free planning is not available")
+    assert "A suggested plan is in the data (fw_not_run)." in result.answer
     assert _sent(library_env) == []
     assert library_env.model.asked == []
 
@@ -230,6 +231,7 @@ def test_an_ad_hoc_request_with_no_planner_text_has_no_suggestion(library_env, m
     (stop,) = _stops(result)
     assert stop["suggested_plan"] == ""
     assert "No plan could be suggested." in result.answer
+    assert result.answer.startswith("No matching plan was found for this part.")
     # The turn ran no command, so the stop travels on an output of its own, marked as plumbing for the page.
     (output,) = result.command_outputs
     assert output.framework is True

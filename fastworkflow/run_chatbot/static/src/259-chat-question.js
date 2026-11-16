@@ -155,6 +155,56 @@ function tmQuestionPlain(bubbleMsg, text) {
   return tmMountPrompt(bubbleMsg, { key: key, element: node, setDisabled: function () {}, nodes: [node] });
 }
 
+/* A chosen plan (use_plan) asks for its parameters, not for a review: the intent is settled, so the form shows the
+   plan's name and description (read-only) and one field per parameter of its Signature, the drafted values prefilled
+   (parameter_request.parameters: name, required, value, state "missing" | "invalid" | null). Run sends one
+   "<name>: <value>" line per filled field (the server reads exactly that); Cancel sends "cancel". No goal text exists
+   here to edit. Null (the plain question stays) when a field has no widget. */
+function tmQuestionPrefill(prop, value) {
+  if (value === null || value === undefined || value === "") { return null; }
+  if (prop.type === "integer" || prop.type === "number") {
+    var n = Number(value);
+    return isFinite(n) ? n : null;
+  }
+  if (prop.type === "array") { return null; }
+  return value;
+}
+
+function tmQuestionPlanChoice(bubbleMsg, req, input) {
+  var key = "question:P:" + JSON.stringify(req);
+  var prev = tmReusePrompt(bubbleMsg, key);
+  if (prev) { return tmMountPrompt(bubbleMsg, prev); }
+  var fields = [];
+  var i;
+  for (i = 0; i < req.parameters.length; i++) {
+    var p = req.parameters[i];
+    var prop = tmIsPlainObject(p) && typeof p.name === "string" ? tmSchemaProperty(input, p.name) : null;
+    if (!prop) { return null; }
+    var state = p.state === "missing" || p.state === "invalid" ? p.state : null;
+    var field = tmParameterField(p.name, prop, p.required === true, state, state ? null : tmQuestionPrefill(prop, p.value));
+    if (!field || field.kind === "password") { return null; }
+    field.enforceRequired = p.required === true;
+    field.wireLabel = p.name;
+    if (field.kind === "choice") { field.allowOther = false; }
+    fields.push(field);
+  }
+  var head = el("div", "planChosen");
+  head.appendChild(el("div", "planChosenName", tmLeafName(req.command)));
+  if (typeof req.description === "string" && req.description) {
+    head.appendChild(el("div", "planChosenDesc", req.description));
+  }
+  var form = tmRenderForm({ title: "Parameters", fields: fields }, [
+    { label: "Run", kind: "primary", onClick: function (values) {
+      tmSendChatText(tmQuestionReply(fields, values) || "yes");
+    } },
+    { label: "Cancel", kind: "ghost", onClick: function () { tmSendChatText("cancel"); } }
+  ]);
+  var rec = { key: key, element: form.element, setDisabled: form.setDisabled, nodes: [head, form.element] };
+  var mounted = tmMountPrompt(bubbleMsg, rec);
+  if (mounted) { tmFocusSoon(form); }
+  return mounted;
+}
+
 function tmQuestionRenderPlanning(bubbleMsg, last) {
   var req = last.artifacts.parameter_request;
   if (!tmIsPlainObject(req) || typeof req.command !== "string" || !req.command) {
@@ -178,6 +228,9 @@ function tmQuestionRenderPlanning(bubbleMsg, last) {
   var input = schema && schema.input;
   if (!tmIsPlainObject(input) || !tmIsPlainObject(input.properties)) {
     return tmQuestionPlain(bubbleMsg, last.text);
+  }
+  if (req.confirm === true && Array.isArray(req.parameters) && req.parameters.length) {
+    return tmQuestionPlanChoice(bubbleMsg, req, input) || tmQuestionPlain(bubbleMsg, last.text);
   }
   var key = "question:A:" + JSON.stringify(req);
   var prev = tmReusePrompt(bubbleMsg, key);
