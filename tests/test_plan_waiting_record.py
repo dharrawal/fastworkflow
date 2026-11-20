@@ -171,21 +171,24 @@ def test_a_value_question_asked_while_a_part_runs_is_the_same_kind_resumed_in_pl
     assert held.question == first.answer and ctx._resolution_pending
     # No resolution exists for this question (the turn's one part was not resolved before a review).
     assert ctx._plan_resolution is None
-    assert ctx._part_loop is not None and ctx._part_loop.asks == 1
+    assert loops.ParameterLoop.from_state(held.payload["loop"]).asks == 1 and ctx._rerun_loop is None
 
     blob = json.loads(json.dumps(ctx.serialize_state(channel_id="part-record")))
 
     assert blob["waiting"]["payload"]["after"] == "resume_part" and blob["plan_resolution"] is None
-    assert blob["part_loop"]["asks"] == 1
+    assert "part_loop" not in blob      # the loop is in the record only (fix-fpyb.11)
     restored = loops.ParameterLoop.from_state(blob["waiting"]["payload"]["loop"])
     assert restored.command == BOOK_PLAN and restored.origin == 0
     _as_a_new_process(ctx, blob)
-    assert ctx._resolution_pending and ctx._part_question_out and ctx._part_loop.asks == 1
+    assert ctx._resolution_pending and ctx._part_question_out
+    assert loops.ParameterLoop.from_state(ctx._waiting.payload["loop"]).asks == 1
 
     todo.script.steps = _finish()
     done = ctx.process_turn("title: Dune")
 
-    # The reply resumed the part in place: the record left the slot, the loop is kept for the asking rule's count. The
-    # typed call is mocked to refuse the title again, so (step 6, consequence b) the question is asked a second time.
+    # The reply resumed the part in place: the record left the slot and the re-run read the loop for the asking rule's
+    # count. The typed call is mocked to refuse the title again, so (step 6, consequence b) the question is asked a
+    # second time, and the new record carries the whole loop (nothing of it lives outside the record afterwards).
     assert done.status is TurnStatus.AWAITING_USER
-    assert ctx._waiting is not None and ctx._part_loop.asks == 2
+    assert ctx._waiting is not None and ctx._rerun_loop is None
+    assert loops.ParameterLoop.from_state(ctx._waiting.payload["loop"]).asks == 2

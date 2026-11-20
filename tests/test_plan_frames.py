@@ -262,9 +262,10 @@ def test_a_blob_without_the_new_keys_restores_one_frame_and_the_old_keys_as_befo
 
 def test_nested_frames_did_not_bump_the_session_schema_version():
     # Nested frames deliberately did not bump SCHEMA_VERSION (design 3.5, Serialisation): their keys are optional and
-    # an absent key means "no nested frames". The version is 7 since the pending question became one saved record
-    # (docs/pending_state_design.md, steps 4, 8 and 9), which did change the format; frames are still not a reason to bump it.
-    assert SCHEMA_VERSION == 7
+    # an absent key means "no nested frames". The version is 8 since the pending question became one saved record
+    # (docs/pending_state_design.md, steps 4, 8 and 9) and a running part's last loop stopped being saved (fix-fpyb.11),
+    # which did change the format; frames are still not a reason to bump it.
+    assert SCHEMA_VERSION == 8
 
 
 def test_the_current_frame_alias_is_the_top_frames_and_pops_back_to_the_turn(

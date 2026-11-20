@@ -366,7 +366,7 @@ def test_the_removed_review_flags_are_gone_from_the_frame_the_state_and_the_cont
     frame = PlanFrame.turn()
     assert not hasattr(frame, "subtask_review_open") and not hasattr(frame, "framework_entry")
     assert not hasattr(WorkflowExecutionContext, "_review_slot")
-    assert SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
 
 
 def test_a_sub_task_review_is_the_turns_record_pointing_at_the_stores_record(gated, no_param_model, monkeypatch):

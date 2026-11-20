@@ -432,11 +432,11 @@ DUNE_RAN = ("find_book", "Dune")
 
 
 def _loop(ctx):
-    """The parameter question's loop: the one in the turn's waiting record, or the running part's last (``_part_loop``)."""
+    """The parameter question's loop: the one in the turn's waiting record, or None when no question is out."""
     from fastworkflow.parameter_clarification import ParameterLoop
 
     held = ctx._waiting
-    return ParameterLoop.from_state(held.payload["loop"]) if held is not None else ctx._part_loop
+    return ParameterLoop.from_state(held.payload["loop"]) if held is not None else None
 
 
 def _asked_at_part_two(env):

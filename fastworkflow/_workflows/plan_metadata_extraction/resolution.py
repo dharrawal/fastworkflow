@@ -372,7 +372,7 @@ DIFFERENT_REQUEST_REASON = ("the reply to its question asked for something else;
                             "nothing else, so it was not run as a new request: send it as its own message")
 
 
-def _ask_misunderstood(resolution: PlanResolution, plan, turn: Turn):
+def ask_misunderstood(resolution: PlanResolution, plan, turn: Turn):
     """The reply said the command was not the one meant: the part goes back to the which-command question (every command
     of the part's scope the plan can run, the intent loop's misunderstanding question). The part is bound to nothing
     until the user picks; ``none`` leaves it ad hoc, as on the deterministic path."""
@@ -389,6 +389,21 @@ def _ask_misunderstood(resolution: PlanResolution, plan, turn: Turn):
     part["outcome"], part["ambiguous"] = NONE, []
     resolution.stage = STAGE_INTENT
     return plan, _ask_choice(resolution, turn, record)
+
+
+def ask_misunderstood_running_part(text: str, turn: Turn):
+    """``(resolution, plan, question)`` for the one part of an unreviewed turn whose value question was answered with
+    "you misunderstood" while the part ran (nothing of it ran): a one-part resolution of *text* and its from-scratch
+    plan, built with no model call, put back to the which-command question (``ask_misunderstood``). The reply to it is
+    read by ``take_reply`` like any which-command reply, then the part's values, then the run."""
+    from fastworkflow import review_proposals
+
+    resolution = PlanResolution(parts=[{
+        "text": text, "outcome": NONE, "ambiguous": [], "planning_scores": {}, "state": PART_OPEN, "chosen": False,
+        "decided_by": BY_QUESTION, "evidence": {}}])
+    plan = review_proposals.SubTaskProposal(items=[review_proposals.SubTask(goal=text)])
+    plan, question = ask_misunderstood(resolution, plan, turn)
+    return resolution, plan, question
 
 
 def _take_values(resolution: PlanResolution, held, reply: str, plan, turn: Turn):
@@ -411,7 +426,7 @@ def _take_values(resolution: PlanResolution, held, reply: str, plan, turn: Turn)
         turn.port.put(loops.waiting_record(loop, loops.AFTER_RESOLVE_NEXT, resolution.index))
         return plan, outcome.question
     if outcome.kind == loops.MISUNDERSTOOD:
-        return _ask_misunderstood(resolution, plan, turn)
+        return ask_misunderstood(resolution, plan, turn)
     if outcome.kind == loops.DIFFERENT:
         # A reply answers its question and nothing else: it is not run as a new request, so the part is set aside and
         # the answer says why.

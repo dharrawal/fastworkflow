@@ -62,7 +62,8 @@ NESTED_BUDGET_SPENT_MESSAGE = (
 
 #: The refusal for a direct action run while a question waits for the user's answer.
 AWAITING_ANSWER_REFUSAL_MESSAGE = (
-    "A question is waiting for the user's answer; reply to it before sending a request, an action or a plan."
+    "A question is waiting for the user's answer; reply to it before sending a request, an action or a plan. "
+    "To drop it instead, reply \"cancel\" (\"no\" for a review or an approval); at the CLI prompt type //cancel."
 )
 
 
@@ -242,7 +243,7 @@ _PARKED_PENDING_KEYS = (
     "subtasks", "subtask_origins", "subtask_index", "subtask_answers",
     "subtask_outputs", "subtask_exhausted", "subtask_plan", "next_step",
     "skill_phase_run", "react", "frames", "frame_react", "turn_child_step_ranges", "turn_steps_used",
-    "turn", "waiting", "part_loop",
+    "turn", "waiting",
 )
 
 
@@ -922,7 +923,6 @@ class WorkflowExecutionContext:
         self._turn_unattended = bool(unattended)
         self._turn_use_plan, self._next_use_plan = self._next_use_plan, None
         self._plan_resolution, self._refusal_stop_reason, self._part_outputs_start = None, "", 0
-        self._part_loop = None
         self._turn_part_facts = None
         self._turn_subtask_review = "not_applicable"
         self._turn_subtask_plan = None
@@ -1210,10 +1210,11 @@ class WorkflowExecutionContext:
     # ``SlotPort``). ``_assistant_round``: the round began with a "/" message.
     _waiting: Optional[waiting_module.Waiting] = None
     _assistant_round: bool = False
-    #: The parameter loop of the question the running part put (``_put_part_loop``), kept after its reply: the record leaves
-    #: the slot at the reply (the part runs on, and may suspend again), so what the asking rule needs after it, the names
-    #: the last question listed (progress) and the count of replies with none (``stalled``), lives here, saved with the session.
-    _part_loop: Optional[Any] = None
+    #: The loop of the question whose reply is re-running its part, for that re-run only (``_resume_parameter_loop_unlistened``
+    #: sets and clears it, in one call, inside one ``process_turn``): the record has left the slot, and ``_open_parameter_loop``
+    #: measures the part's next refusal against the names the last question listed and the count of replies with no
+    #: progress. When the re-run asks again the new record carries the whole loop, so nothing of it is ever saved.
+    _rerun_loop: Optional[Any] = None
 
     @property
     def _awaiting_user(self) -> bool:
@@ -1480,7 +1481,7 @@ class WorkflowExecutionContext:
         """Clear the live pending state (the suspended turn, its review, its CME run) without touching history."""
         self._reset_agent_suspension()
         self._turn_frame().subtask_plan = None
-        self._plan_resolution = self._part_loop = None
+        self._plan_resolution = None
         self._suspend_began_at = None
         self._turn_suspended_ms = 0
         if self.has_open_command():
@@ -1647,7 +1648,6 @@ class WorkflowExecutionContext:
             "approval": self._approval_state_payload(),
             # The turn's pending resolution (which command each part gets, then its missing values; bd fix-o1lg).
             "plan_resolution": None if self._plan_resolution is None else self._plan_resolution.to_state(),
-            "part_loop": None if self._part_loop is None else self._part_loop.to_state(),
             # What each part's settling knew, kept for the learning rows written where the reviewed plan is run.
             "turn_part_facts": json.loads(json.dumps(self._turn_part_facts, default=str)) if self._turn_part_facts else None,
             "use_plan": self._turn_use_plan,
@@ -1742,9 +1742,6 @@ class WorkflowExecutionContext:
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         self._plan_resolution = resolution.PlanResolution.from_state(state.get("plan_resolution"))
-        from fastworkflow.parameter_clarification import ParameterLoop
-
-        self._part_loop = ParameterLoop.from_state(state.get("part_loop"))
         self._turn_part_facts = state.get("turn_part_facts") or None
         self._turn_use_plan = state.get("use_plan") or None
         # Absent from blobs written before sub-task splitting; the defaults mean "not split".
@@ -2759,8 +2756,7 @@ class WorkflowExecutionContext:
 
     def _reset_agent_suspension(self) -> None:
         """Clear Topology-B ask_user suspend state (abort, finalize, or cancel_pending)."""
-        # The resolution stays (as it did) and so does the part's loop (its stall count outlives a suspension); the next
-        # turn begins without them. The question is no longer out: the agent's own question, the turn's open review, a
+        # The resolution stays (as it did); the next turn begins without it. The question is no longer out: the agent's own question, the turn's open review, a
         # paused decision step and the plan's questions go with the suspension, whichever route ended it. An approval
         # ends with the approval store's record, and the CME's open command with its command.
         if self._waiting is not None and self._waiting.kind != waiting_module.KIND_APPROVAL and (
@@ -4235,7 +4231,6 @@ class WorkflowExecutionContext:
         """Put the running part's value question *loop* out as the turn's one waiting record."""
         from fastworkflow import parameter_clarification
 
-        self._part_loop = loop
         self._turn_port().put(parameter_clarification.waiting_record(
             loop, parameter_clarification.AFTER_RESUME_PART, loop.origin))
 
@@ -4285,7 +4280,7 @@ class WorkflowExecutionContext:
         if (self._part_ran_something() or not waiting_module.can_ask(self)
                 or not planning_commands.refusal_names_an_input(command, error)):
             return None
-        loop = self._part_loop
+        loop = self._rerun_loop
         if loop is not None and loop.command == command.name and loop.origin == origin:
             # The part ran again with the values the replies gave and its checks still refuse something.
             outcome = loops.reopen(loop, command, gaps, refusal=error)
@@ -4301,8 +4296,17 @@ class WorkflowExecutionContext:
         from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
 
         loop = loops.ParameterLoop.from_state(self._waiting.payload["loop"])
-        self._part_loop = loop
-        self._turn_port().clear()      # the question is no longer out; the loop is kept for the rule's count
+        self._turn_port().clear()      # the question is no longer out; the re-run reads the loop for the rule's count
+        self._rerun_loop = loop
+        try:
+            return self._rerun_part_with_reply(loop, reply)
+        finally:
+            self._rerun_loop = None
+
+    def _rerun_part_with_reply(self, loop, reply: str) -> fastworkflow.CommandOutput:
+        from fastworkflow import parameter_clarification as loops, planning_commands
+        from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
+
         message = self._suspended_message()
         self._note_agent_resume()
         self.complete_ask_user_entry(reply)
@@ -4323,12 +4327,19 @@ class WorkflowExecutionContext:
             self._put_part_loop(loop)
             return self._settle_agent_result(message, dspy.Prediction(
                 suspended=True, clarification=outcome.question, exhausted=False))
-        if outcome.kind in (loops.MISUNDERSTOOD, loops.DIFFERENT):
-            # Nothing of the part ran, and no resolution exists to ask which command again: the part ends as not run
-            # (the reply is never run as a new request) and the answer says why.
-            result = self._not_run_part(command=loop.command, means="planning", reason=(
-                "you said it was not the command you meant" if outcome.kind == loops.MISUNDERSTOOD
-                else DIFFERENT_REQUEST_REASON))
+        if outcome.kind == loops.MISUNDERSTOOD:
+            # Nothing of the part ran (``_open_parameter_loop`` asks only before it has), so it goes back to the
+            # which-command question as at the gate: a one-part resolution of its text, built with no model call. The
+            # reply to it goes through ``_resume_plan_resolution``, then the part's values, then the run.
+            from fastworkflow._workflows.plan_metadata_extraction import resolution
+            self._plan_resolution, self._turn_subtask_plan, question = resolution.ask_misunderstood_running_part(
+                self._part_request_text(), self._resolution_turn())
+            return self._settle_agent_result(message, dspy.Prediction(
+                suspended=True, clarification=question, exhausted=False))
+        if outcome.kind == loops.DIFFERENT:
+            # A reply answers its question and nothing else: the part ends as not run (the reply is never run as a new
+            # request) and the answer says why.
+            result = self._not_run_part(command=loop.command, means="planning", reason=DIFFERENT_REQUEST_REASON)
         elif outcome.kind == loops.DECLINED:
             result = self._not_run_part(
                 command=loop.command, means="planning",

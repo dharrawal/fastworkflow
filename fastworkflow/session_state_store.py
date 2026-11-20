@@ -41,7 +41,9 @@ PENDING_STATE_KEY = "pending"
 # 7: the agent's own question and an approval are the turn's waiting record too (kinds ``agent`` and ``approval``); the
 # keys ``awaiting_user``, ``suspended_user_message``, ``pending_clarification_request`` and ``assistant_command`` are gone
 # (the question is the record, and the "/" round is ``waiting.assistant``), and a parked review rides in its record.
-SCHEMA_VERSION = 7
+# 8: the key ``part_loop`` is gone (a running part's last loop lives only for the re-run its reply starts; a question
+# asked again carries the whole loop in its waiting record).
+SCHEMA_VERSION = 8
 
 
 class IncompatibleSessionState(Exception):

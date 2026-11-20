@@ -220,7 +220,7 @@ def test_a_saved_blob_holds_the_record_and_none_of_the_removed_flags_and_restore
 
     blob = json.loads(json.dumps(ctx.serialize_state(channel_id=f"step-{name}")))
 
-    assert blob["schema_version"] == 7 and blob["waiting"]["kind"] == KIND_OF[name]
+    assert blob["schema_version"] == 8 and blob["waiting"]["kind"] == KIND_OF[name]
     assert not [key for key in REMOVED_KEYS if key in blob]
     assert blob["waiting"]["assistant"] is ctx.assistant_round
     ctx._waiting = None

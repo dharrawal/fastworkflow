@@ -198,7 +198,7 @@ def test_a_refusal_may_be_asked_again_after_a_question_the_asking_rule_decides_h
     ctx._begin_turn(REQUEST)
     # The reply to the first question has been run: the turn's loop records that it asked. Step 6 (consequence b): that no
     # longer shuts the gate (the "once" rule is gone); the parameter loop's rule decides whether a next question is put.
-    ctx._part_loop = ParameterLoop(command="member_loans", asks=1)
+    ctx._rerun_loop = ParameterLoop(command="member_loans", asks=1)
 
     assert workflow_agent._planning_command_refusal_may_ask(ctx) is True
 
@@ -213,9 +213,10 @@ def test_a_loop_that_ended_on_replies_with_no_progress_is_never_asked_again(work
     refusal = _refusal(command, {"member": ""}, REQUEST)
 
     assert ctx._open_parameter_loop(command, refusal, request_text=REQUEST) is not None       # the first question
-    loop = ctx._part_loop
+    loop = ParameterLoop.from_state(ctx._waiting.payload["loop"])
     loop.stalled = 2                                                                          # two replies with no progress
     ctx._waiting = None                                                                       # the reply was taken
+    ctx._rerun_loop = loop                                                                    # and the part re-runs with it
 
     assert ctx._open_parameter_loop(command, refusal, request_text=REQUEST) is None
     assert ctx._waiting is None
@@ -235,15 +236,16 @@ def test_the_refusal_flags_survive_a_save_and_restore(workflow_env):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, _wf = _session(sink, folder=PLANNING_COMMANDS)
-    ctx._part_loop = ParameterLoop(command="member_loans", asks=1, open=["member"], request_text=REQUEST)
-    ctx._waiting = Waiting(KIND_PARAMETERS, payload={"loop": ctx._part_loop.to_state(), "after": "resume_part"})
+    loop = ParameterLoop(command="member_loans", asks=1, open=["member"], request_text=REQUEST)
+    ctx._waiting = Waiting(KIND_PARAMETERS, payload={"loop": loop.to_state(), "after": "resume_part"})
     state = ctx.serialize_state(channel_id="refusal-flags")
 
     restored, _wf = _session(sink, folder=PLANNING_COMMANDS)
     restored.apply_serialized_state(state)
 
     assert restored._resolution_pending is True
-    assert restored._part_loop == ctx._part_loop and restored._waiting.payload == ctx._waiting.payload
+    assert "part_loop" not in state and restored._rerun_loop is None
+    assert restored._waiting.payload == ctx._waiting.payload
 
 
 def test_a_save_from_before_the_refusal_flags_restores_them_as_unset(workflow_env):
@@ -254,12 +256,12 @@ def test_a_save_from_before_the_refusal_flags_restores_them_as_unset(workflow_en
              if key not in ("skill_refusal_pending", "skill_refusal_answered", "plan_resolution")}
 
     restored, _wf = _session(sink, folder=PLANNING_COMMANDS)
-    restored._part_loop = ParameterLoop(command="member_loans", asks=1)
-    restored._waiting = Waiting(KIND_PARAMETERS, payload={"loop": restored._part_loop.to_state(), "after": "resume_part"})
+    restored._waiting = Waiting(KIND_PARAMETERS, payload={
+        "loop": ParameterLoop(command="member_loans", asks=1).to_state(), "after": "resume_part"})
     restored.apply_serialized_state(older)
 
     assert restored._resolution_pending is False
-    assert restored._part_loop is None
+    assert restored._rerun_loop is None
 
 
 def test_a_failure_that_is_not_a_refusal_is_never_put_to_the_user(workflow_env, monkeypatch):

@@ -4811,8 +4811,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nMissing parameter values: query\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nquery\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -5107,8 +5105,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nValues not used: query='Bob' is not written in the request\nMissing parameter values: query\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nquery\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -5285,8 +5281,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nMissing parameter values: query\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nquery\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -5362,8 +5356,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nMissing parameter values: code\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\ncode\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -5435,8 +5427,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nInvalid parameter values: code 'BAD-7'\nthat shelf is closed\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\ncode\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -5570,8 +5560,6 @@
        "title"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'lend_book'\nExtracted parameters so far:\nCopies: 1\nKind: loan\n\nMissing parameter values: member, title\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nmember, title\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -5739,8 +5727,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nMissing parameter values: query\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nquery\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6035,8 +6021,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nValues not used: query='Bob' is not written in the request\nMissing parameter values: query\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nquery\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6152,8 +6136,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nMissing parameter values: query\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nquery\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6229,8 +6211,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nMissing parameter values: code\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\ncode\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6302,8 +6282,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nInvalid parameter values: code 'BAD-7'\nthat shelf is closed\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\ncode\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6437,8 +6415,6 @@
        "title"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "once",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'lend_book'\nExtracted parameters so far:\nCopies: 1\nKind: loan\n\nMissing parameter values: member, title\n\nProvide corrected parameter values in the exact order specified below, separated by commas:\nmember, title\nCheck your command name if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6707,8 +6683,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nValues not used: query='Carl Smith' is a placeholder, not a value\nI can't run find member yet: your request does not give the query. Which query should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6802,8 +6776,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nI can't run find member yet: your request does not give the query. Which query should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6895,8 +6867,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nI can't run find member yet: your request does not give the query. Which query should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -6978,8 +6948,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nValues not used: query='Bob Jones' is not written in the request\nI can't run find member yet: your request does not give the query. Which query should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -7066,8 +7034,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nValues not used: query='Bob Jones' is not written in the request\nI can't run find member yet: your request does not give the query. Which query should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -7322,8 +7288,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nI can't run find member yet: your request does not give the query. Which query should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -7496,8 +7460,6 @@
        "query"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'find_member'\nValues not used: query='...' is punctuation, not a value\nI can't run find member yet: your request does not give the query. Which query should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -7776,8 +7738,6 @@
        "member"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'lend_book'\nExtracted parameters so far:\nTitle: Dune\nCopies: 2\nKind: loan\n\nValues not used: member='Jane Roe' is a placeholder, not a value\nI can't run lend book yet: your request does not give the member. Which member should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -8046,8 +8006,6 @@
        "title"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'lend_book'\nExtracted parameters so far:\nMember: Ann Lee\nCopies: 1\nKind: loan\n\nI can't run lend book yet: your request does not give the title. Which title should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -8365,8 +8323,6 @@
        "title"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'lend_book'\nExtracted parameters so far:\nCopies: 1\nKind: loan\n\nI can't run lend book yet: your request does not give the member and title. What should the member and title be? Reply with name: value lines (member: ...; title: ...), or with the values in order separated by commas.\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -8475,8 +8431,6 @@
        "title"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'lend_book'\nExtracted parameters so far:\nMember: Ann Lee\nCopies: 1\nKind: loan\n\nI can't run lend book yet: your request does not give the title. Which title should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -8869,8 +8823,6 @@
        "title"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'lend_book'\nExtracted parameters so far:\nMember: Ann Lee\nCopies: 1\nKind: loan\n\nValues not used: title='Ulysses' is not written in the request\nI can't run lend book yet: your request does not give the title. Which title should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -9238,8 +9190,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nI can't run shelf code yet: that shelf is closed. Which code should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [
        "BAD-3"
@@ -9379,8 +9329,6 @@
        "author"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'author_books'\nI can't run author books yet: author='Stephen King' is not written in the request. Which author should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -9458,8 +9406,6 @@
        "author"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'author_books'\nI can't run author books yet: your request does not give the author. Which author should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -9587,8 +9533,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nI can't run shelf code yet: that shelf is closed. Which code should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -9686,8 +9630,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nI can't run shelf code yet: your request does not give the code. Which code should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {
@@ -9778,8 +9720,6 @@
        "code"
       ],
       "origin": null,
-      "pending": true,
-      "policy": "unbounded",
       "question": "PARAMETER EXTRACTION ERROR FOR COMMAND 'shelf_code'\nExtracted parameters so far:\nFloor: 0\n\nI can't run shelf code yet: that shelf is closed. Which code should I use?\nOnly your answer is read; anything else in the reply is ignored.\nEnter 'abort' to get out of this error state and/or execute a different command.\nEnter 'you misunderstood' if the wrong command was executed.",
       "replies": [],
       "request": {

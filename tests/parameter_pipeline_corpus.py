@@ -395,21 +395,14 @@ def _output(output) -> dict:
             "parameter_request": norm(output.parameter_request)}
 
 
-def recorded_loop(loop, agentic: bool) -> dict:
-    """A parameter loop's state in the shape the table recorded it, which still had the ``policy`` and ``pending`` fields
-    (removed with the three asking policies, step 6 of ``docs/pending_state_design.md``): a loop that is stored is a
-    question that is out, and the CME stage's policy was ``once`` for an agent session and ``unbounded`` otherwise."""
-    return {**loop.to_state(), "policy": "once" if agentic else "unbounded", "pending": True}
-
-
-def _recorded_context(context: dict, agentic: bool = False) -> dict:
-    """The CME context as the table recorded it before the pending question moved to the turn's waiting record: the
-    other keys, and the parameter loop under ``parameter_loop`` (the table's shape is unchanged)."""
+def _observed_context(context: dict) -> dict:
+    """The CME context's keys, and the parameter loop of the turn's waiting record (the pending question) as the loop's
+    own state, under ``parameter_loop``."""
     from fastworkflow import parameter_clarification, waiting
 
     shown = {key: value for key, value in context.items() if key != waiting.PORT_KEY}
     if (loop := parameter_clarification.pending(context)) is not None:
-        shown["parameter_loop"] = recorded_loop(loop, agentic)
+        shown["parameter_loop"] = loop.to_state()
     return shown
 
 
@@ -426,14 +419,12 @@ def run_impl(env: Environment, case: dict) -> dict:
         pe.park(cme, name, params_class.model_construct(**pending), question="Q?", request_text=case["text"])
     diagnostics: dict = {}
     out: dict = {}
-    from fastworkflow.parameters import ask
-    agentic = case.get("mode") != "slash" and ask.audience_of(workflow.context) == ask.AGENT
     try:
         out["output"] = _output(pe.ParameterExtraction(cme, workflow, name, case["text"])._extract_impl(diagnostics))
     except BaseException as exc:  # noqa: BLE001 - an exception is part of the record
         out["exception"] = error(exc)
     out["diagnostics"] = norm(diagnostics)
-    out["cme_context"] = norm(_recorded_context(cme.context, agentic))
+    out["cme_context"] = norm(_observed_context(cme.context))
     return _record(env, out)
 
 

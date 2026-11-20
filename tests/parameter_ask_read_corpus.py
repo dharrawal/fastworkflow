@@ -427,29 +427,23 @@ def frame_cases(tmp: Path):
                     extractor = ParameterExtraction(cme, app, "Ctx/cmd", text)
                     diagnostics: dict = {}
                     first = extractor._extract_impl(diagnostics)
-                    steps.append(frame_record(first, cme, diagnostics, audience == "agent"))
+                    steps.append(frame_record(first, cme, diagnostics))
                     if reply is not None:
                         extractor2 = ParameterExtraction(cme, app, "Ctx/cmd", reply)
                         diagnostics2: dict = {}
                         second = extractor2._extract_impl(diagnostics2)
-                        steps.append(frame_record(second, cme, diagnostics2, audience == "agent"))
+                        steps.append(frame_record(second, cme, diagnostics2))
                     return steps
                 out[key] = safe(run)
                 n += 1
     return n
 
 
-def _recorded_loop(loop, agentic: bool) -> dict:
-    from tests import parameter_pipeline_corpus
-
-    return parameter_pipeline_corpus.recorded_loop(loop, agentic)
-
-
-def frame_record(output, cme, diagnostics, agentic=False):
+def frame_record(output, cme, diagnostics):
     return {"valid": output.parameters_are_valid, "error_msg": output.error_msg, "suggestions": norm(output.suggestions),
             "parameter_request": norm(output.parameter_request), "params": norm(output.cmd_parameters.model_dump())
             if output.cmd_parameters is not None else None,
-            "loop": norm(_recorded_loop(loop, agentic) if (loop := pcl.pending(cme.context)) is not None else None),
+            "loop": norm(loop.to_state() if (loop := pcl.pending(cme.context)) is not None else None),
             "diag": norm({k: v for k, v in diagnostics.items() if k in (
                 "missing_fields", "invalid_fields", "extraction_method", "argument_check_refusals_final", "retry_round",
                 "retry_round_ordinal")})}

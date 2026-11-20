@@ -407,7 +407,7 @@ def test_a_refusal_naming_a_field_is_still_asked(environment):
     case = {"id": "f", "site": "impl", "command": "shelf_code", "text": "label the shelf BAD-1",
             "answers": [corpus.A(code="BAD-1", floor=0), corpus.A(code="BAD-1", floor=0)]}
     out = corpus.run_case(environment, case)
-    assert out["output"]["valid"] is False and out["cme_context"]["parameter_loop"]["pending"] is True
+    assert out["output"]["valid"] is False and "parameter_loop" in out["cme_context"]
 
 
 def test_a_guard_refusal_names_the_argument_so_it_is_asked(environment):
@@ -416,7 +416,7 @@ def test_a_guard_refusal_names_the_argument_so_it_is_asked(environment):
             "answers": [corpus.A(author="Stephen King"), corpus.A(author="Stephen King")]}
     out = corpus.run_case(environment, case)
     loop = out["cme_context"]["parameter_loop"]
-    assert out["output"]["valid"] is False and loop["pending"] is True and loop["open"] == ["author"]
+    assert out["output"]["valid"] is False and loop["open"] == ["author"]
     assert out["output"]["parameter_request"]["invalid"] == ["author"]
 
 

@@ -36,6 +36,7 @@ from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F40
 from tests.test_waiting_kinds import _last
 
 DECLINED = "it was declined"
+PICKED = "Book/show_book"      # an execution command the which-command question lists for the todo workflow
 
 
 class _Remote:
@@ -354,7 +355,7 @@ def test_part_name_value_lines_are_values_and_the_remote_model_is_not_asked(todo
 
 def test_part_a_request_for_a_moment_keeps_the_question_and_counts_nothing(todo, monkeypatch):
     remote, first = _asked_while_running(todo, monkeypatch, "wait")
-    before = todo.ctx._part_loop
+    before = parameter_clarification.ParameterLoop.from_state(todo.ctx._waiting.payload["loop"])
     waited = todo.ctx.process_turn("hold on, checking")
     assert waited.status is TurnStatus.AWAITING_USER and waited.answer.startswith("OK, take your time.")
     assert first.answer in waited.answer and len(remote.calls) == 1
@@ -364,14 +365,42 @@ def test_part_a_request_for_a_moment_keeps_the_question_and_counts_nothing(todo,
 
 
 @pytest.mark.parametrize("phrase_or_word, calls", [("you misunderstood", 0), ("the wrong command seems to have been picked here", 1)])
-def test_part_you_misunderstood_ends_the_part_as_not_run_naming_why(todo, monkeypatch, phrase_or_word, calls):
+def test_part_you_misunderstood_goes_back_to_the_which_command_question(todo, monkeypatch, phrase_or_word, calls):
+    # bd fix-fpyb.12: nothing of the part ran before its question, so "you misunderstood" returns to the which-command
+    # question as at the gate (every command the plan path can run), whose reply goes through the resolution.
     remote, _ = _asked_while_running(todo, monkeypatch, "misunderstood")
-    done = todo.ctx.process_turn(phrase_or_word)
-    assert done.status is TurnStatus.COMPLETED and len(remote.calls) == calls
-    (stop,) = [stop for stop in _stops(done) if stop["command"] == BOOK_PLAN]
-    # Step 8 looked again at going back to the which-command question for a running part and left it (a pick has nowhere
-    # to go: docs/pending_state_design.md 3.12): the entry and the answer say the user said it was not the command meant.
-    assert "not the command you meant" in stop["reason"] and "not the command you meant" in done.answer
+    asked = todo.ctx.process_turn(phrase_or_word)
+    choice = _artifacts(asked)["plan_choice"]
+    assert asked.status is TurnStatus.AWAITING_USER and _last(asked)["question_kind"] == "plan_choice"
+    assert choice["misunderstood"] is True and choice["request"] == "who wrote that book"
+    assert PICKED in [each["name"] for each in choice["choices"]] and len(remote.calls) == calls
+    assert todo.ctx._waiting.kind == waiting.KIND_INTENT and todo.ctx._plan_resolution is not None
+
+
+def _commands_run(out) -> list[str]:
+    return [each.command_name for each in out.command_outputs
+            if not getattr(each, "framework", False) and each.command_name != "ask_user"]
+
+
+def test_part_you_misunderstood_then_a_pick_runs_the_picked_command_once(todo, monkeypatch):
+    _asked_while_running(todo, monkeypatch, "misunderstood")
+    asked = todo.ctx.process_turn("you misunderstood")
+    names = [each["name"] for each in _artifacts(asked)["plan_choice"]["choices"]]
+    assert PICKED in names
+    todo.script.steps = [("execute_workflow_query", {"command": "show book"}), *_finish()]
+    done = todo.ctx.process_turn(PICKED)
+    # The pick ran with no review and no second question, and the picked command ran exactly once.
+    assert done.status is TurnStatus.COMPLETED and _commands_run(done) == [PICKED]
+    assert todo.ctx._waiting is None and todo.ctx._plan_resolution is None
+
+
+@pytest.mark.parametrize("word", ["cancel", "abort"])
+def test_part_you_misunderstood_then_cancel_drops_the_part_as_not_run(todo, monkeypatch, word):
+    _asked_while_running(todo, monkeypatch, "misunderstood")
+    todo.ctx.process_turn("you misunderstood")
+    done = todo.ctx.process_turn(word)
+    assert done.status is TurnStatus.COMPLETED and "cancelled" in done.answer
+    assert _commands_run(done) == [] and todo.ctx._plan_resolution is None and todo.ctx._waiting is None
 
 
 def test_part_a_different_request_ends_the_part_and_is_not_run_as_a_request(todo, monkeypatch):
