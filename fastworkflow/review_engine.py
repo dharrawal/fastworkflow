@@ -58,7 +58,7 @@ DEFAULT_MODE = MODE_ENFORCE
 #: An approval (action) record's reply cap and wall-clock TTL: two replies, or 15 minutes.
 TTL_TURNS = 2
 TTL_SECONDS = 900
-#: A proposal review (sub_tasks, plan) is a dialog of edits: about 8 replies, or 30 minutes (fix-3rsq.plan-review.2.5).
+#: A proposal review (sub_tasks) is a dialog of edits: about 8 replies, or 30 minutes (fix-3rsq.plan-review.2.5).
 PROPOSAL_TTL_TURNS = 8
 PROPOSAL_TTL_SECONDS = 30 * 60
 MAX_HISTORY = 100
@@ -69,8 +69,7 @@ MAX_HISTORY = 100
 
 KIND_ACTION = "action"
 KIND_SUB_TASKS = "sub_tasks"
-KIND_PLAN = "plan"
-KINDS = (KIND_ACTION, KIND_SUB_TASKS, KIND_PLAN)
+KINDS = (KIND_ACTION, KIND_SUB_TASKS)
 
 AWAITING = "awaiting"
 REVISED = "revised"
@@ -2143,7 +2142,7 @@ def reply_policy(
     """The reply policy for a kind (the policy decision point for replies); *interpreter* is the proposal reader."""
     if kind == KIND_ACTION:
         return ActionReplyPolicy()
-    if kind in (KIND_SUB_TASKS, KIND_PLAN):
+    if kind == KIND_SUB_TASKS:
         return ProposalReplyPolicy(
             interpreter,
             plan_cme=plan_cme,

@@ -21,19 +21,19 @@ REPLACE    the pending command is replaced by *command* (its stored         comm
 MERGE      the reply *text* is an answer: it is merged into the stored      text
            command, and extraction goes on
 STOP       nothing more will be asked: the command ends, failed, with       message, reply_intent
-           *message*, and no question stays pending
+           *message*, and no question stays pending (a third wait)
 ========== ================================================================ ======================================
 
 ``read_reply`` is a thin adapter from the one reader of a value question's reply (``parameters.reply.read_reply``, which a
-plan part's value question is read by too) to RUN, WAIT, DIFFERENT, REPLACE and MERGE. STOP is not used by a reader: the
-asking rule's end of the question is made by the extraction stage (design note, 3.10).
+plan part's value question is read by too) to RUN, WAIT, DIFFERENT, REPLACE and MERGE. STOP is returned for a request for a moment
+that is the question's third in a row; the asking rule's other end is made by the extraction stage (design note, 3.10).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
-from fastworkflow import parameter_clarification
+from fastworkflow import no_agent_mode, parameter_clarification, waiting
 from fastworkflow.parameters import reply as replies
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.signatures import MISSING_INFORMATION_ERRMSG
@@ -130,8 +130,22 @@ def read_reply(workflow, app_workflow, command: str) -> Reply:
     if reading.kind == replies.REPLACE:
         return Reply(ACTION_REPLACE, command=command)
     if reading.kind == replies.WAIT:
+        # The first wait in a row is free; each further one counts as a reply with no progress, so the asking rule's
+        # limit ends the question (the count is in the question's record, with the loop).
+        missing = ", ".join(missing_fields or open_names)
+        held = waiting.port_of(workflow.context).get() if loop is not None else None
+        waited = parameter_clarification.waited_of(held)
+        if loop is not None:
+            after = held.payload.get("after", parameter_clarification.AFTER_RUN_COMMAND)
+            if waited:
+                loop.stalled += 1
+            parameter_clarification.store(workflow.context, loop, after=after, waited=1)
+            if waited and parameter_clarification.stopped(loop):
+                return Reply(ACTION_STOP, reply_intent=replies.INTENT_WAIT, message=(
+                    f"{command_name} was not run: no usable answer was given in "
+                    f"{no_agent_mode.MAX_NO_PROGRESS} replies in a row. {MISSING_INFORMATION_ERRMSG}{missing}"))
         return Reply(ACTION_WAIT, reply_intent=replies.INTENT_WAIT, text="\n".join(
-            [replies.WAIT_TEXT, f"{MISSING_INFORMATION_ERRMSG}{', '.join(missing_fields)}"]))
+            [replies.WAIT_TEXT, f"{MISSING_INFORMATION_ERRMSG}{missing}"]))
     if reading.kind == replies.DIFFERENT:
         return Reply(ACTION_DIFFERENT, reply_intent=replies.INTENT_DIFFERENT)
     return Reply(ACTION_MERGE, text=command)

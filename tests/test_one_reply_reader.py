@@ -124,6 +124,26 @@ def test_the_remote_read_is_asked_once_and_its_word_is_the_kind(word, kind):
     assert reading.kind == kind and reading.intent == word and calls == [("Which a?", "hold on")]
 
 
+@pytest.mark.parametrize("reply, slot", [
+    ("3", read.Slot(number=True)), ("-2.5", read.Slot(number=True)),
+    ("HIGH", read.Slot(options=("high", "low"))), ("no", read.Slot(boolean=True)),
+])
+def test_a_reply_that_fits_a_constrained_field_is_not_sent_to_the_remote_model(reply, slot):
+    """bd fix-iw13: a number, an allowed value or a yes/no for the one open field is read in code."""
+    def never(question, text):
+        raise AssertionError("the remote model was asked")
+
+    reading = replies.read_reply(reply, ["a"], ["a"], slots={"a": slot}, remote=never)
+    assert reading.kind == replies.VALUES and "a" in reading.values
+
+
+@pytest.mark.parametrize("slot", [read.Slot(number=True), read.Slot(options=("high", "low")), read.Slot()])
+def test_a_reply_that_does_not_fit_or_a_free_text_field_keeps_the_remote_read(slot):
+    calls: list = []
+    reading = replies.read_reply("hold on", ["a"], ["a"], slots={"a": slot}, remote=_said("wait", calls))
+    assert len(calls) == 1 and reading.kind == replies.WAIT
+
+
 def test_an_answer_from_the_remote_read_leaves_the_codes_reading():
     calls: list = []
     reading = replies.read_reply("Dune", ["a"], ["a"], remote=_said("answer", calls))

@@ -578,11 +578,8 @@ def _execute_review(workflow, record: PendingAction):
     """Run the review command once for an accepted proposal record (the approved execution)."""
     from fastworkflow.command_executor import CommandExecutor
 
-    from fastworkflow.review_proposals import PROPOSAL_KINDS
-
-    number = next(key for key, cls in PROPOSAL_KINDS.items() if cls.spec == record.command)
     action = fastworkflow.Action(command_name=REVIEW_COMMAND, command=REVIEW_COMMAND,
-                                 parameters={"round": number, "items": record.binding.get("items_text", "")})
+                                 parameters={"items": record.binding.get("items_text", "")})
     with review_engine.approved_review(record.id):
         return CommandExecutor.perform_action(workflow, action)
 

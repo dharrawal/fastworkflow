@@ -541,6 +541,10 @@ class ExperimentController:
         # ID is protected.
         if registration is not None:
             benchmark_setup.bind_experiment(self.workflow_folderpath, experiment_id)
+        # A driver that names no workflow is this controller's own folder's.
+        workflow_name = workflow_name or benchmark_setup.workflow_name_for(
+            self.workflow_folderpath
+        )
         # The experiment joins its contest in the store it is recorded into
         # (`fix-9eg.17.1`), in the same transaction; one registered at UI
         # creation is already a member there and keeps its group.

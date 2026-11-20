@@ -16,7 +16,7 @@ Nothing in this module calls a model. Free text is read by an extractor the call
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Iterable, Optional
 
 from fastworkflow import no_agent_mode, waiting
@@ -244,6 +244,7 @@ class Outcome:
     missing: tuple[str, ...] = ()
     describe: str = ""
     reply_kind: str = ""
+    waited: int = 0          # 1 when the reply was a request for a moment, else 0: the question's record keeps it
 
 
 # ---- the question ----------------------------------------------------------------------------------------------------
@@ -309,21 +310,31 @@ def requestion(context: dict, question: str) -> None:
     reply is read against what the user saw. Nothing when no loop is pending."""
     if (loop := pending(context)) is not None:
         loop.question = question
-        store(context, loop, after=waiting.port_of(context).get().payload.get("after", AFTER_RUN_COMMAND))
+        held = waiting.port_of(context).get()
+        store(context, loop, after=held.payload.get("after", AFTER_RUN_COMMAND), waited=waited_of(held))
 
 
-def store(context: dict, loop: ParameterLoop, after: str = AFTER_RUN_COMMAND) -> None:
+def waited_of(held) -> int:
+    """The waits in a row the question's record *held* carries (payload key ``waited``, absent when none). It is kept
+    with the question, not on the loop, and ends with it: a request for a moment is free once, and each further one in
+    a row counts as a reply with no progress (``advance``; the CME's ``parameter_reply.read_reply``)."""
+    return int(held.payload.get("waited") or 0) if held is not None else 0
+
+
+def store(context: dict, loop: ParameterLoop, after: str = AFTER_RUN_COMMAND, waited: int = 0) -> None:
     """Make *loop* the turn's one pending question: the parameter loop replaces whatever question the CME held (the port
     holds one record at a time). *after* says what follows the answer (``AFTER_RUN_COMMAND``, ``AFTER_EDIT_SLOT``)."""
-    waiting.port_of(context).put(waiting.Waiting(
-        waiting.KIND_PARAMETERS, owner=waiting.OWNER_CME, payload={"loop": loop.to_state(), "after": after}))
+    payload = {"loop": loop.to_state(), "after": after, **({"waited": waited} if waited else {})}
+    waiting.port_of(context).put(waiting.Waiting(waiting.KIND_PARAMETERS, owner=waiting.OWNER_CME, payload=payload))
 
 
-def waiting_record(loop: ParameterLoop, after: str, part: Optional[int] = None) -> waiting.Waiting:
+def waiting_record(loop: ParameterLoop, after: str, part: Optional[int] = None, waited: int = 0) -> waiting.Waiting:
     """The plan path's waiting record for *loop*'s question (owner ``plan``): ``after`` says what follows the answer
-    (``AFTER_RESOLVE_NEXT``, ``AFTER_RESUME_PART``) and ``part`` the turn part it belongs to."""
+    (``AFTER_RESOLVE_NEXT``, ``AFTER_RESUME_PART``), ``part`` the turn part it belongs to and ``waited`` the requests
+    for a moment in a row (``Outcome.waited``)."""
     return waiting.Waiting(waiting.KIND_PARAMETERS, question=loop.question,
-                           payload={"loop": loop.to_state(), "after": after, "part": part})
+                           payload={"loop": loop.to_state(), "after": after, "part": part,
+                                    **({"waited": waited} if waited else {})})
 
 
 def clear(context: dict) -> None:
@@ -413,14 +424,15 @@ def _settle(loop: ParameterLoop, command, gaps, progressed: bool, *, description
 
 def advance(loop: ParameterLoop, reply: str, command, *,
             extract: Optional[Callable[[str], dict]] = None, description: str = "",
-            not_asked: Iterable[str] = (), live: bool = False) -> Outcome:
+            not_asked: Iterable[str] = (), live: bool = False, waited: int = 0) -> Outcome:
     """Take the reply to the loop's question.
 
     The reply is read by the one reader (``parameters.reply.read_reply``). With *live* (a caller that serves a user) it
     reads the fixed phrases of ``abort`` and ``you misunderstood`` and, for a reply that is not ``name: value`` lines,
     asks the remote decision model once (no call when none is set): ``abort`` is ``declined``, and ``wait``,
-    ``misunderstood`` and ``different`` come back as outcomes of those kinds with the loop untouched (a wait keeps the
-    question and counts nothing). Without it the reply is read in code only. Values are kept on the loop; the gaps are worked out again by
+    ``misunderstood`` and ``different`` come back as outcomes of those kinds with the loop untouched (the first wait in
+    a row keeps the question and counts nothing; *waited* is the waits in a row so far, held in the question's record,
+    and each further one is a reply that made no progress, so ``MAX_NO_PROGRESS`` of them end the loop). Without it the reply is read in code only. Values are kept on the loop; the gaps are worked out again by
     ``planning_commands.argument_gaps`` on the values kept, against the request text with the replies after it; and the
     progress rule decides between ``complete``, ``ask_again`` and ``exhausted``. Free text is given to *extract* (text ->
     {name: value}, the caller's extractor) when the loop is not a confirmation; a confirmation is strict, so free text
@@ -442,9 +454,9 @@ def advance(loop: ParameterLoop, reply: str, command, *,
     before = list(loop.asked)
     if kind == REPLY_DECLINE:
         return Outcome(DECLINED, missing=tuple(loop.open), reply_kind=kind)
-    if kind == replies.WAIT:
+    if kind == replies.WAIT and not waited:
         return Outcome(WAIT, question=f"{replies.WAIT_TEXT}\n\n{loop.question}", request=loop.request,
-                       missing=tuple(loop.open), reply_kind=kind)
+                       missing=tuple(loop.open), reply_kind=kind, waited=1)
     if kind in (replies.MISUNDERSTOOD, replies.DIFFERENT):
         return Outcome(kind, missing=tuple(loop.open), reply_kind=kind)
     if kind == REPLY_FREE and not loop.confirm and extract is not None and str(reply or "").strip():
@@ -461,7 +473,7 @@ def advance(loop: ParameterLoop, reply: str, command, *,
                                            loop.text()).from_earlier(not_asked)
     _take_gaps(loop, gaps)
     # A confirmation takes only what it can read exactly; free text there is never a reason to run.
-    unreadable = kind == REPLY_FREE and (loop.confirm or not values)
+    unreadable = kind in (REPLY_FREE, replies.WAIT) and (loop.confirm or not values)
     if not gaps.names and not unreadable:
         # The count of replies with no progress is left as it is: the part's own checks have the last word, and when
         # they still refuse something ``reopen`` measures this reply against what the last question asked.
@@ -470,4 +482,5 @@ def advance(loop: ParameterLoop, reply: str, command, *,
     # question about it; it is not a reply that made no progress.
     first_about_it = not before and not loop.stalled and kind == REPLY_VALUES
     progressed = not unreadable and (first_about_it or made_progress(before, gaps.names))
-    return _settle(loop, command, gaps, progressed, description=description, reply_kind=kind)
+    outcome = _settle(loop, command, gaps, progressed, description=description, reply_kind=kind)
+    return replace(outcome, waited=1) if kind == replies.WAIT else outcome

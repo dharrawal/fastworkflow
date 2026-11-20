@@ -254,8 +254,10 @@ def _same(value: Any, other: Any) -> bool:
         return False
 
 
-def _join_list(found: list[tuple[str, str, int, Any, Any]]) -> list[Any]:
-    """Join the values of *found* ``(query, page, query_size, value, output)``, in run order."""
+def _join_list(found: list[tuple[str, str, int, Any, Any]]) -> list[Any] | None:
+    """Join the values of *found* ``(query, page, query_size, value, output)``, in run order.
+
+    A refused run's None is not a value: it is skipped, and None is returned when every run gave None."""
     pages = [item for item in found if isinstance(item[3], (list, tuple))]
     query = None
     if pages:
@@ -268,10 +270,14 @@ def _join_list(found: list[tuple[str, str, int, Any, Any]]) -> list[Any]:
         by_key[(run_query, run_page)] = value
     joined: list[Any] = []
     for value in by_key.values():
+        if value is None:
+            continue
         if isinstance(value, (list, tuple)):
             joined.extend(value)
         else:
             joined.append(value)
+    if by_key and all(value is None for value in by_key.values()):
+        return None
     return joined
 
 

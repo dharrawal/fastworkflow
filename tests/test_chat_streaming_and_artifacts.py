@@ -31,7 +31,6 @@ import asyncio
 import importlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import uuid
@@ -77,35 +76,6 @@ def hello_world_path():
     if not os.path.isdir(path):
         pytest.skip(f"hello_world_workflow not found at {path}")
     return path
-
-
-@pytest.fixture
-def env_files(tmp_path):
-    """Workflow env files written from the shipped template.
-
-    Placeholder keys only: nothing in this module reaches a model, and a test
-    that silently started spending would be a bug, not a feature.
-    """
-    package_path = fastworkflow.get_fastworkflow_package_path()
-    env_file = tmp_path / "fastworkflow.env"
-    passwords_file = tmp_path / "fastworkflow.passwords.env"
-    shutil.copy(
-        os.path.join(package_path, "examples", "fastworkflow.env"), env_file
-    )
-    passwords_file.write_text(
-        "\n".join(
-            f"LITELLM_API_KEY_{role}=placeholder-never-used"
-            for role in (
-                "SYNDATA_GEN",
-                "PARAM_EXTRACTION",
-                "PLANNER",
-                "AGENT",
-                "CONVERSATION_STORE",
-            )
-        )
-        + "\n"
-    )
-    return str(env_file), str(passwords_file)
 
 
 @pytest.fixture

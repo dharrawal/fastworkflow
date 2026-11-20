@@ -46,8 +46,7 @@ class TestCommandDirectory:
             "IntentDetection/reset_context",
             "IntentDetection/what_is_current_context",
             # Framework commands shipped with the review engine (fastworkflow/_framework_commands,
-            # fix-3rsq.10 / Phase 9-10 review_plan, review_subtasks, review_proposal).
-            "review_plan",
+            # fix-3rsq.10 / Phase 9-10 review_subtasks, review_proposal).
             "review_subtasks",
             "review_proposal",
         }

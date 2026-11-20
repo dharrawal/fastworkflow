@@ -26,7 +26,6 @@ import asyncio
 import importlib
 import json
 import os
-import shutil
 import sys
 import uuid
 
@@ -53,42 +52,6 @@ def hello_world_workflow_path():
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
     return workflow_path
-
-
-@pytest.fixture
-def env_files(tmp_path):
-    """Workflow env files written from the shipped template.
-
-    Previously the repo's own ``env/.env`` and ``passwords/.env``, which meant
-    the whole file skipped on a machine that has no passwords file — so the
-    tests were unrunnable for two independent reasons at once. The keys here
-    are placeholders and are never used: no test in this file reaches a model.
-    """
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    template = os.path.join(
-        project_root, "fastworkflow", "examples", "fastworkflow.env"
-    )
-    if not os.path.isfile(template):
-        pytest.skip(f"env template missing at {template}")
-
-    env_file = tmp_path / "fastworkflow.env"
-    shutil.copy(template, env_file)
-    passwords_file = tmp_path / "fastworkflow.passwords.env"
-    passwords_file.write_text(
-        "\n".join(
-            f"LITELLM_API_KEY_{role}=placeholder-not-used"
-            for role in (
-                "SYNDATA_GEN",
-                "PARAM_EXTRACTION",
-                "RESPONSE_GEN",
-                "PLANNER",
-                "AGENT",
-                "CONVERSATION_STORE",
-            )
-        )
-        + "\n"
-    )
-    return str(env_file), str(passwords_file)
 
 
 @pytest.fixture

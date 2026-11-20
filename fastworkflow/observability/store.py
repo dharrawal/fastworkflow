@@ -6423,7 +6423,7 @@ class ObservabilityStore:
                 expired = updated_at < horizon_moment.isoformat()
                 if inactive and (_writer_health_is_clean(health) or expired):
                     conn.execute("DELETE FROM diagnostics WHERE key=?", (key,))
-            conn.execute("PRAGMA incremental_vacuum")
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
             conn.commit()
             # Fold the deletes back into the main file now, so the evidence
             # they removed does not wait there for the next checkpoint.
@@ -6734,7 +6734,7 @@ class ObservabilityStore:
                 deleted["experiments_invalidated"] = invalidated
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            conn.execute("PRAGMA incremental_vacuum")
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
             conn.commit()
 
         return deleted
@@ -6773,7 +6773,7 @@ class ObservabilityStore:
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            conn.execute("PRAGMA incremental_vacuum")
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
             conn.commit()
 
         return deleted

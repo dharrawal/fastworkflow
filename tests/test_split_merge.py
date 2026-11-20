@@ -611,3 +611,56 @@ def test_a_name_taken_from_the_earlier_turns_is_not_an_invention_and_the_request
     # When everything joins, the request (never the earlier turns) is the one job.
     assert merge_subtasks(q, ["Add a note to Mia Chen's record that she was reminded.",
                               "Show the notes on Mia Chen's record."], context=context) == [q]
+
+
+# ------------------------------------------------------------------ name integrity (fix-26pf, fix-hia1.38)
+def test_a_name_with_and_cut_in_two_is_put_back_together():
+    q = "Show the groups of Baker and Sons and Sons and the cases of Ann Lee."
+    split = ["Show the groups of Baker", "Show the groups of Sons and the cases of Ann Lee."]
+    assert merge_subtasks(q, split) == [q]
+
+
+def test_a_quoted_name_with_and_cut_in_two_is_never_left_cut():
+    q = "Show the groups of 'Baker and Sons' and the cases of Ann Lee."
+    out = merge_subtasks(q, ["Show the groups of Baker.", "Show the groups of Sons.", "Show the cases of Ann Lee."])
+    assert out == [q]
+
+
+def test_a_stuttered_name_is_collapsed_to_the_requests_spelling():
+    q = "Walk Blake and Sons. Then show the cases of Ann Lee."
+    split = ["Walk Blake and Sons and Sons and Sons and Sons.", "Show the cases of Ann Lee."]
+    assert merge_subtasks(q, split) == ["Walk Blake and Sons.", "Show the cases of Ann Lee."]
+    q = "Walk 'Blake and Sons'. Then show the cases of Ann Lee."
+    assert merge_subtasks(q, ["Walk Blake and Sons and Sons.", "Show the cases of Ann Lee."]) == [
+        "Walk Blake and Sons.", "Show the cases of Ann Lee."]
+
+
+def test_a_name_the_request_itself_repeats_is_not_collapsed():
+    q = "Walk Blake and Sons and Sons. Then show the cases of Ann Lee."
+    split = ["Walk Blake and Sons and Sons.", "Show the cases of Ann Lee."]
+    assert merge_subtasks(q, split) == split
+
+
+def test_whole_names_with_and_come_through_unchanged():
+    q = "Show the groups of Baker and Sons and the cases of Ann Lee. Then walk 'Cobb and Daughters'."
+    split = ["Show the groups of Baker and Sons.", "Show the cases of Ann Lee.", "Walk 'Cobb and Daughters'."]
+    assert merge_subtasks(q, split) == split
+
+
+# ------------------------------------------------------------------ dependent parts stay together (fix-dr1e d)
+def test_a_dependent_part_naming_the_same_person_is_kept_with_its_parent():
+    q = "Who does Ann Lee report to and what is the delta between her permissions and that of her boss"
+    assert merge_subtasks(q, ["Who does Ann Lee report to?",
+                              "What is the delta between Ann Lee's permissions and that of her boss?"]) == [q]
+
+
+def test_a_subject_less_dependent_part_is_kept_with_its_parent():
+    q = "Walk one login to an entitlement, then audit that entitlement. Also sweep Bo Chan."
+    out = merge_subtasks(q, ["Walk one login to an entitlement.", "Audit that entitlement.", "Sweep Bo Chan."])
+    assert not any("Audit that entitlement" in t and "Walk one login" not in t for t in out)
+
+
+def test_a_comparison_followed_by_a_dependent_listing_is_one_job():
+    q = "Compare Ann Lee and Bo Chan, then for whichever carries more risk, list the findings."
+    assert merge_subtasks(q, ["Compare Ann Lee and Bo Chan.",
+                              "For whichever carries more risk, list the findings."]) == [q]

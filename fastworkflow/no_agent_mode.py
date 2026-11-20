@@ -334,9 +334,22 @@ def ran_statement(entry: dict[str, Any]) -> str:
         if rows:
             lines.append(f"- rows: {_fact_text(rows)}")
     if (entry.get("open_step") or {}).get("kind") == STEP_PAGE_CAP:
-        lines += ["", "The read stopped at the page cap with rows still to read: any count above is of a partial "
-                      "read, not of the whole list."]
+        lines += ["", partial_read_sentence("page cap")]
     return "\n".join(lines)
+
+
+def partial_read_sentence(limit: str) -> str:
+    """The one sentence that says a paged read stopped at *limit* (``page cap`` or ``step limit``) with rows still to
+    read, so a count in the answer is of the rows read and not of the whole list."""
+    return (f"The read stopped at the {limit} with rows still to read: any count above is of a partial read, not of "
+            "the whole list.")
+
+
+def step_limit_note(command: str, read: dict[str, Any]) -> str:
+    """The note a run that ran out of steps while paging *command* ends its answer with: the rows read of the total
+    the command reported (``read`` is the ``partial_read`` shape) and the partial-read sentence."""
+    return (f"{command}: {read.get('rows_read')} rows read of {read.get('total')} the command reported.\n"
+            f"{partial_read_sentence('step limit')}")
 
 
 # ---- decision steps: the question a paused planning command asks and how its reply is read ------------------------

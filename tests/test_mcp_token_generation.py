@@ -21,19 +21,6 @@ def hello_world_workflow_path():
 
 
 @pytest.fixture
-def env_files():
-    """Get paths to actual env files for testing"""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file):
-        pytest.skip(f"Env file not found at {env_file}")
-    if not os.path.isfile(passwords_file):
-        pytest.skip(f"Passwords file not found at {passwords_file}")
-    return env_file, passwords_file
-
-
-@pytest.fixture
 def app_module(hello_world_workflow_path, env_files):
     """Import the FastAPI app module with required CLI ARGS configured."""
     env_file, passwords_file = env_files

@@ -276,6 +276,32 @@ def test_error_span_names_the_command_and_context(monkeypatch):
     assert span.context == expected_context
 
 
+def test_error_span_records_success_false_and_control_signals_do_not(monkeypatch):
+    """fix-zl5b: a failed dispatch says success=False like the normal path
+    does; a control signal is not a failure and records no success."""
+    from fastworkflow.workflow_execution_context import CommandCancelledError
+
+    ctx, sink, _wf = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
+    try:
+        with pytest.raises(RuntimeError):
+            CommandExecutor.invoke_command(ctx, "fail")
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    assert span.attributes["success"] is False
+
+    ctx, sink, _wf = _failing_ctx(monkeypatch, lambda: CommandCancelledError("cancelled"))
+    try:
+        with pytest.raises(CommandCancelledError):
+            CommandExecutor.invoke_command(ctx, "fail")
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    assert "success" not in span.attributes
+
+
 def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
     """The three-way identity must hold on the error path too.
 

@@ -2520,6 +2520,13 @@ def _typed_phase_output_problems(
                     except PhaseError:
                         lines = []
                 step_cmds = [name for name, _ in step_commands(lines, known)]
+                # An open step that writes the command word whole names it (the agent runs it);
+                # a phase that never mentions it stays a load error.
+                text = "\n".join(str(line) for line in lines)
+                step_cmds.extend(
+                    name for name in sorted(known)
+                    if name not in step_cmds and re.search(rf"\b{re.escape(name)}\b", text)
+                )
                 for message in tpf.check_phase_steps_name_commands(
                     fpath, phase.name, step_cmds, phase.output,
                     resolution.model_to_command, signatures,

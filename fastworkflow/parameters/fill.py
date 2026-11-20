@@ -261,6 +261,16 @@ def is_own_command_token(token: str, command_name: str) -> bool:
     token = token.lstrip("/").lower()
     return token in (command_name.lower(), command_name.split("/")[-1].lower())
 
+def without_own_command_word(text: str, command_name: str) -> str:
+    """*text* without a leading token that is this command's own name (``find_book SCOM`` -> ``SCOM``).
+
+    What the grounding guard reads as the request: the command word an agent's text starts with is
+    not something the user wrote, so a value only it spells (``Application`` in ``find_application``)
+    is not written in the request. The parsers read the text whole.
+    """
+    head, _, rest = text.lstrip().partition(" ")
+    return rest.strip() if is_own_command_token(head, command_name) else text
+
 def bound_model(command_parameters_class: type[BaseModel],
                  converted: dict[str, Any]) -> Optional[BaseModel]:
     """The parameters model holding *converted* (already type-converted), or None.

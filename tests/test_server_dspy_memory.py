@@ -125,15 +125,6 @@ def workflow_path():
 
 
 @pytest.fixture
-def env_files():
-    env_file = os.path.join(_REPO_ROOT, "env", ".env")
-    passwords_file = os.path.join(_REPO_ROOT, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI server tests")
-    return env_file, passwords_file
-
-
-@pytest.fixture
 def server_argv_preamble(workflow_path, env_files):
     """Source that sets ``sys.argv`` before ``__main__`` parses it at import time."""
     env_file, passwords_file = env_files

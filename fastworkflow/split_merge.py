@@ -462,6 +462,25 @@ def _source_sentence(text: str, sentences: list[str], subj: frozenset[str], sole
     return best if cover[best] >= SOURCE_COVERAGE else None
 
 
+def _and_names(known: list[str]) -> list[str]:
+    """The request subjects whose own text holds an "and" ("Baker and Sons", 'Stale and shared logins')."""
+    return [k for k in known if re.search(r"\sand\s", k, re.IGNORECASE)]
+
+
+def _collapse_stutter(text: str, user_query: str, known: list[str]) -> str:
+    """A name with an "and" followed by a repeat of its own last segment ("Blake and Sons and Sons") that
+    the request never writes that long is the request's own spelling of the name (invariant: name integrity)."""
+    for name in _and_names(known):
+        last = re.split(r"\sand\s", name, flags=re.IGNORECASE)[-1].strip()
+        if not last:
+            continue
+        repeat = r"(?:\s+and\s+" + re.escape(last) + r")"
+        pattern = re.compile(re.escape(name) + repeat + "+(?![\\w-])", re.IGNORECASE)
+        if pattern.search(text) and not re.search(re.escape(name) + repeat, user_query, re.IGNORECASE):
+            text = pattern.sub(lambda _m: name, text)
+    return text
+
+
 def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
                           identifiers: tuple[re.Pattern, ...], wrong_records_only: bool = False) -> list[str]:
     """Rule 6a: the sub-tasks taken from a job sentence carry all of that sentence's subjects.
@@ -483,6 +502,11 @@ def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
     sentences = _sentences(user_query)
     subj = [subjects_in(t, known, identifiers) for t in texts]
     sources = [_source_sentence(t, sentences, s) for t, s in zip(texts, subj)]
+    for i, text in enumerate(texts):
+        # a sub-task holding only a half of a request name with an "and" is taken from the sentence naming it
+        cut = [a for a in _and_names(known) if _norm(a) in subj[i] and not _contains(text, a)]
+        if sources[i] is None and cut:
+            sources[i] = next((k for k, sentence in enumerate(sentences) if _contains(sentence, cut[0])), None)
     replace: dict[int, str] = {}
     drop: set[int] = set()
     for k, sentence in enumerate(sentences):
@@ -497,6 +521,9 @@ def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
                   and _source_sentence(texts[i], sentences, subj[i], sole=True) == k]
         kept = [i for i in taken if i not in strays]
         missing = own - frozenset().union(*(subj[i] for i in kept))
+        # a name with an "and" counts only written whole: a half of it ("Sons") is no sign it was named
+        missing |= {_norm(a) for a in _and_names(known) if _norm(a) in own
+                    and not any(_contains(texts[i], a) for i in kept)}
         text = _LEADING_LINK.sub("", sentence.strip())
         text = text[:1].upper() + text[1:]
         if strays:
@@ -1116,6 +1143,7 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     if len(items) < 2:
         return list(subtasks)
     known = request_subjects(user_query, identifiers)
+    items = [_collapse_stutter(t, user_query, known) for t in items]
     # rule 1 reads the request and the earlier turns: what the splitter took from either is not invented
     source = f"{user_query}\n{context}" if context else user_query
     given = request_subjects(source, identifiers) if context else known

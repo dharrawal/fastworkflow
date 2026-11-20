@@ -18,11 +18,11 @@ def retail_workflow_path() -> str:
 
 
 @pytest.fixture(scope="function")
-def chat_session(retail_workflow_path: str, request):
+def chat_session(retail_workflow_path: str, request, env_files):
     """Spin up an in-memory chat session for each test so state cannot leak."""
     env_vars = {
-        **dotenv_values("./env/.env"),
-        **dotenv_values("./passwords/.env")
+        **dotenv_values(env_files[0]),
+        **dotenv_values(env_files[1]),
     }
     fastworkflow.init(env_vars)
     

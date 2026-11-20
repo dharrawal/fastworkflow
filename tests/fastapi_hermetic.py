@@ -46,3 +46,36 @@ def restore_fastapi_env(previous_env: dict[str, Any]) -> None:
     if fastworkflow.RoutingRegistry:
         fastworkflow.RoutingRegistry.clear_registry()
     fastworkflow.init(previous_env)
+
+
+PLACEHOLDER_KEY = "<placeholder: no key>"
+TEMPLATE_MODEL = "mistral/mistral-small-latest"
+_KEY_PREFIX = "LITELLM_API_KEY_"
+
+
+def write_placeholder_env(directory: Path | str) -> tuple[str, str]:
+    """Write ``fastworkflow.env`` and ``fastworkflow.passwords.env`` into *directory*; return both paths.
+
+    Built only from the tracked examples (never ``env/.env`` or ``passwords/.env``), so the result is the same on
+    every machine. The env file is the template followed by one block that sets every role's model to the template's
+    default, so a developer's local model lines in the working copy cannot change what a test calls. The passwords
+    file holds one placeholder per ``LITELLM_API_KEY_<ROLE>`` NAME the passwords template declares and no
+    ``JEV_API_KEY``; the placeholder is written in the shipped style (``<``), which ``llm_credentials`` reads as no key.
+    """
+    examples = Path(fastworkflow.get_fastworkflow_package_path()) / "examples"
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    roles = [
+        name[len(_KEY_PREFIX):]
+        for name in dotenv_values(examples / "fastworkflow.passwords.env")
+        if name.startswith(_KEY_PREFIX)
+    ]
+    env_file = directory / "fastworkflow.env"
+    env_file.write_text(
+        (examples / "fastworkflow.env").read_text()
+        + "\n# Test override: the template's model for every role.\n"
+        + "".join(f"LLM_{role}={TEMPLATE_MODEL}\n" for role in roles)
+    )
+    passwords_file = directory / "fastworkflow.passwords.env"
+    passwords_file.write_text("".join(f"{_KEY_PREFIX}{role}={PLACEHOLDER_KEY}\n" for role in roles))
+    return str(env_file), str(passwords_file)

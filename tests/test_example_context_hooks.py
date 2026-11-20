@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import gc
 import importlib
-import os
 import shutil
 import sys
 import uuid
@@ -188,12 +187,8 @@ def test_editing_a_context_class_file_changes_no_command_fingerprint(tmp_path, i
 # -- the library inside the real server -------------------------------------------------------------------------
 
 @pytest.fixture
-def library_app(tmp_path):
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
+def library_app(tmp_path, env_files):
+    env_file, passwords_file = env_files
     folder = tmp_path / "library"
     shutil.copytree(LIBRARY, folder, ignore=shutil.ignore_patterns(
         "___command_info", "___workflow_contexts", "___convo_info", "__pycache__"), symlinks=True)

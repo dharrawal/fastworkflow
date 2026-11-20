@@ -202,6 +202,20 @@ def _lone(name: str, value: str, slot: Slot) -> Read:
     return Read(VALUES, {name: value})
 
 
+def fits_constrained(reply: str, open_names: Iterable[str], slots: Optional[Mapping[str, Slot]]) -> bool:
+    """True when *reply* is, in code, a valid value of every open field and each of those fields is constrained (a yes/no,
+    allowed values or a number): the one open field takes the whole reply, several take its comma parts in order. A free
+    text field never fits (so a reply like "hold on" is still read by the remote model)."""
+    names = [str(name) for name in open_names]
+    if not names or not slots or any(not (slot := slots.get(name)) or not (slot.boolean or slot.options or slot.number)
+                                     for name in names):
+        return False
+    text = _unquoted(str(reply or ""))
+    parts = [text] if len(names) == 1 else split_values(text)
+    return len(parts) == len(names) and all(
+        part and _fit(part, slots[name]) is not None for name, part in zip(names, parts))
+
+
 _YES_NO = frozenset({"yes", "y", "true", "no", "n", "false", "nope", "none", "neither"})
 _NUMBER = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 

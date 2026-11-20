@@ -176,6 +176,45 @@ def pytest_runtest_setup(item):
     """
     if _head_marker_and_absent(item) and not plan_head.heads_required():
         pytest.skip(plan_head.missing_head_message())
+    if _needs_real_key_and_has_none(item):
+        pytest.skip("requires_llm_key: no real LITELLM_API_KEY_* (or bedrock model) is configured")
+
+
+SERVER_LAYER_FIXTURES = ("env_files", "app_module")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """A server-layer test (one that asks for ``env_files`` or ``app_module``) may skip only because it needs a live key.
+
+    ``env_files`` is written from the tracked template and never skips, so a skip there means a silent hole in the
+    suite (a missing env file, a missing workflow). It is reported as a failure naming the skip reason. A test that
+    carries ``requires_llm_key`` is the one allowed skip. Only a skip while the test is being SET UP counts: that is
+    where a missing env file or workflow shows (the fixtures), while a skip in the test body is the test's own
+    declared condition (the jsdom DOM checks skip there unless ``TEST_JSDOM_ROOT`` is set, and have their own gate,
+    ``python -m tests.browser_validation``).
+    """
+    outcome = yield
+    report = outcome.get_result()
+    if (
+        report.skipped
+        and report.when == "setup"
+        and not hasattr(report, "wasxfail")
+        and item.get_closest_marker("requires_llm_key") is None
+        and any(name in item.fixturenames for name in SERVER_LAYER_FIXTURES)
+    ):
+        reason = report.longrepr[2] if isinstance(report.longrepr, tuple) else str(report.longrepr)
+        report.outcome = "failed"
+        report.longrepr = (
+            f"server-layer test skipped without the requires_llm_key marker, which is a failure "
+            f"(it must run everywhere): {reason}"
+        )
+
+
+def _needs_real_key_and_has_none(item) -> bool:
+    from tests import llm_credentials
+
+    return item.get_closest_marker("requires_llm_key") is not None and not llm_credentials.real_llm_credentials_available()
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -209,6 +248,35 @@ def pytest_configure(config):
         "markers",
         "requires_llm_key: mark test as needing a real LLM API key to do more than skip",
     )
+
+
+@pytest.fixture
+def env_files(tmp_path, request):
+    """``(env_file, passwords_file)`` for server-layer tests, written from the tracked template.
+
+    Same on every machine: never reads ``env/.env`` or ``passwords/.env``, holds placeholder keys only (read as no key
+    by ``llm_credentials``) and no ``JEV_API_KEY``, and sets every role's model to the template's default. Nothing a
+    test does with it reaches a model unless the test installs a live one.
+    """
+    from tests.fastapi_hermetic import write_placeholder_env
+
+    # A server-layer test reaches a model only if it carries ``requires_llm_key``: the real litellm entry points
+    # refuse the call, so a code path that would send one (the topic label, a parameter extraction) fails inside the
+    # app, as it would offline, instead of sending a request with a placeholder key. A test that installs its own
+    # model stand-in is left alone.
+    # The patch has its own ``MonkeyPatch`` (not the test's), so a test's own ``monkeypatch`` is undone first.
+    guard = pytest.MonkeyPatch()
+    if request.node.get_closest_marker("requires_llm_key") is None:
+        def refuse(*args, **kwargs):
+            raise AssertionError("a live model call was attempted from a test that does not carry requires_llm_key")
+
+        for name in ("completion", "acompletion"):
+            if getattr(getattr(litellm, name), "__module__", "") == "litellm.main":
+                guard.setattr(litellm, name, refuse)
+    try:
+        yield write_placeholder_env(tmp_path / "env_files")
+    finally:
+        guard.undo()
 
 
 @pytest.fixture

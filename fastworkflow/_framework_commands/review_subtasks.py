@@ -36,7 +36,7 @@ class PlanGenerator:
             return self.proposal.accepted
 
     def review(self, input) -> Review:
-        return [run("review_proposal", round=1, items=input.subtasks)]
+        return [run("review_proposal", items=input.subtasks)]
 
     def __result__(self, input, review):
         return Signature.Output(items=[SubTask(**item) for item in json.loads(review.accepted)["items"]])

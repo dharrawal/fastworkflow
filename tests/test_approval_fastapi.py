@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import importlib
-import os
 import shutil
 import sys
 import uuid
@@ -44,16 +43,6 @@ def no_live_model(monkeypatch):
 
     monkeypatch.setattr(litellm, "completion", _refuse)
     monkeypatch.setattr(litellm, "acompletion", _refuse)
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture

@@ -128,7 +128,7 @@ _SCRIPT_RE = re.compile(rb"<script\b[^>]*>(.*?)</script>", re.DOTALL)
 
 # Content types that may contain active content: only ever rendered inside a
 # sandboxed iframe by the SPA; direct responses are additionally sandboxed via
-# CSP (see _artifact_headers) [R22].
+# CSP (see _artifact_headers).
 _HTMLISH_TYPES = ("text/html", "application/xhtml+xml", "image/svg+xml")
 
 
@@ -443,7 +443,7 @@ class ChatbotServer:
         # handlers otherwise thrash the GIL decoding the same span JSON.
         self._turns_scan_lock = threading.Semaphore(1)
         self._derived_turn_cache = DerivedTurnCache()
-        # Per-launch bearer token [R5]; overridable only for tests.
+        # Per-launch bearer token; overridable only for tests.
         self.token = token if token is not None else secrets.token_urlsafe(32)
         self.index_html = load_index_html()
         script_hashes = _inline_script_hashes(self.index_html)
@@ -458,7 +458,7 @@ class ChatbotServer:
         # connect-src: 'self' for the debug-mode read API, plus loopback-only
         # origins so TEST MODE can call the local FastAPI server
         # (/initialize, /invoke_agent, /invoke_assistant). Never a non-loopback
-        # host — the SPA can only ever talk to servers on this machine [R19][R22].
+        # host — the SPA can only ever talk to servers on this machine.
         self.page_csp = (
             "default-src 'none'; "
             f"script-src 'self'{' ' + script_srcs if script_srcs else ''}; "
@@ -491,7 +491,7 @@ class ChatbotServer:
         class _Handler(_ChatbotRequestHandler):
             chatbot = server
 
-        # 127.0.0.1 only — never configurable to a wider bind [R5][R18].
+        # 127.0.0.1 only — never configurable to a wider bind.
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
@@ -966,8 +966,8 @@ def _checked_write_routes(
 
 
 _WRITE_ROUTES = _checked_write_routes((
-    # The one write surface for recorded review notes (fix-9eg.16,
-    # owner wording). Reads live on GET /api/feedback-notes and
+    # The one write surface for recorded review notes (owner wording).
+    # Reads live on GET /api/feedback-notes and
     # GET /api/task-feedback, so a read is never spelled as a post.
     _WriteRoute("POST", _exact("/post_feedback"), "_post_feedback_note"),
     _WriteRoute("POST", _exact("/api/benchmark-setup"), "_post_benchmark_record"),
@@ -984,7 +984,7 @@ _WRITE_ROUTES = _checked_write_routes((
     _WriteRoute("POST", _exact("/api/select_workflow"), "_post_select_workflow"),
     _WriteRoute("POST", _exact("/api/configure_env"), "_post_configure_env"),
     _WriteRoute("POST", _exact("/api/train"), "_post_train"),
-    # Sealing, deleting and releasing benchmark experiments (fix-ajir.24).
+    # Sealing, deleting and releasing benchmark experiments.
     _WriteRoute("POST", _exact(SEALED_PREFIX), "_post_seal", require_object_body=True),
     _WriteRoute("POST", _exact(RELEASES_PATH), "_post_release", require_object_body=True),
     _WriteRoute("DELETE", sealed_delete_path, "_delete_sealed", reads_body=False),
@@ -1183,7 +1183,7 @@ class _ChatbotRequestHandler(
             payload["error_id"] = error_id
         self._send_json(payload, status=status)
 
-    # -- access control [R5][R18] ---------------------------------------
+    # -- access control ---------------------------------------
     #
     # The allowlist admits any LOOPBACK authority — 127.0.0.1 / localhost /
     # [::1], any port — and nothing else. Loopback-only is what defeats DNS
@@ -1208,7 +1208,7 @@ class _ChatbotRequestHandler(
         host = (self.headers.get("Host") or "").strip().lower()
         if not self._is_loopback_authority(host):
             logger.warning(
-                f"Chatbot refused a request with non-loopback Host {host!r} [R18]"
+                f"Chatbot refused a request with non-loopback Host {host!r}"
             )
             return False
         origin = (self.headers.get("Origin") or "").strip().lower()
@@ -1220,7 +1220,7 @@ class _ChatbotRequestHandler(
                 or not self._is_loopback_authority(authority)
             ):
                 logger.warning(
-                    f"Chatbot refused a request with non-loopback Origin {origin!r} [R18]"
+                    f"Chatbot refused a request with non-loopback Origin {origin!r}"
                 )
                 return False
         return True
@@ -1354,7 +1354,7 @@ class _ChatbotRequestHandler(
         The 405 allowlist is ``_WRITE_ROUTES``. A matched row always names a
         handler, so nothing allowlisted can fall through into clear-conversations.
         An unknown write from a bad host or a missing token is 403 or 401,
-        not 405 (owner decision 2026-09-30, fix-hzux.10).
+        not 405 (owner decision 2026-09-30).
         """
         split = urlsplit(self.path)
         path = split.path
@@ -1589,7 +1589,7 @@ class _ChatbotRequestHandler(
             # low-confidence test -- is applied by `search_turns` to the whole
             # authorized dataset. This route used to list one page and then drop
             # rows from it, so a turn matching on page four was reported as no
-            # match at all (fix-9eg.18.1); the filtering now happens before the
+            # match at all; the filtering now happens before the
             # page is cut rather than after.
             # A sealed experiment's turns are read from its archive.
             if q("experiment"):
@@ -1622,7 +1622,7 @@ class _ChatbotRequestHandler(
                 return
             self._send_json({"turn": turn})
         # GET /api/feedback and /api/feedback/<turn_key> read the agent-memory
-        # `feedback` table and were removed with it (fix-9eg.16). They are not
+        # `feedback` table and were removed with it. They are not
         # re-pointed at review notes: a client still calling them is asking
         # for something that no longer exists, and a 404 says so, where a
         # silently different payload would not.

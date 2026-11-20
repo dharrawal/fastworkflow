@@ -625,6 +625,36 @@ class PlanGenerator:
     )
 
 
+def test_open_step_that_mentions_the_command_word_counts_as_naming_it(tmp_path):
+    """fix-rayk: a prose step naming find_book whole is the agent's step for it;
+    a phase that never mentions it is still the load error above."""
+    source = '''from pydantic import BaseModel, Field
+
+from fastworkflow.planning import run
+
+from .find_book import Signature as FindBook
+
+
+class Signature:
+    """Open typed phase."""
+
+    class Input(BaseModel):
+        query: str = Field(description="words")
+
+
+class PlanGenerator:
+    def find(self, input) -> FindBook.Output:
+        return ["look the title up with find_book"]
+'''
+    folder = _library_workflow(tmp_path)
+    path = os.path.join(folder, "_commands", "Library", "open_typed.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(source)
+    planning_commands.resolve_field_sources.cache_clear()
+    res = planning_commands.resolve_field_sources(folder)
+    assert not [e for e in res.errors if "hands on find_book's Output" in e.message]
+
+
 def test_union_annotation_hands_on_whichever_member_ran(library_env):
     class Plan:
         def find(self, input) -> FindBook.Output | FindMember.Output:

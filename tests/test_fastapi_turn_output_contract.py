@@ -51,16 +51,6 @@ COMMAND_OUTPUT_ONLY_KEYS = frozenset(
 )
 
 
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
-
-
 def _load_app_module(workflow_path: str, env_files, speedict_dir):
     env_file, passwords_file = env_files
     sys.argv = [
@@ -490,6 +480,7 @@ def _parse_sse(text: str) -> list[dict]:
     return events
 
 
+@pytest.mark.requires_llm_key
 @pytest.mark.parametrize("stream_format", ["ndjson", "sse"])
 def test_the_stream_terminal_output_event_is_a_turn_output(agent_app_module, stream_format):
     """The final 'output' event carries a TurnOutput, not a CommandOutput.

@@ -211,6 +211,7 @@ def gated(todo):
 
 
 def test_a_subtask_review_is_tagged_review_and_an_edit_refreshes_it(gated, monkeypatch):
+    script_matcher(monkeypatch, {EMMA: {"none": 0.9}, JOKE: {"none": 0.9}})
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda user_query, **kwargs: [EMMA, JOKE])
     out = gated.ctx.process_turn(f"{EMMA} and {JOKE}")

@@ -33,12 +33,9 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture(scope="module")
-def initialized():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing")
+def initialized(tmp_path_factory):
+    from tests.fastapi_hermetic import write_placeholder_env
+    env_file, passwords_file = write_placeholder_env(tmp_path_factory.mktemp("env_files"))
     from dotenv import dotenv_values
 
     fastworkflow.init({**dotenv_values(env_file), **dotenv_values(passwords_file)})

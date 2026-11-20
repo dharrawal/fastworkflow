@@ -515,6 +515,12 @@ def test_a_field_can_name_its_own_paging_parameter():
     assert browsed(runs).book_uids == ["b2"]  # the typed fill pages on "start"
 
 
+def test_a_refused_run_is_not_a_value_of_the_joined_list():
+    # fix-3rsq.facts-join-none: a refused run's None used to become [None].
+    assert _join_list([("q", "{}", 0, None, {})]) is None
+    assert _join_list([("q", "{}", 0, None, {}), ("q", "1", 0, ["b1"], {})]) == ["b1"]
+
+
 # A listing whose first page alone carries a whole-scope tally (later pages report none).
 class OverdueShelf:
     class Input(BaseModel):

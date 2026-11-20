@@ -112,10 +112,21 @@ def test_conditional_a_request_for_a_moment_keeps_the_question_and_counts_nothin
     assert waited.answer.startswith(replies.WAIT_TEXT) and first.answer in waited.answer
     assert _decision(library_env)["asked"] == 1
     # The same question is still out and a later plain reply answers it; the wait did not stack a second prefix.
+    # A second wait in a row counts as a reply that gave nothing usable (fix-b3w2): the question is asked once more.
     again = library_env.ctx.process_turn("hold on, let me check")
-    assert again.answer.count(replies.WAIT_TEXT) == 1 and _decision(library_env)["asked"] == 1
+    assert again.status is TurnStatus.AWAITING_USER and _decision(library_env)["asked"] == 2
     done = library_env.ctx.process_turn("no")
     assert done.status is TurnStatus.COMPLETED and _stops(done) is None
+
+
+def test_conditional_a_third_wait_in_a_row_stops_the_command_and_a_reply_between_resets_the_count(library_env,
+                                                                                                   monkeypatch):
+    _asked(library_env, monkeypatch, Conditional)
+    _Remote(monkeypatch, "wait")
+    library_env.ctx.process_turn("hold on")
+    library_env.ctx.process_turn("hold on")
+    done = library_env.ctx.process_turn("hold on")
+    assert done.status is TurnStatus.COMPLETED and library_env.ctx.waiting is None and _stops(done)
 
 
 def test_conditional_a_different_request_stops_the_command_and_is_not_run_as_a_request(library_env, monkeypatch):

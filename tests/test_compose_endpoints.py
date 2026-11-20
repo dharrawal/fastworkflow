@@ -7,7 +7,6 @@ Real FastAPI app over a copy of ``tests/hello_world_workflow``, real auth, real 
 from __future__ import annotations
 
 import importlib
-import os
 import shutil
 import sys
 import threading
@@ -26,16 +25,6 @@ from fastworkflow.utils import dspy_utils
 
 HELLO = Path(__file__).resolve().parent / "hello_world_workflow"
 _COPY_IGNORE = shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__")
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture

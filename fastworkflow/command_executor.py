@@ -543,7 +543,11 @@ class CommandExecutor(CommandExecutorInterface):
                 # that could not say which command it covered. fix-ajv.16 FW-3.
                 command_name=_annotation(exc, "_fw_command_name"),
                 context=_annotation(exc, "_fw_context"),
-                attributes={"error_type": type(exc).__name__},
+                attributes={
+                    "error_type": type(exc).__name__,
+                    # A control signal is not a failure, so it records no outcome.
+                    **({} if is_control_signal else {"success": False}),
+                },
             )
             if not is_control_signal:
                 # A failure is still a dispatch that happened. Without the id,
@@ -813,6 +817,9 @@ class CommandExecutor(CommandExecutorInterface):
             command_output.context = "global" if not ran_on_name else ran_on_name
             command_output.ran_in_context_name = ran_on_name or ""
             command_output.ran_in_context_clause = ran_on_clause
+
+        if command_output.success:
+            command_writes.record_phase_write(chat_session, workflow.folderpath, command_name)
 
         # important to clear the current command mode from the workflow context
         _end_round(chat_session)

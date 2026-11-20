@@ -419,11 +419,12 @@ def _take_values(resolution: PlanResolution, held, reply: str, plan, turn: Turn)
     description = (review_proposals.planning_descriptions(turn.workflow.folderpath).get(command.name, "")
                    if loop.confirm else "")
     outcome = loops.advance(loop, reply, command, extract=extract, description=description,
-                            not_asked=_from_earlier_parts(item), live=True)
+                            not_asked=_from_earlier_parts(item), live=True, waited=loops.waited_of(held))
     if outcome.kind in (loops.ASK_AGAIN, loops.WAIT):
         # The asking rule (``parameter_clarification``): asked again while each reply makes progress, and once more after
-        # one that does not; in every session. A reply that asked for a moment leaves the question out and counts nothing.
-        turn.port.put(loops.waiting_record(loop, loops.AFTER_RESOLVE_NEXT, resolution.index))
+        # one that does not; in every session. The first reply in a row that asked for a moment leaves the question out
+        # and counts nothing; each further one counts as a reply with no progress (``waited`` is in the record).
+        turn.port.put(loops.waiting_record(loop, loops.AFTER_RESOLVE_NEXT, resolution.index, waited=outcome.waited))
         return plan, outcome.question
     if outcome.kind == loops.MISUNDERSTOOD:
         return ask_misunderstood(resolution, plan, turn)

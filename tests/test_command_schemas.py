@@ -32,7 +32,7 @@ from fastworkflow.mcp_server import FastWorkflowMCPServer, command_schema_listin
 HELLO = Path(__file__).resolve().parent / "hello_world_workflow"
 _COPY_IGNORE = shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__")
 COMMAND_FILE = "_commands/add_two_numbers.py"
-FRAMEWORK_COMMANDS = ("review_plan", "review_proposal", "review_subtasks")
+FRAMEWORK_COMMANDS = ("review_proposal", "review_subtasks")
 
 _HEADER = """import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
@@ -111,16 +111,6 @@ def _copy_hello(folder: Path, *, declare_output: bool) -> str:
     source += _CALL_WITH_OUTPUT if declare_output else _CALL_WITHOUT_OUTPUT
     (folder / COMMAND_FILE).write_text(source)
     return str(folder)
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture
@@ -247,7 +237,7 @@ def test_command_schemas_requires_a_token(app_module):
 
 def test_command_schema_listing_hides_framework_commands(output_workflow, mcp_env):
     listing = command_schema_listing(output_workflow)
-    assert "review_plan" not in listing and "review_subtasks" not in listing
+    assert "review_subtasks" not in listing
     assert "review_proposal" not in listing
 
 

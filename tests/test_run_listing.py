@@ -649,13 +649,13 @@ def test_the_production_arm_is_threshold_and_one_constant_switches_it():
 # ---------------------------------------------------------------------------
 
 def test_the_framework_commands_are_hidden_from_every_run_listing(copy_of):
-    """The framework's planning commands (review_subtasks, review_plan) are system machinery (fix-3rsq.plan-review.1):
+    """The framework's planning commands (review_subtasks) are system machinery (fix-3rsq.plan-review.1):
     the loader has them, and no run's listing names them, under any arm, or gathers them for a sub-task that names one."""
     from fastworkflow.command_directory import CommandDirectory
 
     library = _library_in(copy_of, name="framework_hidden")
-    assert "review_plan" in CommandDirectory.load(library.folderpath).map_command_2_metadata   # not vacuous
-    sub_task = "run review_plan on the plan"
+    assert "review_subtasks" in CommandDirectory.load(library.folderpath).map_command_2_metadata   # not vacuous
+    sub_task = "run review_subtasks on the plan"
     assert not {name for name in shortlist_for(library, sub_task) if name.split("/")[-1] in FRAMEWORK_LEAVES}
     texts = [run_listing_text(library, sub_task, arm=FULL),
              run_listing_text(library, sub_task, arm=COMMAND_SHORTLIST),
@@ -665,7 +665,7 @@ def test_the_framework_commands_are_hidden_from_every_run_listing(copy_of):
         assert not any(leaf in text for leaf in FRAMEWORK_LEAVES)
 
 
-FRAMEWORK_LEAVES = frozenset({"review_subtasks", "review_plan"})
+FRAMEWORK_LEAVES = frozenset({"review_subtasks"})
 
 
 def test_a_listing_within_the_threshold_is_given_whole_and_gathers_nothing(copy_of, monkeypatch):

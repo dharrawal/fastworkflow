@@ -289,3 +289,18 @@ def test_number_words_count_as_written_numbers():
 def test_digits_inside_a_written_str_value_are_not_numbers_the_request_writes():
     """``Doyle and Sons 1``: the 1 belongs to the name, so the request writes no number for count."""
     assert _check("find Doyle and Sons 1", name="Doyle and Sons 1", count=7).refused == {}
+
+
+def test_the_agents_own_command_word_is_not_the_request_the_guard_reads(extract):
+    """fix-2juj, through ``ParameterExtraction._extract_impl``: 'member' is spelled only inside the command word
+    ``find_member`` the agent's text begins with (the caller's ``find_member:`` prefix is stripped, the word after it is not), so it is not written in the request; the retry's 'Ann Lee' is."""
+    output, diagnostics, lm = extract(
+        TUTORIAL, "find_member", "find_member: find_member Ann Lee",
+        {"reasoning": "the command word", "query": "member"},
+        {"reasoning": "the name", "query": "Ann Lee"})
+
+    assert diagnostics["argument_check_refusals"] == ["query='member' is not written in the request"]
+    assert diagnostics["argument_check_retry"] is True
+    assert _calls(lm) == 2
+    assert output.parameters_are_valid is True
+    assert output.cmd_parameters.query == "Ann Lee"

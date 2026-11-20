@@ -2136,6 +2136,33 @@ def check_ungrouped_list_notices(workflow_folder: str) -> list[str]:
     return notices
 
 
+def check_matcher_example_notices(workflow_folder: str) -> list[str]:
+    """Notices (never failures) for a command with more ``plain_utterances`` than the matcher shows.
+
+    The remote matcher lists the first ``workflow_agent.MATCHER_EXAMPLES`` of each candidate's utterances;
+    the rest still train the local model. Printed by ``command preview --check`` only."""
+    from fastworkflow.observation_offloading.facts import workflow_signatures
+    from fastworkflow.workflow_agent import MATCHER_EXAMPLES
+
+    try:
+        signatures = workflow_signatures(os.path.abspath(workflow_folder))
+    except Exception:  # noqa: BLE001 - without signatures no command is known
+        return []
+    notices: list[str] = []
+    for name, signature in sorted(signatures.items()):
+        try:
+            count = len(getattr(signature, "plain_utterances", None) or ())
+        except Exception:  # noqa: BLE001 - a notice never fails the check
+            continue
+        if count > MATCHER_EXAMPLES:
+            notices.append(
+                f"notice: {name} has {count} plain_utterances; the matcher shows the first "
+                f"{MATCHER_EXAMPLES} of {count}. Examples {MATCHER_EXAMPLES + 1}+ train the local model "
+                "but the remote matcher does not see them, so the order of the first "
+                f"{MATCHER_EXAMPLES} decides how this command is matched.")
+    return notices
+
+
 def preview_main(args) -> int:
     """``fastworkflow command preview``: write the previews, or with ``--check`` compare them."""
     from fastworkflow import planning_commands
@@ -2163,6 +2190,8 @@ def preview_main(args) -> int:
         for warning in check_kind_list_warnings(args.workflow_folder):
             print(warning)
         for notice in check_ungrouped_list_notices(args.workflow_folder):
+            print(notice)
+        for notice in check_matcher_example_notices(args.workflow_folder):
             print(notice)
         if command_problems:
             return 1
@@ -2193,6 +2222,7 @@ __all__ = [
     "check_kind_list_warnings",
     "check_note_condition_warnings",
     "check_previews",
+    "check_matcher_example_notices",
     "check_ungrouped_list_notices",
     "condition_text",
     "default_out_dir",

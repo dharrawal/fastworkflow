@@ -121,6 +121,32 @@ def test_3_the_count_is_in_a_row_progress_resets_it(kind):
     assert kind.asked() and kind.open_of(last) == [kind.b]
 
 
+# ---- 3b: a request for a moment is free once, then counts (fix-b3w2) ------------------------------------------------
+
+def test_3b_a_third_wait_in_a_row_stops_it_and_a_value_between_waits_resets_the_count(kind, monkeypatch):
+    from tests.test_one_reply_reader import _Remote
+
+    def still_open():
+        return list(kind.ctx.waiting.payload["loop"]["open"])
+
+    _Remote(monkeypatch, "wait")
+    kind.start()
+    for _ in range(2):          # the first wait is free, the second counts once: still asked
+        kind.send("hold on a moment")
+        assert kind.asked() and still_open() == [kind.a, kind.b]
+    last = kind.send("hold on a moment")
+
+    assert not kind.asked() and kind.ctx.waiting is None
+    _says_not_run_and_names(last, kind.a, kind.b)
+
+    kind.start()
+    kind.send("hold on a moment")
+    assert kind.asked() and still_open() == [kind.a, kind.b]
+    assert kind.open_of(kind.send(kind.line(kind.a))) == [kind.b]
+    kind.send("hold on a moment")
+    assert kind.asked() and still_open() == [kind.b]
+
+
 # ---- 4: cancel --------------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("word", ["cancel", "stop", "never mind"])

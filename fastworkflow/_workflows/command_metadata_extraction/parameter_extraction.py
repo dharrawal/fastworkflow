@@ -559,7 +559,7 @@ class ParameterExtraction:
             _planning_command_of(self.app_workflow, self.command_name) is None
         # The request is the command text the extractor read (self.command, prefix stripped, which
         # InputForParamExtraction.create was given): see argument_checks for why it is not more.
-        check, settle = _llm_guard(self.command, diagnostics) if guarded else (None, None)
+        check, settle = _llm_guard(fill.without_own_command_word(self.command, self.command_name), diagnostics) if guarded else (None, None)
         extracted = pipeline.extract(
             fill_text, check=check, settle=settle, validate=validated,
             retry_note=argument_checks.REFUSED_EXTRACTION_NOTE, unparsed=lambda: bool(first_unparsed))

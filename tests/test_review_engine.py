@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from fastworkflow import approval_binding as ab
 from fastworkflow import review_engine as re_
 from fastworkflow.review_engine import (
-    AWAITING, CONFIRMED, DECLINED, EXECUTED, EXPIRED, INVALIDATED, KIND_ACTION, KIND_PLAN,
+    AWAITING, CONFIRMED, DECLINED, EXECUTED, EXPIRED, INVALIDATED, KIND_ACTION,
     KIND_SUB_TASKS, REVISED, Change, Drop, EditParseError, IllegalTransition,
     Proposal, ReviewError, ReviewRecord, ReviewStore, Verdict, apply_edits, audit_attributes,
     fingerprint, link, open_review, parse_edits, propagate, proposal_of, register_proposal,
@@ -61,7 +61,7 @@ class Goal(BaseModel):
 
 @register_proposal
 class GoalPlan(Proposal):
-    kind = KIND_PLAN
+    kind = KIND_SUB_TASKS
     spec = "review_test_plan"
     title = "Plan"
     item_template = "{index}. {goal}: {steps}"
@@ -484,7 +484,7 @@ def test_a_proposal_review_gets_its_own_reply_cap_and_an_approval_keeps_two():
     """fix-3rsq.plan-review.2.5: the proposal kinds admit about 8 replies or 30 minutes; the approval (action) kind
     keeps TTL_TURNS=2 and TTL_SECONDS. Each open record carries the cap its kind is given."""
     assert re_.ttl_for_kind(KIND_ACTION) == (re_.TTL_TURNS, re_.TTL_SECONDS) == (2, 900)
-    assert re_.ttl_for_kind(KIND_SUB_TASKS) == re_.ttl_for_kind(KIND_PLAN) == (8, re_.PROPOSAL_TTL_SECONDS)
+    assert re_.ttl_for_kind(KIND_SUB_TASKS) == (8, re_.PROPOSAL_TTL_SECONDS)
     store = _store()
     record = open_review(None, store, _tasks("a"), surface=store.surface)
     assert (record.ttl_turns, record.ttl_seconds) == (8, re_.PROPOSAL_TTL_SECONDS)

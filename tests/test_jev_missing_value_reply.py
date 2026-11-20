@@ -247,7 +247,9 @@ def test_wait_keeps_the_pending_round(monkeypatch, jev_on):
     assert output.response.startswith("OK, take your time.\nMissing parameter values: ")
     assert "user_name" in output.response
     assert intent_loop.waiting_for(workflow.context) == intent_loop.WAITING_PARAMETERS
-    assert waiting.port_of(workflow.context).get() is stored
+    # The round is untouched; the record only notes the first wait in a row (fix-b3w2: ``waited``).
+    held = waiting.port_of(workflow.context).get()
+    assert held.payload["loop"] == stored.payload["loop"] and held.payload["waited"] == 1
     assert workflow.context["command_name"] == PENDING_COMMAND
     assert recorded == []
 

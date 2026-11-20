@@ -2183,17 +2183,27 @@ def command_match_signature(options: tuple):
 
 #: Phrases that point at other parts of the request instead of naming them; a sub-task with one is broken.
 _UNRESOLVED_REFERENCE = re.compile(
-    r"\b(?:each of them|both of them|all of them|the same treatment|the same look)\b", re.IGNORECASE)
+    r"\b(?:each of them|both of them|all of them)\b", re.IGNORECASE)
 
 
 #: A brace placeholder the model left in a sub-task ("{HIGHER_RISK_PERSON} carries more risk"): an identifier, or
 #: words, in braces. "{}", "{ }" and JSON-ish text ('{"a": 1}', '{1}') do not match: they start with no letter.
 _BRACE_PLACEHOLDER = re.compile(r"\{[A-Za-z][A-Za-z0-9_ ]*\}")
 
+#: The same in square brackets ("[Person 1 name] starts on the roster") and a numbered label that opens a sub-task
+#: ("Control 1: who is in it"); both are the model's stand-ins for a record, not text of the request.
+_SQUARE_PLACEHOLDER = re.compile(r"\[[A-Za-z][A-Za-z0-9_ ]*\]")
+_NUMBERED_OPENER = re.compile(r"^\s*[A-Za-z]+(?: [A-Za-z]+)? \d+\s*:")
+
 
 def _invented_placeholders(text: str, user_query: str) -> list[str]:
-    """The brace placeholders of ``text`` whose exact text is not in the user's request (a request may hold braces)."""
-    return [p for p in _BRACE_PLACEHOLDER.findall(text) if p not in user_query]
+    """The placeholders of ``text`` ({NAME}, [Person 1 name], an "X N:" opener) whose exact text is not in the
+    user's request (a request may hold them)."""
+    found = _BRACE_PLACEHOLDER.findall(text) + _SQUARE_PLACEHOLDER.findall(text)
+    opener = _NUMBERED_OPENER.match(text)
+    if opener:
+        found.append(opener.group(0).strip())
+    return [p for p in found if p not in user_query]
 
 
 def _visibly_broken(subtasks: list[str], user_query: str = "") -> bool:
@@ -2268,9 +2278,9 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     job_types = _job_types_for(workflow_folderpath)
-    # Temperature 0, so the same request splits the same way; a split that is
-    # visibly broken or cut off at the cap is retried once at 0.7, which also
-    # misses the LM cache.
+    # Temperature 0 makes the first attempt less random, not repeatable: the same request can still split
+    # differently from one run to the next (the provider is not deterministic at 0). A split that is
+    # visibly broken or cut off at the cap is retried once at 0.7, which also misses the LM cache.
     # A split whose only flaw is a leftover reference ("each of them") is still
     # better than none, so it is kept when the retry does not fix it; when both
     # attempts are like that, the less broken one (``_breakage``; the first on a tie).

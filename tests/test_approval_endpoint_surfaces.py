@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-import os
 import shutil
 import sqlite3
 import sys
@@ -54,12 +53,8 @@ def no_live_model(monkeypatch):
 
 
 @pytest.fixture
-def app_module(tmp_path, monkeypatch):
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
+def app_module(tmp_path, monkeypatch, env_files):
+    env_file, passwords_file = env_files
     from fastworkflow.run_fastapi_mcp import jwt_manager, utils
     monkeypatch.setattr(jwt_manager, "EXPECT_ENCRYPTED_JWT", True)
     # Start every test from the server's real default (restored afterwards), not from a forced value.

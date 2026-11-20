@@ -4,7 +4,7 @@
 in the chat review form (``edits``) and the exact text the form sends (``reply``). The DOM test
 (``chatbot_review_form_dom.cjs``) asserts that ``tmComposeReviewEdits`` produces ``reply``; this module
 feeds ``reply`` to the real ``parse_edits``, ``_normalize_parsed_subtask_edits`` and ``apply_edits`` on
-real ``SubTaskProposal`` / ``PlanProposal`` instances (and to ``ProposalReplyPolicy``, which resolves a
+real ``SubTaskProposal`` instances (and to ``ProposalReplyPolicy``, which resolves a
 reply) and asserts what came out.
 
 A case with ``refused_fields`` is something the form refuses to send, because the server would not do
@@ -30,7 +30,7 @@ from fastworkflow.review_engine import (
     apply_edits,
     parse_edits,
 )
-from fastworkflow.review_proposals import PlanProposal, SubTaskProposal
+from fastworkflow.review_proposals import SubTaskProposal
 
 CASES = json.loads((Path(__file__).parent / "fixtures" / "review_form_edits.json").read_text(encoding="utf-8"))
 ACCEPTED = [case for case in CASES if "reply" in case]
@@ -38,8 +38,7 @@ REFUSED = [case for case in CASES if "refused_fields" in case]
 
 
 def _proposal(case):
-    cls = SubTaskProposal if case["kind"] == "sub_tasks" else PlanProposal
-    return cls(items=case["items"])
+    return SubTaskProposal(items=case["items"])
 
 
 def _named_values(item) -> dict:
@@ -47,8 +46,6 @@ def _named_values(item) -> dict:
 
 
 def _shape(item, kind: str) -> dict:
-    if kind == "plan":
-        return {"goal": item.goal, "steps": list(item.steps)}
     return {"goal": item.goal, "inputs": _named_values(item)}
 
 
@@ -124,7 +121,7 @@ def test_what_the_form_refuses_would_not_do_what_the_person_meant(case):
 
 
 def test_dropping_all_n_steps_is_refused_and_n_minus_1_is_not():
-    for items_case in ("one_input_edit", "plan_no_edits_is_yes", "single_step_proposal_edit"):
+    for items_case in ("one_input_edit", "single_step_proposal_edit"):
         case = next(c for c in CASES if c["name"] == items_case)
         proposal = _proposal(case)
         count = len(proposal.items)
@@ -144,10 +141,10 @@ def test_the_fixture_covers_what_the_review_asked_for():
         "goal_and_input_on_same_step", "skip_one_step", "skip_plus_edits_elsewhere",
         "input_named_check_is_sent_through_inputs", "input_named_goal_is_sent_through_inputs",
         "semicolon_in_a_value", "newline_in_a_value", "equals_in_a_value", "colon_space_in_a_value",
-        "drop_n_minus_1_of_n", "plan_goal_edit_and_drop",
+        "drop_n_minus_1_of_n",
     ):
         assert required in names, required
-    assert {case["kind"] for case in CASES} == {"sub_tasks", "plan"}
+    assert {case["kind"] for case in CASES} == {"sub_tasks"}
 
 
 # ---- fix-2vyv: a typed edit is applied exactly as written, or refused with a message; it is never lost or misread ----
@@ -291,8 +288,7 @@ def test_an_accept_cue_beside_an_edit_does_not_accept_and_drop_the_edit():
     "Yes, go ahead, but do not run any of the actions.",
 ])
 def test_plain_acceptances_are_still_accepted(reply):
-    for proposal in (_one_item_proposal(), PlanProposal(items=[{"goal": "Fix it", "steps": ["a", "b"]}])):
-        assert ProposalReplyPolicy().decide(proposal, reply).verdict == Verdict.CONFIRM, reply
+    assert ProposalReplyPolicy().decide(_one_item_proposal(), reply).verdict == Verdict.CONFIRM, reply
 
 
 @pytest.mark.parametrize("reply", ["no", "decline"])

@@ -1513,3 +1513,17 @@ class TestProcessLogs:
             session["train_log_path"] == log_path
         )
         assert session["server_log_path"]
+
+
+def test_server_source_carries_no_internal_tracker_tags():
+    """fix-jo9h: comments and log strings state the invariant in words."""
+    import fastworkflow.run_chatbot.server as server_module
+
+    pattern = re.compile(r"\[(?:R|DR)\d+\]|\bfix-[a-z0-9]+(?:\.[a-z0-9]+)*")
+    with open(server_module.__file__, encoding="utf-8") as handle:
+        hits = [
+            f"{number}: {line.strip()}"
+            for number, line in enumerate(handle, 1)
+            if pattern.search(line)
+        ]
+    assert hits == []

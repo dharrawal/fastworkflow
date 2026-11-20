@@ -172,3 +172,126 @@ def test_a_planning_command_may_not_declare_writes(tmp_path):
     with pytest.raises(command_writes.WritesDeclarationError, match="note_member is a planning command"):
         RoutingRegistry.get_definition(folder)
     RoutingRegistry.clear_registry()
+
+
+def test_a_write_the_phase_names_once_runs_once_whatever_the_agent_repeats(writes_env):
+    # fix-ddis: note_member's one step names add_note once, and code runs it. The phase agent, asked for the
+    # open step that follows, calls add_note again: the phase's own count is spent, so it is refused unrun.
+    writes_env.planning_command = _real_planning_command(NOTE_MEMBER, "_commands/Library/note_member.py").command
+    writes_env.args = {"member": "Raj Patel", "text": "he paid his fine"}
+    writes_env.model.run('add_note text="he paid his fine again"')
+    writes_env.model.finish()
+    writes_env.model.finish()
+
+    result = writes_env.ctx.process_turn("note on Raj Patel's record that he paid his fine")
+
+    assert result.status == TurnStatus.COMPLETED
+    assert _library(writes_env).members["m2"].notes == ["prefers email reminders", "he paid his fine"]
+    outputs = _outputs(writes_env, "add_note")
+    assert [o.success for o in outputs] == [True, False]
+    assert outputs[1].command_response.artifacts.get("write_refused") is True
+    assert "already ran" in outputs[1].command_response.response
+
+
+def test_a_failed_write_does_not_use_up_the_phases_count(writes_env):
+    # Only a successful run counts: the refusal state is per phase run and a failed attempt can be retried.
+    writes_env.ctx._phase_run = {"plan": "1. add_note text=hi"}
+    try:
+        assert command_writes.phase_write_refusal(writes_env.ctx, writes_env.wf.folderpath, "Record/add_note") is None
+        assert command_writes.phase_write_refusal(writes_env.ctx, writes_env.wf.folderpath, "Record/add_note") is None
+        command_writes.record_phase_write(writes_env.ctx, writes_env.wf.folderpath, "Record/add_note")
+        refusal = command_writes.phase_write_refusal(writes_env.ctx, writes_env.wf.folderpath, "Record/add_note")
+        assert refusal is not None and "already ran" in refusal
+        writes_env.ctx._phase_run = {"plan": "1. add_note text=hi\n2. add_note text=ho"}
+        assert command_writes.phase_write_refusal(writes_env.ctx, writes_env.wf.folderpath, "Record/add_note") is None
+    finally:
+        writes_env.ctx._phase_run = None
+
+
+def _note_each_book_plan(item_steps):
+    """A fan-out planning command over the author's books; *item_steps(uid)* are one book's steps."""
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.author)]
+
+        @phase(over="find.book_uids", max_items=5, noun="books")
+        def book(self, uid) -> OpenedBook:
+            return item_steps(uid)
+
+        def __result__(self, input, book):
+            return "the books were handled"
+
+    return _build_planning_command(Plan, {"author": (str, Field(description="the author's name"))})
+
+
+def test_a_fan_out_phase_writes_once_per_item_and_refuses_a_repeat_within_an_item(writes_env):
+    # fix-ddis: the count belongs to one item's phase run (the plan is set again for each item), so the
+    # step that names add_note once writes once for EACH book; the agent's repeat inside a book is refused.
+    writes_env.planning_command = _note_each_book_plan(
+        lambda uid: [run("open_book", book_uid=uid), run("add_note", text="checked"),
+                     when("the member asked for more on the book", run("open_book", book_uid=uid))])
+    writes_env.args = {"author": "Austen"}
+    before = _notes(writes_env)
+    for _ in range(2):                                  # each of the two books: the agent repeats, then finishes
+        writes_env.model.run('add_note text="checked again"')
+        writes_env.model.finish()
+
+    result = writes_env.ctx.process_turn("note every Austen book as checked")
+
+    assert result.status == TurnStatus.COMPLETED
+    after = _notes(writes_env)
+    assert after["b3"] == before["b3"] + ["checked"] and after["b4"] == before["b4"] + ["checked"]
+    assert {uid: notes for uid, notes in after.items() if uid not in ("b3", "b4")} == {
+        uid: notes for uid, notes in before.items() if uid not in ("b3", "b4")}
+    assert [o.success for o in _outputs(writes_env, "add_note")] == [True, False, True, False]
+    for refused in _outputs(writes_env, "add_note")[1::2]:
+        assert refused.command_response.artifacts.get("write_refused") is True
+        assert "already ran" in refused.command_response.response
+
+
+@pytest.fixture
+def flaky_writes_env(tmp_path, initialized_fastworkflow, monkeypatch):
+    # The library's own add_note, with one real way to fail: it refuses a note that says "bad".
+    path = os.path.join(LIBRARY, "_commands", "Record", "add_note.py")
+    source = open(path, encoding="utf-8").read()
+    guarded = source.replace(
+        "        record = workflow.record\n",
+        "        if 'bad' in input.text:\n            raise fastworkflow.Refused('that note is refused')\n"
+        "        record = workflow.record\n")
+    assert guarded != source
+    state = _make_library_runner_env(
+        tmp_path, initialized_fastworkflow, monkeypatch,
+        extra_commands=WRITES_FILES, real_dispatch=True,
+        command_texts={"_commands/Record/add_note.py": guarded})
+    yield state
+    state.ctx.pop_active_workflow()
+
+
+def test_a_write_that_fails_does_not_use_up_the_phases_count(flaky_writes_env):
+    # fix-ddis: the one step that names add_note is the agent's (a conditional). Its first call really fails
+    # (the command refuses it), which must not spend the count: the retry succeeds, and only then is a third
+    # call refused as a repeat.
+    env = flaky_writes_env
+    env.planning_command = _note_each_book_plan(
+        lambda uid: [run("open_book", book_uid=uid),
+                     when("the member asked to annotate the book", run("add_note", text="annotation"))])
+    env.args = {"author": "Austen"}
+    before = _notes(env)
+    env.model.run('add_note text="a bad note"')
+    env.model.run('add_note text="a good note"')
+    env.model.run('add_note text="a third note"')
+    env.model.finish()
+    env.model.finish()
+
+    result = env.ctx.process_turn("annotate every Austen book")
+
+    assert result.status == TurnStatus.COMPLETED
+    outputs = _outputs(env, "add_note")
+    assert [o.success for o in outputs] == [False, True, False]
+    assert outputs[0].command_response.artifacts.get("write_refused") is not True    # it ran, and failed
+    assert "refused" in outputs[0].command_response.response
+    assert outputs[2].command_response.artifacts.get("write_refused") is True        # the repeat, unrun
+    assert "already ran" in outputs[2].command_response.response
+    after = _notes(env)
+    assert after["b3"] == before["b3"] + ["a good note"]
+    assert after["b4"] == before["b4"]

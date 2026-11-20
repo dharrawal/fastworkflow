@@ -293,21 +293,21 @@ async function main() {
   const plannedResults = plain(w.tmResultsOf(planned, SCHEMAS));
   assert.deepEqual(plannedResults.map((r) => [r.id, r.command]), [['r1', 'find_book']], 'plumbing is left out');
   assert.deepEqual(plain(w.tmResultsOf(planned, {}).map((r) => r.command)), ['find_book'], 'with or without a schema listing');
-  assert.equal(plain(w.tmResultsOf([co('Shelf/review_plan', {a: 1}, null)], {})).length, 1, 'a workflow command of that leaf is not plumbing');
+  assert.equal(plain(w.tmResultsOf([co('Shelf/review_subtasks', {a: 1}, null)], {})).length, 1, 'a workflow command of that leaf is not plumbing');
   /* the server's marker decides: `framework: true` is plumbing whatever the name, with or without a listing;
      `framework: false` is a result even under a name the legacy list holds; a record without the key (a stored
      turn) keeps the legacy name list (the `planned` records above) [fix-2nsr] */
   const marked = [
     co('a_future_framework_command', {x: 1}, null, {framework: true}),
-    co('review_plan', {a: 1}, null, {framework: true, context: 'global'}),
+    co('review_subtasks', {a: 1}, null, {framework: true, context: 'global'}),
     co('find_book', {book_uids: ['u1'], titles: ['Dune'], total: 1}, {start: 0}, {framework: false}),
   ];
   assert.deepEqual(plain(w.tmResultsOf(marked, {}).map((r) => r.command)), ['find_book'], 'framework:true is left out with no listing');
   assert.deepEqual(plain(w.tmResultsOf(marked, SCHEMAS).map((r) => r.command)), ['find_book'], 'and with one');
-  const appReview = [co('review_plan', {verdict: 'ok', risks: ['r']}, {topic: 't'}, {framework: false})];
-  assert.deepEqual(plain(w.tmResultsOf(appReview, {}).map((r) => r.command)), ['review_plan'],
+  const appReview = [co('review_proposal', {verdict: 'ok', risks: ['r']}, {topic: 't'}, {framework: false})];
+  assert.deepEqual(plain(w.tmResultsOf(appReview, {}).map((r) => r.command)), ['review_proposal'],
     'an application command that shares a legacy name is shown when the key is present and false');
-  assert.equal(plain(w.tmResultsOf([co('review_plan', {a: 1}, null, {framework: null})], {})).length, 0,
+  assert.equal(plain(w.tmResultsOf([co('review_proposal', {a: 1}, null, {framework: null})], {})).length, 0,
     'a null marker is "unknown": the legacy list applies');
   /* a command the listing does not name is still a result: the listing also omits the internal metadata-extraction
      commands and child-workflow commands, whose outputs are real */

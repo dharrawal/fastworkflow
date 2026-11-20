@@ -63,7 +63,9 @@ NESTED_BUDGET_SPENT_MESSAGE = (
 #: The refusal for a direct action run while a question waits for the user's answer.
 AWAITING_ANSWER_REFUSAL_MESSAGE = (
     "A question is waiting for the user's answer; reply to it before sending a request, an action or a plan. "
-    "To drop it instead, reply \"cancel\" (\"no\" for a review or an approval); at the CLI prompt type //cancel."
+    "To drop it instead, reply \"cancel\" (\"no\" for a review or an approval) or, at the CLI prompt, type //cancel; "
+    "over HTTP or MCP call cancel_pending, which drops any question. A reply \"cancel\" to the agent's own "
+    "question is only an answer to it: to drop that one, call cancel_pending."
 )
 
 
@@ -1990,11 +1992,22 @@ class WorkflowExecutionContext:
         memory. Embedders call this to abandon it per their own session lifecycle
         (e.g. request timeout, user navigated away).
 
+        Drops every kind of pending question silently: the agent's own, an approval or review, and the one
+        the deterministic path (the CME) holds, which a reply would otherwise answer.
+
         Returns True if a pending clarification was cleared, False otherwise.
         """
         cancelled_approvals = self.cancel_pending_approvals()
         if not self._awaiting_user:
-            return cancelled_approvals > 0
+            if self._waiting is None:
+                return cancelled_approvals > 0
+            if self.has_open_command():
+                self._clear_cme_continuation()
+            plan_cme = getattr(self, "_plan_cme", None)
+            if plan_cme is not None:
+                self._clear_cme_continuation(plan_cme)
+            self._waiting = None
+            return True
         self._reset_agent_suspension()
         self._suspend_began_at = None
         self._turn_suspended_ms = 0
@@ -2992,9 +3005,9 @@ class WorkflowExecutionContext:
             self._turn_subtask_review = "fast_path"
             resolution.record_part(workflow, subtasks[0], intent.command, resolution.how_settled(intent.decided_by),
                                    intent.evidence)
-            if self.no_agent_mode and intent.kind != resolution.KIND_PLANNING:
-                # No agent model: a single command is run bound (``_run_plain_means``, code runs it and its own
-                # response is the answer), so it is drafted as a one-item plan, not left to the agent.
+            if intent.kind != resolution.KIND_PLANNING:
+                # A single settled command is run bound, in both modes (``_run_plain_means``: code runs it, and the
+                # agent cannot run a different one), so it is drafted as a one-item plan, not left to the agent.
                 self._turn_subtask_plan = review_proposals.draft_round1_proposal(
                     workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None))
             return None
@@ -4173,9 +4186,13 @@ class WorkflowExecutionContext:
             self._waiting = None
             agent.clear_suspension()
             return "stop", self._decision_stop(decision, declined[reading.kind])
-        if reading.kind == replies.WAIT:
-            # The same question stays out and nothing is counted.
+        if reading.kind == replies.WAIT and not decision.get("waited"):
+            # The same question stays out and nothing is counted: the first request for a moment in a row. A further
+            # one is a reply that gave nothing usable (counted below).
+            decision["waited"] = 1
             return "ask", self._pause_for_decision(state, decision, waited=True)
+        if reading.kind != replies.WAIT:
+            decision.pop("waited", None)
         text: Optional[str] = None
         why = ""
         if decision["kind"] == no_agent_mode.STEP_CONDITIONAL:
@@ -4227,12 +4244,13 @@ class WorkflowExecutionContext:
         return (self._resolution_pending and held.kind == waiting_module.KIND_PARAMETERS
                 and held.payload.get("after") == parameter_clarification.AFTER_RESUME_PART)
 
-    def _put_part_loop(self, loop) -> None:
-        """Put the running part's value question *loop* out as the turn's one waiting record."""
+    def _put_part_loop(self, loop, waited: int = 0) -> None:
+        """Put the running part's value question *loop* out as the turn's one waiting record (*waited*: the requests for
+        a moment in a row, see ``parameter_clarification.waited_of``)."""
         from fastworkflow import parameter_clarification
 
         self._turn_port().put(parameter_clarification.waiting_record(
-            loop, parameter_clarification.AFTER_RESUME_PART, loop.origin))
+            loop, parameter_clarification.AFTER_RESUME_PART, loop.origin, waited=waited))
 
     def _part_ran_something(self) -> bool:
         """Whether the part that is running has run a command of its own (the review's plumbing and a question do not
@@ -4296,14 +4314,15 @@ class WorkflowExecutionContext:
         from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
 
         loop = loops.ParameterLoop.from_state(self._waiting.payload["loop"])
+        waited = loops.waited_of(self._waiting)
         self._turn_port().clear()      # the question is no longer out; the re-run reads the loop for the rule's count
         self._rerun_loop = loop
         try:
-            return self._rerun_part_with_reply(loop, reply)
+            return self._rerun_part_with_reply(loop, reply, waited)
         finally:
             self._rerun_loop = None
 
-    def _rerun_part_with_reply(self, loop, reply: str) -> fastworkflow.CommandOutput:
+    def _rerun_part_with_reply(self, loop, reply: str, waited: int = 0) -> fastworkflow.CommandOutput:
         from fastworkflow import parameter_clarification as loops, planning_commands
         from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
 
@@ -4318,13 +4337,14 @@ class WorkflowExecutionContext:
         # Free text is read by the shared extractor, with or without an agent model (the asking rule is one).
         outcome = loops.advance(
             loop, reply, command,
-            extract=lambda text: planning_commands.extracted_arguments(command, text, self._app_workflow), live=True)
+            extract=lambda text: planning_commands.extracted_arguments(command, text, self._app_workflow), live=True,
+            waited=waited)
         if outcome.kind == loops.ASK_AGAIN:
-            self._put_part_loop(loop)
+            self._put_part_loop(loop, outcome.waited)
             return self._settle_agent_result(message, self._suspend_on_parameter_loop())
         if outcome.kind == loops.WAIT:
-            # The user asked for a moment: the same question stays out, and nothing is counted.
-            self._put_part_loop(loop)
+            # The user asked for a moment: the same question stays out, and nothing is counted (the first in a row).
+            self._put_part_loop(loop, outcome.waited)
             return self._settle_agent_result(message, dspy.Prediction(
                 suspended=True, clarification=outcome.question, exhausted=False))
         if outcome.kind == loops.MISUNDERSTOOD:
@@ -4441,7 +4461,7 @@ class WorkflowExecutionContext:
                                        unattended: bool = False, within_turn: bool = False):
         """The framework's own entry point for a framework planning command (fix-3rsq.plan-review.1).
 
-        Runs *qualified_name* (review_subtasks, review_plan) as one turn, through the same nested frame
+        Runs *qualified_name* (review_subtasks) as one turn, through the same nested frame
         and executor a planning step uses, without the agent's explicit-name resolution (which refuses
         framework commands). Returns the command's output, or the awaiting output when the review asks the
         user (its replies come as ordinary messages on this session).
@@ -4852,6 +4872,7 @@ class WorkflowExecutionContext:
             steps = steps + (state["steps_after"] if last and last_item else [])
             state["first_step"] = first_step
             state["plan"] = number(steps)
+            state["writes_run"] = {}       # the writes this phase run has made (command_writes)
         plan_text = state["plan"]
         answer_only = not resumed and planning_phases.is_answer_only(plan_text, **names)
         if answer_only and last and planning_phases.answer_by_code(plan_text):
@@ -5138,8 +5159,8 @@ class WorkflowExecutionContext:
             if getattr(result, "suspended", None) is True:
                 return result
             self._record_subtask_answer(result, self._typed_output_since(outputs_before))
-            if getattr(result, "exhausted", None) is True:
-                self._hand_off(k)
+            if getattr(result, "exhausted", None) is True and not self._hand_off(k):
+                self._note_partial_read(origin)
             k += 1
 
         combined = self._combined_answer()
@@ -5369,8 +5390,44 @@ class WorkflowExecutionContext:
         """The sub-task text an origin was split out as (its first entry, before any hand-off)."""
         return self._subtasks[self._origins.index(origin)]
 
-    def _hand_off(self, k: int) -> None:
-        """Queue a fresh-executor continuation of sub-task k, which hit the step cap.
+    def _note_partial_read(self, origin: int) -> None:
+        """A part that ran out of steps with no continuation left ends its answer with a code-written note for each
+        paged read of its commands that stopped with rows unread and a reported total (``no_agent_mode.step_limit_note``),
+        so a count or "none found" in the answer is not taken for the whole list. A part that did not run out of
+        steps, or a read with no total, adds nothing."""
+        from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
+        from fastworkflow.planning_phases import _page_read
+
+        try:
+            floor = (getattr(self, "_evidence_floors", None) or {}).get(origin, 0)
+            runs = self._archived_command_runs(from_step=floor)
+        except Exception as error:  # noqa: BLE001 - the note is additive, never a reason to fail the turn
+            logger.debug(f"partial-read note skipped ({error})")
+            return
+        reads: dict[tuple[str, str], dict[str, Any]] = {}
+        for run in runs:
+            page = _page_read(run, PAGING_PARAMETERS)
+            if page is None:
+                continue
+            name, start, count, total = page
+            rest = {key: value for key, value in (run.get("input") or {}).items() if key != name}
+            read = reads.setdefault((run["command"], json.dumps(rest, sort_keys=True, default=str)),
+                                    {"pages": {}, "rows": {}})
+            read["pages"][start], read["total"] = count, total
+            listed = next((v for v in run["output"].values() if isinstance(v, (list, tuple))), [])
+            read["rows"][start] = list(listed)
+        notes = []
+        for (command, _), read in reads.items():
+            rows_read = sum(read["pages"].values())
+            if rows_read < read["total"]:
+                rows = [row for _, page_rows in sorted(read["rows"].items()) for row in page_rows]
+                notes.append(no_agent_mode.step_limit_note(command, {
+                    "pages": len(read["pages"]), "rows_read": rows_read, "total": read["total"], "rows": rows}))
+        if notes and self._subtask_answers:
+            self._subtask_answers[-1] = f"{self._subtask_answers[-1]}\n\n" + "\n".join(notes)
+
+    def _hand_off(self, k: int) -> bool:
+        """Queue a fresh-executor continuation of sub-task k, which hit the step cap; False when none is left.
 
         The progress check reads the agent's current trajectory, so it runs before
         the next run replaces that trajectory. At most MAX_HANDOFFS continuations per sub-task.
@@ -5380,7 +5437,7 @@ class WorkflowExecutionContext:
         if turn.origins.count(origin) > MAX_HANDOFFS:
             # No continuation left: the capped answer stands as partial and the turn is exhausted.
             turn.subtask_exhausted = True
-            return
+            return False
         from fastworkflow.workflow_agent import run_progress_check
 
         done = run_progress_check(self, "step_limit", done_only=True).strip()
@@ -5394,6 +5451,7 @@ class WorkflowExecutionContext:
             + (f"\n\n{opened}" if opened else "")))
         turn.origins.insert(k + 1, origin)
         # This capped run's answer is kept: _combined_answer joins it with the continuation's.
+        return True
 
     def _combined_answer(self) -> str:
         """Answers grouped under their original sub-task; a single-origin turn is its answers with no heading.

@@ -1,13 +1,11 @@
-"""The framework's review proposals: round 1 (sub-tasks) and round 2 (plan), as typed Pydantic objects.
+"""The framework's review proposal, round 1 (sub-tasks), as a typed Pydantic object.
 
-Plans are GOALS with bound steps, never a bare command list (arch 19.0 invariant 1): a ``PlanGoal`` states
-the goal and the commands that are the means to it. Each proposal is registered under its spec name, which
-is the name of the planning command that reviews it (``review_subtasks``, ``review_plan``).
+Each proposal is registered under its spec name, which is the name of the planning command that reviews it
+(``review_subtasks``).
 
 ``from_text`` reads a proposal from the one-line text a planning command passes to ``review_proposal``:
 
-* sub-tasks: ``goal; goal; ...`` (outcomes, inputs and means are then set by edits or by the candidates builder);
-* plan: ``goal = step | step; goal = step``.
+* sub-tasks: ``goal; goal; ...`` (outcomes, inputs and means are then set by edits or by the candidates builder).
 
 ``draft_round1_proposal`` drafts the round-1 proposal of a split result for the turn's gate: each part's means is the
 one decision of ``fastworkflow/_workflows/plan_metadata_extraction/resolution.py`` (``part_intent``: exact name, then the
@@ -31,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from fastworkflow import subtask_pool, turn_cache, turn_progress
 from fastworkflow.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
 from fastworkflow.review_engine import (
-    KIND_PLAN, KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, Proposal,
+    KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, Proposal,
     Split, _SafeValues, register_proposal)
 
 logger = logging.getLogger(__name__)
@@ -588,13 +586,6 @@ class SubTaskProposal(Proposal):
         return cls(items=[SubTask(goal=goal) for goal in goals])
 
 
-class PlanGoal(BaseModel):
-    """A goal, and the bound steps (commands with their values) that are its means."""
-
-    goal: str
-    steps: list[str] = Field(default_factory=list)
-
-
 def _check_line(index: int, item: "SubTask") -> str:
     """The review line for a planning means whose drafted arguments the framework refuses: what is missing and how to
     give it (the reply grammar the review reads), else the refusal in its own words."""
@@ -609,27 +600,6 @@ def _check_line(index: int, item: "SubTask") -> str:
                 f"{'are' if len(names) > 1 else 'is'} missing. "
                 f'Reply "{replies}" to give {"them" if len(names) > 1 else "it"}.')
     return f"Cannot run as shown: {item.check}."
-
-
-@register_proposal
-class PlanProposal(Proposal):
-    kind = KIND_PLAN
-    spec = "review_plan"
-    title = "Plan"
-    item_template = "{index}. {goal}: {steps}"
-    min_items = 1
-    items: list[PlanGoal] = Field(default_factory=list)
-
-    @classmethod
-    def from_text(cls, text: str) -> "PlanProposal":
-        goals: list[PlanGoal] = []
-        for part in text.split(";"):
-            if not part.strip():
-                continue
-            goal, _, steps = part.partition("=")
-            goals.append(PlanGoal(goal=goal.strip(),
-                                  steps=[step.strip() for step in steps.split("|") if step.strip()]))
-        return cls(items=goals)
 
 
 # ----------------------------------------------------------------------
@@ -651,7 +621,7 @@ def decided_item(workflow, goal: str, *, exclude=()) -> "SubTask":
 
 
 #: The review command's argument values for each proposal (a value is not a command name).
-PROPOSAL_KINDS = {1: SubTaskProposal, 2: PlanProposal}
+PROPOSAL_KINDS = {1: SubTaskProposal}
 
 
 # ----------------------------------------------------------------------

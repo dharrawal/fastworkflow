@@ -953,6 +953,21 @@ class TestMaintenance:
         assert "turns" not in deleted
         assert len(_rows(db_path, "SELECT turn_key FROM turns")) == 1
 
+    def test_forget_channel_and_clear_leave_no_free_pages(self, db_path):
+        """fix-slz6: the vacuum runs to completion, not one page per call."""
+        store = obs.ObservabilityStore(db_path)
+        with store._connect() as conn:
+            for i in range(400):
+                conn.execute(
+                    "INSERT INTO spans(span_id, trace_id, name, kind, start_ns, status, "
+                    "attributes, channel_id) VALUES (?,?,?,?,?,?,?,?)",
+                    (f"s-{i}", "20000101T000000-a", "fw.turn", "internal", i, "ok",
+                     "x" * 4_000, "chan-free"),
+                )
+        store.forget_channel("chan-free")
+        with store._connect() as conn:
+            assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+
     @staticmethod
     def _span(store, span_id, trace_id, start_ns, experiment_id=None):
         with store._connect() as conn:

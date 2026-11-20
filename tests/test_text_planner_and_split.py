@@ -293,6 +293,42 @@ def test_a_placeholder_that_survives_the_retry_leaves_the_request_whole():
         "{HIGHER_RISK_PERSON} carries more risk; list the findings.", "Sweep Hubbard."]
 
 
+def test_square_bracket_placeholders_and_numbered_openers_not_in_the_request_are_visibly_broken():
+    from fastworkflow.workflow_agent import _visibly_broken
+
+    query = "Who is on the roster of each unit? Also sweep Hubbard."
+    assert _visibly_broken(["[Person 1 name] starts on the roster.", "Sweep Hubbard."], query)
+    assert _visibly_broken(["Control 1: who is in it.", "Sweep Hubbard."], query)
+    # the user's own text is theirs
+    assert not _visibly_broken(["[Person 1 name] starts on the roster.", "Sweep Hubbard."],
+                               "[Person 1 name] starts on the roster. Also sweep Hubbard.")
+    assert not _visibly_broken(["Control 1: who is in it.", "Sweep Hubbard."],
+                               "Control 1: who is in it. Also sweep Hubbard.")
+    # ordinary sub-tasks (a colon, a number, brackets that are not a placeholder) are not flagged
+    assert not _visibly_broken(["Audit Alice: list the rights.", "Sweep Hubbard 2.", "Set a[0] to 1.", "Add [1] and [2]."], query)
+
+
+def test_a_square_bracket_placeholder_that_survives_the_retry_leaves_the_request_whole():
+    query = "Who is on the roster of each unit? Also sweep Hubbard."
+    broken = {"reasoning": "r", "subtasks": "1. [Person 1 name] starts on the roster.\n2. Sweep Hubbard."}
+    assert _split_with_query(query, broken, broken) == [query]
+
+
+def test_the_same_phrases_of_a_request_are_not_leftover_references():
+    from fastworkflow.workflow_agent import _visibly_broken
+
+    assert not _visibly_broken(["Give Ann Lee the same treatment as Bo Chan.", "Sweep Hubbard."], "the request")
+    assert not _visibly_broken(["Give Cy Dale the same look as Bo Chan.", "Sweep Hubbard."], "the request")
+    assert _visibly_broken(["Audit each of them.", "Sweep Hubbard."], "the request")
+
+
+def test_the_recorded_real_split_comes_through_the_placeholder_check():
+    from fastworkflow.workflow_agent import _invented_placeholders
+
+    assert not any(_invented_placeholders(line.split(". ", 1)[1], RECORDED_QUERY_5_10)
+                   for line in RECORDED_REPLY_5_10.splitlines())
+
+
 def test_a_single_sub_task_is_the_request_as_the_user_wrote_it():
     # The model's rewrite of a one-job request dropped its leading record phrase: the request comes back whole.
     query = ("For Ada Ng's card, list the fines it carries with the payments that would clear them, and every "
@@ -832,9 +868,10 @@ def test_breakage_counts_records_named_twice_then_leftover_references():
 
     summary = [line.split(". ", 1)[1] for line in _SUMMARY_AND_INVENTED[0].splitlines() if line[:1].isdigit()]
     per_job = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
-    # Ann Lee, Bob Kerr and Cid Moss each appear in a second sub-task; three sub-tasks keep a reference
-    assert _breakage(_TWICE_REQUEST, summary, None) == (3, 3)
-    assert _breakage(_TWICE_REQUEST, per_job, None) == (0, 3)
+    # Ann Lee, Bob Kerr and Cid Moss each appear in a second sub-task; one sub-task keeps a reference ("each of them";
+    # "the same treatment" is the request's own wording, bd fix-jtxv)
+    assert _breakage(_TWICE_REQUEST, summary, None) == (3, 1)
+    assert _breakage(_TWICE_REQUEST, per_job, None) == (0, 0)
 
 
 def test_a_reply_is_cut_off_by_its_finish_reason_or_by_reaching_max_tokens():

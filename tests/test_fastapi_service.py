@@ -27,19 +27,6 @@ def hello_world_workflow_path():
 
 
 @pytest.fixture
-def env_files():
-    """Get paths to actual env files for testing"""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file):
-        pytest.skip(f"Env file not found at {env_file}. Please create ./env/.env")
-    if not os.path.isfile(passwords_file):
-        pytest.skip(f"Passwords file not found at {passwords_file}. Please create ./passwords/.env")
-    return env_file, passwords_file
-
-
-@pytest.fixture
 def unique_user_id():
     """Generate a unique user ID for each test to avoid session conflicts"""
     import uuid

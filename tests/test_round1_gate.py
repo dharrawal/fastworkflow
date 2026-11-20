@@ -315,3 +315,22 @@ def test_a_drafted_goal_never_holds_the_conversation_summary(gated, monkeypatch)
     assert out.status is TurnStatus.COMPLETED
     assert seen == [JOKE] and conversations == ["conversation summary: startup -> The library is open."]
     assert [item.goal for item in gated.ctx._turn_subtask_plan.items] == [JOKE]
+
+
+# ----------------------------------------------------------------------
+# fix-jj3k: the fast path is bound in agent mode too
+# ----------------------------------------------------------------------
+
+
+def test_a_fast_path_command_is_bound_to_its_part_in_agent_mode(gated, monkeypatch):
+    """A single execution command the local model is confident of is drafted as a one-item plan and run bound, as in
+    no-agent mode (``_run_plain_means``: the listing is narrowed to the command), not left to the agent. The review is
+    still skipped."""
+    _split_into(monkeypatch, [FIND])
+    gated.script.steps = _finish()
+    out = gated.ctx.process_turn(FIND)
+    assert out.status is TurnStatus.COMPLETED
+    assert gated.store.records == []
+    assert _marker(gated) == "fast_path"
+    (item,) = gated.ctx._turn_subtask_plan.items
+    assert (item.means.kind, item.means.name) == ("plain", "Library/find_member")

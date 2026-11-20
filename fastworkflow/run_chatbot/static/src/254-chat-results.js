@@ -205,7 +205,7 @@ function tmResultSchema(result, schemas) {
    DELETE TM_LEGACY_FRAMEWORK_COMMANDS, and the fallback line at the end of tmIsFrameworkOutput, when no stored turn predates the
    `framework` key (a store older than that release is no longer readable). A test keeps the list equal to
    that folder until then. */
-var TM_LEGACY_FRAMEWORK_COMMANDS = ["review_plan", "review_proposal", "review_subtasks"];
+var TM_LEGACY_FRAMEWORK_COMMANDS = ["review_proposal", "review_subtasks"];
 
 function tmIsFrameworkOutput(co) {
   if (!co || typeof co !== "object") { return false; }

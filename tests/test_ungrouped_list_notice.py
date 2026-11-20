@@ -121,3 +121,41 @@ def test_the_notice_function_never_raises_on_a_folder_with_no_workflow(tmp_path)
                                      "simple_workflow_template", "extended_workflow_example"])
 def test_the_bundled_examples_produce_no_notice(example):
     assert command_preview.check_ungrouped_list_notices(str(EXAMPLES / example)) == []
+
+
+# fix-bh1e.16: a command with more utterances than the matcher shows gets a notice.
+
+def _library_with_utterance_counts(tmp_path, counts):
+    folder = tmp_path / "library"
+    shutil.copytree(EXAMPLES / "library", folder, ignore=shutil.ignore_patterns("__pycache__", "___*"))
+    for name, count in counts.items():
+        utterances = ",\n        ".join(f'"show {name} number {i}"' for i in range(count))
+        (folder / "_commands" / f"{name}.py").write_text(
+            COMMAND.format(name=name, fields="        left: list[str] = Field(default_factory=list, description='l')")
+            .split("    plain_utterances")[0]
+            + f"    plain_utterances = [\n        {utterances},\n    ]\n\n\nclass ResponseGenerator:\n"
+            "    def __call__(self, workflow: fastworkflow.Workflow, command: str,\n"
+            "                 input: Signature.Input) -> Signature.Output:\n"
+            "        return Signature.Output(left=[])\n",
+            encoding="utf-8")
+    return str(folder)
+
+
+def test_a_command_with_more_utterances_than_the_matcher_shows_is_noticed(tmp_path, monkeypatch, capsys):
+    from fastworkflow.workflow_agent import MATCHER_EXAMPLES
+
+    folder = _library_with_utterance_counts(
+        tmp_path, {"many_phrases": MATCHER_EXAMPLES + 1, "few_phrases": MATCHER_EXAMPLES})
+
+    notices = command_preview.check_matcher_example_notices(folder)
+
+    many = [n for n in notices if n.startswith("notice: many_phrases ")]
+    assert len(many) == 1
+    assert f"first {MATCHER_EXAMPLES} of {MATCHER_EXAMPLES + 1}" in many[0]
+    assert not [n for n in notices if "few_phrases" in n]
+
+    out = str(tmp_path / "previews")
+    assert _run_cli(monkeypatch, "command", "preview", folder, "--out", out) == 0
+    capsys.readouterr()
+    assert _run_cli(monkeypatch, "command", "preview", folder, "--check", "--out", out) == 0
+    assert capsys.readouterr().out.count("notice: many_phrases ") == 1

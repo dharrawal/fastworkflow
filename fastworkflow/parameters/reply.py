@@ -15,7 +15,8 @@ a reply can be besides values, in this order:
 5. any other reply goes to the remote decision model, ONCE, through the caller's ``remote`` function (None: no read, and
    so no model call). Its answer is ``wait`` (the user asks for a moment: the question stays), ``decline`` (it asked to
    stop), ``misunderstood`` (the command was the wrong one) or ``different`` (the reply is another request); ``answer``
-   or a read below the threshold leaves the code's reading as it was.
+   or a read below the threshold leaves the code's reading as it was. No read is made for a reply that already is a
+   valid value of every open field when each is constrained (a number, an allowed value, a yes/no).
 6. else the reading of ``parameters.read``: ``values`` or ``free``.
 
 Imports no model stack: the remote read is a function passed in (``remote_intent`` is the usual one and imports its
@@ -103,7 +104,7 @@ def read_reply(reply: str, names: Iterable[str], open_names: Iterable[str], *, c
         return Reading(_BY_INTENT[phrase])
     if replaces is not None and replaces(reply):
         return Reading(REPLACE)
-    if remote is not None and not base.named:
+    if remote is not None and not base.named and not read.fits_constrained(reply, open_names, slots):
         intent = remote(question, reply)
         if intent in _BY_INTENT:
             return Reading(_BY_INTENT[intent], intent=intent)

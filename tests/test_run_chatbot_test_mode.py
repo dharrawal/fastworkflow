@@ -53,16 +53,6 @@ def workflow_path():
     return path
 
 
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
-
-
 def _load_app_module(workflow_path, env_files, tmp_path, extra_argv=()):
     env_file, passwords_file = env_files
     sys.argv = [

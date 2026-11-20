@@ -32,7 +32,7 @@ def test_a_hand_built_output_does_not_claim_either_way():
 
 def test_a_record_written_before_the_field_existed_still_validates():
     legacy = fastworkflow.CommandOutput.model_validate(
-        {"command_response": {"response": "x", "success": True}, "command_name": "review_plan"})
+        {"command_response": {"response": "x", "success": True}, "command_name": "review_subtasks"})
     assert legacy.framework is None
 
 
@@ -47,21 +47,21 @@ def test_the_metadata_flag_marks_exactly_the_framework_commands_folder(tmp_path)
 
 def test_recording_marks_the_framework_commands_and_only_those(tmp_path):
     _folder, ctx, _wf = _make(tmp_path, LIBRARY, "library")
-    for name in ("review_plan", "review_proposal", "review_subtasks"):
+    for name in ("review_proposal", "review_subtasks"):
         ctx.append_turn_output(_output(name))
-    for name in ("find_book", "library_hours", "ask_user", "Shelf/review_plan", "wildcard"):
+    for name in ("find_book", "library_hours", "ask_user", "Shelf/review_subtasks", "wildcard"):
         ctx.append_turn_output(_output(name))
     recorded = {o.command_name: o.framework for o in ctx._turn_outputs}
     assert recorded == {
-        "review_plan": True, "review_proposal": True, "review_subtasks": True,
+        "review_proposal": True, "review_subtasks": True,
         "find_book": False, "library_hours": False, "ask_user": False,
-        "Shelf/review_plan": False, "wildcard": False,
+        "Shelf/review_subtasks": False, "wildcard": False,
     }
 
 
 def test_an_output_already_decided_is_not_overwritten(tmp_path):
     _folder, ctx, _wf = _make(tmp_path, LIBRARY, "library")
-    decided = _output("review_plan")
+    decided = _output("review_subtasks")
     decided.framework = False
     ctx.append_turn_output(decided)
     assert ctx._turn_outputs[-1].framework is False
