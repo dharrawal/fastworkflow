@@ -1,0 +1,1126 @@
+{
+ "schema": 1,
+ "workflow": "library",
+ "notes": [
+  "Hand-written held-out requests for the decision 'which plan, if any, does this part get' on the bundled library example (fix-o1lg S0).",
+  "Disjoint from every seed utterance of the library's commands and from library.json and library_handwritten.json in this folder (tests/test_plan_intent_fixture.py checks it).",
+  "context is where the workflow stands: Library is the root record; Book is the book b1 inside it.",
+  "expect is plan (expected names the planning command), execution (expected names the plain command that answers it; no plan may be given) or none (nothing in the workflow serves it; no plan may be given).",
+  "group names the case's group: plan, execution, resembles_plan (a plain command answers it, but its wording resembles a planning command's description) or none.",
+  "two_part requests carry their parts as a split would write them, each with its own expectation; the scorer scores each part."
+ ],
+ "cases": [
+  {
+   "id": "plan-loan_report-1",
+   "utterance": "which members currently hold this title, and when must they bring it back",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/loan_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-loan_report-2",
+   "utterance": "who's got this one checked out and what are the due dates",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/loan_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-loan_report-3",
+   "utterance": "tell me the borrowers of this book with their return dates",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/loan_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-loan_report-4",
+   "utterance": "is this copy lent to anyone, and when is it expected back",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/loan_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-loan_report-5",
+   "utterance": "I need the people borrowing this book and each deadline",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/loan_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-loan_report-6",
+   "utterance": "who took this book out and by when should it come back",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/loan_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-shelf_report-1",
+   "utterance": "which branch has this book, how many do we own, and who's borrowing it",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/shelf_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-shelf_report-2",
+   "utterance": "give me the location, the copy count and the current borrowers for this title",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/shelf_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-shelf_report-3",
+   "utterance": "where can I find this book and is any copy lent out",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/shelf_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-shelf_report-4",
+   "utterance": "what's the holding branch for this one, and are all copies in",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/shelf_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-shelf_report-5",
+   "utterance": "full availability picture for this book: branch, copies, loans",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/shelf_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-shelf_report-6",
+   "utterance": "is this book on a shelf anywhere right now, and where",
+   "context": "Book",
+   "expect": "plan",
+   "expected": "Book/shelf_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-author_books-1",
+   "utterance": "which Frank Herbert books do we stock, with the copy numbers",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/author_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-author_books-2",
+   "utterance": "show me all titles by Austen and how many of each we hold",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/author_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-author_books-3",
+   "utterance": "everything written by Jane Austen in our collection, with copies per title",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/author_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-author_books-4",
+   "utterance": "list Herbert's works here along with the number of copies of each",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/author_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-author_books-5",
+   "utterance": "what titles from Frank Herbert are in the collection and how many copies per title",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/author_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-author_books-6",
+   "utterance": "run through the Jane Austen holdings, each title with its copies",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/author_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_by_title-1",
+   "utterance": "who's the writer of Emma and how many do we own",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_by_title",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_by_title-2",
+   "utterance": "author of Dune Messiah please, and the number of copies",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_by_title",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_by_title-3",
+   "utterance": "for the title Persuasion, tell me its author and our copy count",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_by_title",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_by_title-4",
+   "utterance": "Dune: who is it by, and how many copies does the library have",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_by_title",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_by_title-5",
+   "utterance": "I'd like the author and copy count for Emma",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_by_title",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_by_title-6",
+   "utterance": "whose book is Persuasion, and do we own more than one copy",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_by_title",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_loans-1",
+   "utterance": "who currently has Emma checked out",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_loans",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_loans-2",
+   "utterance": "which members are borrowing Persuasion",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_loans",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_loans-3",
+   "utterance": "has anybody taken out Dune Messiah",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_loans",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_loans-4",
+   "utterance": "tell me the borrowers of Dune",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_loans",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_loans-5",
+   "utterance": "who's got a copy of Emma at home right now",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_loans",
+   "group": "plan"
+  },
+  {
+   "id": "plan-book_loans-6",
+   "utterance": "is Persuasion lent to someone, and to whom",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/book_loans",
+   "group": "plan"
+  },
+  {
+   "id": "plan-count_books-1",
+   "utterance": "how many titles do we carry by Frank Herbert",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/count_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-count_books-2",
+   "utterance": "give me the number of books with Dune in the name",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/count_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-count_books-3",
+   "utterance": "count the Austen books in the collection",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/count_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-count_books-4",
+   "utterance": "what's the total of books matching Messiah",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/count_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-count_books-5",
+   "utterance": "how many of our books are written by Jane Austen",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/count_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-count_books-6",
+   "utterance": "number of catalogue entries that have Emma in the title",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/count_books",
+   "group": "plan"
+  },
+  {
+   "id": "plan-find_record-1",
+   "utterance": "is anything or anyone here called Chen",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/find_record",
+   "group": "plan"
+  },
+  {
+   "id": "plan-find_record-2",
+   "utterance": "do we have a patron by the name of Ann",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/find_record",
+   "group": "plan"
+  },
+  {
+   "id": "plan-find_record-3",
+   "utterance": "check whether a book named Persuasion exists",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/find_record",
+   "group": "plan"
+  },
+  {
+   "id": "plan-find_record-4",
+   "utterance": "does the name Raj belong to any member",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/find_record",
+   "group": "plan"
+  },
+  {
+   "id": "plan-find_record-5",
+   "utterance": "is there such a title as Dune in our records",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/find_record",
+   "group": "plan"
+  },
+  {
+   "id": "plan-find_record-6",
+   "utterance": "do you know of a member or book going by Mia",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/find_record",
+   "group": "plan"
+  },
+  {
+   "id": "plan-member_report-1",
+   "utterance": "what books does Mia Chen have out at the moment",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/member_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-member_report-2",
+   "utterance": "give me Raj Patel's loans along with the notes on his file",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/member_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-member_report-3",
+   "utterance": "summarize Ann Lee for me: what she's borrowed",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/member_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-member_report-4",
+   "utterance": "what is Raj Patel currently borrowing",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/member_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-member_report-5",
+   "utterance": "pull up Mia Chen's loans and any notes we keep on her",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/member_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-member_report-6",
+   "utterance": "I want an overview of Ann Lee's account",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/member_report",
+   "group": "plan"
+  },
+  {
+   "id": "plan-note_member-1",
+   "utterance": "write on Mia Chen's file that she lost her card",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/note_member",
+   "group": "plan"
+  },
+  {
+   "id": "plan-note_member-2",
+   "utterance": "please record for Ann Lee: prefers phone calls",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/note_member",
+   "group": "plan"
+  },
+  {
+   "id": "plan-note_member-3",
+   "utterance": "make a note against Raj Patel that a fee was waived",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/note_member",
+   "group": "plan"
+  },
+  {
+   "id": "plan-note_member-4",
+   "utterance": "Ann Lee's record should say she changed her email",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/note_member",
+   "group": "plan"
+  },
+  {
+   "id": "plan-note_member-5",
+   "utterance": "jot down on Raj Patel's account: asked for a new card",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/note_member",
+   "group": "plan"
+  },
+  {
+   "id": "plan-note_member-6",
+   "utterance": "leave a remark on Mia Chen's record saying she volunteers on Fridays",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/note_member",
+   "group": "plan"
+  },
+  {
+   "id": "plan-overdue_summary-1",
+   "utterance": "give me a rundown of our branches and the late loans",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/overdue_summary",
+   "group": "plan"
+  },
+  {
+   "id": "plan-overdue_summary-2",
+   "utterance": "what's the state of the library: locations and overdue count",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/overdue_summary",
+   "group": "plan"
+  },
+  {
+   "id": "plan-overdue_summary-3",
+   "utterance": "brief me on the branches and how many items are overdue at Riverside",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/overdue_summary",
+   "group": "plan"
+  },
+  {
+   "id": "plan-overdue_summary-4",
+   "utterance": "library health check please: branches plus overdue loans",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/overdue_summary",
+   "group": "plan"
+  },
+  {
+   "id": "plan-overdue_summary-5",
+   "utterance": "tell me the branches we run and the number of late returns overall",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/overdue_summary",
+   "group": "plan"
+  },
+  {
+   "id": "plan-overdue_summary-6",
+   "utterance": "an overview of the whole library, with overdue figures",
+   "context": "Library",
+   "expect": "plan",
+   "expected": "Library/overdue_summary",
+   "group": "plan"
+  },
+  {
+   "id": "exec-01",
+   "utterance": "what branches exist in this library",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/list_branches",
+   "group": "execution"
+  },
+  {
+   "id": "exec-02",
+   "utterance": "name the library's locations",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/list_branches",
+   "group": "execution"
+  },
+  {
+   "id": "exec-03",
+   "utterance": "how many overdue loans does Central have",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/count_overdue",
+   "group": "execution"
+  },
+  {
+   "id": "exec-04",
+   "utterance": "what's the count of late loans across the library",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/count_overdue",
+   "group": "execution"
+  },
+  {
+   "id": "exec-05",
+   "utterance": "number of loans past due at Riverside",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/count_overdue",
+   "group": "execution"
+  },
+  {
+   "id": "exec-06",
+   "utterance": "search for books with Messiah in the title",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_book",
+   "group": "execution"
+  },
+  {
+   "id": "exec-07",
+   "utterance": "look for titles by Herbert",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_book",
+   "group": "execution"
+  },
+  {
+   "id": "exec-08",
+   "utterance": "search the patrons for Patel",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_member",
+   "group": "execution"
+  },
+  {
+   "id": "exec-09",
+   "utterance": "look up the member Mia",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_member",
+   "group": "execution"
+  },
+  {
+   "id": "exec-10",
+   "utterance": "open the book b2",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/open_book",
+   "group": "execution"
+  },
+  {
+   "id": "exec-11",
+   "utterance": "switch to book b4",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/open_book",
+   "group": "execution"
+  },
+  {
+   "id": "exec-12",
+   "utterance": "open member m2",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/open_member",
+   "group": "execution"
+  },
+  {
+   "id": "exec-13",
+   "utterance": "go to member m3's record",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/open_member",
+   "group": "execution"
+  },
+  {
+   "id": "exec-14",
+   "utterance": "what are the opening hours at Central",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "library_hours",
+   "group": "execution"
+  },
+  {
+   "id": "exec-15",
+   "utterance": "is the library open on Sundays",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "library_hours",
+   "group": "execution"
+  },
+  {
+   "id": "exec-16",
+   "utterance": "when does Riverside close",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "library_hours",
+   "group": "execution"
+  },
+  {
+   "id": "exec-17",
+   "utterance": "list the loans for this book",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Book/list_loans",
+   "group": "execution"
+  },
+  {
+   "id": "exec-18",
+   "utterance": "show the next page of this book's loans",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Book/list_loans",
+   "group": "execution"
+  },
+  {
+   "id": "exec-19",
+   "utterance": "display this book's details",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Book/show_book",
+   "group": "execution"
+  },
+  {
+   "id": "exec-20",
+   "utterance": "what's the title and author of the open book",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Book/show_book",
+   "group": "execution"
+  },
+  {
+   "id": "exec-21",
+   "utterance": "add a note saying the dust jacket is missing",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Record/add_note",
+   "group": "execution"
+  },
+  {
+   "id": "exec-22",
+   "utterance": "note: page 12 is torn",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Record/add_note",
+   "group": "execution"
+  },
+  {
+   "id": "exec-23",
+   "utterance": "what notes does this book have",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Record/show_notes",
+   "group": "execution"
+  },
+  {
+   "id": "exec-24",
+   "utterance": "read out the notes kept on this title",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Record/show_notes",
+   "group": "execution"
+  },
+  {
+   "id": "resembles-01",
+   "utterance": "tally the overdue loans in every branch",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/count_overdue",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-02",
+   "utterance": "how many late loans does Riverside have right now",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/count_overdue",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-03",
+   "utterance": "find books written by Frank Herbert",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_book",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-04",
+   "utterance": "search the catalogue for the title Emma",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_book",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-05",
+   "utterance": "find the book called Persuasion",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_book",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-06",
+   "utterance": "look up members named Chen",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_member",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-07",
+   "utterance": "search the member list for Ann",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/find_member",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-08",
+   "utterance": "which branches do we run",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/list_branches",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-09",
+   "utterance": "name each of our library branches",
+   "context": "Library",
+   "expect": "execution",
+   "expected": "Library/list_branches",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-10",
+   "utterance": "page through this title's loans",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Book/list_loans",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-11",
+   "utterance": "what branch is the open book at and how many copies",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Book/show_book",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "resembles-12",
+   "utterance": "add a note to this book's record: returned damaged",
+   "context": "Book",
+   "expect": "execution",
+   "expected": "Record/add_note",
+   "group": "resembles_plan"
+  },
+  {
+   "id": "none-01",
+   "utterance": "what's the weather like in town today",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-02",
+   "utterance": "order twenty new copies of Dune from the supplier",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-03",
+   "utterance": "translate the word library into French",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-04",
+   "utterance": "how much are the late fees per day",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-05",
+   "utterance": "book a meeting room for Tuesday afternoon",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-06",
+   "utterance": "write a poem about reading",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-07",
+   "utterance": "delete the member Raj Patel",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-08",
+   "utterance": "what's the wifi password at Central",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-09",
+   "utterance": "recommend a good science fiction novel that we don't own",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-10",
+   "utterance": "send an email reminder to everyone with late books",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-11",
+   "utterance": "who won the football match last night",
+   "context": "Library",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-12",
+   "utterance": "print a barcode label for this book",
+   "context": "Book",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  },
+  {
+   "id": "none-13",
+   "utterance": "reserve this book for me for next week",
+   "context": "Book",
+   "expect": "none",
+   "expected": null,
+   "group": "none"
+  }
+ ],
+ "two_part": [
+  {
+   "id": "two-01",
+   "request": "who wrote Emma and how many copies are there, and also who is borrowing Persuasion",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "who wrote Emma and how many copies are there",
+     "expect": "plan",
+     "expected": "Library/book_by_title"
+    },
+    {
+     "utterance": "who is borrowing Persuasion",
+     "expect": "plan",
+     "expected": "Library/book_loans"
+    }
+   ]
+  },
+  {
+   "id": "two-02",
+   "request": "count the Herbert books, then brief me on the branches and the overdue loans",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "count the Herbert books",
+     "expect": "plan",
+     "expected": "Library/count_books"
+    },
+    {
+     "utterance": "brief me on the branches and the overdue loans",
+     "expect": "plan",
+     "expected": "Library/overdue_summary"
+    }
+   ]
+  },
+  {
+   "id": "two-03",
+   "request": "what is Ann Lee borrowing, and put a note on Raj Patel's record that he called",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "what is Ann Lee borrowing",
+     "expect": "plan",
+     "expected": "Library/member_report"
+    },
+    {
+     "utterance": "put a note on Raj Patel's record that he called",
+     "expect": "plan",
+     "expected": "Library/note_member"
+    }
+   ]
+  },
+  {
+   "id": "two-04",
+   "request": "is there a member called Chen, and which Austen titles do we own with their copies",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "is there a member called Chen",
+     "expect": "plan",
+     "expected": "Library/find_record"
+    },
+    {
+     "utterance": "which Austen titles do we own with their copies",
+     "expect": "plan",
+     "expected": "Library/author_books"
+    }
+   ]
+  },
+  {
+   "id": "two-05",
+   "request": "list our branches and tell me who has Dune out",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "list our branches",
+     "expect": "execution",
+     "expected": "Library/list_branches"
+    },
+    {
+     "utterance": "tell me who has Dune out",
+     "expect": "plan",
+     "expected": "Library/book_loans"
+    }
+   ]
+  },
+  {
+   "id": "two-06",
+   "request": "how many loans are late at Central, and what has Mia Chen got on loan",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "how many loans are late at Central",
+     "expect": "execution",
+     "expected": "Library/count_overdue"
+    },
+    {
+     "utterance": "what has Mia Chen got on loan",
+     "expect": "plan",
+     "expected": "Library/member_report"
+    }
+   ]
+  },
+  {
+   "id": "two-07",
+   "request": "who has this book and when is each copy due, and add a note that the cover is stained",
+   "context": "Book",
+   "parts": [
+    {
+     "utterance": "who has this book and when is each copy due",
+     "expect": "plan",
+     "expected": "Book/loan_report"
+    },
+    {
+     "utterance": "add a note that the cover is stained",
+     "expect": "execution",
+     "expected": "Record/add_note"
+    }
+   ]
+  },
+  {
+   "id": "two-08",
+   "request": "where is this book held and who has it, and what are Central's opening hours",
+   "context": "Book",
+   "parts": [
+    {
+     "utterance": "where is this book held and who has it",
+     "expect": "plan",
+     "expected": "Book/shelf_report"
+    },
+    {
+     "utterance": "what are Central's opening hours",
+     "expect": "execution",
+     "expected": "library_hours"
+    }
+   ]
+  },
+  {
+   "id": "two-09",
+   "request": "who is the author of Dune Messiah with the copy count, and tell me a riddle",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "who is the author of Dune Messiah with the copy count",
+     "expect": "plan",
+     "expected": "Library/book_by_title"
+    },
+    {
+     "utterance": "tell me a riddle",
+     "expect": "none",
+     "expected": null
+    }
+   ]
+  },
+  {
+   "id": "two-10",
+   "request": "note on Ann Lee's record that her card expired, and how many books have Dune in the title",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "note on Ann Lee's record that her card expired",
+     "expect": "plan",
+     "expected": "Library/note_member"
+    },
+    {
+     "utterance": "how many books have Dune in the title",
+     "expect": "plan",
+     "expected": "Library/count_books"
+    }
+   ]
+  },
+  {
+   "id": "two-11",
+   "request": "what's the forecast for tomorrow, and which Frank Herbert books do we have with copies",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "what's the forecast for tomorrow",
+     "expect": "none",
+     "expected": null
+    },
+    {
+     "utterance": "which Frank Herbert books do we have with copies",
+     "expect": "plan",
+     "expected": "Library/author_books"
+    }
+   ]
+  },
+  {
+   "id": "two-12",
+   "request": "give me the status of the branches and overdue loans, and check if a book called Emma exists",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "give me the status of the branches and overdue loans",
+     "expect": "plan",
+     "expected": "Library/overdue_summary"
+    },
+    {
+     "utterance": "check if a book called Emma exists",
+     "expect": "plan",
+     "expected": "Library/find_record"
+    }
+   ]
+  },
+  {
+   "id": "two-13",
+   "request": "find the member Raj and open book b3",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "find the member Raj",
+     "expect": "execution",
+     "expected": "Library/find_member"
+    },
+    {
+     "utterance": "open book b3",
+     "expect": "execution",
+     "expected": "Library/open_book"
+    }
+   ]
+  },
+  {
+   "id": "two-14",
+   "request": "who's borrowing Emma, and summarize Raj Patel's loans and notes",
+   "context": "Library",
+   "parts": [
+    {
+     "utterance": "who's borrowing Emma",
+     "expect": "plan",
+     "expected": "Library/book_loans"
+    },
+    {
+     "utterance": "summarize Raj Patel's loans and notes",
+     "expect": "plan",
+     "expected": "Library/member_report"
+    }
+   ]
+  }
+ ]
+}

@@ -6,7 +6,7 @@ from contextlib import nullcontext
 import fastworkflow
 from pydantic import BaseModel
 from fastworkflow import tracing
-from fastworkflow import approval_binding, command_writes
+from fastworkflow import approval_binding, command_writes, waiting
 from fastworkflow.command_interfaces import CommandExecutorInterface
 from fastworkflow.context_navigation import declared_descends_to
 
@@ -124,13 +124,25 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
     )
 
 
+def _assistant_round(chat_session) -> bool:
+    """The round was started by a "/" message (the CME's port says so)."""
+    return waiting.port_of(chat_session.cme_workflow.context).assistant
+
+
+def _end_round(chat_session) -> None:
+    """The "/" round ends (the one place a command's run clears the mark)."""
+    waiting.port_of(chat_session.cme_workflow.context).end_round()
+
+
 def _pending_before_cme_reply(workflow) -> dict:
-    """What the CME workflow was in the middle of, read before the router runs (an abort clears it): the NLU stage, the
-    command text being processed and the command whose parameters were being extracted. Empty when nothing."""
+    """What the CME workflow was in the middle of, read before the router runs (an abort clears it): what it was
+    waiting for (``intent_loop.waiting_for``), the command text being processed and the command whose parameters were
+    being extracted. Empty when nothing."""
     try:
+        from fastworkflow import intent_loop
+
         context = workflow.context
-        stage = context.get("NLU_Pipeline_Stage")
-        pending = {"stage": getattr(stage, "name", None) if stage is not None else None,
+        pending = {"waiting_for": intent_loop.waiting_for(context),
                    "command": context.get("command"), "command_name": context.get("command_name")}
         return {key: value for key, value in pending.items() if value is not None}
     except Exception:  # noqa: BLE001
@@ -158,12 +170,12 @@ def _no_agent_note(route, workflow) -> str:
     router's command file, so the internal workflow's training fingerprint (a hash of those files) does not move.
     Empty in agent mode, for an agent's own call, and for any reply that is not an unrouted request."""
     if workflow is None or route.handled or route.routed or route.command_name is not None \
-            or route.parameter_request is not None or route.intent_choices:
+            or route.parameter_request is not None or route.plan_choice:
         return ""    # a reply that offers candidate commands needs a pick, not an explanation of the mode
     try:
         context = workflow.context
         app_workflow = context.get("app_workflow")
-        agentic = ("is_assistant_mode_command" not in context
+        agentic = (not waiting.port_of(context).assistant
                    and app_workflow is not None and bool(app_workflow.context.get("run_as_agent")))
         if agentic or not context.get("no_agent_mode"):
             return ""
@@ -203,8 +215,10 @@ def _wildcard_command_output(framed: CommandOutput, pending: dict | None = None,
         artifacts["reply_intent"] = route.reply_intent
     if route.parameter_request is not None:
         artifacts["parameter_request"] = route.parameter_request
-    if route.intent_choices:
-        artifacts["intent_choices"] = route.intent_choices
+    if route.plan_choice:
+        # The which-command question, in the one shape every path asks it (`intent_loop.prompt_artifacts`).
+        artifacts["question_kind"] = "plan_choice"
+        artifacts["plan_choice"] = route.plan_choice
     artifacts.update(_cme_reply_artifacts(route.output, pending))
     return CommandOutput(
         command_response=fastworkflow.CommandResponse(
@@ -636,9 +650,7 @@ class CommandExecutor(CommandExecutorInterface):
         # command that needs the agent is refused with its reasons. A mechanical one falls
         # through to the extraction hop below, and the post-extraction branch runs it. In agent
         # mode the name goes through the extraction hop and runs as a planning command.
-        if app_workflow is not None and (
-            "is_assistant_mode_command" in chat_session.cme_workflow._context
-        ):
+        if app_workflow is not None and _assistant_round(chat_session):
             token = _command_name_token(command)
             if planning_name := _resolve_planning_command_name(
                 app_workflow.folderpath, token
@@ -658,8 +670,7 @@ class CommandExecutor(CommandExecutorInterface):
 
         if command_output.command_handled:       
             # important to clear the current command mode from the workflow context
-            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
-                del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            _end_round(chat_session)
             return command_output
         elif not command_output.success:       
             return command_output
@@ -678,8 +689,7 @@ class CommandExecutor(CommandExecutorInterface):
         # is refused unrun (fix-fixv, command_writes): a read-only planning command changes nothing.
         refusal = command_writes.phase_write_refusal(chat_session, workflow.folderpath, command_name)
         if refusal is not None:
-            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
-                del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            _end_round(chat_session)
             # Marked so the agent loop neither logs it as an executed action nor lets the policy
             # remember it as run (workflow_agent._execute_workflow_query skips both, as for policy_blocked).
             refused = CommandOutput(
@@ -693,12 +703,12 @@ class CommandExecutor(CommandExecutorInterface):
         if planning_name := _resolve_planning_command_name(
             workflow.folderpath, command_name
         ):
-            assistant = "is_assistant_mode_command" in chat_session.cme_workflow._context
+            assistant = _assistant_round(chat_session)
             if assistant:
                 refusal = (None if getattr(chat_session, "no_agent_mode", False) is True else
                            _assistant_planning_refusal(workflow.folderpath, planning_name, workflow))
                 if refusal is not None:
-                    del chat_session.cme_workflow._context["is_assistant_mode_command"]
+                    _end_round(chat_session)
                     return refusal
             # Agent mode: the step's arguments were extracted above; the planning command
             # runs them as a nested frame. Its output is the step's observation. Assistant mode
@@ -713,8 +723,8 @@ class CommandExecutor(CommandExecutorInterface):
                         planning_name, input_obj, command
                     )
             finally:
-                if assistant and "is_assistant_mode_command" in chat_session.cme_workflow._context:
-                    del chat_session.cme_workflow._context["is_assistant_mode_command"]
+                if assistant:
+                    _end_round(chat_session)
             planning_output.workflow_name = workflow.folderpath.split("/")[-1]
             planning_output.context = workflow._current_command_context_displayname
             planning_output.command_name = planning_name
@@ -762,8 +772,7 @@ class CommandExecutor(CommandExecutorInterface):
             blocked.context = context
             blocked.command_name = command_name
             blocked.command_parameters = input_obj or None
-            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
-                del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            _end_round(chat_session)
             return blocked
 
         context_before = workflow._current_command_context
@@ -806,8 +815,7 @@ class CommandExecutor(CommandExecutorInterface):
             command_output.ran_in_context_clause = ran_on_clause
 
         # important to clear the current command mode from the workflow context
-        if "is_assistant_mode_command" in chat_session.cme_workflow._context:
-            del chat_session.cme_workflow._context["is_assistant_mode_command"]
+        _end_round(chat_session)
 
         return command_output
 

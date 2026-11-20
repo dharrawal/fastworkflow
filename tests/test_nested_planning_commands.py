@@ -433,7 +433,8 @@ def test_i_a_guard_refusal_is_the_invalid_value_response_and_pushes_no_frame(
         assert [(o.success, o.command_response.response) for o in refused] == [(
             False,
             f"PARAMETER EXTRACTION ERROR FOR COMMAND '{BOOK_BY_TITLE}'\n"
-            "title='Foundation' is not written in the request",
+            "I can't run book by title yet: title='Foundation' is not written in the request. "
+            "Which title should I use?",
         )]
         # The guard came before the hook and the Input: neither ran, and no frame was pushed.
         assert state.wf.context.get(HOOK_CALLS) is None
@@ -674,7 +675,7 @@ def test_r_an_ask_user_in_a_nested_call_suspends_the_whole_turn(open_find_env):
     assert suspended.status == TurnStatus.AWAITING_USER
     assert suspended.answer == "Which Dune?"
     assert ctx.awaiting_user
-    assert ctx._pending_clarification_request == "Which Dune?"
+    assert ctx.waiting.question == "Which Dune?"
     # The child is on top; the parent planning call and the turn frame stay under it, each suspended.
     frames = ctx._frame_stack()
     assert [f.command_name for f in frames] == [None, BOOK_LOANS, BOOK_BY_TITLE]
@@ -706,7 +707,7 @@ def test_s_a_suspended_nested_stack_restores_on_a_fresh_context(
         assert [f.alias for f in frames] == expected_aliases
         assert [f.agent.export_suspended() for f in frames[1:]] == expected_suspensions
         assert restored.ctx.awaiting_user
-        assert restored.ctx._pending_clarification_request == "Which Dune?"
+        assert restored.ctx.waiting.question == "Which Dune?"
         # The restored nested agents count their steps against the turn's budget, as they did.
         assert all(f.agent.on_iteration is not None for f in frames[1:])
 
@@ -778,7 +779,7 @@ def test_u_a_direct_action_is_refused_while_a_question_waits_and_the_turn_is_kep
     assert all(a is b for a, b in zip(ctx._turn_outputs, outputs))
     assert ctx._turn_frame().agent.export_suspended() == suspended_turn
     assert ctx.awaiting_user
-    assert ctx._pending_clarification_request == "Which Dune?"
+    assert ctx.waiting.question == "Which Dune?"
 
     turn = ctx.process_action_turn(action)
 
@@ -809,7 +810,7 @@ def test_v_a_nested_call_that_asks_twice_stays_suspended_until_its_last_answer(o
     assert second.status == TurnStatus.AWAITING_USER
     assert second.answer == "Which edition?"
     assert ctx.awaiting_user
-    assert ctx._pending_clarification_request == "Which edition?"
+    assert ctx.waiting.question == "Which edition?"
     assert [f.command_name for f in ctx._frame_stack()] == [None, BOOK_LOANS, BOOK_BY_TITLE]
 
     result = ctx.process_turn("the first edition")
@@ -1585,7 +1586,7 @@ with pytest.MonkeyPatch.context() as mp:
             ctx.apply_serialized_state(json.loads(blob_path.read_text()))
             report = {"command_names": [f.command_name for f in ctx._frame_stack()],
                       "awaiting": ctx.awaiting_user,
-                      "question": ctx._pending_clarification_request}
+                      "question": ctx.waiting.question}
             state.nested.run("find_book query=Dune")
             state.nested.finish()
             state.model.finish()

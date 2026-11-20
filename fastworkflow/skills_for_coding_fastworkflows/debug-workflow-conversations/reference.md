@@ -135,13 +135,12 @@ context chain), so read ALL of a trace's intent spans in `start_ns` order.
 | Attribute | Meaning |
 |---|---|
 | `context`, `stage`, `utterance` | Where/when the attempt ran (`stage` ∈ INTENT_DETECTION, INTENT_AMBIGUITY_CLARIFICATION, INTENT_MISUNDERSTANDING_CLARIFICATION) |
-| `matcher_layer` | Which layer decided: `exact_prefix`, `fuzzy_prematch`, `embedding_cache`, `classifier`, `clarification_default` |
+| `matcher_layer` | Which layer decided: `exact_prefix`, `fuzzy_prematch`, `classifier`, `clarification_default` (a span recorded by an earlier version may say `embedding_cache`) |
 | `classifier` | Present when the classifier ran: `{model_tier: tiny\|large, confidence, ambiguous_threshold, confident, top_label, topk_labels}` |
 | `ambiguous` + `candidates` | Low-confidence prediction: the candidate list shown to the user/agent |
 | `escalation_labels_discarded` | Escalation labels ranked in top-k but suppressed from the prompt |
 | `fuzzy_prematch_tie` | Commands that tied at the fuzzy layer (deferred to the classifier) |
 | `command_name`, `resolved`, `is_cme_command` | The outcome; `resolved: false` means no local prediction — the caller walks to the parent context |
-| `cache_similarity_threshold` | Present on `embedding_cache` hits (0.85) |
 
 ### `fw.nlu.param_extraction` (kind `internal`)
 Wraps parameter extraction + validation for the resolved command.

@@ -91,6 +91,19 @@ def approval_workflow(tmp_path_factory) -> str:
     return _copy_workflow(tmp_path_factory.mktemp("cli_turn_approval") / "wf", annotate_approval=True)
 
 
+@pytest.fixture(autouse=True)
+def _package_chat_session_restored():
+    """``_start`` binds the session to ``fastworkflow.chat_session`` (as ``fastworkflow run`` does); put back what the
+    name held, so a later test file still finds the submodule there."""
+    missing = object()
+    previous = vars(fastworkflow).get("chat_session", missing)
+    yield
+    if previous is missing:
+        vars(fastworkflow).pop("chat_session", None)
+    else:
+        fastworkflow.chat_session = previous
+
+
 def _start(workflow_path: str) -> ChatSession:
     fastworkflow.init({})
     session = ChatSession(run_as_agent=False)
@@ -358,7 +371,7 @@ def _reply_text(chat: ChatSession, message: str) -> tuple[str, bool]:
 
 def test_cancel_of_a_missing_value_prompt_is_what_typing_abort_does(session):
     prompt, _ = _reply_text(session, "/add_two_numbers first_num=2")
-    assert "Missing parameter values" in prompt and session._core.has_open_command()
+    assert "your request does not give the second num" in prompt and session._core.has_open_command()
 
     assert session.cancel_pending_prompt() == "clarification"
     assert wait_for_turn(session, lambda event: None, timeout_seconds=30) is WaitOutcome.DONE
@@ -437,7 +450,10 @@ def test_the_cancel_comes_before_a_message_that_was_already_queued(approval_work
         assert len(replies) == 1 and _sum_text() not in replies[0], "only the queued message's own result"
         assert _calls(call_log) == 0, "the queued yes approved nothing"
         assert chat.take_cancelled_unseen_notice() is True
-        assert chat.cancel_pending_prompt() is None
+        # The queued "yes" matched no command, so the which-command question it opened is what is pending now
+        # (one pending record since bd fix-o1lg: it is saved with the session and can be cancelled like any
+        # question). The approval is not pending: the queued yes approved nothing, as asserted above.
+        assert chat.cancel_pending_prompt() == "clarification"
     finally:
         chat._keep_alive = False
 
@@ -560,7 +576,7 @@ def test_run_main_end_to_end_over_piped_stdin_cancel_then_a_normal_command_then_
         time.sleep(1.0)
 
         at = terminal.send("/add_two_numbers first_num=2")
-        terminal.wait_for("Missing parameter values", at)
+        terminal.wait_for("your request does not give the second num", at)
         time.sleep(1.5)
 
         at = terminal.send("//cancel")

@@ -7,7 +7,7 @@ unbound is shown in the review and, when it is still unbound after the review, a
 
 Driven as tests/test_no_agent_review.py is: the real agent context on the annotated library copy with its planning
 commands, no agent model. The scripted seams are the planner's split, the shared extractor's model, and the matcher
-(``planning_match``), which a pinned turn must never ask. No test here can reach a model: every model call and every
+(``resolution.part_intent``), which a pinned turn must never ask. No test here can reach a model: every model call and every
 network connection is refused (``_offline``)."""
 from __future__ import annotations
 
@@ -15,15 +15,15 @@ import socket
 
 import pytest
 
-from fastworkflow import approval_binding, no_agent_mode, review_proposals
+from fastworkflow import approval_binding, no_agent_mode
 from fastworkflow.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_agent import load_planning_command_map
 from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext
 from tests.scripted_extractor import ScriptedExtractor, script_extractor
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401 - the real agent on the library copy
 from tests.test_round1_gate import EMMA, JOKE, _split_into, gated  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.conftest import script_matcher
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -127,18 +127,18 @@ class Matcher:
     def __init__(self, pick: str | None = None):
         self.pick, self.asked = pick, []
 
-    def __call__(self, workflow, text, exclude=None):
-        self.asked.append(text)
-        if self.pick is None:
-            return "", None, {}
-        return "", load_planning_command_map(workflow.folderpath)[self.pick], {self.pick: 0.9}
+    def __call__(self, text):
+        """The remote decision model's answer for *text*: ``pick`` confidently, or no answer at all."""
+        return None if self.pick is None else {self.pick: 0.9, "none": 0.0}
+
+    def install(self, monkeypatch) -> "Matcher":
+        self.asked = script_matcher(monkeypatch, self)
+        return self
 
 
 @pytest.fixture
 def matcher(monkeypatch):
-    match = Matcher()
-    monkeypatch.setattr(review_proposals, "planning_match", match)
-    return match
+    return Matcher().install(monkeypatch)
 
 
 def _reply(gated, message):
@@ -270,8 +270,7 @@ def test_an_unattended_turn_with_a_missing_value_is_not_run_naming_it(gated, mat
 
 def test_a_normally_matched_planning_command_gets_the_same_review(gated, monkeypatch):
     """The path a pinned part must equal: the matcher picks the plan, the draft binds it, the review opens."""
-    match = Matcher(PLAN)
-    monkeypatch.setattr(review_proposals, "planning_match", match)
+    match = Matcher(PLAN).install(monkeypatch)
     script_extractor(monkeypatch, *[GIVEN] * 12)
     _split_into(monkeypatch, [JOKE_EMMA])
     out = gated.ctx.process_turn(JOKE_EMMA, approval_surface=HOST)
@@ -282,29 +281,21 @@ def test_a_normally_matched_planning_command_gets_the_same_review(gated, monkeyp
     assert match.asked
 
 
-def _missing_flow(gated, monkeypatch, start):
-    """Draft with the title unbound -> the review says so -> the user approves as shown -> the title is asked for ->
-    the reply runs it. Returns (review, the question, the run's output)."""
-    extractor_finds_title_only_in_a_reply(monkeypatch)
-    first = start()
-    review = _review(first)
-    asked = _reply(gated, "yes")
-    done = _reply(gated, "Emma")
-    return first, review, asked, done
-
-
-def test_a_matched_part_with_a_required_value_unbound_shows_it_asks_for_it_and_runs_on_the_reply(gated, monkeypatch):
-    """What a normal match did before this change: the review showed no hint (only the item's ``check`` data), and
-    approving as shown ended the part as not run ("it cannot run as planned (missing required argument title)")."""
-    monkeypatch.setattr(review_proposals, "planning_match", Matcher(PLAN))
+def test_a_matched_part_with_a_required_value_unbound_is_asked_for_it_before_the_review(gated, monkeypatch):
+    """Rewritten for bd fix-o1lg S4/S5. Before, the review showed the title unbound, approving it asked for the title,
+    and the reply ran the part. Now the title is asked for FIRST; the review then shows it given (nothing missing), and
+    approving it runs the part with no further question."""
+    Matcher(PLAN).install(monkeypatch)
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
-    first, review, asked, done = _missing_flow(
-        gated, monkeypatch, lambda: gated.ctx.process_turn(JOKE, approval_surface=HOST))
+    extractor_finds_title_only_in_a_reply(monkeypatch)
+    asked = gated.ctx.process_turn(JOKE, approval_surface=HOST)
 
-    assert review["items"][0]["check"] == "missing required argument title"
-    assert "the required value 'title' is missing" in first.answer and 'Reply "change 1: title=..."' in first.answer
     assert asked.status is TurnStatus.AWAITING_USER and "Which title should I use?" in asked.answer
     assert asked.command_outputs[-1].command_response.artifacts["question_kind"] == "planning_parameter"
+    review = _review(_reply(gated, "Emma"))
+    (item,) = review["items"]
+    assert [(i["name"], i["value"], i["drafted"]) for i in item["inputs"]] == [("title", "Emma", False)]
+    done = _reply(gated, "yes")
     assert done.status is TurnStatus.COMPLETED and _ran(done) and not _stops(done)
 
 
@@ -315,9 +306,10 @@ def test_the_choice_and_the_question_are_saved_with_a_pending_parameter_question
     gated.ctx.process_turn(EMMA, use_plan=PLAN, approval_surface=HOST)
     state = gated.ctx.serialize_state(channel_id="c")
 
-    assert state["use_plan"] == PLAN and state["skill_refusal_pending"] is True
-    assert state["refusal_progress"]["base"] == EMMA and state["refusal_progress"]["given"] == {"title": "Emma"}
-    assert state["pending_refusal_request"]["confirm"] is True and state["pending_refusal_request"]["command"] == PLAN
+    loop = state["waiting"]["payload"]["loop"]
+    assert state["use_plan"] == PLAN and "pending" not in loop and loop["confirm"] is True
+    assert loop["request_text"] == EMMA and loop["values"] == {"title": "Emma"}
+    assert loop["request"]["confirm"] is True and loop["request"]["command"] == PLAN
 
 
 @pytest.mark.parametrize("name", ["Library/no_such_plan", "book_by_title", "review_subtasks", "find_member"],
@@ -349,23 +341,32 @@ def test_a_reply_to_a_waiting_question_cannot_carry_a_plan(gated, matcher, monke
 
 def test_without_use_plan_nothing_changes(gated, matcher, monkeypatch):
     _split_into(monkeypatch, [JOKE])
-    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED)
+    asked = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED)
 
-    assert out.status is TurnStatus.COMPLETED and matcher.asked
+    # Without a pinned plan the part is matched as always. No plan matches it, so an attended turn asks which one is
+    # meant (fix-yu3l.5); "none" ends it as the part that is not run.
+    assert asked.status is TurnStatus.AWAITING_USER and matcher.asked
+    assert asked.command_outputs[-1].command_response.artifacts["question_kind"] == "plan_choice"
+    assert gated.ctx._turn_use_plan is None
+    out = gated.ctx.process_turn("none", approval_surface=UNVERIFIED)
+
+    assert out.status is TurnStatus.COMPLETED and len(_stops(out)) == 1
     assert gated.ctx._turn_use_plan is None
 
 
 # ---------------------------------------------------------------- the entry carries the request
 
 def test_a_split_turn_entry_carries_its_own_request_and_a_single_part_its_message(gated, matcher, monkeypatch):
+    # Unattended turns: the entry of a part that is not run is the subject (an attended turn asks which plan is meant
+    # first, fix-yu3l.5).
     _split_into(monkeypatch, [JOKE, HAIKU])
-    out = gated.ctx.process_turn(f"{JOKE} and {HAIKU}", approval_surface=UNVERIFIED)
+    out = gated.ctx.process_turn(f"{JOKE} and {HAIKU}", approval_surface=UNVERIFIED, unattended=True)
 
     first, second = _stops(out)
     assert (first["request"], second["request"]) == (JOKE, HAIKU)
 
     _split_into(monkeypatch, [JOKE])
-    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED)
+    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED, unattended=True)
     (single,) = _stops(out)
     assert single["request"] == JOKE
 

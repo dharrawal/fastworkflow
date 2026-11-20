@@ -3,8 +3,9 @@
 The form of fix-weih.11 replies with one line per answered field: ``"<field name>: <value>"`` on path A, ``"<Label>: <value>"`` on path B. These tests drive
 the real suspensions the form answers and ask what the server does with that exact text; no browser.
 
-Path A, a refused planning command input. ``_rerun_after_planning_command_refusal`` does NOT parse the reply:
-it appends the reply to the suspended request (``"<request>\\n<reply>"``) and runs the turn again, and the
+Path A, a refused planning command input, with an agent model. ``_resume_parameter_loop`` does NOT bind the reply
+in code on this path: it puts the reply after the part's request (``"<request>\\n<reply>"``) and runs that part's
+typed call again (the part, not the turn: fix-yu3l.4), and the
 planner's typed call reads that whole text through the shared parameter extractor (a model, on
 LLM_PARAM_EXTRACTION), whose argument the guards then check. There is no ``name=value`` or ``Label:`` binding
 in code on this path, so a name prefix is read by the extractor as part of the request, exactly as a plain
@@ -31,6 +32,7 @@ from tests.test_approval_binding import (  # noqa: F401 - the real agent on the 
 from tests.test_pending_prompt_description import (  # noqa: F401
     REAL_BUILD_QUERY, _command, _last_artifacts, no_draft_extraction)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.conftest import script_matcher
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -54,8 +56,7 @@ def _suspend_on_refusal(todo, monkeypatch):
     def refuse(*args, **kwargs):
         raise refused.value
 
-    monkeypatch.setattr("fastworkflow.review_proposals.planning_match",
-                        lambda workflow, text, exclude=None: ("", command, {}))
+    script_matcher(monkeypatch, lambda text: {command.name: 0.9, "none": 0.0})
     monkeypatch.setattr(workflow_agent, "typed_planning_call", refuse)
     unused_lm = dspy.LM("openai/unused-planner", api_base="http://127.0.0.1:9/v1", api_key="unused", num_retries=0)
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps",
@@ -72,15 +73,19 @@ def test_path_a_the_form_reply_is_appended_to_the_request_and_not_parsed(todo, m
 
     seen = {}
 
-    def run_agent(message):
-        seen["message"] = message
+    def call_agent(query, planner_user_query, **kwargs):
+        seen["message"], seen["planner_message"], seen["planning_name"] = query, planner_user_query, kwargs.get(
+            "planning_name")
         return dspy.Prediction(final_answer="done", exhausted=False)
 
-    monkeypatch.setattr(todo.ctx, "_run_agent", run_agent)
+    monkeypatch.setattr(todo.ctx, "_call_agent_for_query", call_agent)
+    monkeypatch.setattr(todo.ctx, "_run_agent", lambda message: pytest.fail("the turn was run again from the top"))
     todo.ctx.process_turn(REPLY)
 
-    # The re-run receives the request, a newline, and the form's text as typed: the label prefix is in it.
-    assert seen["message"] == f"{REQUEST}\n{REPLY}"
+    # The part's call receives the request, a newline, and the form's text as typed: the label prefix is in it. The
+    # command is the one that asked, so the matcher is not asked again.
+    assert seen["message"] == f"{REQUEST}\n{REPLY}" == seen["planner_message"]
+    assert seen["planning_name"] == command.name
     # The question's exchange is completed with the same text.
     entry = next(o for o in todo.ctx._turn_outputs if o.is_ask_user)
     assert entry.command_response.success is True

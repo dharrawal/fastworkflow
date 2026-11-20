@@ -11,9 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from typing import Any, Iterator, Optional
-
-import numpy as np
+from typing import Any, Iterator
 
 
 def _key_str(key: Any) -> str:
@@ -40,8 +38,8 @@ class KVStore:
 
     Values are stored as JSON TEXT. That matches today's call sites (scalars,
     small dicts, conversation turns). Large binary or high-cardinality payloads
-    should use a dedicated table with typed columns / BLOBs (see
-    :class:`UtteranceCacheStore`) rather than stuffing them into ``v``.
+    should use a dedicated table with typed columns / BLOBs rather than being
+    stuffed into ``v``.
     """
 
     def __init__(self, path: str, *, timeout: float = 30.0) -> None:
@@ -95,106 +93,6 @@ class KVStore:
         self._conn.close()
 
     def __enter__(self) -> "KVStore":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-
-class UtteranceCacheStore:
-    """Per-utterance embedding cache with float32 BLOB vectors.
-
-    The mechanical JSON-in-KVStore swap for this workload is 3–6x slower than
-    speedict; one row per hash with a raw float32 column is ~132x faster.
-    Shares a SQLite file safely with :class:`KVStore` (separate tables).
-    """
-
-    def __init__(self, path: str, *, timeout: float = 30.0) -> None:
-        self._conn = _open_sqlite(path, timeout=timeout)
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS utterance_cache (
-                k TEXT PRIMARY KEY,
-                meta TEXT NOT NULL,
-                vec BLOB NOT NULL
-            )
-            """
-        )
-        self._conn.commit()
-
-    @staticmethod
-    def _pack_vec(embedding: Optional[Any]) -> bytes:
-        if embedding is None:
-            return b""
-        arr = np.asarray(embedding, dtype=np.float32)
-        if arr.size == 0:
-            return b""
-        return arr.tobytes()
-
-    @staticmethod
-    def _unpack_vec(blob: bytes) -> Optional[np.ndarray]:
-        if not blob:
-            return None
-        return np.frombuffer(blob, dtype=np.float32)
-
-    def get(self, key: str) -> Optional[dict[str, Any]]:
-        row = self._conn.execute(
-            "SELECT meta, vec FROM utterance_cache WHERE k=?", (key,)
-        ).fetchone()
-        if row is None:
-            return None
-        meta = json.loads(row[0])
-        embedding = self._unpack_vec(row[1])
-        return {
-            "utterance": meta.get("utterance", ""),
-            "command_mapping": meta.get("command_mapping", {}),
-            "embedding": embedding,
-        }
-
-    def upsert(
-        self,
-        key: str,
-        *,
-        utterance: str,
-        command_mapping: dict[str, Any],
-        embedding: Optional[Any],
-    ) -> None:
-        meta = json.dumps(
-            {"utterance": utterance, "command_mapping": command_mapping}
-        )
-        self._conn.execute(
-            """
-            INSERT INTO utterance_cache (k, meta, vec) VALUES (?, ?, ?)
-            ON CONFLICT(k) DO UPDATE SET meta=excluded.meta, vec=excluded.vec
-            """,
-            (key, meta, self._pack_vec(embedding)),
-        )
-        self._conn.commit()
-
-    def iter_entries(self) -> Iterator[tuple[str, dict[str, Any]]]:
-        # Stream rows from the cursor — do not fetchall(); cache_match only
-        # needs the best match and must not hold every embedding in memory.
-        for key, meta_json, vec in self._conn.execute(
-            "SELECT k, meta, vec FROM utterance_cache"
-        ):
-            meta = json.loads(meta_json)
-            yield key, {
-                "utterance": meta.get("utterance", ""),
-                "command_mapping": meta.get("command_mapping", {}),
-                "embedding": self._unpack_vec(vec),
-            }
-
-    def has_entries(self) -> bool:
-        """True if the table has any rows. Cheap EXISTS check (no materialisation)."""
-        return (
-            self._conn.execute("SELECT 1 FROM utterance_cache LIMIT 1").fetchone()
-            is not None
-        )
-
-    def close(self) -> None:
-        self._conn.close()
-
-    def __enter__(self) -> "UtteranceCacheStore":
         return self
 
     def __exit__(self, *exc: object) -> None:

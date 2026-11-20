@@ -243,7 +243,7 @@ def _make_pending(app_module, channel_id):
     from fastworkflow.run_fastapi_mcp.utils import persist_pending_after_turn
     runtime = _runtime(app_module, channel_id)
     ctx = runtime.execution_context
-    ctx._awaiting_user = True
+    ctx._ask_agent_question("which one?")
     persist_pending_after_turn(app_module.session_manager, runtime, None)
 
 

@@ -624,3 +624,28 @@ def test_chat_session_startup_warms_the_planning_commands_of_the_workflow_it_bin
     finally:
         session._keep_alive = False
         session.stop_workflow()
+
+
+def test_a_list_argument_and_a_literal_argument_load_and_merge_the_template(tmp_path):
+    """The template builder keys the other arguments' values; a list argument's value must not break it."""
+    text = '''"""mixed: a list and a literal."""
+from typing import Literal
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Mixed."""
+
+    class Input(BaseModel):
+        tags: list[str] = Field(description="the tags", json_schema_extra={"copied_from_command_text": True})
+        kind: Literal["a", "b"] = Field(default="a", description="the kind")
+        more: list[str] = Field(default_factory=list, description="more tags")
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"say {', '.join(input.tags)} as {input.kind}"] if input.kind == "a" else ["say other"]
+'''
+    command = workflow_agent.load_planning_command_map(_write(tmp_path, {"mixed": text}))["mixed"]
+    assert [(p.name, p.required) for p in command.params] == [("tags", True), ("kind", False), ("more", False)]
+    assert command.template == ("say <<tags> as a or other, by kind>",)

@@ -168,34 +168,19 @@ def test_without_utterances_the_matcher_listing_is_the_description_only(tmp_path
     assert workflow_agent._matcher_job_types(folder) == workflow_agent._job_types_for(folder)
 
 
-def test_match_planning_command_sends_the_listing_with_examples_to_the_matcher(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
+def test_the_matcher_listing_carries_the_examples_of_a_planning_command_that_has_them(tmp_path):
+    # (was: match_planning_command sends the listing to the matcher; the one matcher is now intent detection's, whose
+    # listing is built from the same text)
     folder = _write(tmp_path, {"plain": _with_utterances(_plain("Close an account.", ["close it"]),
                                                          ["shut this account down"])})
-    seen = {}
-
-    def predict(**inputs):
-        seen.update(inputs)
-        return SimpleNamespace(job=SimpleNamespace(value="plain", probabilities={"plain": 0.9}, confidence=0.9))
-
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": (predict, DummyLM([]))})
-    assert workflow_agent.match_planning_command("please shut it", folder) == ("plain", ("close it",))
-    assert seen["job_types"] == '- plain: Close an account. e.g. "shut this account down"'
+    assert workflow_agent._matcher_job_types(folder) == '- plain: Close an account. e.g. "shut this account down"'
 
 
-def test_the_matcher_signature_mentions_examples_only_when_a_planning_command_has_them(tmp_path, monkeypatch):
-    monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: object())
+def test_the_matcher_listing_mentions_examples_only_when_a_planning_command_has_them(tmp_path):
     with_examples = _write(tmp_path / "a", {"plain": _with_utterances(_plain("Close it.", ["x"]), ["shut it"])})
     without = _write(tmp_path / "b", {"plain": _plain("Close it.", ["x"])})
-
-    def desc(folder):
-        return workflow_agent._planning_command_matcher(folder)[""][0].signature.input_fields["job_types"].json_schema_extra["desc"]
-    try:
-        assert "example requests" in desc(with_examples)
-        assert desc(without) == "the available job types, one per line as '- name: description'"
-    finally:
-        workflow_agent._planning_command_matcher.cache_clear()
+    assert "e.g." in workflow_agent._matcher_job_types(with_examples)
+    assert "e.g." not in workflow_agent._matcher_job_types(without)
 
 
 def test_a_planning_command_with_params_offers_its_steps_as_template_text(tmp_path):
@@ -253,8 +238,8 @@ def test_a_string_argument_must_be_written_in_the_request_and_takes_its_spelling
     command = _command(tmp_path)
     request = "Who is in the payroll group? Is Ann Lee one of them?"
     args, notes = sc.check_arguments(
-        command, {"name": '"Payroll group"', "kind": "Group", "person": "ann lee", "count": "3"}, request)
-    assert args == _args(name="payroll", person="Ann Lee", count=3)
+        command, {"name": '"Payroll group"', "kind": "Group", "person": "ann lee", "count": "1"}, request)
+    assert args == _args(name="payroll", person="Ann Lee", count=1)
     assert notes == ["name='\"Payroll group\"' -> 'payroll'", "person='ann lee' -> 'Ann Lee'"]
 
 
@@ -505,23 +490,26 @@ def test_without_a_planning_command_command_the_planner_is_unchanged(workflow_en
     assert result == "show my todo items\n\nExecute these next steps:\n1. Show all todo items"
 
 
-def test_one_match_gives_the_template_and_the_command_of_a_planning_command_with_params(tmp_path, monkeypatch):
+def test_a_planning_command_gives_the_template_and_the_command_the_planner_is_handed(tmp_path):
+    # (was: one match gives both; the decision is now the intent loop's, ``resolution.part_intent``, and the planner
+    # is handed the matched command's template text)
     folder = _write(tmp_path, {"lookup": LOOKUP, "leaver": _plain("Someone is leaving.", ["find them"])})
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("lookup", 0.9)})
-    template, command = workflow_agent.planner_planning_command_for("Who is in Payroll?", folder)
-    assert command is workflow_agent.load_planning_command_map(folder)["lookup"]
+    commands = workflow_agent.load_planning_command_map(folder)
+    template = workflow_agent._template_text(commands["lookup"].template)
     assert template.startswith("A job like this is usually done as:\n- open_directory\n- <find_group or find_feed")
     # a skill without params: its command too, so its call runs through the phase runner
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
-    template, command = workflow_agent.planner_planning_command_for("Ann Lee is leaving", folder)
-    assert command is workflow_agent.load_planning_command_map(folder)["leaver"]
-    assert template == workflow_agent.plan_template_for("Ann Lee is leaving", folder)
+    assert commands["leaver"] is workflow_agent.load_planning_command_map(folder)["leaver"]
+    assert workflow_agent._template_text(commands["leaver"].template).startswith("A job like this is usually done as:\n- find them")
 
 
 def test_the_execution_context_passes_the_matched_command_except_to_a_continuation(workflow_env, monkeypatch):
     workflow_env()
     ctx, _wf = _session(RecordingTraceSink())
-    sentinel = object()
+    from types import SimpleNamespace
+
+    from tests.conftest import script_plan
+
+    sentinel = SimpleNamespace(name="sentinel_plan", template=("one step",))
     seen = []
 
     class Stop(Exception):
@@ -531,15 +519,16 @@ def test_the_execution_context_passes_the_matched_command_except_to_a_continuati
         seen.append((query, kwargs["plan_template"], kwargs["planning_command"]))
         raise Stop
 
-    monkeypatch.setattr(workflow_agent, "planner_planning_command_for", lambda text, folder, **_: ("TEMPLATE", sentinel))
+    script_plan(monkeypatch, lambda text: sentinel)
+    TEMPLATE = workflow_agent._template_text(sentinel.template)
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps", fake_build)
     with pytest.raises(Stop):
         ctx._call_agent_for_query("Who is in Payroll?", "Who is in Payroll?", template_text="Who is in Payroll?")
     with pytest.raises(Stop):
         ctx._call_agent_for_query("Who is in Payroll?\n\nAlready done in this sub-task: ...", "x",
                                   template_text="Who is in Payroll?")
-    assert seen == [("Who is in Payroll?", "TEMPLATE", sentinel),
-                    ("Who is in Payroll?\n\nAlready done in this sub-task: ...", "TEMPLATE", None)]
+    assert seen == [("Who is in Payroll?", TEMPLATE, sentinel),
+                    ("Who is in Payroll?\n\nAlready done in this sub-task: ...", TEMPLATE, None)]
 
 
 # ---------------------------------------------------------------- checks against the request (verify, in_request)
@@ -640,15 +629,17 @@ def test_a_dependent_argument_follows_the_checked_value(tmp_path):
 def test_an_in_request_count_must_be_a_number_the_request_writes(tmp_path):
     command = _command(tmp_path, CHECKED)
     raw = {"name": "Payroll 2", "kind": "group", "count": 3}
-    # "the first two": 3 is not written; the number inside the name does not count
-    args, notes = sc.check_arguments(command, raw, "Open the first two members of Payroll 2.")
-    assert args["count"] == 2 and notes == ["count=3 -> 2 (the number the request writes)"]
+    # "the first two": 3 is not written; the number inside the name does not count. It is refused, never replaced
+    # by the one number the request writes (one rule for every kind of command).
+    with pytest.raises(PlanningCommandCallError, match=r"count=3 is not a number the request writes \(2\)"):
+        sc.check_arguments(command, raw, "Open the first two members of Payroll 2.")
     assert sc.check_arguments(command, raw, "Open 3 members of Payroll 2.")[0]["count"] == 3
     # no number written: the argument (or its default) stands
     assert sc.check_arguments(command, {"name": "Payroll 2", "kind": "group"}, "Open members of Payroll 2.")[0][
         "count"] == 2
-    # several numbers, none of them the argument: the default when it is written, else the call fails
-    assert sc.check_arguments(command, raw, "Open two of the five members of Payroll 2.")[0]["count"] == 2
+    # an int the extractor left out is not given: the default stands even when the request writes other numbers
+    assert sc.check_arguments(command, {"name": "Payroll 2", "kind": "group"}, "Open the first five members of Payroll 2.")[
+        0]["count"] == 2
     with pytest.raises(PlanningCommandCallError, match="not a number the request writes"):
         sc.check_arguments(command, raw, "Open four of the five members of Payroll 2.")
 
@@ -1205,18 +1196,19 @@ def test_a_refused_planning_command_call_is_planned_again_with_the_refusal(tmp_p
 
 def test_a_required_argument_the_extractor_leaves_missing_is_taken_from_the_typed_fill(tmp_path, workflow_env,
                                                                                        monkeypatch):
-    """fix-48np: the extractor misses "Payroll" twice; the planner's typed fill gives it, the same checks pass it, and
+    """fix-48np: the extractor misses "Payroll"; the planner's typed fill gives it, the same checks pass it, and
     the plan span's notes say so."""
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST)
-    extractor = script_extractor(monkeypatch, *[_arguments(_pair_answer(first="NOT_FOUND"))] * 2)
+    extractor = script_extractor(monkeypatch, _arguments(_pair_answer(first="NOT_FOUND")))
     lm = DummyLM([_pair_answer(), _pair_answer()])     # the typed fill, then the steps before and after
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
 
-    assert len(extractor.prompts) == 2 and len(lm.history) == 2
+    # a value that is simply missing is not read again by the extractor: one extraction, then the typed fill
+    assert len(extractor.prompts) == 1 and len(lm.history) == 2
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
     assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}

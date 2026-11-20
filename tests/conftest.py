@@ -16,7 +16,7 @@ import pytest
 import fastworkflow
 from fastworkflow import context_budget
 from fastworkflow.observability import store as observability_store
-from tests import consultation_head, recorded_router
+from tests import plan_head, recorded_router
 from tests.recorded_router import recorded_review_router  # noqa: F401  (fixture, shared by the reader tests)
 # Add the project root to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -149,14 +149,14 @@ def pytest_collection_modifyitems(config, items):
 def pytest_addoption(parser):
     parser.addoption(
         "--record-review-router", action="store_true", default=False, dest="record_review_router",
-        help="re-record tests/fixtures/review_reply_router_answers.json from the real consultation head "
+        help="re-record tests/fixtures/review_reply_router_answers.json from the real plan head "
              "(see tests/recorded_router.py)",
     )
 
 
 def pytest_report_header(config):
-    """Name the consultation head's current version in the session header, so a red after a retrain is attributable."""
-    return consultation_head.head_status_line()
+    """Name the plan head's current version in the session header, so a red after a retrain is attributable."""
+    return plan_head.head_status_line()
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -164,25 +164,25 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def _head_marker_and_absent(item) -> bool:
-    return item.get_closest_marker("requires_consultation_head") is not None and not consultation_head.head_trained()
+    return item.get_closest_marker("requires_plan_head") is not None and not plan_head.head_trained()
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """``requires_consultation_head``: skip, before any fixture, when the local head is absent.
+    """``requires_plan_head``: skip, before any fixture, when the local head is absent.
 
     With ``FW_REQUIRE_HEADS=1`` the test is not skipped: ``pytest_runtest_call`` fails it, so it reports FAILED
     (not an error in setup) and its message names what is missing.
     """
-    if _head_marker_and_absent(item) and not consultation_head.heads_required():
-        pytest.skip(consultation_head.missing_head_message())
+    if _head_marker_and_absent(item) and not plan_head.heads_required():
+        pytest.skip(plan_head.missing_head_message())
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_call(item):
-    if _head_marker_and_absent(item) and consultation_head.heads_required():
+    if _head_marker_and_absent(item) and plan_head.heads_required():
         pytest.fail(
-            f"{consultation_head.REQUIRE_HEADS_ENV} is set and {consultation_head.missing_head_message()}",
+            f"{plan_head.REQUIRE_HEADS_ENV} is set and {plan_head.missing_head_message()}",
             pytrace=False,
         )
 
@@ -191,7 +191,7 @@ def pytest_configure(config):
     """Configure pytest markers."""
     config.addinivalue_line(
         "markers",
-        "requires_consultation_head: asserts the built-in consultation ProposalReview intent head's own quality; "
+        "requires_plan_head: asserts the built-in plan ProposalReview intent head's own quality; "
         "skips when the local (gitignored) head is not trained, fails instead when FW_REQUIRE_HEADS=1",
     )
     config.addinivalue_line(
@@ -241,7 +241,7 @@ def no_planner_key(monkeypatch):
     """A process with no optional planner (Jev) key, for tests that assert behaviour without one.
 
     ``fastworkflow.get_env_var`` reads the loaded env files before the process environment, so the key is removed
-    from both; the planner LM and the planning-command matcher are ``lru_cache``d, so both caches are dropped
+    from both; the planner LM is ``lru_cache``d, so its cache is dropped
     before the test (an earlier test that had a key may have filled them) and after it (so this test leaks nothing).
     When the planner becomes mandatory, the tests that use this fixture are retired.
     """
@@ -251,12 +251,83 @@ def no_planner_key(monkeypatch):
                         {name: value for name, value in fastworkflow._env_vars.items() if name != "JEV_API_KEY"})
     def drop_caches():
         # A test may have stubbed either with a plain function (monkeypatch, undone after this fixture), which has no cache.
-        for planner_function in (workflow_agent._jev_lm, workflow_agent._planning_command_matcher):
-            getattr(planner_function, "cache_clear", lambda: None)()
+        getattr(workflow_agent._jev_lm, "cache_clear", lambda: None)()
 
     drop_caches()
     yield
     drop_caches()
+
+
+def script_matcher(monkeypatch, distributions) -> list[str]:
+    """Script the remote decision model's answer as intent detection asks it, with no model call.
+
+    Makes the matcher available (``intent_detector.matcher_available``) and answers its one call per part
+    (``intent_detector._matcher_distribution``) with ``distributions[text]``: ``{option: score}`` over the commands of
+    the scope path and ``none``. *distributions* may also be a function of the text. A text with no scripted answer is
+    a failed call, so the local model's answer stands (as when the real call fails). Returns the list of the texts the
+    matcher was asked about, in order. Narrower than ``matcher_model`` (which scripts every ``dspy.Predict`` of the
+    process): only intent detection's matcher is scripted, so a turn's other model calls are whatever the test makes
+    them.
+    """
+    from fastworkflow import intent_detector
+
+    asked: list[str] = []
+
+    def answer(workflow_folderpath, scope_path, utterance, exclude=frozenset()):
+        asked.append(utterance)
+        scores = distributions(utterance) if callable(distributions) else distributions.get(utterance)
+        if scores is None:
+            return {"scores": {}, "model": "scripted", "latency_ms": 0.0, "calls": 0, "error": "not scripted"}
+        return {"scores": {str(k): float(v) for k, v in dict(scores).items()}, "model": "scripted",
+                "latency_ms": 0.0, "calls": 1}
+
+    monkeypatch.setattr(intent_detector, "matcher_available", lambda: True)
+    monkeypatch.setattr(intent_detector, "_matcher_distribution", answer)
+    return asked
+
+
+def no_local_model(monkeypatch) -> None:
+    """No context has a trained local intent model (the state of a workflow that has not been trained): the detection
+    chain is the remote decision model alone, so a test's scripted answer (``script_matcher``) is the whole decision."""
+    from fastworkflow import intent_detector, run_listing
+
+    monkeypatch.delenv("FW_REQUIRE_HEADS", raising=False)
+    monkeypatch.setattr(intent_detector, "has_head", lambda folder: False)
+    monkeypatch.setattr(run_listing, "head_answers", lambda workflow, sub_task, command_info_root=None: {})
+
+
+def script_plan(monkeypatch, pick, *, decided_by: str = "exact_name") -> None:
+    """Script which plan a part gets (``resolution.part_intent``), for a harness that builds its planning commands in
+    memory: ``pick(text)`` returns the planning command object the part's text matches, or None (the part is ad hoc).
+    The picked commands are added to ``workflow_agent.load_planning_command_map`` so the run finds them by name. A
+    pinned plan (``use_plan``) is still decided by the product code. *decided_by* defaults to an exact command name, the
+    one decider a single planning part takes the fast path on (a local model's planning pick is checked, fix-o1lg.2)."""
+    from fastworkflow import workflow_agent
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+    real_intent, real_map = resolution.part_intent, workflow_agent.load_planning_command_map
+    picked: dict = {}
+
+    def part_intent(workflow, text, *, pinned=None, exclude=()):
+        if pinned:
+            return real_intent(workflow, text, pinned=pinned, exclude=exclude)
+        from fastworkflow import turn_cache
+
+        command = turn_cache.memo(("script_plan", text), lambda: pick(text))
+        if command is None or command.name in set(exclude):
+            return resolution.PartIntent(resolution.NONE, decided_by=decided_by)
+        picked[command.name] = command
+        return resolution.PartIntent(resolution.MATCH, command.name, resolution.KIND_PLANNING,
+                                     (resolution.Ranked(command.name, resolution.KIND_PLANNING, 0.9),), decided_by)
+
+    monkeypatch.setattr(resolution, "part_intent", part_intent)
+    monkeypatch.setattr(workflow_agent, "load_planning_command_map", lambda folder: {**real_map(folder), **picked})
+
+
+@pytest.fixture
+def scripted_matcher(monkeypatch):
+    """``scripted_matcher(distributions)``: ``script_matcher`` for this test."""
+    return lambda distributions: script_matcher(monkeypatch, distributions)
 
 
 @pytest.fixture
@@ -305,22 +376,33 @@ def restore_litellm_model_cost():
 
 @pytest.fixture(autouse=True, scope="function")
 def cleanup_background_threads():
-    """Ensure background ChatWorker threads finish before the next test.
+    """Give the ChatWorker threads a test started a moment to finish before the next test.
 
-    Only waits when a ChatWorker is actually alive. A blanket 0.5s sleep on
-    every test cost ~13 minutes on a ~1500-test suite; only a handful of
-    tests start ChatWorker threads.
+    Only workers started during this test are waited for, and for one second in all. A worker left idle by
+    an earlier test (it waits on its queue for the life of the process) is not waited for again: joining every
+    leftover worker for 0.5 s each cost 10 s per test once twenty had been left behind, and more as a run went on.
     """
+    before = set(threading.enumerate())
     yield
     workers = [
         t
         for t in threading.enumerate()
-        if type(t).__name__ == "ChatWorker" and t.is_alive()
+        if type(t).__name__ == "ChatWorker" and t.is_alive() and t not in before
     ]
-    if not workers:
-        return
-    # Join briefly first; fall back to a short sleep if a worker is stubborn.
+    deadline = time.monotonic() + 1.0
     for t in workers:
-        t.join(timeout=0.5)
-    if any(t.is_alive() for t in workers):
-        time.sleep(0.5)
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+@pytest.fixture
+def review_nouns_workflow():
+    """The review reply guards read the input names of the workflow a reply is for (``review_proposals.workflow_scope``).
+    Review tests that build proposals in memory from a recorded exchange use inputs such as ``unit``, ``right`` and
+    ``person``; ``tests/review_nouns_workflow`` declares them."""
+    from pathlib import Path
+    from fastworkflow.review_proposals import workflow_scope
+
+    folder = str(Path(__file__).parent.joinpath("review_nouns_workflow").resolve())
+    with workflow_scope(folder):
+        yield folder
+

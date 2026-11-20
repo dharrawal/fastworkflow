@@ -24,7 +24,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, planning_commands
+from fastworkflow import ModuleType, parameter_clarification, planning_commands
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
@@ -127,8 +127,8 @@ def test_direct_action_missing_plain_required_field_is_asked_not_raised(workflow
         CommandExecutor.perform_action(workflow, action)
 
     message = str(exc_info.value)
-    assert "Missing parameter values" in message
-    assert missing in message
+    assert "your request does not give" in message
+    assert missing.replace("_", " ") in message
 
 
 def test_direct_action_with_no_parameters_asks_for_every_plain_required_field(workflow):
@@ -178,11 +178,10 @@ def test_llm_leaving_plain_required_fields_out_asks_for_them(llm_answers):
     assert output.parameters_are_valid is False
     for name in ("count", "ratio", "ids"):
         assert name in output.error_msg
-    stored = cme.context["stored_parameters"]
-    assert stored.name == "Bob"
+    loop = parameter_clarification.pending(cme.context)
+    assert loop.values["name"] == "Bob"
     for name in ("count", "ratio", "ids"):
-        field = _params_class(RECORD).model_fields[name]
-        assert ParameterExtraction._is_asked_field(field, getattr(stored, name)), name
+        assert name in loop.open, name
 
 
 def test_llm_answering_every_plain_required_field_is_valid(llm_answers):

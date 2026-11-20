@@ -1,9 +1,11 @@
-"""A message that begins with "/" while a no-agent decision question is pending, through the real HTTP routes (fix-rn9p).
+"""A message that begins with "/" while a no-agent decision question is pending, through the real HTTP routes (fix-rn9p;
+changed by fix-fpyb.7: a "/" message is the reply on BOTH routes now).
 
 ``POST /invoke_agent`` (and the MCP ``invoke_agent`` tool) strips every leading "/" before the context sees the message
 (its documented rule since 2.17: the agent endpoint is never the deterministic one), so while a ``phase_step`` question
 is pending EVERY message on it is the reply, a "/" one included. ``POST /invoke_assistant`` (the MCP ``invoke_assistant``
-tool) keeps the "/", and the context handles it as a separate deterministic command while the question stays open.
+tool) keeps the "/", and the context removes it itself: the message is the reply there too (it was a separate
+deterministic command before fix-fpyb.7).
 
 The routes are the real ones, driven by ``TestClient`` on a real server. The one seam: the server channel's
 ``process_turn`` hands the message the route passed to the library test context that holds the pending question (a real
@@ -33,10 +35,17 @@ def server(action_app_module):
 
 
 def _no_agent_again(monkeypatch):
-    """No agent model again: the server's startup (inside ``TestClient``) loads the env files, which set ``LLM_AGENT``."""
-    monkeypatch.delenv("LLM_AGENT", raising=False)
+    """No agent model and no remote decision model again: the server's startup (inside ``TestClient``) loads the env files,
+    which set ``LLM_AGENT`` and the Jev key (a reply to a decision step is read by the remote model when there is one:
+    ``no_planner_key`` is this test's premise, as in ``tests/test_no_agent_mode.py``)."""
+    from fastworkflow import workflow_agent
+
+    for name in ("LLM_AGENT", "JEV_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(fastworkflow, "_env_vars",
-                        {name: value for name, value in fastworkflow._env_vars.items() if name != "LLM_AGENT"})
+                        {name: value for name, value in fastworkflow._env_vars.items()
+                         if name not in ("LLM_AGENT", "JEV_API_KEY")})
+    getattr(workflow_agent._jev_lm, "cache_clear", lambda: None)()
 
 
 def _pause_and_route(app_module, client, library_env, monkeypatch):
@@ -67,14 +76,15 @@ def _pause_and_route(app_module, client, library_env, monkeypatch):
 def _deterministic_command_handler(monkeypatch, handled: list[str]):
     def deterministic(cls, session, command):
         handled.append(command)
-        session._cme_workflow.context.pop("is_assistant_mode_command", None)   # as the real invoke_command ends
+        session.end_round()   # as the real invoke_command ends
         return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(response="done"))
 
     monkeypatch.setattr(CommandExecutor, "invoke_command", classmethod(deterministic))
 
 
-def test_on_the_assistant_route_a_slash_message_is_a_separate_command_and_the_question_stays(
-        library_env, server, monkeypatch):
+def test_on_the_assistant_route_a_slash_message_is_the_reply_too(library_env, server, monkeypatch):
+    """Changed (bd fix-fpyb.7, owner decision 2026-11-19): ``/invoke_assistant`` keeps the "/", and the context now reads
+    a "/" message sent while a question is out as the reply with the "/" removed, as ``/invoke_agent`` always did."""
     with TestClient(server.app) as client:
         headers, seen = _pause_and_route(server, client, library_env, monkeypatch)
         handled: list[str] = []
@@ -83,10 +93,11 @@ def test_on_the_assistant_route_a_slash_message_is_a_separate_command_and_the_qu
                                json={"user_query": "/find_book query=Messiah", "timeout_seconds": 30})
 
     assert response.status_code == 200, response.text
-    # The route kept the "/": the context ran the deterministic command, and the question was not read.
-    assert seen == ["/find_book query=Messiah"] and handled == ["/find_book query=Messiah"]
+    # The route kept the "/"; the context read it as the reply (unreadable as yes or no) and ran no command.
+    assert seen == ["/find_book query=Messiah"] and handled == []
+    assert response.json()["answer"].startswith("I could not read that reply as yes or no. ")
     assert library_env.ctx._awaiting_user is True
-    assert library_env.ctx._phase_run["decision"]["asked"] == 1
+    assert library_env.ctx._waiting.payload["decision"]["asked"] == 2
     assert _find_runs(library_env) == ["find_book query=Dune"]
 
 
@@ -104,7 +115,7 @@ def test_on_the_agent_route_a_slash_message_is_the_reply_and_the_second_one_ends
         body = first.json()
         assert body["status"] == "awaiting_user"
         assert body["answer"].startswith("I could not read that reply as yes or no. ")
-        assert library_env.ctx._phase_run["decision"]["asked"] == 2
+        assert library_env.ctx._waiting.payload["decision"]["asked"] == 2
 
         second = client.post("/invoke_agent", headers=headers,
                              json={"user_query": "/list_branches", "timeout_seconds": 30})
@@ -118,9 +129,9 @@ def test_on_the_agent_route_a_slash_message_is_the_reply_and_the_second_one_ends
     assert _find_runs(library_env) == ["find_book query=Dune"]
 
 
-def test_the_question_names_what_each_route_does_with_a_slash_message(library_env, monkeypatch):
+def test_the_question_says_a_slash_message_is_the_reply(library_env, monkeypatch):
     library_env.planning_command = _build_planning_command(Conditional)
     _plan(monkeypatch, library_env)
     text = _pending(library_env.ctx.process_turn("look up the book Dune"))[0]
-    assert "every message sent to the agent (invoke_agent), including one that begins with '/', is read as the reply" in text
-    assert "to run a separate command meanwhile, send it to the assistant (invoke_assistant)" in text
+    assert "every message, including one that begins with '/', is read as the reply" in text
+    assert "separate command" not in text and "invoke_assistant" not in text

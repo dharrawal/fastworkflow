@@ -34,6 +34,14 @@ MESSAGING_APP = str(
     Path(__file__).parent.parent / "fastworkflow" / "examples" / "messaging_app_4"
 )
 
+#: A request no prefix or fuzzy layer claims, so the local classifier decides (confidently, 0.78 on hello_world's
+#: trained model), with the command's values given as XML so the turn's parameter extraction is the agent-mode regex.
+#: Run with ``no_planner_key``: with a planner key the remote decision model decides first (layer "matcher") and the
+#: turn goes on into a live parameter-extraction call.
+CLASSIFIER_REQUEST = (
+    "please compute the total of five plus three <first_num>5</first_num><second_num>3</second_num>"
+)
+
 
 @pytest.fixture(scope="module", autouse=True)
 def initialized_fastworkflow():
@@ -109,13 +117,12 @@ class TestIntentSpan:
         assert span.attributes["command_name"] == "IntentDetection/what_can_i_do"
         assert span.attributes["is_cme_command"] is True
 
+    @pytest.mark.usefixtures("no_planner_key")
     def test_classifier_layer_carries_confidence_and_threshold(self, hello_ctx):
         ctx, sink = hello_ctx
         # A phrasing no prefix/fuzzy layer claims: the classifier must decide,
         # and its numbers must land on the span whether or not it is confident.
-        CommandExecutor.invoke_command(
-            ctx, "please compute the total of five plus three"
-        )
+        CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
         spans = [
             s
             for s in sink.named(tracing.SPAN_NLU_INTENT)

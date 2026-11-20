@@ -688,7 +688,7 @@ button.newConv:hover { filter: brightness(1.1); }
 .artifactsLink::after, .resultsLink::after { content: " ▸"; font: inherit; text-decoration: none; }
 .artifactsLink[aria-expanded="true"]::after, .resultsLink[aria-expanded="true"]::after { content: " ◂"; }
 .artifactsLink:hover:not(:disabled), .resultsLink:hover:not(:disabled) { background: none; border-color: transparent; }
-/* parameter form and intent pills [fix-weih.5] */
+/* parameter form [fix-weih.5] */
 .chatMsg.hasForm { max-width: min(100%, 640px); }
 .chatMsg.hasForm .bubble { white-space: normal; }
 .paramForm { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
@@ -717,18 +717,12 @@ button.newConv:hover { filter: brightness(1.1); }
 .paramState[hidden] { display: none; }
 .paramSecret .paramSecretNote { font-style: italic; }
 .paramStatus { color: var(--bar-human); font-size: 11.5px; font-weight: 600; margin-top: 6px; }
-.paramActions, .intentActions, .intentPills { display: flex; flex-wrap: wrap; gap: 8px; }
-.paramBtn.ghost, .intentChoices button.ghost { background: transparent; border-color: transparent;
+.paramActions, .intentActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.paramBtn.ghost { background: transparent; border-color: transparent;
   color: var(--muted); }
 .paramDetails { margin-top: 10px; }
 .paramDetailsBody { margin-top: 4px; color: var(--muted); font-size: 12px; white-space: pre-wrap;
   overflow-wrap: anywhere; }
-.intentChoices { display: flex; flex-direction: column; gap: 8px; }
-.intentLabel { font-weight: 600; }
-.intentPill { border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12.5px; background: var(--accent-soft); border-color: var(--accent);
-  color: var(--accent-ink); }
-.intentPill:disabled { background: var(--panel); border-color: var(--border); color: var(--muted); }
 /* Placed by tmPlaceArtifactPanel; fixed so the chat log, or the turn detail
    pane, cannot clip it. */
 .artifacts {
@@ -1327,6 +1321,9 @@ textarea.fitText:not(.reviewGoal) { font-size: 13px; }
 .planBtn:disabled { background: var(--panel); border-color: var(--border); color: var(--muted); }
 .planMore { align-self: flex-start; margin-top: 6px; background: transparent; border-color: transparent;
   color: var(--muted); font-size: 12px; }
+/* The question "which plan should run this part?" [fix-yu3l.5]: the same buttons, as the reply to the question. */
+.planQuestion { display: flex; flex-direction: column; gap: 10px; }
+.planRequest { color: var(--muted); font-size: 12.5px; }
 /* A chosen plan's parameter form: the plan's name and description, read-only, above its fields. */
 .planChosen { margin-bottom: 8px; }
 .planChosenName { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }

@@ -1,6 +1,6 @@
 """Integration tests for the fuzzy pre-match tie guard in intent detection.
 
-Covers fix-0xn. Before the guard, `CommandNamePrediction.predict` took
+Covers fix-0xn. Before the guard, the CME's intent stage took
 `best_matched_commands[0]` from a list that `find_best_matches` documents as
 *all* candidates tying for the minimum distance. Commands sharing a prefix tie
 at distance 0.0, because scoring compares only the leading `len(input)`
@@ -22,7 +22,9 @@ from io import StringIO
 import pytest
 
 import fastworkflow
+from fastworkflow import model_pipeline_training
 from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     CommandNamePrediction,
@@ -34,6 +36,9 @@ from fastworkflow.utils.fuzzy_match import find_best_matches
 TIED_PREFIX = "add_child_todo"
 TIED_COMMANDS = {"add_child_todoitem", "add_child_todolist"}
 
+import logging as _logging
+
+intent_logger = _logging.getLogger("fastWorkflow")
 FUZZY_THRESHOLD = 0.3  # the literal at the call site under test
 
 
@@ -72,15 +77,29 @@ def todolist_workflows(tmp_path):
         parent_workflow_id=app_workflow.id,
         workflow_context={"app_workflow": app_workflow},
     )
+    # The workflow stands on a TodoList below its manager, with a head for each of the two scopes.
+    from fastworkflow import intent_detector
+    from tests.todo_list_workflow.application.todo_list import TodoList
+    from tests.todo_list_workflow.application.todo_manager import TodoListManager
+
+    manager = TodoListManager(file_path=str(tmp_path / "lists.json"), load_from_file=False)
+    todo_list = TodoList(1, "groceries")
+    todo_list.parent = manager
+    app_workflow.root = manager
+    app_workflow.record = todo_list
+    for context in ("TodoList", "TodoListManager"):
+        folder = intent_detector.head_folder(str(workflow_path), context)
+        os.makedirs(os.path.join(folder, "tinymodel.pth"), exist_ok=True)
+        for name in ("label_encoder.pkl", "threshold.json"):
+            with open(os.path.join(folder, name), "w") as marker:
+                marker.write("{}")
     return app_workflow, cme_workflow
 
 
 def _router_returning(predictions, modelpipeline=...):
     class PredictingRouter:
         def __init__(self, model_artifact_path):
-            # `store_utterance_cache` only computes an embedding when the
-            # pipeline is not None, so passing None keeps the clarification
-            # stages reachable without loading a transformer.
+            # The real router's pipeline; None keeps the double free of a transformer.
             self.modelpipeline = self if modelpipeline is ... else modelpipeline
 
         def predict(self, command):
@@ -139,56 +158,54 @@ def test_tie_defers_to_the_classifier_rather_than_picking_one(
     is what must win."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        intent_detection, "CommandRouter",
+        model_pipeline_training, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
-    result = CommandNamePrediction(cme_workflow).predict(
-        "TodoList", TIED_PREFIX, fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+    result = CommandNamePrediction(cme_workflow).predict(TIED_PREFIX)
 
-    assert result.command_name == "TodoList/get_properties"
-    assert result.error_msg is None
+    assert result.command == "TodoList/get_properties"
+    assert result.outcome == "match"
 
 
+# With the planner key an unsure local answer goes to the remote decision model (the chain, fix-o5wi.2);
+# this asserts what happens without one.
+@pytest.mark.usefixtures("no_planner_key")
 def test_tie_reaches_the_ambiguity_prompt_when_the_classifier_is_unsure(
     todolist_workflows, monkeypatch, setup_test_environment
 ):
     """Deferring restores the prompt that exists to ask which one was meant."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        intent_detection, "CommandRouter",
+        model_pipeline_training, "CommandRouter",
         _router_returning(
             ["TodoList/add_child_todoitem", "TodoList/add_child_todolist"]))
 
-    result = CommandNamePrediction(cme_workflow).predict(
-        "TodoList", TIED_PREFIX, fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+    result = CommandNamePrediction(cme_workflow).predict(TIED_PREFIX)
 
-    assert result.command_name is None
-    assert result.error_msg is not None
-    assert "add_child_todoitem" in result.error_msg
-    assert "add_child_todolist" in result.error_msg
+    assert result.command is None
+    assert result.outcome == "ambiguous"
+    assert set(result.ambiguous) == {"TodoList/add_child_todoitem", "TodoList/add_child_todolist"}
 
 
 def test_tie_is_logged(todolist_workflows, monkeypatch, setup_test_environment):
     """The pre-guard behaviour was invisible; a discarded tie must not be."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        intent_detection, "CommandRouter",
+        model_pipeline_training, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
     log_output = StringIO()
     log_handler = logging.StreamHandler(log_output)
-    intent_detection.logger.addHandler(log_handler)
+    intent_logger.addHandler(log_handler)
     try:
-        CommandNamePrediction(cme_workflow).predict(
-            "TodoList", TIED_PREFIX,
-            fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+        CommandNamePrediction(cme_workflow).predict(TIED_PREFIX)
     finally:
-        intent_detection.logger.removeHandler(log_handler)
+        intent_logger.removeHandler(log_handler)
 
     warning = log_output.getvalue()
     assert "Fuzzy pre-match tied across" in warning
     assert "add_child_todoitem" in warning
-    assert "Deferring to the classifier" in warning
+    assert "Deferring to the chain" in warning
 
 
 # ---------------------------------------------------------------------------
@@ -203,15 +220,13 @@ def test_unique_fuzzy_match_still_routes_without_the_classifier(
     stub router would return a different command if it were consulted."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        intent_detection, "CommandRouter",
+        model_pipeline_training, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
-    result = CommandNamePrediction(cme_workflow).predict(
-        "TodoList", "add_child_todoitm",
-        fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+    result = CommandNamePrediction(cme_workflow).predict("add_child_todoitm")
 
-    assert result.command_name == "TodoList/add_child_todoitem"
-    assert result.error_msg is None
+    assert result.command == "TodoList/add_child_todoitem"
+    assert result.outcome == "match" and result.decided_by == "fuzzy_name"
 
 
 def test_exact_command_name_still_routes(
@@ -221,39 +236,22 @@ def test_exact_command_name_still_routes(
     reaches the fuzzy branch at all."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        intent_detection, "CommandRouter",
+        model_pipeline_training, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
-    result = CommandNamePrediction(cme_workflow).predict(
-        "TodoList", "add_child_todolist",
-        fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+    result = CommandNamePrediction(cme_workflow).predict("add_child_todolist")
 
-    assert result.command_name == "TodoList/add_child_todolist"
+    assert result.command == "TodoList/add_child_todolist" and result.decided_by == "exact_name"
 
 
-def test_clarification_stage_tie_still_resolves_to_one_of_the_tied_commands(
-    todolist_workflows, monkeypatch, setup_test_environment
+def test_a_tie_in_a_reply_to_the_which_command_question_is_unclear_never_the_first(
+    todolist_command_names
 ):
-    """fix-0xn's open half, pinned so the remaining decision gets made on
-    purpose rather than inherited.
+    """fix-0xn's open half, decided by fix-o1lg S7: the reply reader is ONE reader, and two names that match equally
+    well are unclear on both paths (the CME used to take whichever came first)."""
+    from fastworkflow import intent_loop
 
-    The clarification stages have no classifier to defer to — fuzzy matching is
-    the only mechanism there — so the guard is scoped to INTENT_DETECTION and a
-    tie in these stages still resolves to whichever candidate came first. When
-    that half is decided, this test is the one to change."""
-    _, cme_workflow = todolist_workflows
-    monkeypatch.setattr(
-        intent_detection, "CommandRouter",
-        _router_returning(["TodoList/get_properties"], modelpipeline=None))
-
-    # These stages write the resolved name to the clarification cache, which
-    # reads the in-flight utterance from the CME context.
-    workflow_context = cme_workflow.context
-    workflow_context["command"] = TIED_PREFIX
-    cme_workflow.context = workflow_context
-
-    result = CommandNamePrediction(cme_workflow).predict(
-        "TodoList", TIED_PREFIX,
-        fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION)
-
-    assert result.command_name in {f"TodoList/{name}" for name in TIED_COMMANDS}
+    tied = sorted(f"TodoList/{name}" for name in TIED_COMMANDS)
+    assert intent_loop.read(TIED_PREFIX, tied).kind == "unclear"
+    # a misspelling that is closer to one of them still picks it
+    assert intent_loop.read("add_child_todoitm", tied).name == "TodoList/add_child_todoitem"

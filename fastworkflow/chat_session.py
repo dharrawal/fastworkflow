@@ -4,8 +4,6 @@ from threading import Thread
 from typing import Optional
 import contextlib
 from pathlib import Path
-import os
-import time
 
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
@@ -13,6 +11,7 @@ import litellm
 
 import fastworkflow
 from fastworkflow import active_workflow
+from fastworkflow import waiting as waiting_module
 from fastworkflow.workflow_execution_context import CommandCancelledError, WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.startup_progress import StartupProgress
@@ -357,22 +356,17 @@ class ChatSession:
             self._core._maybe_enqueue_trace_sentinel()
 
     def _pending_cancel_reply(self) -> Optional[tuple[str, str]]:
-        """What is pending on the session once no turn is running, as ``(kind, the engine reply that cancels it)``.
+        """What is pending on the session once no turn is running, as ``(label, the engine reply that cancels it)``.
 
-        The one classification ``//cancel`` and the cleanup of an abandoned turn share: an open approval or plan
-        review is answered ``no`` (the chat page's Decline / Cancel), an open command (a missing value, an
-        ambiguous command) ``abort`` (the page's Cancel on those forms). None when nothing is pending. A blocked
-        ``ask_user`` read is not here: it is ended by ``MessageQueue.post_cancel``.
+        The one classification ``//cancel`` and the cleanup of an abandoned turn share: the CANCEL event of
+        ``waiting.step`` on the core's one ``waiting`` record, whose kind table gives the reply that ends it as typing it
+        does: ``no`` for an approval or a plan review, ``cancel`` for a plan's which-command or value question and a
+        paused decision step, ``abort`` for the CME's open command. None when nothing is pending, and for an
+        ``ask_user`` question: a blocked read is ended by ``MessageQueue.post_cancel`` (a ChatSession never holds a
+        suspended one, it blocks on its queue).
         """
-        from fastworkflow import approval_binding
-
-        workflow = self._core.app_workflow
-        if workflow is not None and (approval_binding.active_approvals(workflow)
-                                     or approval_binding.active_reviews(workflow)):
-            return "review", "no"
-        if self._core.has_open_command():
-            return "clarification", "abort"
-        return None
+        move = waiting_module.step(self._core.waiting, waiting_module.Event(waiting_module.CANCEL))
+        return (move.label, move.text) if move.action == waiting_module.ACT_REPLY else None
 
     def cancel_pending_prompt(self) -> Optional[str]:
         """Cancel what the session is waiting on, the way the chat page's Cancel does; the kind, or None.
@@ -380,7 +374,8 @@ class ChatSession:
         * ``"question"``: a blocked ``ask_user`` read ends through the engine's ``CommandCancelledError``
           (the turn's "Command cancelled" output, suspension cleared).
         * ``"review"``: an open approval or plan review is answered ``no``.
-        * ``"clarification"``: an open command is answered ``abort``.
+        * ``"clarification"``: any other open question (a which-command or value question of a plan or of the open
+          command, a paused decision step) is answered with its kind's cancel reply (``fastworkflow.waiting.TABLE``).
 
         The reply goes through the user message queue, so the turn that results is read like any other.
         None when nothing is pending, or when an interrupted turn is still finishing (it has no prompt).
@@ -601,109 +596,3 @@ class ChatSession:
     #     command_output._mcp_source = mcp_result  # Mark for special formatting
     #     return command_output
     
-    def _process_message(self, message: str) -> fastworkflow.CommandOutput:
-        """Back-compat shim: delegate single-message execution to the core."""
-        return self._core._execute_message(message)
-
-    def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
-        """Back-compat shim: delegate agent-message execution to the core."""
-        return self._core._execute_message(message)
-
-    def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
-        """Back-compat shim: delegate action execution to the core."""
-        return self._core.process_action(action)
-
-    def profile_invoke_command(self, message: str):
-        """
-        Profile the invoke_command method with detailed focus on performance issues.
-        
-        Args:
-            message: The message to process
-            output_file: Name of the profile output file
-            
-        Returns:
-            The result of the invoke_command call
-        """
-        from datetime import datetime
-        
-        # Generate a unique filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"invoke_command_{timestamp}.prof"        
-
-        import cProfile
-        import pstats
-        import io
-        import time
-        
-        # Create a Profile object
-        profiler = cProfile.Profile()
-        
-        # Enable profiling
-        profiler.enable()
-        
-        # Execute invoke_command and time it
-        start_time = time.time()
-        if self._core.app_workflow:
-            self.push_active_workflow(self._core.app_workflow)
-        try:
-            result = self._CommandExecutor.invoke_command(self, message)
-        finally:
-            if self._core.app_workflow:
-                self.pop_active_workflow()
-        elapsed = time.time() - start_time
-        
-        # Disable profiling
-        profiler.disable()
-        
-        # Save profile results to file
-        profiler.dump_stats(output_file)
-        print(f"\nProfile data saved to {os.path.abspath(output_file)}")
-        print(f"invoke_command execution took {elapsed:.4f} seconds")
-        
-        # Create summary report
-        report_file = f"{os.path.splitext(output_file)[0]}_report.txt"
-        with open(report_file, "w") as f:
-            # Overall summary by cumulative time
-            s = io.StringIO()
-            ps = pstats.Stats(profiler, stream=s)
-            ps.sort_stats('cumulative').print_stats(30)
-            f.write(f"=== CUMULATIVE TIME SUMMARY (TOP 30) === Execution time: {elapsed:.4f}s\n")
-            f.write(s.getvalue())
-            f.write("\n\n")
-            
-            # Internal time summary
-            s = io.StringIO()
-            ps = pstats.Stats(profiler, stream=s)
-            ps.sort_stats('time').print_stats(30)
-            f.write("=== INTERNAL TIME SUMMARY (TOP 30) ===\n")
-            f.write(s.getvalue())
-            f.write("\n\n")
-            
-            # Most called functions
-            s = io.StringIO()
-            ps = pstats.Stats(profiler, stream=s)
-            ps.sort_stats('calls').print_stats(30)
-            f.write("=== MOST CALLED FUNCTIONS (TOP 30) ===\n")
-            f.write(s.getvalue())
-            
-            # Focus areas for issues 3-7
-            focus_areas = [
-                ('lock_contention', ['lock', 'acquire', 'release'], 'time'),
-                ('model_operations', ['torch', 'nn', 'model'], 'cumulative'),
-                ('command_extraction', ['wildcard.py', 'extract', 'predict'], 'cumulative'),
-                ('file_io', ['_get_sessiondb_folderpath', '_load', '_save'], 'cumulative'),
-                ('frequent_operations', ['startswith', 'isinstance', 'get'], 'calls')
-            ]
-            
-            for name, patterns, sort_by in focus_areas:
-                f.write(f"\n\n=== {name.upper()} ===\n")
-                for pattern in patterns:
-                    s = io.StringIO()
-                    ps = pstats.Stats(profiler, stream=s)
-                    ps.sort_stats(sort_by).print_stats(pattern, 10)
-                    f.write(f"\nPattern: '{pattern}'\n")
-                    f.write(s.getvalue())
-        
-        print(f"Detailed report saved to {os.path.abspath(report_file)}")
-        
-        return result

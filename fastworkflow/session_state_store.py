@@ -33,7 +33,15 @@ PENDING_STATE_KEY = "pending"
 # is somehow presented to a 3.0 build.
 # 4: registered experiment claims persist their epoch and server incarnation.
 # A pre-fence suspended blob cannot safely resume a registered attempt.
-SCHEMA_VERSION = 4
+# 5: the deterministic path's pending question is the turn's one waiting record (keys ``waiting`` and ``review_slot``);
+# the ``cme`` and ``plan_cme`` sections are gone and a blob that has them is refused (no reader for the old keys).
+# 6: the sub-task review and a paused decision step are the turn's waiting record too (kinds ``review`` and
+# ``decision``; the review's slot question is nested in it); the keys ``subtask_review_open`` and ``review_slot`` are gone
+# and ``skill_phase_run`` no longer carries ``decision``.
+# 7: the agent's own question and an approval are the turn's waiting record too (kinds ``agent`` and ``approval``); the
+# keys ``awaiting_user``, ``suspended_user_message``, ``pending_clarification_request`` and ``assistant_command`` are gone
+# (the question is the record, and the "/" round is ``waiting.assistant``), and a parked review rides in its record.
+SCHEMA_VERSION = 7
 
 
 class IncompatibleSessionState(Exception):

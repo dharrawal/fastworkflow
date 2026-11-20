@@ -39,6 +39,7 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow import tracing
+from fastworkflow import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
@@ -57,6 +58,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     slot_binding_uncertainty,
 )
 from fastworkflow.command_executor import CommandExecutor
+from tests.test_nlu_span_emission import CLASSIFIER_REQUEST
 from fastworkflow.observability.decision_signals import (
     SIGNAL_DOMAINS,
     SLOT_BINDING_SOURCES,
@@ -71,12 +73,11 @@ HELLO_WORLD = str(
     Path(__file__).parent.parent / "fastworkflow" / "examples" / "hello_world"
 )
 
-# The five layers `_predict_impl` can attribute a resolution to, plus the "nothing
+# The four layers the intent loop can attribute a resolution to, plus the "nothing
 # claimed it" case that leaves the attribute unset.
 MATCHER_LAYERS = (
     "exact_prefix",
     "fuzzy_prematch",
-    "embedding_cache",
     "classifier",
     "clarification_default",
     None,
@@ -234,13 +235,6 @@ def _trace_for(matcher_layer):
             "fuzzy_threshold": _FUZZY_PREMATCH_MAX_DISTANCE,
             "candidate_count": 2,
         }
-    if matcher_layer == "embedding_cache":
-        return {
-            "matcher_layer": "embedding_cache",
-            "cache_similarity": 0.91,
-            "cache_similarity_threshold": 0.85,
-            "candidate_count": 1,
-        }
     if matcher_layer == "classifier":
         return {
             "matcher_layer": "classifier",
@@ -319,15 +313,6 @@ def test_classifier_tier_carries_confidence_and_a_producer_version():
     assert "classifier-topk-margin" not in _kinds(uncertainty)
 
 
-def test_embedding_cache_reports_an_uncapturable_measurement_honestly():
-    """The cosine similarity decided this, and §6.6.1's SignalKind enum has no
-    member for it — so the structured record says "not-instrumented" rather than
-    silently looking like a decision nobody measured."""
-    uncertainty = command_identity_uncertainty(_trace_for("embedding_cache"))
-    assert uncertainty.signals == ()
-    assert uncertainty.signals_absent_reason == "not-instrumented"
-
-
 def test_unmatched_utterance_records_zero_candidates_and_missing_evidence():
     """No matcher claimed it. find_best_matches discards the distance above its
     threshold, so the one measurement taken is not recoverable here."""
@@ -393,9 +378,10 @@ def test_suppression_is_exactly_what_the_ambiguity_prompt_does():
         == ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY
     )
     assert CommandNamePrediction.escalation_signals_in(predictions) == [WILDCARD_LABEL]
-    message = CommandNamePrediction._formulate_ambiguous_command_error_message(
-        predictions, run_as_agent=True
-    )
+    from fastworkflow import intent_clarification
+
+    offered = [{"name": name} for name in intent_loop._usable(predictions, set())]
+    message = intent_clarification.plan_choice_question("x", offered, ambiguous=True, for_agent=True)
     assert WILDCARD_LABEL not in message
     assert "add_two_numbers" in message
 
@@ -404,12 +390,7 @@ def test_honored_escalation_resolves_to_no_local_command():
     """`honored` claims the parent-chain walk is reached; the walk is driven by
     `command_name=None`, so that is what the resolver must return."""
     assert escalation_outcome_of([WILDCARD_LABEL]) == ESCALATION_OUTCOME_HONORED
-    assert (
-        CommandNamePrediction.resolve_fully_qualified_command_name(
-            WILDCARD_LABEL, {"add_two_numbers": "add_two_numbers"}
-        )
-        is None
-    )
+    assert intent_loop._usable([WILDCARD_LABEL], set()) == []
 
 
 # ----------------------------------------------------------------------
@@ -599,50 +580,6 @@ class TestRoutingIsUnchanged:
         assert span.attributes["command_name"] == "IntentDetection/what_can_i_do"
         assert span.attributes["is_cme_command"] is True
 
-    def test_embedding_cache_lookup_is_unchanged_by_asking_for_details(
-        self, hello_ctx
-    ):
-        """The one call this change altered in another module's API.
-
-        `cache_match(..., return_details=True)` must pick the same label as the
-        plain call and still answer None on a miss, or the embedding-cache tier
-        routes differently. Real store, real DistilBERT embeddings, real matcher.
-        """
-        from fastworkflow.cache_matching import cache_match, store_utterance_cache
-        from fastworkflow.model_pipeline_training import CommandRouter
-
-        pipeline = CommandRouter(
-            f"{HELLO_WORLD}/___command_info/*"
-        ).modelpipeline
-        cache_path = str(
-            Path(HELLO_WORLD) / "___convo_info" / f"sigtest-{uuid.uuid4().hex}.sqlite3"
-        )
-        try:
-            store_utterance_cache(
-                cache_path, "add five and three", "add_two_numbers", pipeline
-            )
-            plain = cache_match(cache_path, "add five and three", pipeline, 0.85)
-            detailed = cache_match(
-                cache_path, "add five and three", pipeline, 0.85, return_details=True
-            )
-            assert plain == "add_two_numbers"
-            assert detailed[0] == plain
-            assert 0.85 <= detailed[1] <= 1.0
-            # A miss stays falsy, which is what the walrus in `_predict_impl` tests.
-            assert (
-                cache_match(
-                    cache_path,
-                    "totally unrelated wording about umbrellas",
-                    pipeline,
-                    0.999,
-                    return_details=True,
-                )
-                is None
-            )
-        finally:
-            Path(cache_path).unlink(missing_ok=True)
-
-
 class TestSpansCarryTheRecords:
     def test_intent_span_carries_a_decision_uncertainty(self, hello_ctx):
         ctx, sink = hello_ctx
@@ -659,12 +596,11 @@ class TestSpansCarryTheRecords:
         # look-alike dict that would fail validation on the way back in.
         assert DecisionUncertainty(**recorded).candidate_count == 1
 
+    @pytest.mark.usefixtures("no_planner_key")
     def test_intent_span_always_carries_an_escalation_outcome(self, hello_ctx):
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "what can i do")
-        CommandExecutor.invoke_command(
-            ctx, "please compute the total of five plus three"
-        )
+        CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
         spans = sink.named(tracing.SPAN_NLU_INTENT)
         assert spans
         for span in spans:
@@ -678,11 +614,10 @@ class TestSpansCarryTheRecords:
             == ESCALATION_OUTCOME_NOT_EVALUATED
         )
 
+    @pytest.mark.usefixtures("no_planner_key")
     def test_classifier_span_carries_a_confidence_signal(self, hello_ctx):
         ctx, sink = hello_ctx
-        CommandExecutor.invoke_command(
-            ctx, "please compute the total of five plus three"
-        )
+        CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
         spans = [
             s
             for s in sink.named(tracing.SPAN_NLU_INTENT)
@@ -730,15 +665,14 @@ _CONTRACT_NAMES = frozenset({
     "slot_binding_source",
 })
 
-# The assembling functions and the locals that hold their output, plus the two raw
-# measurements this change stopped discarding. Named explicitly rather than
+# The assembling functions and the locals that hold their output, plus the raw
+# measurement this change stopped discarding. Named explicitly rather than
 # inferred, so that renaming one and leaving this list alone fails the presence
 # check below instead of silently emptying the rule.
 _CAPTURED_VALUE_NAMES = frozenset({
     "_recorded_command_identity_uncertainty",
     "_recorded_slot_binding_uncertainty",
-    "best_distance",
-    "cache_similarity",
+    "distance",
     "command_identity_uncertainty",
     "escalation_outcome_of",
     "signals",
@@ -746,11 +680,12 @@ _CAPTURED_VALUE_NAMES = frozenset({
     "uncertainty",
 })
 
-_GUARDED_MODULES = (intent_detection, parameter_extraction)
+# intent_loop is where the command-identity decision is made now (the CME's span assembly stays in intent_detection).
+_GUARDED_MODULES = (intent_detection, intent_loop, parameter_extraction)
 
 # The functions that decide where a message goes. Nothing they contain may come
 # from the signals contract at all.
-_ROUTING_FUNCTIONS = ("_predict_impl", "_extract_impl")
+_ROUTING_FUNCTIONS = ("_predict_impl", "_extract_impl", "resolve", "_by_name", "_chain")
 
 # `is` / `is not` against None asks whether a record exists; it cannot express a
 # threshold. Every other comparison can.

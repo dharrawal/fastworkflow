@@ -102,7 +102,7 @@ def test_a_required_field_holding_the_called_commands_name_is_missing(workflow):
         workflow, NoteParams(note="use_payload"), diagnostics=diagnostics)
 
     assert not is_valid and fields == ["note"]
-    assert "Missing parameter values: note" in message
+    assert "your request does not give the note" in message   # the one sentence a person is told (parameters.ask)
     assert "'use_payload' is the name of this command, not a value" in message
     assert diagnostics["command_name_values"] == {"note": "use_payload"}
 
@@ -145,7 +145,7 @@ def test_a_list_item_holding_a_command_name_makes_the_whole_list_missing(workflo
         workflow, NamesParams(names=["Ledger", "check_ready"]))
 
     assert not is_valid and fields == ["names"]
-    assert "Missing parameter values: names" in message
+    assert "your request does not give the names" in message
     assert "the name of the command 'check_ready'" in message
 
 

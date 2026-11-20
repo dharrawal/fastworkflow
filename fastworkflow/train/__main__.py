@@ -34,6 +34,7 @@ from fastworkflow.train import (
     artifact_versioning,
     determinism,
     duplicate_detection,
+    intent_model_layout,
     metrics_persistence,
     param_example_cache,
     personas,
@@ -330,6 +331,10 @@ def _with_workflow_persona_source(train_func):
 
 @_with_workflow_persona_source
 def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
+    # Resolve once, here: the command files this run records in its training signature take their
+    # spelling from this path, so a relative one would bake the current directory into the version
+    # and a later run from elsewhere would see a different signature.
+    workflow_path = os.path.abspath(workflow_path)
     # Ensure context model is parsed so downstream helpers have contexts
     CommandContextModel.load(workflow_path)
     RoutingDefinition.build(workflow_path)
@@ -430,6 +435,19 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     # EXPERIMENT-ONLY (Phase 9 step 3). The head layout is part of every context's signature, so
     # artifacts of the flattened and scoped layouts never mix. None is today's layout.
     head_scope = model_pipeline_training.active_experiment_head_scope()
+    # The artifact layout (INTENT_MODEL_LAYOUT in the workflow env): read here, when training
+    # starts, and nowhere at run time. It is a global input of the signature, so a change of
+    # layout is a full retrain into the other layout.
+    layout = intent_model_layout.layout_for_workflow(workflow_path)
+    # True for the layouts with one model for the workflow (``embedding``, ``workflow``).
+    workflow_layout = layout in intent_model_layout.ONE_MODEL_LAYOUTS
+    if layout == intent_model_layout.EMBEDDING:
+        embedding = intent_model_layout.embedding_settings(workflow_path)
+        print(f"{Fore.CYAN}Intent model layout: {layout} (frozen encoder {embedding['encoder']}, "
+              f"{embedding['pooling']} pooling; one linear head for the workflow, commit threshold "
+              f"{embedding['commit_threshold']:.2f}).{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.CYAN}Intent model layout: {layout}.{Style.RESET_ALL}")
     try:
         plan, training_signature = selective_training.compute_training_plan(
             workflow_path,
@@ -440,6 +458,7 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
             cache_mode=cache_mode,
             reserved_class_arm=arm,
             head_scope=head_scope,
+            intent_model_layout_name=layout,
         )
     except Exception:
         workflow.close()
@@ -464,6 +483,9 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         seed=seed,
         previous_version=previous_version,
         **manifest_record,
+        # A one-model layout is named; a per-context manifest is unchanged, and a manifest
+        # without the key is per-context.
+        **({intent_model_layout.MANIFEST_KEY: layout} if workflow_layout else {}),
     )
 
     # generate_diverse_utterances cannot return provenance (its signature is public API
@@ -471,7 +493,10 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     recorder = determinism.ProvenanceRecorder(workflow_path)
     # Always recorded, shipped runs included: score_not_here and the provenance readers take the
     # arm from here, and the resolved name (sparse_1 for a shipped run) is what it should say.
-    recorder.run_metadata = run_metadata
+    recorder.run_metadata = (
+        {**run_metadata, intent_model_layout.MANIFEST_KEY: layout}
+        if workflow_layout else run_metadata
+    )
     determinism.set_provenance_recorder(recorder)
     # Same reason, same shape: generation reaches the cache through a module-level handle
     # because it cannot be handed a workflow path. This is what makes two runs at the same
@@ -499,6 +524,7 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
                 context_name: context_signature.not_here_samples
                 for context_name, context_signature in training_signature.contexts.items()
             },
+            intent_model_layout=layout if workflow_layout else None,
         )
         for context_name, samples in used_samples.items():
             recorded = training_signature.contexts[context_name].not_here_samples
@@ -561,9 +587,10 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         **selective_training.context_contribution_manifest_fields(
             training_signature, plan
         ),
+        **_embedding_head_manifest_fields(workflow_path, version_id, layout),
     )
     report = training_report.report_training_data(
-        workflow_path, print_report=False, write=True)
+        workflow_path, print_report=False, write=True, version_id=version_id)
     _require_publishable_training_report(report)
     # Only a SUCCESSFUL train becomes current. A failed one leaves the previous version
     # published and complete, with its own partial version beside it rather than on top
@@ -595,6 +622,29 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     # the writes (rather than wiping up-front) means a failed train leaves the
     # previous, complete ___command_info intact and runnable.
     _prune_stale_artifacts(workflow_path)
+
+def _embedding_head_manifest_fields(workflow_path: str, version_id: str, layout: str) -> dict:
+    """``{"intent_embedding_head": {...}}`` for a version trained in the ``embedding`` layout: the
+    encoder, the head's commit threshold, the cross-fit facts (rows, accuracy, confused pairs),
+    the times and the bytes, read back from the head's own ``scopes.json``. Empty for
+    the other layouts. Also prints the one line that says what was used and how long it took."""
+    if layout != intent_model_layout.EMBEDDING:
+        return {}
+    from fastworkflow.train import embedding_head
+
+    summary = embedding_head.read_summary(str(
+        artifact_versioning.version_dir(workflow_path, version_id)
+        / intent_model_layout.WORKFLOW_MODEL_DIRNAME))
+    if summary is None:
+        return {}
+    print(
+        f"{Fore.CYAN}Intent model: layout {layout}, encoder {summary['encoder']} "
+        f"({summary['pooling']} pooling), {summary['labels']} labels, {summary['rows']} rows. "
+        f"The head took {summary['train_seconds']:.1f} s (embedding {summary['embed_seconds']:.1f} s, "
+        f"fit {summary['fit_seconds']:.1f} s, cross-fit {summary['cross_fit_seconds']:.1f} s) "
+        f"and is {summary['bytes']:,} bytes.{Style.RESET_ALL}")
+    return {"intent_embedding_head": summary}
+
 
 #: Parameter-example settings of the trainer. The cache-report reads these too, so the
 #: variant key it checks is the one the trainer would ask for.
@@ -770,7 +820,7 @@ def _trains_the_fastworkflow_package(workflow_path: str) -> bool:
     """
     from fastworkflow.model_pipeline_training import (
         is_internal_cme_folder,
-        is_internal_consultation_folder,
+        is_plan_metadata_extraction_folder,
     )
 
     package = os.path.realpath(fastworkflow.get_fastworkflow_package_path())
@@ -778,7 +828,7 @@ def _trains_the_fastworkflow_package(workflow_path: str) -> bool:
     return (
         real == package
         or is_internal_cme_folder(workflow_path)
-        or is_internal_consultation_folder(workflow_path)
+        or is_plan_metadata_extraction_folder(workflow_path)
     )
 
 
@@ -811,6 +861,12 @@ def _internal_workflow_trained(
         context_artifact_dir = os.path.join(
             workflow_folderpath, "___command_info", context_folder
         )
+        if intent_model_layout.is_workflow_scope_folder(context_artifact_dir):
+            # A one-model layout (the framework's own workflows are in the embedding layout):
+            # the context holds a pointer and the version's one model, not the per-context files.
+            if not intent_model_layout.workflow_context_complete(context_artifact_dir):
+                return False
+            continue
         for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
             if not os.path.exists(os.path.join(context_artifact_dir, artifact_name)):
                 return False
@@ -839,7 +895,7 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
         _internal_workflow_trained(
             fastworkflow_folderpath, "command_metadata_extraction"
         )
-        and _internal_workflow_trained(fastworkflow_folderpath, "consultation")
+        and _internal_workflow_trained(fastworkflow_folderpath, "plan_metadata_extraction")
     )
 
 

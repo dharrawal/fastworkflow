@@ -122,7 +122,7 @@ the `fw.nlu.intent` spans:
 | `resolved: false` on every attempt (the walk climbed contexts and gave up) | The utterance routes nowhere — vocabulary gap or command missing from the context's surface | Seed utterances (`plain_utterances`, ~8 varied phrasings) · `design-context-models` (is the command reachable from this context?) |
 | `ambiguous: true` with a `candidates` list | Classifier confidence below threshold — check `classifier.confidence` vs `classifier.ambiguous_threshold`; near-misses mean starved or colliding seeds | `detect-duplicate-capabilities` (are two candidates the same capability?) · seeds · `design-context-models` |
 | Wrong `command_name`, `matcher_layer: classifier` | A confident mis-route: the wrong command's training set claims this phrasing | `detect-duplicate-capabilities` · `evaluate-intent-routing` (measure before/after) · seeds |
-| Wrong `command_name`, `matcher_layer: fuzzy_prematch` or `embedding_cache` | A pre-classifier layer matched — the utterance lexically resembles another command's name, or a stale cache entry | Rename the colliding command, or investigate the matched cache entry and its provenance |
+| Wrong `command_name`, `matcher_layer: fuzzy_prematch` | A pre-classifier layer matched — the utterance lexically resembles another command's name | Rename the colliding command |
 | `escalation_labels_discarded` present | The command likely lives in an ancestor context but the local prompt hid that | `design-context-models` (context surfaces / `base` inheritance) |
 
 **B. Were the parameters extracted correctly?** Read `fw.nlu.param_extraction`:

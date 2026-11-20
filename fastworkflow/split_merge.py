@@ -609,7 +609,7 @@ def reduce_to_cap(user_query: str, subtasks: list[str], cap: int, identifiers: t
     The ladder: (1) exact copies; (2) a sub-task contained in another; (3) near copies, a pair naming the same
     subjects with ``NEAR_COPY_OVERLAP`` of their words in common that ``near_copy`` (Jev, optional) confirms,
     the later one dropped; (4) ``merge_subtasks`` with ``same_job``; (5) adjacent sub-tasks joined, first those
-    ``label`` (the planning command matcher, optional) gives the same job type, then the adjacent pair with the
+    ``label`` (the part's plan from the intent loop, optional) gives the same job type, then the adjacent pair with the
     most content words in common. A joined text holds both parts, so every subject stays named. The three Jev
     callbacks share ``max_jev_calls``; past it they are not asked and the deterministic rule decides.
     """

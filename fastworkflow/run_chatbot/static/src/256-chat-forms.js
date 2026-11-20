@@ -1,7 +1,7 @@
 /* -- chat forms [fix-weih.5] -------------------------------------------- */
-/* One generic form renderer, tmRenderForm, plus the two prompts of a human's
-   "/" command that use it with no model call: a parameter form (missing or
-   rejected values) and ambiguous-intent pills. The renderer knows nothing
+/* One generic form renderer, tmRenderForm, plus the prompt of a human's
+   "/" command that uses it with no model call: a parameter form (missing or
+   rejected values); the which-command question is drawn in 263-chat-plans.js. The renderer knows nothing
    about "/" commands; later children reuse it for approvals, reviews and
    questions. Every string reaches the page through el()/textContent [R22].
 
@@ -52,7 +52,7 @@
    tmRenderForm. */
 
 var TM_PROMPT_ARTIFACT_KEYS = ["question_kind", "approval", "review",
-  "parameter_request", "intent_choices"];
+  "parameter_request", "plan_choice"];
 
 var tmLiveForms = [];
 var tmFormSeq = 0;
@@ -895,80 +895,10 @@ function tmRenderParameterForm(bubbleMsg, out) {
   return mounted;
 }
 
-/* -- ambiguous intent pills ---------------------------------------------- */
-
-function tmCommandTooltip(name) {
-  var entry = tmCommandSchema(name);
-  if (!entry) { return ""; }
-  var parts = [entry.input, entry.output];
-  var i;
-  for (i = 0; i < parts.length; i++) {
-    var p = parts[i];
-    if (p && typeof p.description === "string" && p.description.trim()) {
-      return p.description.trim();
-    }
-  }
-  return "";
-}
-
-function tmRenderIntentChoices(bubbleMsg, out) {
-  if (bubbleMsg.dataset.restored === "1") { return null; }
-  if (!tmIsLiveTurn(bubbleMsg)) { return null; }
-  var last = tmLastPromptArtifacts(out);
-  var raw = last && last.artifacts.intent_choices;
-  if (!Array.isArray(raw)) { return null; }
-  var seen = {};
-  var names = [];
-  raw.forEach(function (cand) {
-    if (typeof cand !== "string" || !cand.trim()) { return; }
-    var leaf = tmLeafName(cand.trim());
-    if (leaf && !seen[leaf]) { seen[leaf] = cand.trim(); names.push(cand.trim()); }
-  });
-  if (!names.length) { return null; }
-  var key = "intent:" + JSON.stringify(raw);
-  var prev = tmReusePrompt(bubbleMsg, key);
-  if (prev) { return tmMountPrompt(bubbleMsg, prev); }
-
-  var root = el("div", "intentChoices");
-  root.setAttribute("role", "group");
-  var labelNode = el("div", "intentLabel", "Multiple commands matched — choose one:");
-  labelNode.id = "intentLabel" + (tmFormSeq += 1);
-  root.setAttribute("aria-labelledby", labelNode.id);
-  root.appendChild(labelNode);
-  var pills = el("div", "intentPills");
-  var disabled = false;
-  function add(parent, label, cls, text, tooltip) {
-    var button = el("button", cls, label);
-    button.type = "button";
-    if (tooltip) { button.title = tooltip; }
-    button.addEventListener("click", function () {
-      if (!disabled) { tmSendChatText(text); }
-    });
-    parent.appendChild(button);
-  }
-  names.forEach(function (cand) {
-    var leaf = tmLeafName(cand);
-    add(pills, leaf, "intentPill", leaf, tmCommandTooltip(cand));
-  });
-  root.appendChild(pills);
-  var more = el("div", "intentActions");
-  add(more, "See all commands", "intentMore secondary", "what can i do?", "");
-  add(more, "Cancel", "intentCancel ghost", "abort", "");
-  root.appendChild(more);
-
-  var rec = { key: key, element: root,
-    setDisabled: function (flag) {
-      disabled = !!flag;
-      Array.prototype.slice.call(root.querySelectorAll("button")).forEach(function (b) {
-        b.disabled = disabled;
-      });
-      if (disabled) { root.classList.add("disabled"); } else { root.classList.remove("disabled"); }
-    },
-    nodes: [root, tmDetailsFor(last.text, false)] };
-  return tmMountPrompt(bubbleMsg, rec);
-}
-
-var TM_PROMPT_RENDERERS = [tmRenderParameterForm, tmRenderIntentChoices];
+/* The which-command question (question_kind "plan_choice") is drawn by tmRenderPlanQuestion in 263-chat-plans.js, which
+   puts itself in front of this list: ONE shape for every path (bd fix-o1lg S7; the older "intent_choices" pills are
+   gone). */
+var TM_PROMPT_RENDERERS = [tmRenderParameterForm];
 
 /* The one call tmRenderTurn makes. Anything it painted last time is gone
    (the bubble was cleared); a prompt is rebuilt, or reused when the paint

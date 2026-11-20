@@ -195,10 +195,9 @@ def test_exhausted_subtask_hands_off_to_a_continuation_matched_on_its_original_t
     ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
     triggers = _fake_progress_check(monkeypatch)
     templates = []
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_planning_command_for",
-        lambda text, folder, **_: templates.append(text) or ("", None),
-    )
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: templates.append(text))
     _split(monkeypatch, ["find X", "find Y"])
     agent = _agent_with_steps(["x partial", "x rest", "Y is there"], exhaust=lambda n: n == 1)
     _set_agents(ctx, agent)

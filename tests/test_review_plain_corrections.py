@@ -9,18 +9,21 @@ Part 1 runs the reader's real code on the edits a reader model returned for a re
 for word, the ``ProposedEdit`` list the reader returned (the span the reader's output is recorded as in
 ``tests/test_review_reader_guards.py``), through the real ``_proposed_edits_to_engine`` and ``apply_edits``. No model is
 called and nothing is mocked. The names and goals are generic stand-ins; the shapes of the replies and of the reader's
-mistakes are the observed ones. Part 2 sends replies through a real review (the consultation workflow's reader, the
+mistakes are the observed ones. Part 2 sends replies through a real review (the plan metadata extraction workflow's reader, the
 head's recorded answers, a scripted planner and parameter extractor).
 """
 from __future__ import annotations
 
 import pytest
 
-from fastworkflow._workflows.consultation import _item_validation
+from fastworkflow._workflows.plan_metadata_extraction import _item_validation
 from fastworkflow.review_engine import EditRefused, apply_edits
 from fastworkflow.review_proposals import (
     Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, _proposed_edits_to_engine, reconcile_dropped_items)
 from fastworkflow.review_step_refs import bare_step_numbers, removal_reading, step_numbers
+
+
+pytestmark = pytest.mark.usefixtures("review_nouns_workflow")
 
 
 def _plan(*steps: tuple[str, str]) -> SubTaskProposal:
@@ -81,10 +84,10 @@ def test_a_whole_list_is_read_but_a_reference_among_words_is_not_a_list():
 
 
 def test_a_routed_drop_entry_that_holds_a_list_drops_every_step_in_it():
-    from fastworkflow._workflows.consultation._commands.ProposalReview.drop import Signature
+    from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview.drop import Signature
 
     class _Workflow:
-        context = {"consultation_proposal": _four_step_plan()}
+        context = {"plan_proposal": _four_step_plan()}
 
     parsed = Signature.Input.model_validate({"items": ["2, 3 and 4"]}, context={"workflow": _Workflow()})
     assert parsed.items == ["2", "3", "4"]
@@ -445,7 +448,7 @@ def test_an_accept_is_decided_before_any_step_reference_is_read(reply, monkeypat
 
 
 # ----------------------------------------------------------------------
-# Part 2: the same replies through a real review (the consultation workflow reads them)
+# Part 2: the same replies through a real review (the plan metadata extraction workflow reads them)
 # ----------------------------------------------------------------------
 #
 # The head's answer for each reply is its recorded one (``recorded_review_router``, tests/recorded_router.py); the
@@ -456,16 +459,16 @@ from fastworkflow import review_engine as re_  # noqa: E402
 from fastworkflow.review_engine import REVISED, open_review  # noqa: E402
 
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: E402,F401
-from tests.test_consultation_reply_policy import (  # noqa: E402,F401
-    _PlannerLM, _wire_consultation, no_draft_extraction, planner, script_param_extraction)
+from tests.test_plan_reply_policy import (  # noqa: E402,F401
+    _PlannerLM, _wire_plan, no_draft_extraction, planner, script_param_extraction)
 from tests.test_round1_gate import gated  # noqa: E402,F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: E402,F401
 
 
-@pytest.fixture(params=["session reader", "consultation fallback reader"])
+@pytest.fixture(params=["session reader", "plan fallback reader"])
 def wiring(request, gated):
     """How the free-text reader is wired: the session's (``store.edit_reader``, as ``_give_review_reader`` sets it for a
-    review the gate opened) or the consultation ``edit`` command's own, used when the store has none."""
+    review the gate opened) or the plan ``edit`` command's own, used when the store has none."""
     if request.param == "session reader":
         from fastworkflow.review_proposals import model_edit_reader
 
@@ -475,7 +478,7 @@ def wiring(request, gated):
 
 def _open(gated, proposal: SubTaskProposal) -> re_.ReviewRecord:
     record = open_review(gated.ctx, gated.store, proposal, surface=gated.store.surface)
-    _wire_consultation(gated)
+    _wire_plan(gated)
     return record
 
 
@@ -550,14 +553,24 @@ class TestNotARemovalThroughTheReview:
         # asked again: by the guard (it names the step and the way to drop it) or by the drop's own question
         assert f"drop {step}" in (out.answer or "") or "Which of the 4 steps do you mean?" in (out.answer or "")
 
-    def test_a_correct_reading_of_a_possessive_is_applied(self, gated, planner, wiring):
+    def test_a_possessive_the_head_reads_as_a_drop_is_asked_about_and_the_plan_is_unchanged(
+            self, gated, planner, wiring):
+        """"Please remove step 2's status filter." is a change to step 2, not the removal of step 2.
+
+        Before the framework's review head moved to the embedding layout it answered this reply with a list of
+        candidates, the reader fell through to the text planner and applied the planner's (correct) change. The
+        embedding head commits to ``drop`` (recorded answer), so the reader's code rule is what protects the user:
+        nothing is removed and the user is asked again.
+        The planner is scripted with the correct change to prove it is the question, not a wrong edit, that stops it."""
         plan = _filter_plan()
         record = _open(gated, plan)
         planner(gated, {"edits": [{"op": "change", "index": 2, "field": "inputs", "value": "status_filter=none"}]})
-        gated.ctx.process_turn("Please remove step 2's status filter.")
-        assert record.state == REVISED
+        out = gated.ctx.process_turn("Please remove step 2's status filter.")
+        assert record.state == re_.AWAITING
         assert _shown_goals(record) == [item.goal for item in plan.items]
-        assert "status_filter" not in {each.name for each in re_.proposal_of(record).items[1].inputs}
+        assert "status_filter" in {each.name for each in re_.proposal_of(record).items[1].inputs}
+        # asked again: by the guard (it offers 'drop 2' or a change to the step) or by the drop's own question
+        assert "drop 2" in (out.answer or "") or "Which of the 4 steps do you mean?" in (out.answer or "")
 
 
 @pytest.mark.usefixtures("initialized_fastworkflow", "no_live_model", "no_draft_extraction")

@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 import fastworkflow
+from fastworkflow import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.capability_answer import CapabilityListing
 from fastworkflow.command_executor import CommandExecutor
@@ -33,7 +34,7 @@ class _RefusingRouter:
 @pytest.fixture
 def pair(setup_test_environment, monkeypatch):
     fastworkflow.init({})
-    monkeypatch.setattr(intent_detection, "CommandRouter", _RefusingRouter)
+    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RefusingRouter)
     app = fastworkflow.Workflow.create(workflow_folderpath=TODO, workflow_id_str=f"cme-data-{uuid4()}")
     cme = fastworkflow.Workflow.create(
         workflow_folderpath=fastworkflow.get_internal_workflow_path(CME),
@@ -108,7 +109,7 @@ def test_abort_says_what_it_ended(pair):
     aborted = _wildcard(cme, "abort")
     assert aborted.command_response.response == "command aborted\n"
     ended = aborted.command_response.artifacts["aborted"]
-    assert ended["stage"] == "INTENT_MISUNDERSTANDING_CLARIFICATION" and ended["command"] == "you_misunderstood"
+    assert ended["waiting_for"] == "intent" and ended["command"] == "you_misunderstood"
     assert aborted.command_response.output.command_name == "abort"
 
 

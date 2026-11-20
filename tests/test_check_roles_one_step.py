@@ -117,10 +117,11 @@ def _validate(app_workflow, command_name: str, request: str, **values):
 def test_two_name_inputs_with_one_value_are_refused_on_the_turn_frame_path(workflow):
     app_workflow, _ = workflow
 
-    is_valid, message, _, _ = _validate(app_workflow, "name_pair", REQUEST, member="Ann Lee", branch="Ann Lee")
+    is_valid, message, _, fields = _validate(app_workflow, "name_pair", REQUEST, member="Ann Lee", branch="Ann Lee")
 
     assert not is_valid
-    assert message == "branch='Ann Lee' is also the value of member"
+    # the roles refusal names the argument it refused, so it is asked like any refused value
+    assert fields == ["branch"] and "branch='Ann Lee' is also the value of member" in message
 
 
 def test_the_turn_frame_refusal_matches_the_typed_call(workflow):
@@ -131,9 +132,9 @@ def test_the_turn_frame_refusal_matches_the_typed_call(workflow):
     with pytest.raises(sc.PlanningCommandInputError) as typed:
         sc._validate_arguments(command, args, REQUEST, None)
 
-    is_valid, message, _, _ = _validate(app_workflow, "name_pair", REQUEST, member="Ann Lee", branch="Ann Lee")
+    is_valid, message, _, fields = _validate(app_workflow, "name_pair", REQUEST, member="Ann Lee", branch="Ann Lee")
     assert not is_valid
-    assert message == str(typed.value)
+    assert fields == ["branch"] and str(typed.value) in message
 
 
 def test_a_plain_str_input_equal_to_a_name_is_refused_as_the_typed_call_refuses_it(workflow):
@@ -145,11 +146,11 @@ def test_a_plain_str_input_equal_to_a_name_is_refused_as_the_typed_call_refuses_
     with pytest.raises(sc.PlanningCommandInputError) as typed:
         sc._validate_arguments(command, args, request, None)
 
-    is_valid, message, _, _ = _validate(app_workflow, "name_and_free_text", request,
-                                        member="Ann Lee", title="Ann Lee")
+    is_valid, message, _, fields = _validate(app_workflow, "name_and_free_text", request,
+                                             member="Ann Lee", title="Ann Lee")
 
     assert not is_valid
-    assert message == str(typed.value)
+    assert fields == ["title"] and str(typed.value) in message
 
 
 def test_an_execution_command_with_two_equal_required_strings_is_not_refused(workflow):

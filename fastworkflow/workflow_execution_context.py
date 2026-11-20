@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import weakref
 import os
 import re
 import time
@@ -36,7 +37,9 @@ import dspy
 import fastworkflow
 import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, planning_commands, tracing
-from fastworkflow import approval_binding, no_agent_mode, turn_cache
+from fastworkflow import approval_binding, intent_loop, no_agent_mode, turn_cache
+from fastworkflow import waiting as waiting_module
+from fastworkflow.parameters import reply as replies
 from fastworkflow.observation_offloading.state import current_execute_alias
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
@@ -59,7 +62,7 @@ NESTED_BUDGET_SPENT_MESSAGE = (
 
 #: The refusal for a direct action run while a question waits for the user's answer.
 AWAITING_ANSWER_REFUSAL_MESSAGE = (
-    "A question is waiting for the user's answer; reply to it before running an action."
+    "A question is waiting for the user's answer; reply to it before sending a request, an action or a plan."
 )
 
 
@@ -93,7 +96,6 @@ def _opened_part(trajectory: dict[str, Any]) -> str:
 
 #: The artifact key under which the final answer of a split turn lists its parts (``_answer_parts``).
 TURN_PARTS_ARTIFACT = "fw_sub_tasks"
-
 #: The artifact key under which the turn lists its stopped or refused parts (no-agent mode; ``fastworkflow.no_agent_mode``).
 NOT_RUN_ARTIFACT = no_agent_mode.NOT_RUN_ARTIFACT
 
@@ -102,6 +104,8 @@ class UsePlanError(ValueError):
     """A ``use_plan`` that names no planning command available here, or is sent while a question waits."""
 #: The artifact key under which a pending prompt of a paused planning command's decision step carries its data.
 PHASE_STEP_ARTIFACT = no_agent_mode.PHASE_STEP_ARTIFACT
+#: The artifact that carries the data of a plan-choice question (``question_kind`` "plan_choice").
+PLAN_CHOICE_ARTIFACT = "plan_choice"
 
 _CLAUSE_BREAK = re.compile(r"[.:;](?=\s|$)|\n")
 
@@ -221,6 +225,8 @@ def _frame_property(field_name: str) -> property:
 #: The turn's answer when the sub-task review is declined or expires: nothing runs (fix-3rsq.plan-review.2.6).
 SUBTASK_REVIEW_DECLINED = ("You declined the sub-task review, so nothing was run. "
                            "Send the request again to review it again.")
+#: The answer of a turn whose every part was cancelled while it was being resolved (before its review).
+EVERY_PART_CANCELLED = "Nothing was run: every part of the request was cancelled."
 SUBTASK_REVIEW_EXPIRED = ("The sub-task review expired before you answered, so nothing was run, and your message "
                           "was not taken as a reply to it. Send the request again to start a new review.")
 
@@ -232,11 +238,11 @@ _OWNER_UNSET = object()
 #: The serialized keys of a parked pending snapshot: the suspended turn and what it waits on, without the history,
 #: the approvals (cancelled, never parked) or the experiment labels (per context, not per conversation).
 _PARKED_PENDING_KEYS = (
-    "awaiting_user", "suspended_user_message", "pending_clarification_request", "skill_refusal_pending",
-    "skill_refusal_answered", "subtasks", "subtask_origins", "subtask_index", "subtask_answers",
-    "subtask_outputs", "subtask_exhausted", "subtask_review_open", "subtask_plan", "next_step",
-    "skill_phase_run", "react", "frames", "frame_react", "turn_child_step_ranges", "turn_steps_used", "nlu_stage",
-    "turn", "cme", "consultation_nlu_stage", "consultation_cme", "assistant_command",
+    "plan_resolution", "turn_part_facts", "use_plan",
+    "subtasks", "subtask_origins", "subtask_index", "subtask_answers",
+    "subtask_outputs", "subtask_exhausted", "subtask_plan", "next_step",
+    "skill_phase_run", "react", "frames", "frame_react", "turn_child_step_ranges", "turn_steps_used",
+    "turn", "waiting", "part_loop",
 )
 
 
@@ -296,8 +302,30 @@ class WorkflowExecutionContext:
     # Defaults for an object built without ``__init__`` (state restore, tests): every attribute ``__init__`` or
     # ``_begin_turn`` sets that code reads elsewhere. Immutable ones sit on the class; mutable ones are made fresh
     # per instance on first read.
-    _planning_command_refusal_request: Optional[dict] = None
-    _pending_refusal_request: Optional[dict] = None
+    @property
+    def _plan_resolution(self) -> Optional[Any]:
+        """The turn's pending resolution (``resolution.PlanResolution``): it belongs to the plan metadata extraction
+        workflow, so it lives in that workflow's context under ``plan_resolution`` (saved with the session under the same
+        key). It holds the resolution's progress only: a question that is out (which command, or a bound plan's values) is
+        the turn's waiting record (``_waiting``), as the command metadata extraction workflow's is. A context built without the plan workflow (a test double) keeps it on the instance."""
+        workflow = self.__dict__.get("_plan_workflow")
+        if workflow is None:
+            return self.__dict__.get("_plan_resolution_unbound")
+        return workflow.context.get("plan_resolution")
+
+    @_plan_resolution.setter
+    def _plan_resolution(self, value: Optional[Any]) -> None:
+        workflow = self.__dict__.get("_plan_workflow")
+        if workflow is None:
+            self.__dict__["_plan_resolution_unbound"] = value
+        elif value is None:
+            workflow.context.pop("plan_resolution", None)
+        else:
+            workflow.context["plan_resolution"] = value
+
+    _planning_command_refusal: Optional[str] = None
+    _refusal_stop_reason: str = ""
+    _part_outputs_start: int = 0
     _turn_parts_of_answer: Optional[tuple[str, list[dict[str, Any]]]] = None
     _last_nested_stop: Optional[dict[str, Any]] = None
     _turn_not_run = _FreshDefault(list)
@@ -361,18 +389,17 @@ class WorkflowExecutionContext:
         self._frames: list[PlanFrame] = [PlanFrame.turn()]
         self._context_change_listener = None
 
-        self._awaiting_user = False
-        self._suspended_user_message: Optional[str] = None
-        self._pending_clarification_request: Optional[str] = None
-        # A refused planning command call put to the user (the planner's PlanningCommandInputError, workflow_agent):
-        # the question the planner left for _call_agent_for_query, whether the suspension
-        # waiting on the reply is one of these, and whether this turn already put one.
+        # The turn's pending resolution (``resolution.PlanResolution``, bd fix-o1lg S4/S5): every part is resolved
+        # before the turn's one review (which command, asked only when ambiguous or, with no agent model, when nothing
+        # serves it; then a bound plan's missing values), and the question out is its. Also the record of the one
+        # parameter question a single unreviewed part's refused typed call puts while it runs. Saved with the session
+        # under ``plan_resolution``, so the reply resumes where the resolution stood.
+        # A refused typed planning call's question, left by the planner (workflow_agent) for _call_agent_for_query,
+        # which suspends the part on it. Only this hand-off: the planner's function has no other way to say it.
         self._planning_command_refusal: Optional[str] = None
-        # The refused call's input as data (planning_refusal_parameter_request), for the pending-prompt tag
-        self._planning_command_refusal_request: Optional[dict] = None
-        self._pending_refusal_request: Optional[dict] = None
-        self._planning_command_refusal_pending = False
-        self._planning_command_refusal_answered = False
+        # Where the part that is running began in the turn's outputs: a question is asked only before the part ran
+        # anything, so that the reply can run it from its start with nothing run twice.
+        self._part_outputs_start = 0
         self._next_step = 0
         # Model steps taken by nested planning-command frames this turn (design 3.5).
         self._turn_steps_used = 0
@@ -446,15 +473,14 @@ class WorkflowExecutionContext:
         # The planning command the client chose for this turn's one part (``process_turn(use_plan=...)``), and the one
         # named for the turn that begins next (read by ``_begin_turn``).
         self._turn_use_plan: Optional[str] = None
-        # No agent model: the questions about a planning command's missing arguments this turn has put (see
-        # ``refusal_question_for``): {command, open (the names asked about last), stalled (replies with no progress), asks};
-        # and why the last refusal ended the part (read when no question could be asked).
-        self._refusal_progress: Optional[dict[str, Any]] = None
+        # No agent model: why the last refusal ended the part (read when no question could be asked about it).
         self._refusal_stop_reason: str = ""
         self._next_use_plan: Optional[str] = None
         # The sub-task review gate's state for the turn (fix-3rsq.plan-review.2.2/.2.6/.2.8): the marker the turn span
         # carries, and the plan the gate built (the accepted one after a review; the draft when no one could answer).
         self._turn_subtask_review: str = "not_applicable"
+        # `intent_learning`: what each part's settling knew, by part text, until the plan is run (`_record_planned_parts`).
+        self._turn_part_facts: Optional[dict] = None
         self._turn_subtask_plan = None
         # fix-48np.1: one shown == run record per bound sub-task the turn ran with drafting on (review_proposals.
         # binding_record); the turn span carries them as ``subtask_bindings``.
@@ -483,7 +509,7 @@ class WorkflowExecutionContext:
         require_construction_record(
             fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
         require_construction_record(
-            fastworkflow.get_internal_workflow_path("consultation"))
+            fastworkflow.get_internal_workflow_path("plan_metadata_extraction"))
 
         cme_id = (
             f"cme_{session_key}"
@@ -493,56 +519,53 @@ class WorkflowExecutionContext:
         self._cme_workflow = fastworkflow.Workflow.create(
             fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
             workflow_id_str=cme_id,
-            workflow_context={
-                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
-            },
+            workflow_context={},    # a fresh context: a workflow created again under one id starts with nothing pending
         )
 
-        consultation_id = (
-            f"consultation_{session_key}"
+        plan_workflow_id = (
+            f"plan_{session_key}"
             if session_key
-            else f"consultation_{uuid.uuid4().hex}"
+            else f"plan_{uuid.uuid4().hex}"
         )
-        consultation_path = fastworkflow.get_internal_workflow_path("consultation")
-        self._consultation_workflow = fastworkflow.Workflow.create(
-            consultation_path,
-            workflow_id_str=consultation_id,
+        plan_path = fastworkflow.get_internal_workflow_path("plan_metadata_extraction")
+        self._plan_workflow = fastworkflow.Workflow.create(
+            plan_path,
+            workflow_id_str=plan_workflow_id,
         )
         from fastworkflow.utils import python_utils
 
         proposal_review_cb = python_utils.get_module(
             os.path.join(
-                consultation_path,
+                plan_path,
                 "_commands",
                 "ProposalReview",
                 "_ProposalReview.py",
             ),
-            consultation_path,
+            plan_path,
         )
         # The review record is the ROOT of this workflow: it has no parent. A wildcard answer
         # from the head (bd fix-1hs8) names no command, so the CME walks to the parent, and a
         # non-root record with no parent crashed there (AttributeError: no get_parent).
         # A workflow created again under the same id (a restart or restore on one channel) is the
         # same object and already has its root: the root can be set once, so that record is reused.
-        existing_root = self._consultation_workflow.root
+        self._plan_resolution = None     # the pending resolution lives in the plan workflow's context: start clean
+        existing_root = self._plan_workflow.root
         if existing_root is None:
-            self._consultation_workflow.root = proposal_review_cb.ProposalReview()
+            self._plan_workflow.root = proposal_review_cb.ProposalReview()
         else:
-            self._consultation_workflow.record = existing_root
+            self._plan_workflow.record = existing_root
 
-        consultation_cme_id = (
-            f"consultation_cme_{session_key}"
+        plan_cme_id = (
+            f"plan_cme_{session_key}"
             if session_key
-            else f"consultation_cme_{uuid.uuid4().hex}"
+            else f"plan_cme_{uuid.uuid4().hex}"
         )
-        self._consultation_cme = fastworkflow.Workflow.create(
+        self._plan_cme = fastworkflow.Workflow.create(
             fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-            workflow_id_str=consultation_cme_id,
-            workflow_context={
-                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
-                "app_workflow": self._consultation_workflow,
-            },
+            workflow_id_str=plan_cme_id,
+            workflow_context={"app_workflow": self._plan_workflow},
         )
+        self._install_waiting_ports()
 
         self.clear_conversation_history()
 
@@ -898,15 +921,14 @@ class WorkflowExecutionContext:
         self._turn_user_message = user_message
         self._turn_unattended = bool(unattended)
         self._turn_use_plan, self._next_use_plan = self._next_use_plan, None
-        self._refusal_progress, self._refusal_stop_reason = None, ""
+        self._plan_resolution, self._refusal_stop_reason, self._part_outputs_start = None, "", 0
+        self._part_loop = None
+        self._turn_part_facts = None
         self._turn_subtask_review = "not_applicable"
         self._turn_subtask_plan = None
         self._turn_subtask_bindings = []
         self._turn_plan_ambiguity = []
         turn_cache.begin_turn()
-        self._planning_command_refusal_pending = False
-        self._pending_refusal_request = None
-        self._planning_command_refusal_answered = False
         self._turn_refined_message = None
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
@@ -1181,6 +1203,86 @@ class WorkflowExecutionContext:
     def cme_workflow(self) -> fastworkflow.Workflow:
         return self._cme_workflow
 
+    # The deterministic path's pending question (kinds ``intent`` and ``parameters``) is the turn's one waiting record
+    # (``fastworkflow.waiting``, ``docs/pending_state_design.md``). The built-in commands reach it through the port in
+    # their context. The sub-task review and a paused decision step are the same record (kinds ``review`` and
+    # ``decision``); the review's own slot question is nested in its payload (``waiting.SLOT_KEY``, the plan CME's
+    # ``SlotPort``). ``_assistant_round``: the round began with a "/" message.
+    _waiting: Optional[waiting_module.Waiting] = None
+    _assistant_round: bool = False
+    #: The parameter loop of the question the running part put (``_put_part_loop``), kept after its reply: the record leaves
+    #: the slot at the reply (the part runs on, and may suspend again), so what the asking rule needs after it, the names
+    #: the last question listed (progress) and the count of replies with none (``stalled``), lives here, saved with the session.
+    _part_loop: Optional[Any] = None
+
+    @property
+    def _awaiting_user(self) -> bool:
+        """The turn is suspended on a question (the next message continues it), read from the waiting record: the agent's
+        own question and every other question that rides on the agent's suspension (``Waiting.rides_suspension``). Not a
+        stored flag; nothing sets it."""
+        held = self._waiting
+        return held is not None and held.rides_suspension
+
+    def _put_record(self, record: waiting_module.Waiting) -> None:
+        """The one place a record becomes the turn's (it replaces any other, so two are never out); it keeps the "/" round."""
+        record.assistant = self._assistant_round
+        self._waiting = record
+
+    def _ask_agent_question(self, question: Any, message: Optional[str] = None) -> None:
+        """The agent suspended on its own question (``ask_user``): the turn's ``agent`` record. A question that rides on the
+        same suspension (a review, a decision step, a plan question, an approval) is already the record and stays; the
+        CME's open command, left by a refused call of an agent session, gives way to it."""
+        held = self._waiting
+        if held is None or held.kind == waiting_module.KIND_AGENT or held.owner == waiting_module.OWNER_CME:
+            payload = {} if message is None else {"message": message}
+            self._put_record(waiting_module.Waiting(waiting_module.KIND_AGENT, question=str(question or ""), payload=payload))
+
+    def _suspended_message(self) -> str:
+        """The user message of the suspended turn (the agent record's, else the turn's)."""
+        held = self._waiting
+        message = held.payload.get("message") if held is not None and held.kind == waiting_module.KIND_AGENT else None
+        return message or self._turn_user_message or ""
+
+    def _put_approval_record(self, record) -> None:
+        """The approval store's record of an action awaiting its answer is the turn's question (``approval_binding.gate``
+        calls this when it asks). The store keeps the record; this points at it."""
+        self._put_record(waiting_module.Waiting(
+            waiting_module.KIND_APPROVAL, question=str(record.rendering or ""),
+            payload={"record_id": record.id, "suspended_agent": bool(record.suspended_agent)}))
+
+    def _store_record_ended(self, record) -> None:
+        """The approval store ended *record* (accepted, declined, expired, invalidated; ``review_engine.transition``): the
+        turn's question that points at it ends with it. The one place a store-backed record is dropped."""
+        held = self._waiting
+        if held is not None and held.store_backed and held.payload.get("record_id") == record.id:
+            self._drop_store_record()
+
+    def _turn_port(self) -> waiting_module.Port:
+        """The port of the turn's waiting record (the plan path's questions are put and taken through it)."""
+        return waiting_module.OwnerPort(self)
+
+    def _install_waiting_ports(self) -> None:
+        """Give the two built-in contexts their port (a workflow created again under one id keeps its context, so this
+        runs after every ``Workflow.create`` of them)."""
+        self._cme_workflow.context[waiting_module.PORT_KEY] = waiting_module.OwnerPort(self)
+        plan_cme = getattr(self, "_plan_cme", None)
+        if plan_cme is not None:
+            plan_cme.context[waiting_module.PORT_KEY] = waiting_module.SlotPort(self)
+
+    @property
+    def assistant_round(self) -> bool:
+        """The round was started by a "/" message: its bare replies stay deterministic in an agent session."""
+        return self._assistant_round
+
+    def start_round(self) -> None:
+        self._assistant_round = True
+
+    def end_round(self) -> None:
+        """The one place the "/" round ends (the record out, if any, loses the mark with it)."""
+        self._assistant_round = False
+        if self._waiting is not None:
+            self._waiting.assistant = False
+
     @property
     def run_as_agent(self) -> bool:
         return self._run_as_agent
@@ -1277,81 +1379,46 @@ class WorkflowExecutionContext:
             "entry_context": self._turn_entry_context,
             "ask_user_rounds": list(self._ask_user_rounds),
             "agent_result": agent_result,
+            # The turn's marks that later steps read: the review's state, the stops of parts not run here, and
+            # whether nobody can answer. Absent from older blobs: the defaults (not applicable, none, attended).
+            "subtask_review": self._turn_subtask_review,
+            "not_run": json.loads(json.dumps(self._turn_not_run, default=str)),
+            "unattended": self._turn_unattended,
         }
 
-    def _serialize_cme_continuation(
-        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
-    ) -> Optional[dict[str, Any]]:
-        """Project the in-flight CME command, or None when none is in flight.
+    def _waiting_state(self, held: Optional[waiting_module.Waiting], cme_workflow,
+                       plan_cme=None) -> Optional[dict[str, Any]]:
+        """The saved form of the turn's waiting record *held*, or None when none is out. A review record carries its
+        slot question nested in its payload; that slot is a record of the plan CME (*plan_cme*), saved like the CME's own.
 
-        Restoring nlu_stage alone is not enough and is actively unsafe: at
-        PARAMETER_EXTRACTION, wildcard.py reads context["command_name"]
-        unconditionally, and parameter_extraction.py merges the user's answer
-        into stored_parameters. Without these three keys a restored session
-        either raises KeyError or silently discards every parameter collected
-        so far and re-extracts from the answer text alone.
+        The CME's scratch keys ``command`` (the text being processed) and ``command_name`` (the command whose parameters
+        are asked) ride in the payload: wildcard.py reads ``command_name`` unconditionally while a parameter question
+        is pending, and the extractor merges the user's answer into the loop. Without them a restored session either raises
+        KeyError or silently discards every parameter collected so far. ``end_command_processing`` leaves ``command_name``
+        behind, so the record, not that key, is what says a command is in flight.
         """
-        if cme_workflow is None:
-            cme_workflow = self._cme_workflow
-        if cme_workflow is None:
-            # close() treats this as reachable, and has_open_command() runs
-            # after every turn rather than only suspensions, so a missing CME
-            # workflow must read as "nothing in flight" instead of raising in
-            # the post-turn persist path.
+        if held is None or cme_workflow is None:
+            # close() treats this as reachable, and has_open_command() runs after every turn rather than only
+            # suspensions, so a missing record or CME workflow must read as "nothing in flight".
             return None
-
-        ctx = cme_workflow.context
-        stored = ctx.get("stored_parameters")
-
-        # command_name is deliberately NOT part of this test. Unlike command and
-        # stored_parameters, end_command_processing() leaves it behind, so a
-        # session that merely ran a command once would look mid-extraction
-        # forever and its state would be written on every completed turn.
-        if stored is None and not self._is_extracting_parameters(cme_workflow):
-            return None
-
-        command_name = ctx.get("command_name")
-        command = ctx.get("command")
-
-        stored_dump = None
-        if stored is not None:
-            # model_construct built this without validation (missing fields hold
-            # NOT_FOUND sentinels), so dump without validating on the way out.
-            stored_dump = stored.model_dump(mode="json")
-
-        payload: dict[str, Any] = {
-            "command": command,
-            "command_name": command_name,
-            "stored_parameters": stored_dump,
-        }
-        missing_value_question = ctx.get("missing_value_question")
-        if missing_value_question is not None:
-            payload["missing_value_question"] = missing_value_question
-        return payload
-
-    def _is_extracting_parameters(
-        self, cme_workflow: Optional[fastworkflow.Workflow] = None,
-    ) -> bool:
-        """True when the NLU pipeline is parked at parameter extraction.
-
-        The stage survives serialization as a raw value, so compare on value
-        rather than on enum identity.
-        """
-        if cme_workflow is None:
-            cme_workflow = self._cme_workflow
-        if cme_workflow is None:
-            return False
-        stage = cme_workflow.context.get("NLU_Pipeline_Stage")
-        target = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
-        return stage == target or getattr(stage, "value", stage) == target.value
+        state = held.to_state()
+        if held.owner == waiting_module.OWNER_CME:
+            state["payload"] = {**state["payload"], "command": cme_workflow.context.get("command"),
+                                "command_name": cme_workflow.context.get("command_name")}
+        if held.kind == waiting_module.KIND_REVIEW and state["payload"].get(waiting_module.SLOT_KEY) and plan_cme is not None:
+            slot = state["payload"][waiting_module.SLOT_KEY]
+            slot["payload"] = {**slot["payload"], "command": plan_cme.context.get("command"),
+                               "command_name": plan_cme.context.get("command_name")}
+        return state
 
     def has_open_command(self) -> bool:
-        """True when a CME command is mid-extraction.
+        """True when a CME command is mid-extraction (the turn's waiting record is the deterministic path's question).
 
         Such a session is not awaiting_user, so nothing else marks it as holding
         state that must survive eviction.
         """
-        return self._serialize_cme_continuation() is not None
+        held = self._waiting
+        return held is not None and held.owner == waiting_module.OWNER_CME and held.kind in waiting_module.CME_KINDS
 
     # ------------------------------------------------------------------
     # Pending state and conversations (fix-newconv-pending)
@@ -1371,11 +1438,7 @@ class WorkflowExecutionContext:
 
     def _has_parkable_pending(self) -> bool:
         """Live pending state that is parked on a conversation change: a question, a refusal, a review or a CME run."""
-        if self._awaiting_user or self._planning_command_refusal_pending or self.has_open_command():
-            return True
-        if getattr(self._turn_frame(), "subtask_review_open", False):
-            return True
-        return bool(approval_binding.active_reviews(self._app_workflow))
+        return self._waiting is not None
 
     def _has_live_pending(self) -> bool:
         """True when anything pending is live: a parkable question or review, or a pending approval."""
@@ -1394,10 +1457,9 @@ class WorkflowExecutionContext:
         conversation). A suspended approval also abandons the agent's suspended call."""
         if self._app_workflow is None:
             return 0
-        awaiting = approval_binding.active_record(self._app_workflow)
+        held, suspended = self._waiting, self._awaiting_user
         cancelled = approval_binding.cancel_conversation_approvals(self, self._app_workflow, reason=reason)
-        if (cancelled and awaiting is not None and awaiting.suspended_agent
-                and awaiting.kind == approval_binding.KIND_ACTION and self._awaiting_user):
+        if cancelled and held is not None and held.kind == waiting_module.KIND_APPROVAL and held.suspended_agent and suspended:
             self._reset_agent_suspension()
         return cancelled
 
@@ -1412,25 +1474,20 @@ class WorkflowExecutionContext:
         context = cme_workflow.context
         context.pop("command", None)
         context.pop("command_name", None)
-        context.pop("stored_parameters", None)
-        context.pop("missing_value_question", None)
-        context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
+        waiting_module.port_of(context).clear()
 
     def _clear_live_pending(self) -> None:
         """Clear the live pending state (the suspended turn, its review, its CME run) without touching history."""
         self._reset_agent_suspension()
-        turn = self._turn_frame()
-        turn.subtask_review_open = False
-        turn.framework_entry = False
-        turn.subtask_plan = None
-        self._planning_command_refusal_answered = False
+        self._turn_frame().subtask_plan = None
+        self._plan_resolution = self._part_loop = None
         self._suspend_began_at = None
         self._turn_suspended_ms = 0
         if self.has_open_command():
             self._clear_cme_continuation()
-        consultation_cme = getattr(self, "_consultation_cme", None)
-        if consultation_cme is not None:
-            self._clear_cme_continuation(consultation_cme)
+        plan_cme = getattr(self, "_plan_cme", None)
+        if plan_cme is not None:
+            self._clear_cme_continuation(plan_cme)
 
     def discard_live_pending(self) -> bool:
         """Drop the live pending state for good (ending a session): approvals, the suspended turn, its review and
@@ -1444,6 +1501,12 @@ class WorkflowExecutionContext:
         """The live pending state as a parked snapshot, tagged with its owner."""
         payload = self.serialize_state(channel_id=str(self._channel_id or ""))
         snapshot: dict[str, Any] = {key: payload.get(key) for key in _PARKED_PENDING_KEYS}
+        held = self._waiting
+        if held is not None and held.store_backed and snapshot.get("waiting"):
+            # One thing is parked: the turn's record carries the approval store's record it points at, which leaves the
+            # store (a parked review must not gate the other conversation) and comes back with the record.
+            snapshot["waiting"]["payload"][waiting_module.STORE_RECORD_KEY] = approval_binding.take_record(
+                self._app_workflow, held.payload.get("record_id"))
         snapshot["conversation_id"] = owner
         snapshot["schema_version"] = SCHEMA_VERSION
         return snapshot
@@ -1461,7 +1524,6 @@ class WorkflowExecutionContext:
                              exc_info=True)
                 snapshot = None
             if snapshot is not None:
-                snapshot["reviews"] = approval_binding.park_reviews(self._app_workflow)
                 self._parked_pending.setdefault(_owner_key(owner), []).append(snapshot)
                 logger.info("parked pending state of conversation %s", owner)
         self._clear_live_pending()
@@ -1485,7 +1547,7 @@ class WorkflowExecutionContext:
         if self._has_parkable_pending():
             self._park_and_clear_live_pending(owner)  # a "/" round's flag is parked with it (fix-icce)
         # The flag stays with its round: it means nothing in the other conversation (the agent must be reachable there).
-        self._cme_workflow.context.pop("is_assistant_mode_command", None)
+        self.end_round()
         self._enable_all_tools()
 
     def park_pending_for_new_conversation(self) -> None:
@@ -1499,7 +1561,7 @@ class WorkflowExecutionContext:
         if self._app_workflow is not None:
             self._cancel_live_approvals(reason="new conversation")
         self._park_and_clear_live_pending(owner)
-        self._cme_workflow.context.pop("is_assistant_mode_command", None)  # as in _settle_pending_for_conversation
+        self.end_round()  # as in _settle_pending_for_conversation
         self._enable_all_tools()
 
     def _restore_parked_pending(self, conversation_id) -> None:
@@ -1518,7 +1580,9 @@ class WorkflowExecutionContext:
             self._parked_pending.setdefault(key, []).insert(0, snapshot)
             logger.error("parked pending state of conversation %s is from another schema; it stays parked", key)
             return
-        approval_binding.unpark_reviews(self._app_workflow, snapshot.get("reviews") or [])
+        if isinstance(parked := snapshot.get("waiting"), dict):
+            approval_binding.restore_record(self._app_workflow, (parked.get("payload") or {}).pop(
+                waiting_module.STORE_RECORD_KEY, None))
         state = {
             **snapshot,
             "approval": None,
@@ -1560,21 +1624,7 @@ class WorkflowExecutionContext:
         if turn.agent is not None:
             react_blob = turn.agent.export_suspended()
 
-        nlu_stage = self._cme_workflow.context.get("NLU_Pipeline_Stage")
-        if hasattr(nlu_stage, "value"):
-            nlu_stage = nlu_stage.value
-        elif nlu_stage is not None:
-            nlu_stage = str(nlu_stage)
-
-        consultation_nlu_stage = None
-        consultation_cme = getattr(self, "_consultation_cme", None)
-        if consultation_cme is not None:
-            consultation_nlu_stage = consultation_cme.context.get("NLU_Pipeline_Stage")
-            if hasattr(consultation_nlu_stage, "value"):
-                consultation_nlu_stage = consultation_nlu_stage.value
-            elif consultation_nlu_stage is not None:
-                consultation_nlu_stage = str(consultation_nlu_stage)
-
+        plan_cme = getattr(self, "_plan_cme", None)
         current_context_name = None
         if self._app_workflow and self._app_workflow._current_command_context is not None:
             current_context_name = self._app_workflow._current_command_context_name
@@ -1593,25 +1643,22 @@ class WorkflowExecutionContext:
             "workflow_folderpath": (
                 self._app_workflow.folderpath if self._app_workflow else None
             ),
-            "awaiting_user": self._awaiting_user,
             # Additive (ADR-EXP-025 section 7): the session's approval records and turn clock.
             "approval": self._approval_state_payload(),
-            "suspended_user_message": self._suspended_user_message,
-            "pending_clarification_request": self._pending_clarification_request,
-            "skill_refusal_pending": self._planning_command_refusal_pending,
-            "skill_refusal_answered": self._planning_command_refusal_answered,
+            # The turn's pending resolution (which command each part gets, then its missing values; bd fix-o1lg).
+            "plan_resolution": None if self._plan_resolution is None else self._plan_resolution.to_state(),
+            "part_loop": None if self._part_loop is None else self._part_loop.to_state(),
+            # What each part's settling knew, kept for the learning rows written where the reviewed plan is run.
+            "turn_part_facts": json.loads(json.dumps(self._turn_part_facts, default=str)) if self._turn_part_facts else None,
             "use_plan": self._turn_use_plan,
-            "refusal_progress": self._refusal_progress,
-            "pending_refusal_request": self._pending_refusal_request if self._planning_command_refusal_pending else None,
             "subtasks": list(turn.subtasks),
             "subtask_origins": list(turn.origins),
             "subtask_index": turn.subtask_index,
             "subtask_answers": list(turn.subtask_answers),
             "subtask_outputs": list(turn.subtask_outputs),
             "subtask_exhausted": turn.subtask_exhausted,
-            # Additive (fix-3rsq.plan-review.2.7/.2.9): the open sub-task review and the turn's sub-task plan, so an
-            # accept after a restart resumes the review and runs the accepted goals.
-            "subtask_review_open": bool(turn.subtask_review_open),
+            # The turn's sub-task plan, so an accept after a restart (the review is the ``waiting`` record) runs the
+            # accepted goals.
             "subtask_plan": None if turn.subtask_plan is None else turn.subtask_plan.model_dump(mode="json"),
             "next_step": self._next_step,
             "skill_phase_run": turn.phase_run,
@@ -1623,18 +1670,8 @@ class WorkflowExecutionContext:
             ],
             "turn_child_step_ranges": [list(step_range) for step_range in turn.child_step_ranges],
             "turn_steps_used": self._turn_steps_used,
-            "nlu_stage": nlu_stage,
-            # The "/" command that opened the pending round: its bare replies stay deterministic in an agent session.
-            # Absent from blobs written before fix-icce, which reads as "not a '/' round".
-            "assistant_command": "is_assistant_mode_command" in self._cme_workflow.context,
             "turn": self._serialize_turn_accumulator(),
-            "cme": self._serialize_cme_continuation(),
-            "consultation_nlu_stage": consultation_nlu_stage,
-            "consultation_cme": (
-                self._serialize_cme_continuation(consultation_cme)
-                if consultation_cme is not None
-                else None
-            ),
+            "waiting": self._waiting_state(self._waiting, self._cme_workflow, plan_cme),
             "current_command_context_name": current_context_name,
             "action_log": list(self._action_log),
             "conversation_history_turns": extract_turns_from_history(
@@ -1691,7 +1728,6 @@ class WorkflowExecutionContext:
             if bool(state.get("claim_epoch")) != bool(state.get("server_incarnation")):
                 raise IncompatibleSessionState(found)
 
-        self._awaiting_user = bool(state.get("awaiting_user"))
         # Additive (fix-newconv-pending): what was parked, kept whole until its conversation is bound again.
         if "parked_pending" in state:
             self._parked_pending = {
@@ -1701,16 +1737,16 @@ class WorkflowExecutionContext:
         # Absent from blobs written before approval binding: no records.
         if state.get("approval") and self._app_workflow is not None:
             approval_binding.store_for(self._app_workflow).load_state(state["approval"])
-        self._suspended_user_message = state.get("suspended_user_message")
-        self._pending_clarification_request = state.get(
-            "pending_clarification_request"
-        )
-        # Absent from blobs written before a refused planning command call could suspend a turn.
-        self._planning_command_refusal_pending = bool(state.get("skill_refusal_pending"))
-        self._planning_command_refusal_answered = bool(state.get("skill_refusal_answered"))
+        # The turn's pending resolution. Old saved sessions are not supported (owner ruling, bd fix-o1lg): the keys an
+        # earlier build wrote (parameter_loop, plan_choice, skill_refusal_pending, ...) are ignored, nothing converted.
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        self._plan_resolution = resolution.PlanResolution.from_state(state.get("plan_resolution"))
+        from fastworkflow.parameter_clarification import ParameterLoop
+
+        self._part_loop = ParameterLoop.from_state(state.get("part_loop"))
+        self._turn_part_facts = state.get("turn_part_facts") or None
         self._turn_use_plan = state.get("use_plan") or None
-        self._refusal_progress = dict(state["refusal_progress"]) if state.get("refusal_progress") else None
-        self._pending_refusal_request = state.get("pending_refusal_request") or self._pending_refusal_request
         # Absent from blobs written before sub-task splitting; the defaults mean "not split".
         turn = self._turn_frame()
         turn.subtasks = list(state.get("subtasks") or [])
@@ -1720,10 +1756,6 @@ class WorkflowExecutionContext:
         turn.subtask_answers = list(state.get("subtask_answers") or [])
         turn.subtask_outputs = list(state.get("subtask_outputs") or [])
         turn.subtask_exhausted = bool(state.get("subtask_exhausted"))
-        # Absent from blobs written before the sub-task review gate: no review open, no plan.
-        turn.subtask_review_open = bool(state.get("subtask_review_open"))
-        # The review's frame flag rides with its open flag: the review is the framework call the turn resumes into.
-        turn.framework_entry = turn.subtask_review_open
         plan = state.get("subtask_plan")
         if plan:
             from fastworkflow.review_proposals import SubTaskProposal
@@ -1731,19 +1763,6 @@ class WorkflowExecutionContext:
             turn.subtask_plan = SubTaskProposal.model_validate(plan)
         else:
             turn.subtask_plan = None
-        from fastworkflow.review_engine import KIND_SUB_TASKS
-
-        active = (
-            approval_binding.active_record(self._app_workflow)
-            if self._app_workflow is not None
-            else None
-        )
-        subtask_review_active = bool(turn.subtask_review_open) or (
-            active is not None and active.kind == KIND_SUB_TASKS
-        )
-        if subtask_review_active:
-            # The restored review keeps its free-text reader (set by the gate of the turn that opened it).
-            self._give_review_reader()
         self._next_step = int(state.get("next_step") or 0)
         # Absent before planning command phases: no phased planning command call in progress.
         turn.phase_run = state.get("skill_phase_run") or None
@@ -1777,41 +1796,23 @@ class WorkflowExecutionContext:
 
             self._conversation_history = restore_history_from_turns(turns)
 
-        # The live pending state belongs to the conversation the blob names (unowned when it names none). The binding
-        # that follows settles it against the conversation the context is bound to (fix-newconv-pending).
+        # The turn's one waiting record comes back with its "/" round (``Waiting.assistant``), then the live pending state
+        # belongs to the conversation the blob names (unowned when it names none). The binding that follows settles it
+        # against the conversation the context is bound to (fix-newconv-pending).
+        move = waiting_module.step(None, waiting_module.Event(waiting_module.RESTORE, state=state.get("waiting")))
+        if move.record is not None and move.record.assistant:
+            self.start_round()
+        self._waiting = None
+        plan_cme = getattr(self, "_plan_cme", None)
+        if plan_cme is not None:
+            self._clear_cme_continuation(plan_cme)
+        self._apply_waiting(move.record)
         self._pending_owner_override = (
             _owner_from_state(state) if self._has_live_pending() else _OWNER_UNSET
         )
-
-        nlu_stage = state.get("nlu_stage")
-        if nlu_stage is not None:
-            try:
-                self._cme_workflow.context["NLU_Pipeline_Stage"] = (
-                    fastworkflow.NLUPipelineStage(nlu_stage)
-                )
-            except (ValueError, TypeError):
-                self._cme_workflow.context["NLU_Pipeline_Stage"] = nlu_stage
-        if state.get("assistant_command"):
-            self._cme_workflow.context["is_assistant_mode_command"] = True
-
-        self._apply_cme_continuation(state.get("cme"))
-        consultation_cme = getattr(self, "_consultation_cme", None)
-        if consultation_cme is not None:
-            self._clear_cme_continuation(consultation_cme)
-            if subtask_review_active:
-                consultation_nlu_stage = state.get("consultation_nlu_stage")
-                if consultation_nlu_stage is not None:
-                    try:
-                        consultation_cme.context["NLU_Pipeline_Stage"] = (
-                            fastworkflow.NLUPipelineStage(consultation_nlu_stage)
-                        )
-                    except (ValueError, TypeError):
-                        consultation_cme.context["NLU_Pipeline_Stage"] = consultation_nlu_stage
-                self._apply_cme_continuation(
-                    state.get("consultation_cme"),
-                    cme_workflow=consultation_cme,
-                    subject_workflow=self._consultation_workflow,
-                )
+        if self._waiting is not None and self._waiting.kind == waiting_module.KIND_REVIEW:
+            # The restored review keeps its free-text reader (set by the gate of the turn that opened it).
+            self._give_review_reader()
         self._apply_turn_accumulator(state.get("turn"))
 
         # Restore the turn agent with the turn frame on top: _workflow_tool_agent reads the top frame.
@@ -1885,27 +1886,50 @@ class WorkflowExecutionContext:
         self._turn_entry_workflow_name = turn.get("entry_workflow_name") or ""
         self._turn_entry_context = turn.get("entry_context") or ""
         self._ask_user_rounds = list(turn.get("ask_user_rounds") or [])
+        self._turn_subtask_review = turn.get("subtask_review") or "not_applicable"
+        self._turn_not_run = list(turn.get("not_run") or [])
+        self._turn_unattended = bool(turn.get("unattended"))
 
         if agent_result := turn.get("agent_result"):
             self._turn_agent_result = _RestoredAgentResult(
                 exhausted=bool(agent_result.get("exhausted"))
             )
 
-    def _apply_cme_continuation(
+    def _apply_waiting(self, held: Optional[waiting_module.Waiting]) -> None:
+        """Restore the turn's waiting record so the next message continues it. A review, a decision step, an approval and
+        the agent's own question come back as they were (a review's slot question is restored into it as the plan CME's
+        own record, below); a question of the which-command or values kind goes through ``_apply_question``."""
+        if held is None:
+            return
+        if held.kind not in waiting_module.CME_KINDS:
+            slot = held.payload.pop(waiting_module.SLOT_KEY, None)
+            if held.kind == waiting_module.KIND_REVIEW:
+                held.payload[waiting_module.SLOT_KEY] = None
+            self._waiting = held
+            if slot is not None:
+                self._apply_question(slot, cme_workflow=getattr(self, "_plan_cme", None),
+                                     subject_workflow=self._plan_workflow)
+            return
+        self._apply_question(held)
+
+    def _apply_question(
         self,
-        cme: Optional[dict[str, Any]],
+        held: waiting_module.Waiting,
         *,
         cme_workflow: Optional[fastworkflow.Workflow] = None,
         subject_workflow: Optional[fastworkflow.Workflow] = None,
     ) -> None:
-        """Restore the in-flight CME command so the next message continues it.
+        """Restore a which-command or values question (the CME's, the plan path's, or a review's slot).
 
-        stored_parameters is rebuilt through model_construct rather than
-        model_validate: the saved instance was itself built that way and holds
-        NOT_FOUND sentinels in the missing fields, which is precisely the state
-        validation exists to reject.
+        The record is plain data and comes back as it was saved; the CME's scratch keys ``command`` and ``command_name``
+        are installed from its payload. A parameter loop's extractor rebuilds the command's ``Input`` from the loop
+        through model_construct, because the open fields hold NOT_FOUND sentinels, which is precisely the state validation
+        exists to reject.
         """
-        if not cme:
+        if held.kind not in waiting_module.CME_KINDS:
+            return
+        if held.owner == waiting_module.OWNER_PLAN:
+            self._turn_port().put(held)      # a plan question: no CME scratch to install
             return
 
         if cme_workflow is None:
@@ -1914,37 +1938,33 @@ class WorkflowExecutionContext:
             return
 
         context = cme_workflow.context
-        command_name = cme.get("command_name")
+        payload = dict(held.payload)
+        command, command_name = payload.pop("command", None), payload.pop("command_name", None)
+        held.payload = payload
 
-        if cme.get("command") is not None:
-            context["command"] = cme["command"]
+        if command is not None:
+            context["command"] = command
         if command_name is not None:
             context["command_name"] = command_name
-        if cme.get("missing_value_question") is not None:
-            context["missing_value_question"] = cme["missing_value_question"]
-
-        stored = cme.get("stored_parameters")
-        if stored is None or command_name is None:
-            return
-
-        params_class = self._command_parameters_class(
-            command_name, subject_workflow=subject_workflow,
-        )
-        if params_class is None:
-            # Losing the partial parameters is bad, but resuming into a command
-            # whose parameter class no longer exists is worse. Reset to intent
-            # detection so the next message is routed rather than merged into a
-            # command that cannot be completed.
-            logger.warning(
-                f"Cannot restore stored_parameters for '{command_name}': its "
-                f"parameter class is gone. Resetting to intent detection."
+        if held.kind == waiting_module.KIND_PARAMETERS:
+            if command_name is None:
+                return
+            params_class = self._command_parameters_class(
+                command_name, subject_workflow=subject_workflow,
             )
-            context.pop("command", None)
-            context.pop("command_name", None)
-            context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
-            return
-
-        context["stored_parameters"] = params_class.model_construct(**stored)
+            if params_class is None:
+                # Losing the partial parameters is bad, but resuming into a command
+                # whose parameter class no longer exists is worse. Reset to intent
+                # detection so the next message is routed rather than merged into a
+                # command that cannot be completed.
+                logger.warning(
+                    f"Cannot restore the parameter loop for '{command_name}': its "
+                    f"parameter class is gone. Resetting to intent detection."
+                )
+                context.pop("command", None)
+                context.pop("command_name", None)
+                return
+        waiting_module.port_of(context).put(held)
 
     def _command_parameters_class(
         self,
@@ -1957,22 +1977,10 @@ class WorkflowExecutionContext:
             subject_workflow = self._app_workflow
         if subject_workflow is None:
             return None
+        from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import parameters_class_of
+
         try:
-            routing = fastworkflow.RoutingRegistry.get_definition(
-                subject_workflow.folderpath
-            )
-            params_class = routing.get_command_class(
-                command_name, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
-            )
-            if params_class is None:
-                sig_cls = routing.get_command_class(
-                    command_name,
-                    fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
-                )
-                slot_input = getattr(sig_cls, "SlotInput", None) if sig_cls else None
-                if slot_input is not None:
-                    params_class = slot_input
-            return params_class
+            return parameters_class_of(subject_workflow.folderpath, command_name, pending=True)
         except Exception:
             return None
 
@@ -2075,14 +2083,11 @@ class WorkflowExecutionContext:
         """
         self._app_workflow = workflow
         self._cme_workflow.context["app_workflow"] = workflow
+        if (store := approval_binding.store_for(workflow)) is not None:
+            store.owner_ref = weakref.ref(self)     # the approval store's records end this turn's record with them
         if self.no_agent_mode:
             # Read by the CME's wildcard to say why a request the deterministic path cannot route was not planned.
             self._cme_workflow.context["no_agent_mode"] = True
-        consultation_cme = getattr(self, "_consultation_cme", None)
-        if consultation_cme is not None and workflow is not None:
-            consultation_cme.context["convo_path"] = os.path.join(
-                workflow.folderpath, "___convo_info"
-            )
         # getattr: a context built through ``__new__`` without ``__init__`` has
         # no flag, and is treated as having chosen its sink.
         if not getattr(self, "_trace_sink_supplied", True):
@@ -2134,10 +2139,10 @@ class WorkflowExecutionContext:
         ok = True
         ok = self._close_workflow_safely(self._cme_workflow) and ok
         ok = self._close_workflow_safely(
-            getattr(self, "_consultation_cme", None),
+            getattr(self, "_plan_cme", None),
         ) and ok
         ok = self._close_workflow_safely(
-            getattr(self, "_consultation_workflow", None),
+            getattr(self, "_plan_workflow", None),
         ) and ok
         return ok
 
@@ -2211,10 +2216,10 @@ class WorkflowExecutionContext:
         """Refuse a ``use_plan`` that cannot be honoured, before the turn begins (``UsePlanError``)."""
         if not use_plan:
             return
+        if self._app_workflow is not None and self._question_is_out():
+            raise UsePlanError(AWAITING_ANSWER_REFUSAL_MESSAGE)
         if self._app_workflow is None or use_plan not in no_agent_mode.plan_names(self._app_workflow):
             raise UsePlanError(f"use_plan {use_plan!r} is not a planning command available here")
-        if self._awaiting_user:
-            raise UsePlanError("use_plan cannot be sent while a question is waiting for its reply; answer it first")
 
     @dspy_logger.observe_dspy_calls
     def _execute_message(
@@ -2231,24 +2236,24 @@ class WorkflowExecutionContext:
         # state is parked (or its approvals cancelled) first, so this message begins a new turn.
         self._settle_pending_for_conversation(self._conversation_id)
 
-        if not self._awaiting_user:
+        # ONE decision of what the message is and what happens to it (``waiting.step``): a reply to the question that is
+        # out (its leading "/" removed, nothing else reads that "/") or a new request, and which stage takes it.
+        move = self._route(message)
+        message = move.text
+        if move.begin:
             # A message during suspension is the resume answer — never a reset.
             self._begin_turn(message, unattended=unattended)
 
         self.push_active_workflow(self._app_workflow)
         try:
-            awaiting = approval_binding.active_record(self._app_workflow)
-            if awaiting is None or not awaiting.suspended_agent:
-                managed = approval_binding.management_reply(self, self._app_workflow, message)
-                if managed is not None:
-                    return self._approval_text_output(managed)
-            if awaiting is not None and (not awaiting.suspended_agent
-                                         or message.strip() == approval_binding.CANCEL_COMMAND):
+            if move.action == waiting_module.ACT_MANAGE and (
+                    managed := approval_binding.management_reply(self, self._app_workflow, move.text)) is not None:
+                return self._approval_text_output(managed)
+            if move.action == waiting_module.ACT_APPROVAL:
                 return self._resume_approval_direct(message)
-            self._prepare_message_routing(message)
-            if self._should_run_agent_for_message(message):
-                if self._awaiting_user:
-                    return self._resume_agent_message(message)
+            if move.action == waiting_module.ACT_RESUME_AGENT:
+                return self._resume_agent_message(message)
+            if move.action == waiting_module.ACT_START_AGENT:
                 return self._process_agent_message(message)
             return self._process_message(message)
         except CommandCancelledError as exc:
@@ -2352,7 +2357,8 @@ class WorkflowExecutionContext:
         return turn_result
 
     #: The artifact keys _describe_pending_prompt owns.
-    _PROMPT_DESCRIPTION_KEYS = ("question_kind", "approval", "review", "parameter_request", PHASE_STEP_ARTIFACT)
+    _PROMPT_DESCRIPTION_KEYS = ("question_kind", "approval", "review", "parameter_request", PHASE_STEP_ARTIFACT,
+                                PLAN_CHOICE_ARTIFACT)
 
     @classmethod
     def _without_prompt_description(cls, output):
@@ -2391,7 +2397,7 @@ class WorkflowExecutionContext:
                 return
         except Exception:  # noqa: BLE001 - never raises into the turn
             return
-        payload_keys = ("approval", "review", "parameter_request", PHASE_STEP_ARTIFACT)
+        payload_keys = ("approval", "review", "parameter_request", PHASE_STEP_ARTIFACT, PLAN_CHOICE_ARTIFACT)
         kind = "unknown"
         payload: dict[str, Any] = {}
         try:
@@ -2407,68 +2413,22 @@ class WorkflowExecutionContext:
         except Exception:  # noqa: BLE001 - never raises into the turn
             pass
 
+    @property
+    def waiting(self):
+        """The one question this turn is waiting on (``fastworkflow.waiting.Waiting``) or None: the turn's record itself."""
+        return self._waiting
+
     def _pending_prompt_kind(self, target) -> tuple[str, dict[str, Any]]:
-        """``(question_kind, payload)`` of the prompt *target* is; raises on any lookup failure."""
-        from fastworkflow import approval_annotations, approval_grants, command_writes, review_engine
+        """``(question_kind, payload)`` of the prompt *target* is; raises on any lookup failure. The kind is the record's
+        (``waiting.TABLE``) and its payload is built by ``prompt_payloads``; the agent's own question, and the CME's open
+        command beside an ``ask_user`` entry, are ``agent`` with none."""
+        from fastworkflow import prompt_payloads
 
-        def json_safe(value):
-            return json.loads(json.dumps(value, default=str))
-
-        record = review_engine.active_record(self._app_workflow)
-        if record is not None and record.state in review_engine.ACTIVE_STATES:
-            if record.kind == review_engine.KIND_ACTION:
-                store = review_engine.store_for(self._app_workflow)
-                can_always = store is not None and approval_grants.identity_key(
-                    store.surface, store.channel) is not None
-                return "approval", {"approval": json_safe({
-                    "command": record.command,
-                    "parameters": dict(record.binding.get("params") or {}),
-                    "origin": record.origin,
-                    "irreversible": record.origin == "user"
-                                    or record.annotation == approval_annotations.REQUIRED_ALWAYS,
-                    "can_always": bool(can_always),
-                })}
-            proposal = review_engine.proposal_of(record)
-            writes = (command_writes.write_commands(self._app_workflow.folderpath)
-                      if self._app_workflow else frozenset())
-            changes_data = [
-                bool(getattr(item, "means", None) and item.means.kind != "from_scratch"
-                     and item.means.name in writes)
-                for item in proposal.items
-            ]
-            items_data = [item.model_dump(mode="json") for item in proposal.items]
-            if self.no_agent_mode:
-                # No agent model: an ad hoc item (means from_scratch) will not be run here; it carries the planner's text
-                # plan (``plan_preview``, "" when there is none) so the client can carry it out. Others run.
-                previews = self._turn_plan_previews
-                for data, item in zip(items_data, proposal.items):
-                    ad_hoc = item.means.kind == "from_scratch"
-                    data["not_run_here"] = ad_hoc
-                    if ad_hoc:
-                        # An item an edit made ad hoc has no preview yet: made now, once.
-                        if item.goal not in previews:
-                            previews[item.goal] = self._plan_preview(item.goal)
-                        data["plan_preview"] = previews[item.goal]
-            return "review", {"review": json_safe({
-                "kind": record.kind,
-                "title": proposal.title,
-                "revision": record.revision,
-                "items": items_data,
-                "changes_data": changes_data,
-                # The replies the shown prompt's hint promises (the text stays as it is).
-                "reply_forms": review_engine.reply_forms(
-                    getattr(record, "rendering", "") or "", proposal, structured=record.turns_seen >= 1),
-            })}
-        if self._planning_command_refusal_pending and self._pending_refusal_request:
-            return "planning_parameter", {"parameter_request": json_safe(dict(self._pending_refusal_request))}
-        decision = (self._phase_run or {}).get("decision")
-        if decision:
-            # A planning command paused at a step a client decides (no-agent mode, ``_suspend_for_decision``).
-            return no_agent_mode.QUESTION_KIND_PHASE_STEP, {no_agent_mode.PHASE_STEP_ARTIFACT: json_safe(
-                no_agent_mode.phase_step_payload(decision["stop"], decision, decision.get("facts")))}
-        if target.is_ask_user:
-            return "agent", {}
-        return "unknown", {}
+        held = self._waiting
+        if held is not None and held.owner != waiting_module.OWNER_CME:
+            if (found := prompt_payloads.payload_of(self, held))[0]:
+                return found
+        return ("agent", {}) if target.is_ask_user else ("unknown", {})
 
     def _turn_memory_entry(self) -> tuple[Optional[str], Optional[str]]:
         """The conversation-history entry THIS turn appended, or (None, None).
@@ -2599,7 +2559,7 @@ class WorkflowExecutionContext:
                 "failure_reason": turn_output.failure_reason,
                 "suspended_ms": turn_result.suspended_ms,
                 "context_mutations": self._compute_context_mutations(),
-                "subtask_review": self._turn_subtask_review,
+                "subtask_review": self._subtask_review_mark(),
                 "subtask_bindings": list(getattr(self, "_turn_subtask_bindings", None) or []) or None,
                 "subtask_plan_ambiguity": list(getattr(self, "_turn_plan_ambiguity", None) or []) or None,
             },
@@ -2663,7 +2623,7 @@ class WorkflowExecutionContext:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before process_action()"
             )
-        if self._awaiting_user:
+        if self._question_is_out():
             # The suspended turn is still waiting for its answer: it is neither ended nor
             # begun over, and its frames stay as they are.
             return fastworkflow.CommandOutput(
@@ -2702,7 +2662,7 @@ class WorkflowExecutionContext:
             command_output = self.process_action(action)
         finally:
             approval_binding.clear_inbound(self._app_workflow)
-        if self._awaiting_user:
+        if self._question_is_out():
             # The refusal: the suspended turn's record was emitted when it suspended and
             # stands; building the result again would emit it once more with the refusal.
             return fastworkflow.TurnOutput(
@@ -2718,23 +2678,27 @@ class WorkflowExecutionContext:
     # Routing helpers
     # ------------------------------------------------------------------
 
-    def _prepare_message_routing(self, message: str) -> None:
-        if (
-            (
-                "NLU_Pipeline_Stage" not in self._cme_workflow.context
-                or self._cme_workflow.context["NLU_Pipeline_Stage"]
-                == fastworkflow.NLUPipelineStage.INTENT_DETECTION
-            )
-            and message.startswith("/")
-        ):
-            self._cme_workflow.context["is_assistant_mode_command"] = True
+    def _question_is_out(self) -> bool:
+        """A question of any kind is waiting for its answer: the turn's waiting record."""
+        return self._waiting is not None
 
-    def _should_run_agent_for_message(self, message: str) -> bool:
-        """Agent path unless assistant-mode '/' command flag is set."""
-        return (
-            self._run_as_agent
-            and "is_assistant_mode_command" not in self._cme_workflow.context
-        )
+    def _route(self, message: str) -> waiting_module.Move:
+        """The one decision of what an incoming message is and which stage takes it (``waiting.step``): the move says whether
+        a turn begins, the text the stages read (a reply has its leading "/" removed, the management messages
+        ``/approvals``, ``/revoke_approval`` and ``/cancel_pending`` keep theirs) and, when nothing is out, that a "/"
+        message opens the assistant round (applied here)."""
+        text = message.strip()
+        move = waiting_module.step(self._waiting, waiting_module.Event(waiting_module.MESSAGE, message), waiting_module.Facts(
+            agent_path=self._run_as_agent, assistant_round=self._assistant_round,
+            manage=text.startswith((approval_binding.MANAGE_LIST, approval_binding.MANAGE_REVOKE)),
+            cancel_pending=text == approval_binding.CANCEL_COMMAND))
+        if move.assistant:
+            self.start_round()
+        return move
+
+    def _route_message(self, message: str) -> str:
+        """The text the stages below read for *message* (``_route``); a "/" message with nothing out opens the round."""
+        return self._route(message).text
 
     def _command_cancelled_output(self, reason: str) -> fastworkflow.CommandOutput:
         # sourcery skip: class-extract-method
@@ -2795,16 +2759,19 @@ class WorkflowExecutionContext:
 
     def _reset_agent_suspension(self) -> None:
         """Clear Topology-B ask_user suspend state (abort, finalize, or cancel_pending)."""
-        self._awaiting_user = False
-        self._suspended_user_message = None
-        self._pending_clarification_request = None
-        self._planning_command_refusal_pending = False
-        self._pending_refusal_request = None
+        # The resolution stays (as it did) and so does the part's loop (its stall count outlives a suspension); the next
+        # turn begins without them. The question is no longer out: the agent's own question, the turn's open review, a
+        # paused decision step and the plan's questions go with the suspension, whichever route ended it. An approval
+        # ends with the approval store's record, and the CME's open command with its command.
+        if self._waiting is not None and self._waiting.kind != waiting_module.KIND_APPROVAL and (
+                self._waiting.owner != waiting_module.OWNER_CME):
+            self._waiting = None
         # A suspended nested frame (run_planning_command) is dropped with the suspension;
         # what is cleared below belongs to the turn frame, the only frame left.
         del self._frame_stack()[1:]
+        turn = self._turn_frame()
         self._clear_subtask_state()
-        turn_agent = self._turn_frame().agent
+        turn_agent = turn.agent
         if turn_agent is not None and hasattr(turn_agent, "clear_suspension"):
             turn_agent.clear_suspension()
 
@@ -2963,9 +2930,11 @@ class WorkflowExecutionContext:
             conversation=self._conversation_context(self.conversation_history),
             planner_lm=getattr(self, "_current_planner_lm", None),
             workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
+            workflow=self._app_workflow,
         )
         if self._app_workflow is not None:
-            # The review gate (fix-3rsq.plan-review.2.6): None when the sub-tasks run now, or the suspended review.
+            # The review gate (fix-3rsq.plan-review.2.6; bd fix-o1lg S4/S5): None when the sub-tasks run now (the fast
+            # path), else a suspended question or review, or the turn's result.
             asked = self._subtask_gate(subtasks)
             if asked is not None:
                 return asked
@@ -2976,12 +2945,13 @@ class WorkflowExecutionContext:
         sub-task plan (accepted, or the draft) runs through _run_subtasks_from, which binds each goal to its means."""
         plan = self._turn_subtask_plan
         planned = plan is not None and len(plan.items) == len(subtasks)
+        if planned:
+            self._record_planned_parts(plan, reviewed=self._turn_subtask_review == "reviewed")
         if planned and any(item.parts for item in plan.items):
             # A joined item (a split over the cap) that the review left as drafted runs its parts as jobs of their own.
             from fastworkflow import review_proposals
             subtasks, plan = review_proposals.expand_joined_parts(
-                self._app_workflow, subtasks, plan, planner_lm=getattr(self, "_current_planner_lm", None),
-                confident_only=self.no_agent_mode)
+                self._app_workflow, subtasks, plan, planner_lm=getattr(self, "_current_planner_lm", None))
             self._turn_subtask_plan = plan
         if len(subtasks) > 1 or planned:
             self._subtasks = subtasks
@@ -3003,102 +2973,222 @@ class WorkflowExecutionContext:
     # The sub-task review gate (fix-3rsq.plan-review.2.2, .2.3, .2.6, .2.8)
     # ------------------------------------------------------------------
 
-    def _subtask_no_answerer(self) -> bool:
-        """True when nobody can answer a review this turn: an unattended turn (ask_user is off for it), or a host
-        surface (REST, MCP). Owner decision 2. An agent-to-agent turn reaches the framework as an unattended turn."""
-        store = approval_binding.store_for(self._app_workflow)
-        host = store is not None and store.surface.kind == "host"
-        if host and self.no_agent_mode and not self._turn_unattended and store.surface.satisfies_end_user():
-            # No agent model: the host's client is the agent that drives the work, so it sees the review (with a
-            # plan preview on each part that will not be run here) and answers it. Unattended turns stay unreviewed.
-            # Only where the reply can be accepted: the host approval path takes a reply to a review only from a
-            # verified end user (``Surface.satisfies_end_user``, the check behind "requires a verified user
-            # identity"); with an unverified one the review would be a dead end, so none is opened.
-            return False
-        return bool(self._turn_unattended) or host
-
     def _subtask_gate(self, subtasks: list[str]):
         """Decide how the turn's sub-tasks run, after split and merge, before any of them runs.
 
-        Fast path (one sub-task, confident head or exact name): no review, today's run. A turn with no one to answer:
-        the draft runs as proposed, recorded as not reviewed. Otherwise the review_subtasks framework command opens with
-        the draft and suspends the turn; returns the suspended prediction (its replies come through
-        _resume_agent_message). Returns None when the sub-tasks run now.
+        Which command or plan each part gets is ONE decision (``resolution.part_intent``, bd fix-o1lg). Fast path (one
+        sub-task that names a command, or an execution command the local model is confident of): no review, today's
+        run; returns None. Otherwise every part is resolved first, in order (``resolution.step``: which command when
+        the decision is ambiguous, or with no agent model when nothing serves it; then a bound plan's missing values),
+        each question suspending the turn; then ONE review of the whole turn, or the run when there is none
+        (``_after_resolution``). Returns the suspended prediction of a question or of the review, or the turn's result.
         """
-        from fastworkflow import review_proposals, turn_progress
+        from fastworkflow import review_proposals
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         workflow = self._app_workflow
         pinned = self._turn_use_plan
         # A pinned plan (``use_plan``) is not a fast path: the client chose the plan, not its arguments, so the part is
-        # drafted for that plan and goes through the review gate as a part the matcher picked that plan for.
-        path = None if pinned else review_proposals.fast_path_for(workflow, subtasks)
-        if (path is not None and self.no_agent_mode and path.is_planning
-                and path.reason == review_proposals.FAST_HEAD_CONFIDENT
-                and review_proposals.jev_says_none(workflow, subtasks[0])):
-            # No agent model: the head is confident about a planning command but Jev is confident none fits (it judges
-            # planning commands, the head does not). Not a fast path: the part is not run (``confident_pick``).
-            path = None
-        if path is not None:
-            # plan-review.6 hook: review_proposals.planning_intent_confirmation is where the one-line confirmation of a
-            # fast-path planning command goes. Round 1 asks nothing here.
+        # drafted for that plan and its parameter question is that turn's review.
+        intent = (resolution.part_intent(workflow, subtasks[0])
+                  if not pinned and len(subtasks) == 1 else None)
+        if intent is not None and resolution.is_fast_path(intent):
             self._turn_subtask_review = "fast_path"
-            if self.no_agent_mode and not path.is_planning:
+            resolution.record_part(workflow, subtasks[0], intent.command, resolution.how_settled(intent.decided_by),
+                                   intent.evidence)
+            if self.no_agent_mode and intent.kind != resolution.KIND_PLANNING:
                 # No agent model: a single command is run bound (``_run_plain_means``, code runs it and its own
                 # response is the answer), so it is drafted as a one-item plan, not left to the agent.
                 self._turn_subtask_plan = review_proposals.draft_round1_proposal(
-                    workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None), confident_only=True)
+                    workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None))
             return None
-        # fix-6lpc: a draft that runs unreviewed in agent mode has no human to correct a wrong binding, so Jev's
-        # confident "none" (``PLANNING_NONE_VETO_THRESHOLD``) leaves a sub-task to the agent. A reviewed draft is shown.
-        draft = review_proposals.draft_round1_proposal(
-            workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None),
-            confident_only=self.no_agent_mode,
-            none_veto=not self.no_agent_mode and self._subtask_no_answerer(),
-            pinned_plan=pinned)
-        if pinned:
-            # The client chose the plan, so the intent is settled: there is no goal or step to review, only the plan's
-            # parameter values. They are asked as a parameter question (every parameter, the drafted values prefilled),
-            # not as the sub-task review (``_ask_plan_parameters``); nothing is asked when the plan has no parameters or
-            # nobody can answer, and the part then runs as drafted.
-            draft = self._overlay_given(draft)
-            self._turn_subtask_plan = draft
-            self._turn_plan_ambiguity = []
-            self._turn_subtask_review = "not_reviewed"
-            return self._ask_plan_parameters(draft.items[0], subtasks[0])
+        # The draft binds only what the decision matched; an ambiguous part is asked about below, before the review.
+        self._turn_subtask_plan = review_proposals.draft_round1_proposal(
+            workflow, subtasks, planner_lm=getattr(self, "_current_planner_lm", None), pinned_plan=pinned)
+        self._turn_plan_ambiguity = []
+        self._plan_resolution = resolution.start(workflow, subtasks, pinned=pinned)
+        self._turn_subtask_plan, question = resolution.step(
+            self._plan_resolution, self._turn_subtask_plan, self._resolution_turn())
+        if question is not None:
+            return dspy.Prediction(suspended=True, clarification=question, exhausted=False)
+        return self._after_resolution()
+
+    @staticmethod
+    def _learning_how(record, part) -> Optional[str]:
+        """How a resolved part's command was settled, for `intent_learning`: a pick at a question or a pinned plan is
+        the user's choice, else the link that decided it."""
+        from fastworkflow import intent_learning
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        if part.get("chosen") or record.pinned:
+            return intent_learning.HOW_USER_CHOICE
+        return resolution.how_settled(part.get("decided_by") or "")
+
+    def _record_planned_parts(self, plan, *, reviewed: bool) -> None:
+        """The resolution path's one writer for a planned turn (the fast path of a single part writes its own row in
+        ``_subtask_gate``): called where the turn's plan is run, with the plan as it stands, once per turn. A part the
+        user chose (a pick at a question, a pinned plan) is that choice; a part of a REVIEWED turn is the review's
+        confirmation of the command it showed for it (accepted), or the corrected command (switched, the drafted one
+        kept as ``rejected_label``); any other part is the link's own answer, unconfirmed. A part with no command, or
+        whose text the review changed, is not recorded. Never raises."""
+        from fastworkflow import intent_learning as learning
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        facts = getattr(self, "_turn_part_facts", None)
+        self._turn_part_facts = None
+        try:
+            for item in plan.items if facts else ():
+                fact, command = facts.get(item.goal), item.means.name
+                if fact is None or not command:
+                    continue
+                how, rejected = fact["how"], None
+                if how != learning.HOW_USER_CHOICE and reviewed:
+                    switched = fact["drafted"] != command
+                    how = learning.HOW_REVIEW_SWITCH if switched else learning.HOW_REVIEW_ACCEPT
+                    rejected = fact["drafted"] if switched else None
+                if how:
+                    resolution.record_part(self._app_workflow, item.goal, command, how, fact["evidence"], rejected)
+        except Exception as error:  # noqa: BLE001 - recording never fails a turn
+            logger.debug(f"intent learning: the turn's parts were not recorded ({error})")
+
+    def _resolution_turn(self):
+        """What the resolution's stage logic needs from this turn (``resolution.Turn``)."""
+        from fastworkflow import workflow_agent
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        return resolution.Turn(workflow=self._app_workflow, no_agent=self.no_agent_mode,
+                               can_ask=waiting_module.can_ask(self),
+                               planner_lm=getattr(self, "_current_planner_lm", None), port=self._turn_port())
+
+    @property
+    def _resolution_pending(self) -> bool:
+        """Whether a plan-path question is out (which command, a bound plan's values, or a running part's values), so
+        that the next message is its reply."""
+        held = self._waiting
+        return held is not None and held.owner == waiting_module.OWNER_PLAN and held.kind in waiting_module.CME_KINDS
+
+    def _resume_plan_resolution(self, reply: str) -> fastworkflow.CommandOutput:
+        """The reply to the plan path's question. Before the review (``after`` ``resolve_next``) it is read in code
+        (``resolution.take_reply``) and the resolution carries on: the next question, or the review, or the run. A
+        question a running part put (a refused typed call, ``after`` ``resume_part``) resumes that part
+        (``_resume_parameter_loop_unlistened``)."""
+        from fastworkflow import parameter_clarification, turn_progress
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        with turn_progress.bound(self):
+            if self._waiting.payload.get("after") == parameter_clarification.AFTER_RESUME_PART:
+                return self._resume_parameter_loop_unlistened(reply)
+            message = self._suspended_message()
+            self._note_agent_resume()
+            self.complete_ask_user_entry(reply)
+            self._turn_subtask_plan, question = resolution.take_reply(
+                self._plan_resolution, reply, self._turn_subtask_plan, self._resolution_turn())
+            if question is not None:
+                return self._settle_agent_result(
+                    message, dspy.Prediction(suspended=True, clarification=question, exhausted=False))
+            return self._settle_agent_result(message, self._after_resolution())
+
+    def _after_resolution(self):
+        """Every part is resolved: the dropped ones are left out, then ONE review of the whole turn, or the run.
+
+        No review when the client pinned the plan (its parameter question was the review), when the turn is one part
+        whose command the user chose by answering which one, when nothing would run (no agent model, every part ad
+        hoc) and when nobody can answer. Returns the suspended review or the turn's result."""
+        from fastworkflow import review_proposals, turn_progress
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        record = self._plan_resolution
+        subtasks = [item.goal for item in self._turn_subtask_plan.items]    # the parts' texts, as drafted
+        self._note_dropped_parts(record)
+        kept_parts = [part for part in record.parts if part["state"] != resolution.PART_DROPPED]
+        draft, subtasks, self._turn_plan_ambiguity = resolution.finish(record, self._turn_subtask_plan, subtasks)
+        # What each kept part's settling knew, by its text, with the command the draft shows for it (the review may
+        # accept or switch it): `_record_planned_parts` writes the rows where the plan is run.
+        self._turn_part_facts = {
+            part["text"]: {"how": (self._learning_how(record, part)), "evidence": part.get("evidence") or {},
+                           "drafted": item.means.name or None}
+            for part, item in zip(kept_parts, draft.items)}
+        chosen = resolution.single_part_chosen(record)
+        self._plan_resolution = None
         self._turn_subtask_plan = draft
-        self._turn_plan_ambiguity = review_proposals.plan_ambiguity_record(draft)
+        if not draft.items:
+            self._turn_subtask_review = "declined"
+            self._turn_subtask_plan = None
+            # No agent model: each cancelled part is a stop the client reads (``fw_not_run``), and the answer says why.
+            answer = "\n\n".join(no_agent_mode.explanation(entry) for entry in self._turn_not_run)
+            return dspy.Prediction(final_answer=answer or EVERY_PART_CANCELLED, exhausted=False)
+        refined = subtasks[0] if len(subtasks) == 1 and len(record.parts) > 1 else self._turn_refined_message
+
+        def run():
+            return self._run_turn_subtasks(subtasks, refined or subtasks[0], self._turn_user_message or subtasks[0])
+
+        if record.pinned:
+            self._turn_subtask_review = "not_reviewed"
+            return run()
+        if chosen:
+            self._turn_subtask_review = "fast_path"
+            return run()
         turn_progress.emit(turn_progress.STAGE_REVIEW)
         nothing_runs = self.no_agent_mode and all(
             item.means.kind == review_proposals.MEANS_FROM_SCRATCH for item in draft.items)
-        # No agent model: the re-run after the user answered a question about a missing value is not reviewed again (the
-        # part was reviewed before it was asked, and the answer is the user's own).
-        answered = self.no_agent_mode and self._planning_command_refusal_answered
-        if nothing_runs or answered or self._subtask_no_answerer():
+        if nothing_runs or not waiting_module.can_review(self):
             # Owner decision 2: no one can answer (or, in no-agent mode, nothing would run, so there is nothing to
-            # approve), so the draft is recorded as not reviewed and the turn carries on.
-            # The draft runs as proposed: its goals and bound means drive the run (_run_subtasks_from).
+            # approve), so the draft is recorded as not reviewed and the turn carries on as drafted.
             self._turn_subtask_review = "not_reviewed"
             logger.info("sub-task review not opened (no one to answer): %d sub-task(s) run as drafted, not reviewed",
                         len(draft.items))
-            return None
-        self._turn_subtask_review = "open"
+            return run()
+        return self._open_review(draft)
+
+    def _note_dropped_parts(self, record) -> None:
+        """No agent model: each part cancelled while the turn was resolved is not run, and a client that drives the work
+        reads it among the turn's stops (``fw_not_run``)."""
+        from fastworkflow import review_proposals
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        if not self.no_agent_mode:
+            return
+        for part in resolution.dropped(record, self._turn_subtask_plan):
+            self._turn_not_run.append(no_agent_mode.stop_entry(
+                command=part["command"], phase=None, open_step=None, done=[], facts={}, remaining=[],
+                suggested_plan="", means=part["means"], sub_task=None, reason=part["reason"],
+                request=part["text"],
+                # An ad hoc part keeps the plans a client may pin it to (``use_plan``), the closest first.
+                available_plans=(no_agent_mode.available_plans(self._app_workflow, part["planning_scores"])
+                                 if part["means"] == review_proposals.MEANS_FROM_SCRATCH else None)))
+
+    def _open_review(self, draft):
+        """Open the review of *draft* (the whole turn): the suspended review."""
+        from fastworkflow import review_proposals
+
         if self.no_agent_mode:
             self._turn_plan_previews = self._ad_hoc_plan_previews(draft)
-        turn = self._turn_frame()
-        turn.subtask_review_open = True
         self._give_review_reader()
-        try:
-            with review_proposals.draft_scope(draft):
-                asked = self.run_framework_planning_command(
-                    "review_subtasks", {"subtasks": review_proposals.DRAFT_ITEMS}, "review the sub-tasks",
-                    within_turn=True)
-        except BaseException:
-            turn.subtask_review_open = False
-            raise
+        with review_proposals.draft_scope(draft):
+            asked = self.run_framework_planning_command(
+                "review_subtasks", {"subtasks": review_proposals.DRAFT_ITEMS}, "review the sub-tasks",
+                within_turn=True)
         if getattr(asked, "suspended", None) is not True:
-            turn.subtask_review_open = False
             raise AssertionError("review_subtasks must suspend the turn on its review")
         return asked
+
+    def _gate_review_out(self) -> bool:
+        """Whether the sub-task gate's review is the turn's waiting record (not a stand-alone framework call's)."""
+        held = self._waiting
+        return held is not None and held.kind == waiting_module.KIND_REVIEW and bool(held.payload.get("gate"))
+
+    def _subtask_review_mark(self) -> str:
+        """The turn span's ``subtask_review``: ``open`` while the sub-task gate's review is out (the review record says
+        so), else the outcome the turn recorded."""
+        return "open" if self._gate_review_out() else self._turn_subtask_review
+
+    def _drop_store_record(self) -> None:
+        """The approval store ended the record the turn's question points at (accepted, declined, expired, cancelled): the
+        question, and the slot question nested in a review, go."""
+        plan_cme = getattr(self, "_plan_cme", None)
+        if plan_cme is not None:
+            self._clear_cme_continuation(plan_cme)
+        self._waiting = None
 
     def _ad_hoc_plan_previews(self, draft) -> dict[str, str]:
         """``{goal: the planner's text plan}`` for each ad hoc item of *draft* (no-agent mode)."""
@@ -3133,8 +3223,8 @@ class WorkflowExecutionContext:
         # The planner's LM is read when a reply comes, not when the review opens: the turn's planner LM is the one in place then.
         store.edit_reader = review_proposals.model_edit_reader(
             planner_lm=lambda: getattr(self, "_current_planner_lm", None), planning_names=names)
-        store.consultation_cme = getattr(self, "_consultation_cme", None)
-        store.consultation_workflow = getattr(self, "_consultation_workflow", None)
+        store.plan_cme = getattr(self, "_plan_cme", None)
+        store.plan_workflow = getattr(self, "_plan_workflow", None)
 
     def _accept_subtask_review(self, agent_result):
         """The gate's review was accepted: its frame finishes with the accepted proposal, which is stored for the
@@ -3142,12 +3232,6 @@ class WorkflowExecutionContext:
         Its inputs and means are not used until 2.9."""
         from fastworkflow import review_proposals
 
-        turn = self._turn_frame()
-        turn.subtask_review_open = False
-        turn.framework_entry = False
-        consultation_cme = getattr(self, "_consultation_cme", None)
-        if consultation_cme is not None:
-            self._clear_cme_continuation(consultation_cme)
         self._finish_framework_call(agent_result)
         accepted = review_proposals.accepted_subtask_proposal(self._app_workflow)
         if accepted is None:
@@ -3162,12 +3246,6 @@ class WorkflowExecutionContext:
         """The gate's review was declined or expired: its frame is dropped, nothing runs, and the turn says so."""
         from fastworkflow import review_engine
 
-        turn = self._turn_frame()
-        turn.subtask_review_open = False
-        turn.framework_entry = False
-        consultation_cme = getattr(self, "_consultation_cme", None)
-        if consultation_cme is not None:
-            self._clear_cme_continuation(consultation_cme)
         self._pop_frame(self._top_frame())
         declined = state == review_engine.DECLINED
         self._turn_subtask_review = "declined" if declined else "expired"
@@ -3179,43 +3257,58 @@ class WorkflowExecutionContext:
                               first_step: int | None = None,
                               template_text: str | None = None,
                               evidence_floor: int | None = None,
-                              bound_command: str | None = None):
+                              bound_command: str | None = None,
+                              planning_name: str | None = None):
         """Plan one query with the planner, then run the ReAct agent on it.
 
         ``template_text`` picks the planning command template; it defaults to the query itself.
         ``evidence_floor`` is the first step index whose archived outputs count as
         this run's for the finish check (a hand-off continuation counts the runs
         of its sub-task before it); it defaults to ``first_step``.
+        ``planning_name`` names the planning command of a part whose command is already known (a part that
+        resumes after its parameter question): the matcher is not asked again.
         """
-        from fastworkflow import review_proposals
         from fastworkflow.workflow_agent import build_query_with_next_steps, sub_task_commands_text
 
         # One planning command match gives both the template and its parsed form; a hand-off continuation
         # (query differs from its original text) plans from the template only, since the planning command
         # call would plan the whole job again.
-        # The match's option distribution (empty without JEV_API_KEY) feeds the listings' gathering (run_listing).
-        # The match is memoised for the turn (review_proposals.planning_match): the gate's draft asked it already.
+        # Which plan, if any: the part's one decision (``resolution.part_intent``), memoised for the turn, so the gate's
+        # draft and this run read the same answer and the remote model is not asked again. Its planning candidates'
+        # scores feed the listings' gathering (run_listing) and order an ad hoc part's plans.
         planning_distribution: dict[str, float] = {}
         plan_template, planning_command = "", None
-        if self._app_workflow is not None and self._turn_use_plan:
-            # The client's choice (``use_plan``) is the match: the matcher is never called on this turn. A bound call
-            # (a refusal's fall-back) names its own command below.
+        known = self._turn_use_plan or planning_name
+        if self._app_workflow is not None and known:
+            # The client's choice (``use_plan``), or the command a part was already asked about, is the match: the
+            # matcher is not called. A bound call (a refusal's fall-back) names its own command below.
             from fastworkflow.workflow_agent import _template_text, load_planning_command_map
 
-            planning_command = (load_planning_command_map(self._app_workflow.folderpath).get(self._turn_use_plan)
+            planning_command = (load_planning_command_map(self._app_workflow.folderpath).get(known)
                                 if bound_command is None else None)
             if planning_command is not None:
                 plan_template = _template_text(planning_command.template)
-                planning_distribution = {self._turn_use_plan: 1.0}
+                planning_distribution = {known: 1.0}
         elif self._app_workflow is not None:
-            plan_template, planning_command, planning_distribution = review_proposals.planning_match(
-                self._app_workflow, template_text or query)
+            from fastworkflow._workflows.plan_metadata_extraction import resolution
+            from fastworkflow.workflow_agent import _template_text, load_planning_command_map
+
+            intent = resolution.part_intent(self._app_workflow, template_text or query)
+            if intent.outcome == resolution.MATCH and intent.kind == resolution.KIND_PLANNING:
+                planning_command = load_planning_command_map(self._app_workflow.folderpath).get(intent.command)
+                if planning_command is not None:
+                    plan_template = _template_text(planning_command.template)
+                    planning_distribution = {intent.command: 1.0}
+            elif intent.outcome != resolution.MATCH:
+                planning_distribution = intent.planning_scores()
         if template_text is not None and template_text != query:
             planning_command = None
         if bound_command is not None:
             # The bound means of a plain goal: the plan names its command, so the finish check holds the goal to it.
             plan_template = f"This sub-task is done with the command {bound_command}."
             planning_command = None
+        # Why a refused call was not asked about is read below; it is this call's, never an earlier part's.
+        self._refusal_stop_reason = ""
         # Initial turn planning uses every prior turn summary, not the previous
         # turn's full agent trajectory (mid-turn replans still use trajectory).
         command_info_and_refined_message_with_todolist = build_query_with_next_steps(
@@ -3229,13 +3322,10 @@ class WorkflowExecutionContext:
             planning_probabilities=planning_distribution or None,
         )
         refusal, self._planning_command_refusal = self._planning_command_refusal, None
-        if refusal is not None:
-            # A refused planning command call the user is asked about: the turn suspends on the question as
-            # an ask_user does (no plan, no run); the reply re-runs it (_rerun_after_planning_command_refusal).
-            self._planning_command_refusal_pending = True
-            self._pending_refusal_request, self._planning_command_refusal_request = (
-                self._planning_command_refusal_request, None)
-            return dspy.Prediction(suspended=True, clarification=refusal, exhausted=False)
+        if refusal is not None and self._part_question_out:
+            # A refused planning command call the user is asked about: the part suspends on the question as an
+            # ask_user does (no plan, no run); the reply resumes this part (_resume_parameter_loop_unlistened).
+            return self._suspend_on_parameter_loop()
         phased, self._phased_planning_command_call = getattr(self, "_phased_planning_command_call", None), None
         if phased is not None:
             # A planning command call: its phases run as sub-plans, with no hand-off.
@@ -3250,6 +3340,8 @@ class WorkflowExecutionContext:
                     command=planning_command.name, means="planning",
                     reason=f"it cannot run as planned ({self._refusal_stop_reason}), and the agent model that would "
                            "take over is not set (LLM_AGENT)")
+            # An ad hoc part was asked about before the review (``resolution.step``) when somebody could answer; here it
+            # ends as not run, listing the plans available here.
             origin = self._origins[self._subtask_index] if getattr(self, "_origins", None) else 0
             item = self._bound_item(origin)
             means = item.means.kind if item is not None else "from_scratch"
@@ -3806,6 +3898,16 @@ class WorkflowExecutionContext:
         return [f"{prefix}{step.number}. {step.text}" for step in self._plan_lines(plan_text, names)
                 if (step.kind == "command" or not ran_only) and (below is None or step.number < below)]
 
+    def _step_results(self, phase, state: dict[str, Any], plan_text: str, names: dict, code, *,
+                      below: Optional[int] = None) -> dict[str, str]:
+        """The response text of each command step code ran in this phase run, keyed by the step's plan line (as
+        ``done`` writes it): what the commands themselves said, for the stop's code-written answer."""
+        results = getattr(code, "results", None) or {}
+        prefix = f"{phase.name}: " if len(state["phases"]) > 1 else ""
+        return {f"{prefix}{step.number}. {step.text}": "\n".join(results[step.number])
+                for step in self._plan_lines(plan_text, names)
+                if step.number in results and step.kind == "command" and (below is None or step.number < below)}
+
     def _no_agent_code_stop(self, phase, plan_text: str, code, names: dict) -> Optional[dict[str, Any]]:
         """Where the phase run stopped for want of a model: None when code ran every step (``code.stop`` "done"),
         else the stop's parts (``open_step``, ``done``, ``remaining``, ``suggested_plan``) for the phase's stop entry.
@@ -3871,6 +3973,9 @@ class WorkflowExecutionContext:
         suggestion = [*(line.split(". ", 1)[-1] for line in [*inner_plan, *own, *later]), *later_lines,
                       no_agent_mode.ANSWER_LINE]
         return {
+            "results": {**(state.get("step_results") or {}),
+                        **self._step_results(phase, state, plan_text, names, code, below=number)},
+            "partial_read": (code.partial_read(number) if kind == no_agent_mode.STEP_PAGE_CAP else None),
             # ``number`` is the step's own number in the phase's plan (as ``remaining`` and ``done`` number their
             # lines); ``plan_number`` is its place in ``suggested_plan``, which is renumbered from 1 (None when the
             # suggestion does not carry the step: a nested command's stop stands in for it).
@@ -3893,6 +3998,7 @@ class WorkflowExecutionContext:
                           "reason": "the answer needs a model to write it from the facts: the command has no "
                                     "__result__ text, and no agent model is set"},
             "done": done, "remaining": pending, "nested": None,
+            "results": dict(self._phase_run.get("step_results") or {}),
             "suggested_plan": no_agent_mode.numbered(
                 [line.split(". ", 1)[-1] for line in pending] + later_lines + [no_agent_mode.ANSWER_LINE]),
             "phase": phase.name,
@@ -3949,7 +4055,8 @@ class WorkflowExecutionContext:
             command=state["skill"], phase=stop["phase"], open_step=stop["open_step"], done=stop["done"],
             facts=facts, remaining=stop["remaining"], suggested_plan=stop["suggested_plan"],
             means="planning", sub_task=self._executing_sub_task(),
-            later_phases=names[index + 1:], nested=stop.get("nested"))
+            later_phases=names[index + 1:], nested=stop.get("nested"),
+            results=stop.get("results"), partial_read=stop.get("partial_read"))
         logger.info("planning command %s: stopped without an agent model at %s (phase %s)", state["skill"],
                     stop["open_step"]["kind"], stop["phase"])
         self._phase_run = self._phase_live = None
@@ -3969,18 +4076,18 @@ class WorkflowExecutionContext:
         # A nested call a "/" command made has no agent step in flight (``invoking_step`` None): its client is
         # not an agent loop, so the reply could not come back through the suspended step.
         called_by_a_step = len(self._frame_stack()) == 1 or getattr(self._top_frame(), "invoking_step", None) is not None
-        return bool(self._run_as_agent and not self._turn_unattended and self.user_message_queue is None
-                    and "is_assistant_mode_command" not in self._cme_workflow.context and called_by_a_step
-                    and not getattr(self._turn_frame(), "framework_entry", False))
+        in_framework_call = any(self._is_framework_command(frame.command_name or "") for frame in self._frame_stack()[1:])
+        return bool(self._run_as_agent and waiting_module.can_ask(self)
+                    and not self._assistant_round and called_by_a_step and not in_framework_call)
 
     def _suspend_for_decision(self, phase, plan_text: str, code, stop: dict[str, Any], own_steps: int):
         """The paused result when open step *stop* is a decision a client can make, else None (free work: the command
         ends with its stop).
 
         A conditional step (``only when <condition>, <command step>``) is decided yes or no; a command step that leaves
-        out one plain required value takes that value. Either way the phase's state is kept in ``_phase_run["decision"]``
-        (serialised with the rest of it), the question is the turn's pending prompt (``question_kind`` "phase_step"),
-        and the reply is read by ``_read_decision_reply`` when the phase resumes."""
+        out one plain required value takes that value. Either way the decision is the turn's waiting record (kind
+        ``decision``; the phase's own state stays in ``_phase_run``), the question is the turn's pending prompt
+        (``question_kind`` "phase_step"), and the reply is read by ``_read_decision_reply`` when the phase resumes."""
         from fastworkflow import planning_phases
 
         open_step = stop["open_step"]
@@ -4014,14 +4121,20 @@ class WorkflowExecutionContext:
             "facts": json.loads(json.dumps(state.get("outputs") or {}, default=str)),
         })
         state["carry_done"] = list(stop["done"][done_before:])
-        state["decision"] = decision
         return self._pause_for_decision(state, decision)
 
-    def _pause_for_decision(self, state: dict[str, Any], decision: dict[str, Any], retry: str = ""):
-        """The suspended result that puts decision *decision*'s question (*retry* opens it again). The agent holds a
-        minimal suspended state, so the suspension is kept, restored and resumed as an ask_user question is."""
-        question = no_agent_mode.decision_question(decision["stop"], decision, retry=retry)
-        decision["question"] = question
+    def _pause_for_decision(self, state: dict[str, Any], decision: dict[str, Any], retry: str = "", *,
+                            waited: bool = False):
+        """The suspended result that puts decision *decision*'s question (*retry* opens it again; *waited*: the user asked
+        for a moment, so the question stays as it was with a line before it) and makes it the turn's waiting record.
+        The agent holds a minimal suspended state, so the suspension is kept, restored and resumed as an ask_user
+        question is."""
+        if waited:
+            question = f"{replies.WAIT_TEXT}\n\n{decision['question']}"
+        else:
+            question = decision["question"] = no_agent_mode.decision_question(decision["stop"], decision, retry=retry)
+        self._put_record(waiting_module.Waiting(waiting_module.KIND_DECISION, question=question,
+                                                payload={"decision": decision}))
         agent = self._workflow_tool_agent
         agent._suspended = {
             "trajectory": dict(getattr(agent, "trajectory", None) or {}), "idx": self._next_step,
@@ -4040,26 +4153,42 @@ class WorkflowExecutionContext:
     def _read_decision_reply(self, state: dict[str, Any], decision: dict[str, Any], reply: str, phase,
                              plan_text: str, own_steps: int, names: dict):
         """Read the reply to a decision step's question: ``("go", resume)`` to carry on from the step (``resume`` is
-        what ``planning_phases.CodeSteps`` takes), ``("ask", paused result)`` to ask once more, or ``("stop", stop)`` to
-        end the command with its structured stop (a decline, or a second reply that could not be read)."""
+        what ``planning_phases.CodeSteps`` takes), ``("ask", paused result)`` to ask again (the user asked for a moment,
+        which counts nothing, or the reply gave nothing usable, once more and then the stop) or ``("stop", stop)`` to
+        end the command with its structured stop. The reply is read by the one reader of every value question
+        (``parameters.reply.read_decision``): the decision's own answer (yes or no, or the value), cancel, abort,
+        "you misunderstood" and a different request. A step of a running plan has no which-command question to return
+        to and a reply answers its question and nothing else, so cancel, abort, "you misunderstood" and a different
+        request all end the command at this step as declined, each naming why; none is run as a new request."""
         from fastworkflow import planning_phases
 
         agent = self._workflow_tool_agent
         reply = " ".join(str(reply or "").split())
+        reading = replies.read_decision(decision, reply)
+        declined = {
+            replies.DECLINE: "declined: the client chose not to decide this step; carry it out as its text says",
+            replies.MISUNDERSTOOD: "declined: you said this is not what you meant, so the step was not decided; "
+                                   "carry it out as its text says",
+            replies.DIFFERENT: "declined: the reply asked for something else, and a reply answers its question and "
+                               "nothing else, so it was not run as a new request (send it as its own message); the step "
+                               "was not decided; carry it out as its text says",
+        }
+        if reading.kind in declined:
+            self._waiting = None
+            agent.clear_suspension()
+            return "stop", self._decision_stop(decision, declined[reading.kind])
+        if reading.kind == replies.WAIT:
+            # The same question stays out and nothing is counted.
+            return "ask", self._pause_for_decision(state, decision, waited=True)
         text: Optional[str] = None
         why = ""
-        if no_agent_mode.declines(reply):
-            agent.clear_suspension()
-            state.pop("decision", None)
-            return "stop", self._decision_stop(
-                decision, "declined: the client chose not to decide this step; carry it out as its text says")
         if decision["kind"] == no_agent_mode.STEP_CONDITIONAL:
-            answer = no_agent_mode.read_yes_no(reply)
-            if answer is None:
+            if reading.kind != replies.VALUES:
                 why = "I could not read that reply as yes or no. "
             else:
-                text = decision["inner"] if answer else ""
-        elif reply:
+                text = decision["inner"] if reading.values["answer"] == "yes" else ""
+        elif value := reading.values.get(decision["field"]):
+            reply = value
             candidate = planning_phases.step_with_value(decision["text"], decision["field"], reply)
             code = self._phase_code_steps(plan_text, own_steps, names, answers=False)
             item = next((i for i in (code.items if code is not None else ()) if i[0].number == decision["number"]), None)
@@ -4069,162 +4198,197 @@ class WorkflowExecutionContext:
             why = (f"{reply!r} is not a valid value for {decision['field']} ({decision['type']}). " if reply
                    else f"I need a value for {decision['field']} ({decision['type']}). ")
         if text is None:
-            if decision["asked"] >= no_agent_mode.MAX_DECISION_ASKS:
+            # A reply that gave nothing usable is asked once more, then the step ends: the conditional's own limit, and
+            # for a missing value the parameter loop's no-progress rule (every ask after the first followed such a reply).
+            limit = (no_agent_mode.MAX_DECISION_ASKS if decision["kind"] == no_agent_mode.STEP_CONDITIONAL
+                     else no_agent_mode.MAX_NO_PROGRESS)
+            if decision["asked"] >= limit:
+                self._waiting = None
                 agent.clear_suspension()
-                state.pop("decision", None)
                 return "stop", self._decision_stop(decision, "the reply could not be read as an answer, twice")
             decision["asked"] += 1
             return "ask", self._pause_for_decision(state, decision, retry=why)
+        self._waiting = None
         agent.clear_suspension()
-        state.pop("decision", None)
         return "go", {"number": decision["number"], "text": text}
 
-    def _overlay_given(self, draft):
-        """The draft with the values the user already gave for the pinned plan (``_refusal_progress["given"]``) as its
-        inputs: they are the user's own, and win over what the extractor read."""
-        from fastworkflow import review_proposals
+    # ------------------------------------------------------------------
+    # The parameter question of a running part (fix-yu3l.4, fastworkflow/parameter_clarification.py)
+    # ------------------------------------------------------------------
+    #
+    # Every part of a turn that has a review is resolved before it (``resolution.step``); while the parts run nothing
+    # more is asked. The one question left here is a single unreviewed part's (the fast path): its refused typed
+    # planning call (workflow_agent.planning_command_refusal_to_ask) asks for the missing values before anything of it
+    # ran, the turn's waiting record (``parameters``, ``after`` ``resume_part``). The reply resumes the part
+    # (_resume_parameter_loop_unlistened) and the turn is not run again.
 
-        given = (self._refusal_progress or {}).get("given") or {}
-        if not given or not draft.items:
-            return draft
-        item = draft.items[0]
-        kept = {each.name: each for each in item.inputs if each.name not in given}
-        inputs = [*kept.values(), *(review_proposals.SubTaskInput(name=name, value=str(value), drafted=False)
-                                    for name, value in given.items())]
-        return draft.model_copy(update={"items": [item.model_copy(update={"inputs": inputs}), *draft.items[1:]]})
+    @property
+    def _part_question_out(self) -> bool:
+        """Whether the running part's value question is out (waiting record ``parameters``, ``after`` ``resume_part``)."""
+        from fastworkflow import parameter_clarification
 
-    def _plan_question(self, command, shown: dict, gaps, retry: str = "") -> tuple[str, dict]:
-        """``(question, parameter_request)`` presenting EVERY parameter of the pinned plan: its name and description, each
-        parameter with the value drafted for it (when the checks stand behind it) or what it still lacks, and how to reply.
-        The data names the same (``parameter_request``: command, description, ``parameters``, missing, invalid, values,
-        ``confirm``), so a client can show a form with the values prefilled."""
-        from fastworkflow import review_proposals
+        held = self._waiting
+        return (self._resolution_pending and held.kind == waiting_module.KIND_PARAMETERS
+                and held.payload.get("after") == parameter_clarification.AFTER_RESUME_PART)
 
-        description = review_proposals.planning_descriptions(self._app_workflow.folderpath).get(command.name, "")
-        missing, invalid = set(gaps.missing), {name for name, _ in gaps.invalid}
-        parameters, lines = [], []
-        for p in command.params:
-            state = "missing" if p.name in missing else ("invalid" if p.name in invalid else None)
-            value = None if state else shown.get(p.name)
-            parameters.append({"name": p.name, "required": bool(p.required), "value": value, "state": state,
-                               "description": p.desc})
-            label = f"{p.name} ({'required' if p.required else 'optional'})"
-            lines.append(f"- {label}: " + (str(value) if value not in (None, "") else
-                                           ("not given" if state != "invalid" else "not usable")))
-        text = (f"{retry}You chose the planning command {command.name}" + (f": {description.rstrip('.')}" if description else "")
-                + ".\nIts parameters:\n" + "\n".join(lines)
-                + "\nReply with one name: value line for each value to set or change, or yes to run with the values shown"
-                + (" (the ones not given must be given first)" if missing or invalid else "")
-                + "; cancel stops.")
-        request = {"command": command.name, "description": description, "confirm": True, "parameters": parameters,
-                   "missing": [n for n in (p.name for p in command.params) if n in missing],
-                   "invalid": [n for n in (p.name for p in command.params) if n in invalid],
-                   "values": {name: str(value) for name, value in shown.items() if name not in missing | invalid}}
-        return text, request
+    def _put_part_loop(self, loop) -> None:
+        """Put the running part's value question *loop* out as the turn's one waiting record."""
+        from fastworkflow import parameter_clarification
 
-    def _pending_refusal_request_for(self, progress: dict) -> Optional[dict]:
-        """The parameter request of the question in *progress*, rebuilt (a question asked again keeps its data)."""
-        from fastworkflow import planning_commands
+        self._part_loop = loop
+        self._turn_port().put(parameter_clarification.waiting_record(
+            loop, parameter_clarification.AFTER_RESUME_PART, loop.origin))
 
-        command = planning_commands.planning_command(self._app_workflow.folderpath, progress["command"])
-        if command is None:
+    def _part_ran_something(self) -> bool:
+        """Whether the part that is running has run a command of its own (the review's plumbing and a question do not
+        count). A question is asked only before it has: the reply then runs the part from its start, nothing twice."""
+        return any(not (getattr(output, "framework", False) or output.command_name == "ask_user"
+                        or self._is_framework_command(output.command_name))
+                   for output in self._turn_outputs[self._part_outputs_start:])
+
+    def _current_part_origin(self) -> Optional[int]:
+        """The part of the turn that is running (None before the parts began: the gate)."""
+        turn = self._turn_frame()
+        return turn.origins[turn.subtask_index] if 0 <= turn.subtask_index < len(turn.origins) else None
+
+    def _suspend_on_parameter_loop(self):
+        """The suspended result that puts the running part's question to the user."""
+        return dspy.Prediction(suspended=True, clarification=self._waiting.question, exhausted=False)
+
+    def _open_parameter_loop(self, command, refusal, *, request_text: str = "") -> Optional[str]:
+        """The question to put to the user about a refused typed call of planning command *command*, or None when it is
+        not to be asked (the caller's fallback follows: the text planner or the agent, or with no agent model the part
+        ends as not run, with ``_refusal_stop_reason`` naming what is missing). The loop is left on
+        the turn's waiting record (``_put_part_loop``); the caller suspends on it (``_suspend_on_parameter_loop``).
+
+        Only on a turn whose part was not resolved before a review (the fast path): a turn that was resolved is not
+        asked again while it runs. One question names every argument the call lacks. It is asked only when the turn is
+        attended, the refusal names an input (a value the user can give) and the part has run nothing yet.
+
+        The asking rule is the one of ``parameter_clarification`` in every session: a question is asked again while each
+        reply closes at least one open value, a reply that closes none is asked once more, and the next one ends it. What
+        the end hands over to differs: with an agent model the call goes to the text planner or the agent, with none the
+        part ends as not run naming what is missing (``_refusal_stop_reason``).
+        """
+        from fastworkflow import parameter_clarification as loops, planning_commands
+
+        if self._turn_subtask_review not in ("not_applicable", "fast_path"):
+            # The turn's parts were resolved before its review: a value refused while it runs is not asked again (no
+            # agent model: the part ends as not run naming it; with one: the agent takes over).
             return None
-        gaps = planning_commands.argument_gaps(
-            command, {p.name: (progress.get("given") or {}).get(p.name) for p in command.params}, progress["base"])
-        return self._plan_question(command, dict(progress.get("given") or {}), gaps)[1]
-
-    def _ask_plan_parameters(self, item, message: str):
-        """A pinned plan's parameter question (instead of a review): the suspended prediction, or None when the part runs
-        now (the plan has no parameters, nobody can answer, or the parameters were shown already this turn)."""
-        from fastworkflow import planning_commands, workflow_agent
-
-        command = planning_commands.planning_command(self._app_workflow.folderpath, item.means.name)
-        progress = self._refusal_progress
-        if command is None or not command.params or (progress and progress.get("command") == command.name):
+        error = (refusal if isinstance(refusal, planning_commands.PlanningCommandInputError)
+                 else planning_commands.PlanningCommandInputError(str(refusal)))
+        gaps = planning_commands.refusal_gaps(command, error)
+        origin = self._current_part_origin()
+        if self.no_agent_mode:
+            self._refusal_stop_reason = gaps.describe() or str(error)
+        if (self._part_ran_something() or not waiting_module.can_ask(self)
+                or not planning_commands.refusal_names_an_input(command, error)):
             return None
-        ran = any(not (getattr(o, "framework", False) or o.command_name == "ask_user"
-                       or self._is_framework_command(o.command_name)) for o in self._turn_outputs)
-        if ran or not workflow_agent._refusal_may_ask_attended_no_answer_check(self):
-            return None
-        raw = {p.name: next((each.value for each in item.inputs if each.name == p.name and each.value is not None), None)
-               for p in command.params}
-        gaps = planning_commands.argument_gaps(command, raw, message)
-        shown = {name: value for name, value in raw.items() if value is not None and name not in gaps.names}
-        question, request = self._plan_question(command, shown, gaps)
-        self._refusal_progress = {"command": command.name, "open": list(gaps.names), "stalled": 0, "asks": 1,
-                                  "base": message, "given": dict(shown), "question": question,
-                                  "params": [p.name for p in command.params]}
-        self._planning_command_refusal_pending = True
-        self._pending_refusal_request = request
-        return dspy.Prediction(suspended=True, clarification=question, exhausted=False)
-
-    def _ask_about_refusal(self, command, refusal: str, gaps=None):
-        """No agent model: the question for a bound planning command whose arguments are still refused after the review
-        (required values left unbound, or not in the request), or None when it cannot be asked (see
-        ``refusal_question_for``). It suspends the turn as a refused typed planning call does
-        (``_call_agent_for_query``): the reply re-runs the turn from its request with the reply after it
-        (``_rerun_after_planning_command_refusal``), and the part is not reviewed again."""
-        from fastworkflow import planning_commands
-
-        if command is None:
-            return None
-        error = planning_commands.PlanningCommandInputError(refusal)
-        error.gaps = gaps
-        question = self.refusal_question_for(command, error)
-        if question is None:
-            return None
-        self._planning_command_refusal_pending = True
-        request = planning_commands.planning_refusal_parameter_request(command, error)
-        if self._turn_use_plan and gaps is not None:
-            # A pinned plan keeps presenting every parameter, with the values obtained so far.
-            progress = self._refusal_progress
-            retry = "That did not give a value I could use. " if progress and progress.get("stalled") else ""
-            question, request = self._plan_question(command, dict(gaps.values), gaps, retry)
-            progress["given"] = {**(progress.get("given") or {}), **{k: str(v) for k, v in gaps.values.items()}}
-            progress["question"], progress["params"] = question, [p.name for p in command.params]
-        self._pending_refusal_request = request
-        return dspy.Prediction(suspended=True, clarification=question, exhausted=False)
-
-    def refusal_question_for(self, command, refusal) -> Optional[str]:
-        """No agent model: the question to put to the user about a refused planning command call, or None when it is not
-        to be asked (the part then ends as not run, with ``_refusal_stop_reason`` naming what is missing).
-
-        One question names every argument the call lacks (``refusal.gaps``, else the one the refusal names). It is asked
-        while the turn is attended and has run nothing of its own (the review's plumbing does not count, and a repeated
-        run of a side effect is never risked), and keeps being asked while each reply makes progress: at least one
-        argument asked about last time is no longer missing. A reply that makes none is asked once more
-        (``MAX_NO_PROGRESS`` in a row ends the part), as a decision step asks again once. The values already obtained stay in
-        the request the re-run reads (and the draft keeps the ones the checks stand behind), so only what is still missing
-        is asked."""
-        from fastworkflow import planning_commands, workflow_agent
-
-        gaps = planning_commands.refusal_gaps(command, refusal)
-        self._refusal_stop_reason = gaps.describe() or str(refusal)
-        ran = any(not (getattr(output, "framework", False) or output.command_name == "ask_user"
-                       or self._is_framework_command(output.command_name))
-                  for output in self._turn_outputs)
-        if (ran or not workflow_agent._refusal_may_ask_attended_no_answer_check(self)
-                or not planning_commands.refusal_names_an_input(command, refusal)):
-            return None
-        names = list(gaps.names)
-        progress = self._refusal_progress
-        retry = ""
-        if progress is not None and progress.get("command") == command.name and not progress.get("open") \
-                and not progress.get("stalled"):
-            # The parameters were all shown with nothing missing (a confirmation) and the run then refused something: a
-            # first question about it.
-            progress["open"], progress["asks"] = names, int(progress.get("asks", 1)) + 1
-        elif progress is not None and progress.get("command") == command.name:
-            progressed = bool(set(progress.get("open") or ()) - set(names))
-            progress["stalled"] = 0 if progressed else int(progress.get("stalled", 0)) + 1
-            if progress["stalled"] >= no_agent_mode.MAX_NO_PROGRESS:
+        loop = self._part_loop
+        if loop is not None and loop.command == command.name and loop.origin == origin:
+            # The part ran again with the values the replies gave and its checks still refuse something.
+            outcome = loops.reopen(loop, command, gaps, refusal=error)
+            if outcome.kind != loops.ASK_AGAIN:
                 return None
-            progress["open"], progress["asks"] = names, int(progress.get("asks", 1)) + 1
-            if not progressed:
-                retry = "That did not give a value I could use. "
         else:
-            self._refusal_progress = {"command": command.name, "open": names, "stalled": 0, "asks": 1}
-        return retry + planning_commands.refusal_question(command, refusal)
+            loop, outcome = loops.open_loop(command, gaps, request_text=request_text, origin=origin, refusal=error)
+        self._put_part_loop(loop)
+        return outcome.question
+
+    def _resume_parameter_loop_unlistened(self, reply: str) -> fastworkflow.CommandOutput:
+        from fastworkflow import parameter_clarification as loops, planning_commands
+        from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
+
+        loop = loops.ParameterLoop.from_state(self._waiting.payload["loop"])
+        self._part_loop = loop
+        self._turn_port().clear()      # the question is no longer out; the loop is kept for the rule's count
+        message = self._suspended_message()
+        self._note_agent_resume()
+        self.complete_ask_user_entry(reply)
+        outputs_before = len(self._turn_outputs)
+        command = planning_commands.planning_command(self._app_workflow.folderpath, loop.command)
+        if command is None:
+            return self._continue_after_loop_part(message, self._not_run_part(
+                command=loop.command, means="planning", reason=f"{loop.command} could not be loaded"), outputs_before)
+        # Free text is read by the shared extractor, with or without an agent model (the asking rule is one).
+        outcome = loops.advance(
+            loop, reply, command,
+            extract=lambda text: planning_commands.extracted_arguments(command, text, self._app_workflow), live=True)
+        if outcome.kind == loops.ASK_AGAIN:
+            self._put_part_loop(loop)
+            return self._settle_agent_result(message, self._suspend_on_parameter_loop())
+        if outcome.kind == loops.WAIT:
+            # The user asked for a moment: the same question stays out, and nothing is counted.
+            self._put_part_loop(loop)
+            return self._settle_agent_result(message, dspy.Prediction(
+                suspended=True, clarification=outcome.question, exhausted=False))
+        if outcome.kind in (loops.MISUNDERSTOOD, loops.DIFFERENT):
+            # Nothing of the part ran, and no resolution exists to ask which command again: the part ends as not run
+            # (the reply is never run as a new request) and the answer says why.
+            result = self._not_run_part(command=loop.command, means="planning", reason=(
+                "you said it was not the command you meant" if outcome.kind == loops.MISUNDERSTOOD
+                else DIFFERENT_REQUEST_REASON))
+        elif outcome.kind == loops.DECLINED:
+            result = self._not_run_part(
+                command=loop.command, means="planning",
+                reason="it was declined" + (f" while its arguments {', '.join(outcome.missing)} were still missing"
+                                            if outcome.missing else ""))
+        elif outcome.kind == loops.EXHAUSTED and self.no_agent_mode:
+            # The one hand-over: with an agent model the part runs on with what was given (the call refused again goes to
+            # the text planner or the agent, never asked a third time: ``reopen``); with none it ends as not run.
+            result = self._not_run_part(
+                command=loop.command, means="planning",
+                reason=f"it cannot run as planned ({outcome.describe}), and the agent model that would take over is "
+                       "not set (LLM_AGENT)")
+        else:
+            result = self._run_loop_part(loop)
+        return self._continue_after_loop_part(message, result, outputs_before)
+
+    def _continue_after_loop_part(self, message: str, result, outputs_before: int):
+        """Carry the turn on after the loop's part gave *result*: its answer is recorded and the later parts run, as
+        after any part that was suspended (``_resume_agent_message``)."""
+        if self._subtasks and getattr(result, "suspended", None) is not True:
+            self._record_subtask_answer(result, self._typed_output_since(outputs_before))
+            if getattr(result, "exhausted", None) is True:
+                self._hand_off(self._subtask_index)
+            result = self._run_subtasks_from(self._subtask_index + 1)
+        return self._settle_agent_result(message, result)
+
+    def _run_loop_part(self, loop):
+        """Run the part the loop belongs to, now that its values are given. Nothing of the part ran before its question
+        (``_part_ran_something``), so it runs from its start and nothing runs twice: its typed call again, on its own
+        text with the reply after it, and the matcher is not asked (the command is known)."""
+        turn = self._turn_frame()
+        k = turn.subtask_index
+        origin = turn.origins[k]
+        floors = getattr(self, "_evidence_floors", None)
+        if not isinstance(floors, dict):
+            floors = self._evidence_floors = {}
+        floors.setdefault(origin, self._next_step)
+        self._enable_all_tools()
+        self._part_outputs_start = len(self._turn_outputs)
+        tail = loop.tail()
+
+        def with_reply(text: str) -> str:
+            return f"{text}\n{tail}" if tail else text
+
+        if len(turn.subtasks) == 1:
+            # An unsplit turn: the call _run_turn_subtasks made, with the reply after the request.
+            return self._call_agent_for_query(
+                with_reply(turn.subtasks[k]), with_reply(self._turn_user_message or turn.subtasks[k]),
+                evidence_floor=0, planning_name=loop.command)
+        text = with_reply(turn.subtasks[k])
+        return self._call_agent_for_query(text, text, first_step=self._next_step, evidence_floor=floors[origin],
+                                          planning_name=loop.command)
+
+    def _part_request_text(self) -> str:
+        """The request text of the part that is running: its own text in a split turn, else the turn's message. What
+        a not-run entry carries as ``request`` and what the plan-choice question quotes."""
+        turn = self._turn_frame()
+        split = len(set(turn.origins)) > 1
+        origin = turn.origins[turn.subtask_index] if split and 0 <= turn.subtask_index < len(turn.origins) else 0
+        return str(self._original_text(origin) if split else self._turn_user_message or "")
 
     def _not_run_part(self, *, command: Optional[str], reason: str, means: str, suggested_plan: str = "",
                       plans_for: Optional[dict[str, float]] = None):
@@ -4237,10 +4401,7 @@ class WorkflowExecutionContext:
         of the turn with the same plans lists only its own closest ones and points to the part that lists them all."""
         plans = (no_agent_mode.available_plans(self._app_workflow, plans_for)
                  if plans_for is not None and command is None else None)
-        turn = self._turn_frame()
-        split = len(set(turn.origins)) > 1
-        origin = turn.origins[turn.subtask_index] if split and 0 <= turn.subtask_index < len(turn.origins) else 0
-        request = (str(self._original_text(origin) if split else self._turn_user_message or "") if plans is not None else None)
+        request = self._part_request_text() if plans is not None else None
         entry = no_agent_mode.stop_entry(
             command=command, phase=None, open_step=None, done=[], facts={}, remaining=[],
             suggested_plan=suggested_plan, means=means, sub_task=self._executing_sub_task(), reason=reason,
@@ -4288,13 +4449,15 @@ class WorkflowExecutionContext:
             self._begin_turn(step_text, unattended=unattended)
             self._note_approval_inbound(None, None, False)
         # The turn frame has no agent step of its own: when the call finishes, its output is the turn's answer.
-        self._turn_frame().framework_entry = True
         self.push_active_workflow(self._app_workflow)
         try:
             with framework_call_scope():
                 output = self.run_planning_command(qualified_name, params, step_text)
         except AskUserSuspend as asked:
-            self._awaiting_user = True
+            if (held := self._waiting) is not None and held.kind == waiting_module.KIND_REVIEW:
+                held.payload["gate"] = bool(within_turn)     # opened by ``review_engine.open_review``; the gate's, or not
+            else:
+                self._ask_agent_question(asked.clarification_request)
             if within_turn:
                 return dspy.Prediction(suspended=True, clarification=asked.clarification_request)
             return self._awaiting_user_output(asked.clarification_request)
@@ -4302,6 +4465,15 @@ class WorkflowExecutionContext:
             self.pop_active_workflow()
         self.append_turn_output(output)
         return output
+
+    def _put_review_record(self, record) -> None:
+        """A review was opened on the approval store (``review_engine.open_review`` calls this): it is the turn's waiting
+        record, pointing at the store's record (the store keeps it). ``gate`` is set by ``run_framework_planning_command``
+        when the sub-task gate of the turn opened it (its accept runs the turn's sub-tasks), not a stand-alone call."""
+        self._put_record(waiting_module.Waiting(
+            waiting_module.KIND_REVIEW, question=str(record.rendering or ""),
+            payload={"record_id": record.id, waiting_module.SLOT_KEY: None, "gate": False,
+                     "suspended_agent": bool(record.suspended_agent)}))
 
     def run_planning_command(self, qualified_name: str, params: Any,
                              step_text: str) -> fastworkflow.CommandOutput:
@@ -4454,7 +4626,6 @@ class WorkflowExecutionContext:
         command = planning_commands.planning_command(self._app_workflow.folderpath, frame.command_name)
         output = self._close_planning_call(frame, result, planning_commands.input_instance(command, frame.call_args))
         self._pop_frame(frame)
-        self._awaiting_user = False
         self.append_turn_output(output)
         return output
 
@@ -4637,8 +4808,11 @@ class WorkflowExecutionContext:
                 source.command for source in fact_sources(phase.output)]
         # A paused decision step (no-agent mode, ``_suspend_for_decision``): the reply is read here, and the phase carries
         # on from the decided step as a code run of its own (its plan, first step and facts are the phase's).
-        decision = state.get("decision") if resumed else None
+        held = self._waiting
+        decision = (held.payload["decision"] if resumed and held is not None and held.kind == waiting_module.KIND_DECISION
+                    else None)
         resume_spec = None
+        own_steps = state.get("own_steps", 0)
         if decision is not None:
             plan_text, own_steps = state["plan"], decision["own_steps"]
             verdict, value = self._read_decision_reply(state, decision, resume_observation, phase, plan_text,
@@ -4663,6 +4837,7 @@ class WorkflowExecutionContext:
             # Code may run the phase's own steps only: never the planner's steps_before
             # (their phase has none of its own) or steps_after (after them).
             own_steps = 0 if phase.name == state.get("before_phase") else len(steps)
+            state["own_steps"] = own_steps       # a resumed run (also after a restore) reads it back
             steps = steps + (state["steps_after"] if last and last_item else [])
             state["first_step"] = first_step
             state["plan"] = number(steps)
@@ -4898,6 +5073,7 @@ class WorkflowExecutionContext:
             # The steps this phase ran, kept for the stop of a later phase (``done``).
             state.setdefault("done_steps", []).extend(
                 self._phase_step_lines(phase, state, plan_text, names, ran_only=True))
+            state.setdefault("step_results", {}).update(self._step_results(phase, state, plan_text, names, code))
         return "done", None
 
     def _phase_code_steps(self, plan_text: str, own_steps: int, names: dict, *,
@@ -4945,6 +5121,8 @@ class WorkflowExecutionContext:
             floors.setdefault(origin, self._next_step)
             first = k == 0 or self._origins[k - 1] != origin
             outputs_before = len(self._turn_outputs)
+            if first:
+                self._part_outputs_start = outputs_before
             result = self._run_entry(k, origin, query, first=first, floor=floors[origin])
             if getattr(result, "suspended", None) is True:
                 return result
@@ -5072,16 +5250,17 @@ class WorkflowExecutionContext:
                 origin + 1, item, reviewed, None if refusal is not None else checked.args,
                 f"refused, the agent ran it instead: {refusal}" if refusal is not None else None))
         if refusal is not None and self.no_agent_mode:
-            # Every argument still missing or refused (the checks stop at the first), from the values the review bound.
+            # The part was resolved before the review (its missing values asked for then); a refusal now is not asked
+            # again: the part ends as not run, naming every argument still missing or refused (the checks stop at the
+            # first), from the values the review bound.
+            checked_text = "\n\n".join([query, *self._subtask_answers])
             gaps = (planning_commands.argument_gaps(
                 command, dict(reviewed.values) if reviewed is not None else dict(resolved.named),
-                "\n\n".join([query, *self._subtask_answers])) if command is not None else None)
-            if (asked := self._ask_about_refusal(command, refusal, gaps)) is not None:
-                return asked
+                checked_text) if command is not None else None)
             return self._not_run_part(
                 command=name, means=review_proposals.MEANS_PLANNING,
-                reason=f"it cannot run as planned ({self._refusal_stop_reason or refusal}), and the agent model that "
-                       "would take over is not set (LLM_AGENT)")
+                reason=f"it cannot run as planned ({gaps.describe() if gaps is not None and gaps.names else refusal}), "
+                       "and the agent model that would take over is not set (LLM_AGENT)")
         if refusal is not None:
             return self._call_agent_for_query(
                 f"{query}\n\nThe planning command {name} cannot run as planned: {refusal}.",
@@ -5216,11 +5395,13 @@ class WorkflowExecutionContext:
                 answers.setdefault(origin, []).append(answer)
         joined = {origin: _join_parts(parts) for origin, parts in answers.items()}
         if len(joined) == 1:
-            return next(iter(joined.values()))
-        return "\n\n".join(
-            f"### {origin + 1}. {_heading_title(self._original_text(origin))}\n{text}"
-            for origin, text in joined.items()
-        )
+            body = next(iter(joined.values()))
+        else:
+            body = "\n\n".join(
+                f"### {origin + 1}. {_heading_title(self._original_text(origin))}\n{text}"
+                for origin, text in joined.items()
+            )
+        return body
 
     def _answer_parts(self, answer: str) -> list[dict[str, Any]]:
         """The parts of a split turn as data, beside the combined answer text (which they never change).
@@ -5434,63 +5615,11 @@ class WorkflowExecutionContext:
         """The turn's output for one agent run: its suspension (the turn awaits the user), or its answer."""
         self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
-            self._awaiting_user = True
-            self._suspended_user_message = message
-            self._pending_clarification_request = agent_result.clarification
+            self._ask_agent_question(agent_result.clarification, message)
             self._note_agent_suspension(agent_result.clarification)
             return self._awaiting_user_output(agent_result.clarification)
         self._reset_agent_suspension()
         return self._finalize_agent_output(message, agent_result)
-
-    def _rerun_after_planning_command_refusal(self, reply: str) -> fastworkflow.CommandOutput:
-        """The reply to a refused planning command call's question: the turn runs once more from its request,
-        with the reply after it, so the planner's typed call sees the value the user gave (its
-        guards read the request). The question's exchange is completed here. Nothing ran before
-        the question (``_planning_command_refusal_may_ask``), so nothing is run twice."""
-        message = f"{self._suspended_user_message}\n{reply}"
-        self._note_agent_resume()
-        self.complete_ask_user_entry(reply)
-        self._planning_command_refusal_pending = False
-        self._pending_refusal_request = None
-        self._planning_command_refusal_answered = True
-        self._reset_agent_suspension()
-        progress = self._refusal_progress
-        if self._turn_use_plan and progress and progress.get("base") is not None:
-            kind, values = no_agent_mode.read_parameter_reply(reply, progress.get("params") or (), progress.get("open") or ())
-            if kind == "unclear":
-                # Strict: a reply that is not a value, yes or cancel is asked again once, then the part ends.
-                progress["stalled"] = int(progress.get("stalled", 0)) + 1
-                if progress["stalled"] < no_agent_mode.MAX_NO_PROGRESS:
-                    self._planning_command_refusal_pending = True
-                    retry = "That did not give a value I could use. "
-                    question = retry + str(progress.get("question") or "").removeprefix(retry)
-                    request = self._pending_refusal_request_for(progress)
-                    self._pending_refusal_request = request
-                    return self._settle_agent_result(message, dspy.Prediction(
-                        suspended=True, clarification=question, exhausted=False))
-                open_names = list(progress.get("open") or ())
-                return self._settle_agent_result(message, self._not_run_part(
-                    command=progress.get("command"), means="planning",
-                    reason=(f"it cannot run as planned (missing required argument{'s' if len(open_names) > 1 else ''} "
-                            f"{', '.join(open_names)}), and no usable reply was given" if open_names else
-                            "its parameters were not confirmed: no usable reply was given")))
-            if kind == "decline":
-                open_names = list(progress.get("open") or ())
-                return self._settle_agent_result(message, self._not_run_part(
-                    command=progress.get("command"), means="planning",
-                    reason="it was declined" + (f" while its arguments {', '.join(open_names)} were still missing"
-                                                if open_names else "")))
-            progress["given"] = {**(progress.get("given") or {}), **values}
-            message = progress["base"] + "".join(f"\n{name}: {value}" for name, value in progress["given"].items())
-            return self._settle_agent_result(message, self._run_agent(message))
-        if self.no_agent_mode and no_agent_mode.declines(reply):
-            # ``cancel`` declines, as it does for every other question: the part is not run, and says so.
-            progress = self._refusal_progress or {}
-            return self._settle_agent_result(message, self._not_run_part(
-                command=progress.get("command"), means="planning",
-                reason=f"it was declined while its arguments {', '.join(progress.get('open') or ()) or 'were'} "
-                       "still missing" if progress.get("open") else "it was declined"))
-        return self._settle_agent_result(message, self._run_agent(message))
 
     def _approval_state_payload(self) -> Optional[dict]:
         store = approval_binding.store_for(self._app_workflow)
@@ -5512,17 +5641,18 @@ class WorkflowExecutionContext:
         """The reply to an approval raised outside the agent's loop (an MCP tool call), or a
         /cancel_pending for a suspended one: the record resolves here, and its outcome is this
         turn's output."""
-        awaiting = approval_binding.active_record(self._app_workflow)
-        was_suspended = awaiting is not None and awaiting.suspended_agent
+        held = self._waiting
+        was_suspended = held is not None and held.suspended_agent
         resolution = approval_binding.resolve_reply(self, self._app_workflow, message)
         if not resolution.done:
-            self._awaiting_user = True
+            # A reply that was not understood: the question is asked again, and the next message answers it.
+            if held is not None and held.store_backed:
+                held.payload[waiting_module.ASKED_AGAIN] = True
             return self._awaiting_user_output(resolution.text)
-        self._awaiting_user = False
         # A user-typed "/" command that was held for this approval left its assistant-mode flag set (the
         # held branch of invoke_command returns before it clears it). The approval is answered: the next
         # plain message belongs to the agent again.
-        self._cme_workflow.context.pop("is_assistant_mode_command", None)
+        self.end_round()
         if was_suspended:
             self._reset_agent_suspension()
         output = resolution.output
@@ -5548,12 +5678,12 @@ class WorkflowExecutionContext:
         """
         if self._app_workflow is None:
             return 0
-        awaiting = approval_binding.active_record(self._app_workflow)
+        held, suspended = self._waiting, self._awaiting_user
         cancelled = approval_binding.cancel_all(self, self._app_workflow, reason="cancelled")
         if cancelled:
             # A held "/" approval was dropped: its assistant-mode flag goes with it (see _resume_approval_direct).
-            self._cme_workflow.context.pop("is_assistant_mode_command", None)
-        if awaiting is not None and awaiting.suspended_agent and self._awaiting_user:
+            self.end_round()
+        if held is not None and held.suspended_agent and suspended:
             self._reset_agent_suspension()
         return cancelled
 
@@ -5580,8 +5710,10 @@ class WorkflowExecutionContext:
 
     def _resume_agent_message(self, user_answer: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
-        if self._planning_command_refusal_pending:
-            return self._rerun_after_planning_command_refusal(user_answer)
+        held = self._waiting
+        reader = held.reader if held is not None else waiting_module.READER_AGENT      # the kind table (``waiting.step``)
+        if reader == waiting_module.READER_RESOLUTION:
+            return self._resume_plan_resolution(user_answer)
         # Catch awaiting_user/_suspended desync before any LLM work: resume()
         # consumes _suspended at entry, so a second request (or a restore that
         # lost the react blob) must not become a bare 500.
@@ -5590,8 +5722,12 @@ class WorkflowExecutionContext:
             raise NoSuspendedAgentStateError(
                 "No suspended ReAct state to resume"
             )
-        awaiting = approval_binding.active_record(self._app_workflow)
-        approval_resumed = awaiting is not None and awaiting.suspended_agent
+        # What the reply is about, read before it changes anything: the turn's message, the question, the store's record
+        # (a reply that ends it ends the turn's record with it) and whether it is the sub-task gate's review.
+        original_message, question, gate_review = self._suspended_message(), held.question if held else "", self._gate_review_out()
+        awaiting = (approval_binding.store_for(self._app_workflow).get(held.payload["record_id"])
+                    if reader == waiting_module.READER_APPROVAL else None)
+        approval_resumed = awaiting is not None
         if approval_resumed:
             # The suspended tool call is an approval (ADR-EXP-025): the reply resolves it, and
             # the resolution is the observation. Nothing else reads the reply.
@@ -5601,7 +5737,7 @@ class WorkflowExecutionContext:
                 return self._awaiting_user_output(resolution.text)
             self._note_agent_resume()
             self.complete_ask_user_entry(user_answer)
-            if resolution.output is None and getattr(self._turn_frame(), "subtask_review_open", False):
+            if resolution.output is None and gate_review:
                 # Declined or expired: the gate's review ends, and nothing runs (fix-3rsq.plan-review.2.6).
                 return self._end_subtask_review_unrun(awaiting.state)
             if resolution.output is not None:
@@ -5609,15 +5745,14 @@ class WorkflowExecutionContext:
                 self._hold_resumed_approval_run(resolution.output)
             self._workflow_tool_agent.iteration_counter = -1
             observation = resolution.text
-        elif (self._phase_run or {}).get("decision"):
+        elif reader == waiting_module.READER_DECISION:
             # A planning command paused at a step the client decides (no-agent mode): the reply itself is the observation,
             # read by the phase (_read_decision_reply). No planner call and no reply-intent call: yes, no, a value or
             # cancel are read in code.
             self._note_agent_resume()
             from fastworkflow.workflow_agent import _append_action_record
 
-            _append_action_record(self, {"agent_query": self._pending_clarification_request,
-                                         "user_response": user_answer})
+            _append_action_record(self, {"agent_query": question, "user_response": user_answer})
             self.complete_ask_user_entry(user_answer)
             self._workflow_tool_agent.iteration_counter = -1
             observation = user_answer
@@ -5627,19 +5762,15 @@ class WorkflowExecutionContext:
             from fastworkflow.workflow_agent import _post_ask_user_response
 
             self._workflow_tool_agent.iteration_counter = -1
-            observation = _post_ask_user_response(
-                self._pending_clarification_request,
-                user_answer,
-                self,
-            )
+            observation = _post_ask_user_response(question, user_answer, self)
         # An approval's observation is the approved command's own run: the step completes as one
         # that returned normally, so its completion hook archives the run held above.
         agent_result = self._resume_top_frame(observation, completes_step=approval_resumed)
         # The suspension may be nested: each call that finishes hands its run to the step it
         # was called from, which resumes next, until the turn frame is on top again.
         while len(self._frame_stack()) > 1 and getattr(agent_result, "suspended", None) is not True:
-            if getattr(self._turn_frame(), "framework_entry", False) and len(self._frame_stack()) == 2:
-                if getattr(self._turn_frame(), "subtask_review_open", False):
+            if len(self._frame_stack()) == 2 and self._is_framework_command(self._top_frame().command_name or ""):
+                if gate_review:
                     # The gate's review was accepted: the turn runs its sub-tasks (fix-3rsq.plan-review.2.6).
                     return self._settle_agent_result(self._turn_user_message, self._accept_subtask_review(agent_result))
                 return self._finish_framework_call(agent_result)
@@ -5652,11 +5783,10 @@ class WorkflowExecutionContext:
             agent_result = self._run_subtasks_from(self._subtask_index + 1)
         self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
-            self._pending_clarification_request = agent_result.clarification
+            self._ask_agent_question(agent_result.clarification, original_message)
             self._note_agent_suspension(agent_result.clarification)
             return self._awaiting_user_output(agent_result.clarification)
 
-        original_message = self._suspended_user_message
         self._reset_agent_suspension()
         return self._finalize_agent_output(original_message, agent_result)
 

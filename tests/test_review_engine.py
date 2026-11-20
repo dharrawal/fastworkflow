@@ -103,7 +103,6 @@ def _force_store_state(record: ReviewRecord, state: str) -> None:
 
 def test_the_transition_table_allows_the_documented_moves_and_nothing_out_of_a_terminal_state():
     assert re_.ACTIVE_STATES == frozenset({AWAITING, REVISED})
-    assert re_.TERMINAL_STATES == frozenset({DECLINED, EXPIRED, INVALIDATED, EXECUTED})
     store = _store()
     record = open_review(None, store, _tasks("a"), surface=store.surface)
     assert record.state == AWAITING and record.kind == KIND_SUB_TASKS

@@ -156,15 +156,23 @@ def _after(command: pc.PlanningCommandCommand, values: dict, request: str, folde
 
 
 @pytest.mark.parametrize("name, request_text, values", [case[1:] for case in CORPUS], ids=[c[0] for c in CORPUS])
-def test_the_typed_call_refuses_what_the_planning_checks_refuse(folder, monkeypatch, name, request_text, values):
+def test_the_typed_call_refuses_what_the_planning_checks_refuse(folder, monkeypatch, request, name, request_text, values):
     command = _command(folder, name)
     before = _before(command, values, request_text)
     after, extractor = _after(command, values, request_text, folder, monkeypatch)
 
     if before[0] == "refused":
         assert after[0] == "refused", (before, after)
-        # refused, then read once more and refused again (a value its type cannot hold is refused at parse, retried)
-        assert extractor.calls >= 2, after
+        # a refused value is read once more and refused again (a value its type cannot hold is refused at parse,
+        # retried); a value that is simply missing is not read again
+        if after[1].startswith("missing required argument"):
+            # one extraction (its own attempts at one parse failure count), never a second pass; except an answer
+            # every attempt of which failed to parse (a value outside an enum): that is a refusal, so it gets the one
+            # second pass, 3 attempts more (bd fix-qoyz step 6, item 1)
+            parse_failure = request.node.callspec.id == "not-an-enum-value"
+            assert extractor.calls <= (6 if parse_failure else 3), after
+        else:
+            assert extractor.calls >= 2, after
     else:
         assert after == before
 
@@ -187,7 +195,7 @@ def test_the_fallback_fills_a_required_argument_the_extractor_missed(folder, mon
     after, extractor = _after(command, {"author": NOT_FOUND}, request, folder, monkeypatch, typed={"author": "Austen"})
 
     assert after == ("ok", {"author": "Austen"})
-    assert extractor.calls >= 2                     # the extractor was asked, and asked again, first
+    assert extractor.calls == 1                     # a missing value is not read again: the typed fill is next
 
 
 def test_the_fallback_cannot_add_a_value_the_checks_refuse(folder, monkeypatch):

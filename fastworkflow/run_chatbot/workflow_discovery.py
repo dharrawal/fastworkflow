@@ -89,10 +89,18 @@ def _workflow_is_trained(path: str) -> bool:
     if not isinstance(contexts, dict) or not contexts:
         return False
     contexts_to_check = (set(contexts) - _cme_context_names()) | {"*"}
+    missing = []
     for context_name in contexts_to_check:
         folder = _GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
         threshold_path = os.path.join(command_info_root, folder, "threshold.json")
         if not os.path.isfile(threshold_path):
+            missing.append(folder)
+    if missing:
+        # A context with no trained head may run on the model matcher: the one decision is
+        # intent_detector.startup_report (the notice itself is printed when the workflow starts).
+        from fastworkflow import intent_detector
+
+        if intent_detector.startup_report(path, missing)[0]:
             return False
     # Phase 9 step 4: artifacts without the not-here construction record are refused at load
     # (ChatSession.start_workflow), so they are not offered as trained here either.

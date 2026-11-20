@@ -34,9 +34,8 @@ from fastworkflow.utils.logging import logger
 # (conversations, turn records, feedback); the CLI no longer resumes workflow
 # context across process restarts (accepted trade-off).
 #
-# Remaining on-disk caches (enablecache below, the NLU clarification cache, and
-# utterance/embedding matching) use stdlib sqlite3 via
-# :class:`fastworkflow.kvstore.KVStore` / ``UtteranceCacheStore`` — JSON
+# Remaining on-disk caches (enablecache below and the NLU suggested-commands state)
+# use stdlib sqlite3 via :class:`fastworkflow.kvstore.KVStore` — JSON
 # values, WAL mode, no process-exclusive LOCK.
 # ----------------------------------------------------------------------
 _STATE_LOCK = threading.RLock()
@@ -399,11 +398,12 @@ class Workflow:
         if "command" in self._context:
             del self._context["command"]
 
-        # important to clear parameter extraction error state (if any)
-        if "stored_parameters" in self._context:
-            del self._context["stored_parameters"]
+        # important to clear the pending question (parameter extraction error state, a which-command question): it lives
+        # in the turn's waiting record, reached through the port (a context with none holds nothing of its own)
+        from fastworkflow import waiting
 
-        self._context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
+        if (port := self._context.get(waiting.PORT_KEY)) is not None:
+            port.clear()
 
         self._mark_dirty()
 

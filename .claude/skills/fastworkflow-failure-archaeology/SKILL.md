@@ -210,8 +210,8 @@ Three fixes in rapid succession, two of them on the same day (2026-06-15):
   holding a strong reference IS the session.
 - **v2.21.6 (3fabdb0):** security dependency updates rounding out the patch train.
 - **Status:** hot path settled. speedict (`from speedict import Rdict`) is still used,
-  intentionally, at: `cache_matching.py`, the `enablecache` decorator in `workflow.py`, the
-  NLU clarification cache (`_workflows/command_metadata_extraction/intent_detection.py`), and
+  intentionally, at: the `enablecache` decorator in `workflow.py`, the
+  NLU suggested-commands state (`_workflows/command_metadata_extraction/intent_detection.py`), and
   `run_fastapi_mcp/conversation_store.py`; `session_state_store.py` stores plain JSON but
   still keys its disk folder off `SPEEDDICT_FOLDERNAME`. Open-issue note — verified facts
   only: **fix-7kp** (created 2026-06-16 00:32:40Z, OPEN) and **fix-2jo** (00:32:49Z, nine

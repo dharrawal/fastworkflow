@@ -62,7 +62,7 @@ Every file:line below was verified against that tree; re-verification one-liners
 
 | # | Symptom | Most likely cause | Discriminating experiment | Fix / workaround |
 |---|---|---|---|---|
-| T1 | Wrong command matched, or import error naming a command file that no longer exists | (a) stale persisted JSON snapshots (pre-v2.22.1 artifacts), (b) in-process `lru_cache` staleness in a long-running process, (c) a learned bad mapping in `___convo_info`, (d) genuine misclassification | Compare `compute_commands_source_fingerprint()` output vs the `source_fingerprint` field inside both JSONs; check process uptime vs file edit time; grep the utterance in the `___convo_info` cache | (a) auto-fixed on next load in ≥2.22.1; (b) restart the process or call `RoutingRegistry.clear_registry()`; (c) delete `___convo_info/`; (d) retrain / add plain_utterances |
+| T1 | Wrong command matched, or import error naming a command file that no longer exists | (a) stale persisted JSON snapshots (pre-v2.22.1 artifacts), (b) in-process `lru_cache` staleness in a long-running process, (c) removed (a learned similarity-cache mapping; the cache is gone), (d) genuine misclassification | Compare `compute_commands_source_fingerprint()` output vs the `source_fingerprint` field inside both JSONs; check process uptime vs file edit time| (a) auto-fixed on next load in ≥2.22.1; (b) restart the process or call `RoutingRegistry.clear_registry()`; (c) n/a; (d) retrain / add plain_utterances |
 | T2 | Crash or FileNotFoundError on `___command_info/<ctx>/threshold.json`; first message fails | Untrained workflow (or a test/experiment wiped the trained model — fix-0hb) | `python -c` call to `is_workflow_trained()` (below) | `fastworkflow train <wf> <env> <passwords>`; for the bundled hello_world: `fastworkflow train ./fastworkflow/examples/hello_world ./env/.env ./passwords/.env` |
 | T3 | `fastworkflow train <your-workflow>` also retrains fastWorkflow's internal CME workflow, every single time | `is_fast_workflow_trained` checks `___command_info/ErrorCorrection/largemodel.pth`, but training has excluded the `ErrorCorrection` context since v2.7.0 — the file is never produced, so the check can never pass | `ls fastworkflow/_workflows/command_metadata_extraction/___command_info/` → only `IntentDetection` and `global` model folders exist | Known mismatch; verified in code 2026-07-09 (see T3 detail). No fix on main. Workaround: none safe; do NOT hand-create the folder. Budget the extra CME train time |
 | T4 | Parameter extraction loops: keeps replying "missing information" with fields stuck at NOT_FOUND | Field metadata too weak for the LLM extractor, agent parroting `examples` values (deliberately rejected), or the sentinel env vars changed | Try the same command with explicit `<param>value</param>` XML (agent mode parses this by regex before any LLM call); check `MISSING_INFORMATION_ERRMSG`/`NOT_FOUND` env values are the template defaults | Improve `Field(description=, examples=, pattern=)` in the command's `Signature.Input`; in deterministic mode type `abort` to escape the state |
@@ -81,8 +81,7 @@ Every file:line below was verified against that tree; re-verification one-liners
 ### T1 — Wrong command matched / stale command caches
 
 Intent detection tries, in order (`fastworkflow/_workflows/command_metadata_extraction/intent_detection.py:99-133`):
-exact first-token match → Levenshtein fuzzy match (threshold 0.3) → embedding cache match at 0.85 cosine
-(`cache_match`, `fastworkflow/cache_matching.py:131`) → transformer `CommandRouter.predict`. Distinguish four causes:
+exact first-token match → Levenshtein fuzzy match (threshold 0.3) → local model `CommandRouter.predict` → remote decision model → question. Distinguish four causes:
 
 1. **Stale persisted snapshots** (fixed in v2.22.1, commit b5747df): before the fix, `routing_definition.json`
    had *no* staleness check and `command_directory.json` used newest-mtime (blind to deletions/renames);
@@ -100,10 +99,7 @@ exact first-token match → Levenshtein fuzzy match (threshold 0.3) → embeddin
    cache, the command-directory lru_cache, and the module import cache — `command_routing.py:410-425`).
    Note the fingerprint embeds absolute paths + `mtime_ns`, so moving a workflow dir or a fresh checkout triggers a
    harmless JSON rebuild (not a retrain).
-3. **Learned clarification cache**: a successful "you misunderstood"-style clarification stores the ORIGINAL
-   utterance → resolved command with its embedding (`intent_detection.py:151-163` calling `store_utterance_cache`),
-   so future messages ≥0.85 similar skip the classifier. One bad learned mapping = persistently wrong command.
-   *Experiment/fix:* delete the workflow's `___convo_info/` directory (regenerated empty; you lose learned mappings).
+3. **(removed)** The learned clarification (similarity) cache no longer exists (fix-o5wi.8); an old `___convo_info/cache.sqlite3` is not read for it.
 4. **Genuine misclassification**: only after 1–3 are excluded. Then it is an NLU-quality problem —
    see `fastworkflow-nlu-pipeline-reference` (thresholds, wildcard negative class, utterance economics).
 
@@ -234,8 +230,7 @@ cache-sensitive.
 ### T10 — speedict/RocksDB notes
 
 Where Rdict still lives (post v2.21.4 hot-path removal, commit 6880b0a): the `enablecache` decorator
-(`fastworkflow/workflow.py:57`), NLU caches (`fastworkflow/cache_matching.py:67,148`,
-`intent_detection.py:200-274`), the conversation store (`run_fastapi_mcp/conversation_store.py:45`).
+(`fastworkflow/workflow.py:57`), the NLU suggested-commands state (`intent_detection.py`), the conversation store (`run_fastapi_mcp/conversation_store.py:45`).
 All open/close per operation because **RocksDB is single-writer** — two concurrent writers on one DB error out
 (hence the "one writer per channel / sticky routing" rule; enforcement is open issue fix-5ka).
 `LOG`, `*.sst`, `MANIFEST-*`, `CURRENT`, `LOCK` files inside `___convo_info/`, `___workflow_contexts/` are normal
@@ -278,7 +273,7 @@ was supplied, returns the default without consulting `os.environ`**. Consequence
 |---|---|---|---|
 | `RoutingRegistry._definitions` + `_GLOBAL_COMMAND_CLASS_CACHE` + `get_cached_command_directory` lru | process | `RoutingRegistry.clear_registry()` or restart | edits to `_commands/` invisible in a live process (T1b). Note: command-class cache is keyed `command_name:module_type` with NO workflow path — command names must be unique per process |
 | `command_directory.json` / `routing_definition.json` | disk, fingerprint-guarded | delete files (auto-rebuilt) — safe | stale routing pre-2.22.1 (T1a) |
-| `___convo_info/` Rdict caches | disk, per workflow | delete directory | learned wrong intent mapping (T1c), stale suggested-commands |
+| `___convo_info/` Rdict caches | disk, per workflow | delete directory | stale suggested-commands |
 | `___command_info/` model folders | disk, per workflow | **re-run `fastworkflow train`** (never hand-delete parts; deleting the whole folder forces full retrain) | wrong-era models; NOTE: failed retrain deliberately keeps prior artifacts runnable (prune happens only after success) |
 | DSPy disk/memory cache | user-global | `rm -rf ~/.dspy_cache` / `dspy.configure_cache(...)` | frozen LLM outputs (T9) |
 | `_WORKFLOW_REGISTRY` weakref session registry | process | drop references / restart; holding a reference IS the session | "session survived longer/shorter than expected"; CLI has NO cross-restart resume since v2.21.4 |

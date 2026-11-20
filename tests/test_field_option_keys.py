@@ -17,7 +17,7 @@ import fastworkflow
 from fastworkflow import FieldOptions, UiOptions
 from fastworkflow import planning_commands as pc
 from fastworkflow.field_options import OPTION_KEYS, ConfirmsOptions, CopiedOptions, RecordNamedOptions, UiOptions
-from fastworkflow.utils import argument_checks
+from fastworkflow.parameters import check as one_guard
 
 
 def _params(model, planning=False):
@@ -123,8 +123,8 @@ def test_converted_from_command_text_takes_a_field_out_of_the_copy_check_and_is_
         due: str = Field(default="", description="the due date", json_schema_extra={"converted_from_command_text": True})
         name: str = Field(default="", description="a name", json_schema_extra={"copied_from_command_text": True})
 
-    assert argument_checks.is_grounding_exempt(Input.model_fields["due"])
-    assert not argument_checks.is_grounding_exempt(Input.model_fields["name"])
+    assert one_guard.is_grounding_exempt(Input.model_fields["due"])
+    assert not one_guard.is_grounding_exempt(Input.model_fields["name"])
     # an execution command's Input: a converted field is not a planning option, so no param
     assert "due" not in _params(Input)
 

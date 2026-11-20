@@ -232,13 +232,13 @@ from fastworkflow.command_directory import CommandDirectory, compute_commands_so
 from fastworkflow.field_options import (
     CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, CONVERTED_FROM_COMMAND_TEXT, COMMAND_TEXT_AFTER_COMMAND_NAME,
     COPIED_FROM_COMMAND_TEXT, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT, UI)
+from fastworkflow.parameter_clarification import Extraction
 from fastworkflow.planning_command_json_schema_internal import (
     HAND_WRITTEN_AVAILABLE_FROM_KEY as _HAND_WRITTEN_AVAILABLE_FROM_KEY,
     PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS as _PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS,
 )
 from fastworkflow.utils.workflow_vocabulary import (
-    KIND_WORD_WHY, WorkflowVocabulary, description_kind_options, is_kind_word, is_pronoun_phrase,
-    load_workflow_vocabulary)
+    WorkflowVocabulary, description_kind_options, load_workflow_vocabulary)
 from fastworkflow.observation_offloading.finish_check import (
     KIND_COMMAND,
     KIND_CONDITIONAL,
@@ -271,11 +271,12 @@ from fastworkflow.workflow_inheritance_model import (
     WorkflowInheritanceModelError,
 )
 
+from fastworkflow.parameters import check as one_guard  # noqa: E402 - the one guard module (bd fix-qoyz step 3)
+from fastworkflow.parameters import ask  # noqa: E402 - the one question builder (bd fix-qoyz step 4)
+from fastworkflow.parameters import rules  # noqa: E402 - the shared text helpers (bd fix-qoyz step 1)
+
 #: A ``classifier_confirms`` check replaces the planner's argument only at or above this probability.
 VERIFY_THRESHOLD = 0.65
-NUMBER_WORDS = {w: i for i, w in enumerate(
-    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
-    "sixteen seventeen eighteen nineteen twenty".split())}
 #: The value a ``classifier_confirms`` check of a ``record_named_in_command_text`` parameter gives when the request names none.
 NO_SUBJECT = "none"
 #: A ``classifier_confirms`` check of a record-naming parameter chooses among at most this many of the request's subjects.
@@ -311,46 +312,31 @@ class PlanningCommandInputError(PlanningCommandCallError):
     planner for one more typed call. ``fields`` names the arguments a ``Refused(field=...)`` named:
     the question put to the user then asks for those arguments."""
 
-    def __init__(self, message: str = "", fields=()):
+    def __init__(self, message: str = "", fields=(), gap: "one_guard.Gap | None" = None):
         super().__init__(message)
         self.fields: tuple[str, ...] = tuple(fields)
-        #: Every argument the call is missing or has refused (``ArgumentGaps``), when the raiser worked them out;
+        #: The refusal of ONE argument as data (``parameters.check.Gap``: name, state, code, why, value), when a guard
+        #: or a rule of the roles refused it. Everything that needs the argument's name or the reason reads it from
+        #: here, never from the message text.
+        self.gap: "one_guard.Gap | None" = gap
+        #: Every argument the call is missing or has refused (``Extraction``), when the raiser worked them out;
         #: ``check_arguments`` itself stops at the first one.
-        self.gaps: "ArgumentGaps | None" = None
-
-
-#: The refusal of one argument: ``name=<value repr> <why>`` (see ``check_arguments``).
-_ARGUMENT_REFUSAL = re.compile(r"^(?P<name>[A-Za-z_]\w*)=(?P<value>.*?) (?P<why>(?:is|names) .*)$")
-_MISSING_ARGUMENT = re.compile(r"^missing required argument (?P<name>[A-Za-z_]\w*)$")
+        self.gaps: "Extraction | None" = None
+        #: The rule that refused (``parameters.check.Gap.code``) when a guard raised it, else empty. ``missing``
+        #: says a required argument is simply not there: nothing the model produced was refused.
+        self.code: str = ""
 
 
 #: The refusals of a free-text value that ``refusal_question`` asks for without quoting the value:
 #: a template token or an invented name, a pronoun the request does not tie to one subject, a
 #: word of the workflow's own vocabulary (a kind of record, a field name, a declared choice).
-PLACEHOLDER_WHY = "is a placeholder, not a value"
+PLACEHOLDER_WHY = one_guard.PLACEHOLDER_WHY
 PRONOUN_WHY = "is a pronoun the request does not tie to a single subject"
-#: Words of an invented example value ("John Doe"): a closed list, as PRONOUNS is.
-PLACEHOLDER_WORDS = frozenset({
-    "john", "jane", "doe", "smith", "foo", "bar", "baz", "example", "placeholder", "unknown",
-    "unspecified", "tbd", "todo", "n/a", "none", "null"})
-#: A template token written as is: brackets and braces, an upper-case ``NAME_1``, "unspecified_x".
-_PLACEHOLDER_SHAPE = re.compile(r"[<>{}]|\b[A-Z][A-Z_]*_\d+\b|(?i:\bunspecified\w*|\bplaceholder\b)")
-
-
-def _placeholder_like(text: str, folded_request: str) -> bool:
-    """A template token or an invented example value. The example words count only when the
-    request does not itself write the value (a real person named "John Doe" passes)."""
-    if _PLACEHOLDER_SHAPE.search(text):
-        return True
-    words = re.findall(r"[a-z/]+", text.lower())
-    return bool(words) and any(w in PLACEHOLDER_WORDS for w in words) and text.lower() not in folded_request
-
-
 def _role_fits(request: str, value: str, p: "Param") -> bool:
     """Whether the request writes *p*'s role just before *value*: the input's name, as words, among
     the four words before the value's first occurrence in the request."""
-    folded = _fold(request).lower()
-    at = folded.find(_fold(value).lower())
+    folded = rules.fold(request).lower()
+    at = folded.find(rules.fold(value).lower())
     if at < 0:
         return False
     words = re.findall(r"[a-z0-9_]+", folded[:at].replace("_", " "))[-4:]
@@ -394,10 +380,7 @@ def missing_argument_question(command: PlanningCommandCommand, name: str) -> str
     The same words for every route that finds the argument missing: a planning command call's refusal
     (``refusal_question``), whatever its check found.
     """
-    task = command.name.replace("_", " ")
-    label = name.replace("_", " ")
-    return (f"I can't run {task} yet: your request does not say which {label} to use. "
-            f"Which {label} should I use?")
+    return ask.word(form=ask.FORM_ARGUMENT, command=command, name=name).text
 
 
 def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> str:
@@ -407,84 +390,12 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     does not say it, the value the planner took is not in the request, or it is not one of the
     allowed values. A refusal that names no input (a rule the planning command's own hook or Input raised)
     is put in its own words. When the call is missing or has refused several arguments (``refusal.gaps``), one
-    question names them all (``gaps_question``).
+    question names them all (``gaps_question``). The words are ``parameters.ask.word``'s.
     """
-    gaps = refusal_gaps(command, refusal)
-    if len(gaps.names) > 1:
-        return gaps_question(command, gaps)
-    task = command.name.replace("_", " ")
-    text = str(refusal)
-    if refusal.fields:
-        # A Refused(field=...) from the hook: the arguments it named are asked for, with its message
-        labels = " and ".join(name.replace("_", " ") for name in refusal.fields)
-        detail = re.sub(r"^validate_extracted_parameters: ", "", text)
-        return f"I can't run {task} yet: {detail}. What should the {labels} be?"
-    if match := _MISSING_ARGUMENT.match(text):
-        return missing_argument_question(command, match["name"])
-    match = _ARGUMENT_REFUSAL.match(text)
-    param = next((p for p in command.params if match and match["name"] == p.name), None)
-    if param is not None:
-        label = param.name.replace("_", " ")
-        value, why = match["value"], match["why"]
-        if why in (PLACEHOLDER_WHY, PRONOUN_WHY, KIND_WORD_WHY):
-            return missing_argument_question(command, param.name)
-        if why.startswith("is also the value of "):
-            other = why.removeprefix("is also the value of ").replace("_", " ")
-            return (f"I can't run {task} yet: {value} is the {other} in your request, not the {label}. "
-                    f"Which {label} should I use?")
-        if why.startswith("is not written in the request"):
-            wrong = f"the {label} {value} is not in your request"
-        elif why.startswith("names no record of the request"):
-            wrong = f"{value} does not match anything in your request"
-        elif why.startswith("is not one of "):
-            wrong = f"the {label} must be one of: {', '.join(param.values)}"
-        elif why.startswith("is not an integer"):
-            wrong = f"the {label} must be a whole number"
-        elif why.startswith("is not true or false"):
-            wrong = f"the {label} must be yes or no"
-        else:
-            wrong = f"the {label} {value} is not valid"
-        return f"I can't run {task} yet: {wrong}. Which {label} should I use?"
-    detail = re.sub(r"^(?:validate_extracted_parameters|the arguments break a rule of \S+): ", "", text)
-    return f"I can't run {task} yet: {detail}. What should I change?"
+    return ask.word(form=ask.FORM_REFUSAL, command=command, refusal=refusal).text
 
 
-@dataclass(frozen=True)
-class ArgumentGaps:
-    """What a planning command call still lacks: the required arguments missing, the ones refused as invalid (each with
-    why), and the checked values of the others (the ones to keep)."""
-
-    missing: tuple[str, ...] = ()
-    invalid: tuple[tuple[str, str], ...] = ()
-    values: dict = field(default_factory=dict, compare=False)
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys([*self.missing, *(name for name, _ in self.invalid)]))
-
-    def describe(self) -> str:
-        """The gaps in a plain phrase: ``missing required argument a, b`` / ``c=... is not ...`` (the not-run reason)."""
-        parts = []
-        if self.missing:
-            parts.append(f"missing required argument{'s' if len(self.missing) > 1 else ''} {', '.join(self.missing)}")
-        parts.extend(f"{name} {why}" for name, why in self.invalid)
-        return "; ".join(parts)
-
-
-def _refusal_gap(command: PlanningCommandCommand, refusal: PlanningCommandInputError):
-    """``(name, "missing" | "invalid", why)`` of the one argument a ``check_arguments`` refusal names, else None."""
-    text = str(refusal)
-    if match := _MISSING_ARGUMENT.match(text):
-        return match["name"], "missing", ""
-    match = _ARGUMENT_REFUSAL.match(text)
-    if match and any(p.name == match["name"] for p in command.params):
-        if match["why"] in (PLACEHOLDER_WHY, PRONOUN_WHY, KIND_WORD_WHY):
-            return match["name"], "missing", ""
-        return match["name"], "invalid", match["why"]
-    return None
-
-
-def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None = None) -> ArgumentGaps:
+def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None = None) -> Extraction:
     """Every required argument *raw* leaves missing or refused (``check_arguments`` stops at the first): the guards run
     again with each gap's parameter left out, until they pass or refuse something that names no argument. The values
     of the other arguments, as the guards checked them, are kept in ``values`` (the ones the request gave, not defaults).
@@ -494,60 +405,37 @@ def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verd
     work = command
     args: dict = {}
     while True:
-        try:
-            args, _ = check_arguments(work, raw, request, verdicts)
+        checked = one_guard.check_plan(work, raw, request, verdicts)
+        stop = checked.stop
+        if stop is None:
+            args = checked.values
             break
-        except PlanningCommandInputError as refused:
-            gap = _refusal_gap(work, refused)
-            if gap is None:
-                break
-            name, kind, why = gap
-            (missing.append(name) if kind == "missing" else invalid.append((name, why)))
-            work = replace(work, params=tuple(p for p in work.params if p.name != name))
-        except PlanningCommandCallError:
+        if stop.call:     # the check finds no such argument in the request at all: it names no argument to ask for
             break
+        (missing.append(stop.name) if stop.state == one_guard.MISSING else invalid.append((stop.name, stop.why)))
+        work = replace(work, params=tuple(p for p in work.params if p.name != stop.name))
     kept = {name: value for name, value in args.items() if not _empty(raw.get(name)) and name not in missing
             and name not in {n for n, _ in invalid}}
-    return ArgumentGaps(missing=tuple(missing), invalid=tuple(invalid), values=kept)
+    return Extraction(missing=tuple(missing), invalid=tuple(invalid), values=kept)
 
 
-def refusal_gaps(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> ArgumentGaps:
+def refusal_gaps(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> Extraction:
     """The gaps a refusal stands for: its own ``gaps`` when the raiser worked them out, else the one argument it names
     (a hook's ``Refused(field=...)`` names invalid ones)."""
     if refusal.gaps is not None:
         return refusal.gaps
     if refusal.fields:
-        return ArgumentGaps(invalid=tuple((name, str(refusal)) for name in dict.fromkeys(refusal.fields)))
-    gap = _refusal_gap(command, refusal)
-    if gap is None:
-        return ArgumentGaps()
-    name, kind, why = gap
-    return ArgumentGaps(missing=(name,)) if kind == "missing" else ArgumentGaps(invalid=((name, why),))
+        why = getattr(refusal, "refusal", None) or str(refusal)
+        return Extraction(invalid=tuple((name, why) for name in dict.fromkeys(refusal.fields)))
+    gap = refusal.gap
+    if gap is None or gap.name not in {p.name for p in command.params}:
+        return Extraction()
+    return Extraction(missing=(gap.name,)) if gap.state == one_guard.MISSING else Extraction(invalid=((gap.name, gap.why),))
 
 
-def gaps_question(command: PlanningCommandCommand, gaps: ArgumentGaps) -> str:
+def gaps_question(command: PlanningCommandCommand, gaps: Extraction) -> str:
     """One question for every argument a call lacks: the ones the request does not give, then the ones refused (why)."""
-    task = command.name.replace("_", " ")
-
-    def label(name: str) -> str:
-        return name.replace("_", " ")
-
-    def joined(names) -> str:
-        names = [label(n) for n in names]
-        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
-
-    parts = []
-    if gaps.missing:
-        parts.append(f"your request does not give the {joined(gaps.missing)}")
-    parts.extend(f"the {label(name)} {why}" for name, why in gaps.invalid)
-    names = list(gaps.names)
-    if len(names) == 1:
-        ask = f"Which {label(names[0])} should I use?"
-    else:
-        example = "; ".join(f"{name}: ..." for name in names[:2])
-        ask = (f"What should the {joined(names)} be? Give each on its own line as name: value "
-               f"({example}).")
-    return f"I can't run {task} yet: {'; '.join(parts)}. {ask}"
+    return ask.word(gaps, form=ask.FORM_GAPS, command=command).text
 
 
 def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> bool:
@@ -562,11 +450,7 @@ def refusal_names_an_input(command: PlanningCommandCommand, refusal: PlanningCom
     """
     if refusal.fields or (refusal.gaps is not None and refusal.gaps.names):
         return True
-    text = str(refusal)
-    if _MISSING_ARGUMENT.match(text):
-        return True
-    match = _ARGUMENT_REFUSAL.match(text)
-    return match is not None and any(p.name == match["name"] for p in command.params)
+    return refusal.gap is not None and any(p.name == refusal.gap.name for p in command.params)
 
 
 def planning_refusal_parameter_request(
@@ -580,11 +464,7 @@ def planning_refusal_parameter_request(
     The shapes ``refusal_question`` reads: ``Refused(field=...)`` from the hook (``fields``), a missing argument, and a
     guard's refusal of one argument (a placeholder, pronoun or kind word reads as missing; any other reason as invalid).
     """
-    gaps = refusal_gaps(command, refusal)
-    if not gaps.names:
-        return None
-    return {"command": command.name, "missing": list(gaps.missing), "invalid": [name for name, _ in gaps.invalid],
-            "values": {name: str(value) for name, value in gaps.values.items()}}
+    return ask.word(form=ask.FORM_REFUSAL, command=command, refusal=refusal).request
 
 
 # ---------------------------------------------------------------- the parsed planning command
@@ -1679,7 +1559,8 @@ def _merge_enum_lines(p: Param, merged: list[list], grid: list[dict]) -> list[li
     of lines, each written for its own values of ``p`` alone (the other arguments alike), of
     one length; their n-th lines become one line with ``<a or b, by p>``."""
     own = [env[p.name] for env in grid]
-    others = [tuple((k, v) for k, v in env.items() if k != p.name) for env in grid]
+    # the other arguments' values as hashable keys: a list argument's value is a list
+    others = [tuple((k, tuple(v) if isinstance(v, list) else v) for k, v in env.items() if k != p.name) for env in grid]
 
     info = []   # per line: (values of p it is written for, the other arguments it is written for)
     for _line, points in merged:
@@ -2224,31 +2105,6 @@ def _producer_types_match(declaring_annotation: Any, target_annotation: Any) -> 
             if elem == declaring_annotation or _strip_optional(elem) == decl_inner:
                 return True
     return False
-
-
-def _discover_dir_command_files(root: str) -> dict[str, str]:
-    """``{qualified_name: filepath}`` for ``.py`` command files under *root* (root and
-    one context subfolder deep, skipping ``_``- and ``.``-prefixed entries)."""
-    if not os.path.isdir(root):
-        return {}
-    out: dict[str, str] = {}
-    for entry in sorted(os.listdir(root)):
-        if entry.startswith(("_", ".")):
-            continue
-        path = os.path.join(root, entry)
-        if os.path.isdir(path):
-            for sub in sorted(os.listdir(path)):
-                if sub.startswith(("_", ".")):
-                    continue
-                sub_path = os.path.join(path, sub)
-                stem, ext = os.path.splitext(sub)
-                if ext == ".py" and os.path.isfile(sub_path):
-                    out[f"{entry}/{stem}"] = sub_path
-            continue
-        stem, ext = os.path.splitext(entry)
-        if ext == ".py" and os.path.isfile(path):
-            out[stem] = path
-    return out
 
 
 def _read_base_contexts(
@@ -3206,77 +3062,50 @@ def _validate_arguments(command: PlanningCommandCommand, args: dict, request: st
     return checked
 
 
-def _validation_text(error) -> str:
-    """A pydantic ValidationError as one line: ``field: message; ...`` (a validator's own
-    ValueError text without pydantic's "Value error, " prefix)."""
-    parts = []
-    for e in error.errors():
-        message = str(e.get("msg", "")).removeprefix("Value error, ")
-        where = ".".join(str(x) for x in e.get("loc", ()))
-        parts.append(f"{where}: {message}" if where else message)
-    return "; ".join(parts)
-
-
-def _validator_refusal(refusal, trace) -> PlanningCommandInputError:
-    """The error for a ``fastworkflow.Refused`` an Input's model validator raised: the hook's wording
-    (``validate_extracted_parameters: <message>``), its ``fields``, the bare message as ``refusal`` and the
-    writes the validators made before it (``written``)."""
-    error = PlanningCommandInputError(f"validate_extracted_parameters: {refusal}", fields=refusal.fields)
-    error.refusal = str(refusal)
-    error.written = trace.written()
-    return error
-
-
 def check_input(command: PlanningCommandCommand, args: dict, request: str, workflow=None) -> dict:
     """Validate ``args`` against the planning command's ``Input``: its field types and its model validators, which
-    get the validation context ``{"command_text": request, "workflow": workflow, "command": command.name}``.
+    get the validation context ``{"command_text": request, "workflow": workflow, "command": command.name}``
+    (``parameters.validate.validate``, the one driver; this function words its outcome for a typed planning call).
 
     Raises PlanningCommandInputError, whose message says which field breaks which rule (a field's type or
     field validator). A ``fastworkflow.Refused`` a model validator raised is the refusal, in the hook's words:
     ``validate_extracted_parameters: <message>``, with its ``fields`` (``refusal`` holds the bare message). A plain
     ``ValueError`` or ``AssertionError`` is the same refusal with no field. Any other exception a model validator raises is a PlanningCommandCallError
     ``validate_extracted_parameters raised <Type>: <text>`` (``raised`` names its type, ``detail`` its text).
-    Both carry ``written``: the fields the validators changed before they stopped (the execution path keeps
-    them, as the hook did; the typed planning call drops them).
+    A refusal carries no writes: what a validator rewrote before it stopped is dropped (one rule, both kinds).
 
     Returns the fields the validators changed, ``{name: value}``, which the caller writes back onto the
     arguments (a validator writes its correction to ``self`` and returns it, spec 3.4). Empty when none changed.
     """
-    import fastworkflow
-    from pydantic import ValidationError
-    from fastworkflow.utils.input_validation import ValidationContext, ValidationTrace, validate_input
+    from fastworkflow.parameters import validate as one_driver
 
     passed = _absent_as_none(command, args)
-    context = ValidationContext({"command_text": request, "workflow": workflow, "command": command.name})
-    trace = ValidationTrace()
     try:
-        validated = validate_input(command.input_model, passed, context, trace)
-    except ValidationError as exc:
-        refusal = next((e["ctx"]["error"] for e in exc.errors()
-                        if isinstance(e.get("ctx", {}).get("error"), fastworkflow.Refused)), None)
-        if refusal is not None:
-            raise _validator_refusal(refusal, trace) from None
-        raise PlanningCommandInputError(f"the arguments break a rule of {command.name}: {_validation_text(exc)}") from None
-    except fastworkflow.Refused as refusal:
-        raise _validator_refusal(refusal, trace) from None
-    except (ValueError, AssertionError) as exc:
+        outcome = one_driver.validate(command.input_model, passed, command_text=request, workflow=workflow,
+                                      command_name=command.name)
+    except one_driver.ValidatorReturnError as exc:
+        raise PlanningCommandCallError(str(exc)) from None
+    refusal = outcome.refusal
+    if refusal is None:
+        return outcome.written
+    if refusal.kind == one_driver.RULE:
+        error = PlanningCommandInputError(refusal.message)
+        error.refusal = refusal.detail or refusal.message
+        raise error from None
+    if refusal.kind == one_driver.REFUSED:
+        error = PlanningCommandInputError(f"validate_extracted_parameters: {refusal.message}", fields=refusal.fields)
+        error.refusal = refusal.message
+        raise error from None
+    if refusal.kind == one_driver.PLAIN:
         # A plain ValueError (or AssertionError) stays a refusal with no field (spec 3.3): the extractor is asked
         # once more, as the pydantic validators' ValueError was at HEAD. Its text is the hook's prefixed message.
-        error = PlanningCommandInputError(f"validate_extracted_parameters: {exc}")
-        error.refusal = str(error)
-        error.written = trace.written()
+        error = PlanningCommandInputError(f"validate_extracted_parameters: {refusal.message}")
+        error.refusal = refusal.message
         raise error from None
-    except Exception as exc:  # noqa: BLE001 - workflow code; the planner falls back to the template
-        failure = PlanningCommandCallError(f"validate_extracted_parameters raised {type(exc).__name__}: {exc}")
-        failure.raised = type(exc).__name__
-        failure.detail = str(exc)
-        failure.written = trace.written()
-        raise failure from None
-    if not isinstance(validated, command.input_model):
-        raise PlanningCommandCallError(f"{command.name}: a validator on Input must return self (the corrected Input) "
-                                       f"or raise; it returned {type(validated).__name__}")
-    return {name: getattr(validated, name) for name in command.input_model.model_fields
-            if name in passed and getattr(validated, name) != passed[name]}
+    failure = PlanningCommandCallError(f"validate_extracted_parameters raised {refusal.raised}: {refusal.message}")
+    failure.raised = refusal.raised
+    failure.detail = refusal.message
+    raise failure from None
 
 
 def _check_roles(command: PlanningCommandCommand, args: dict, request: str) -> None:
@@ -3292,17 +3121,14 @@ def _check_roles(command: PlanningCommandCommand, args: dict, request: str) -> N
                 continue
             fits_p, fits_q = _role_fits(request, value, p), _role_fits(request, value, q)
             loser, other = (q, p) if fits_p and not fits_q else (p, q)
-            raise PlanningCommandInputError(f"{loser.name}={args[loser.name]!r} is also the value of {other.name}")
+            why = f"is also the value of {other.name}"
+            raise PlanningCommandInputError(
+                f"{loser.name}={args[loser.name]!r} {why}",
+                gap=one_guard.Gap(loser.name, one_guard.INVALID, "role", why, args[loser.name],
+                                  f"{loser.name}={args[loser.name]!r} {why}"))
 
 
 # ---------------------------------------------------------------- arguments and guards
-
-def _clean_str(value) -> str:
-    text = str(value).strip()
-    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'`":
-        text = text[1:-1].strip()
-    return text.rstrip(" .;,")
-
 
 def strip_words(text: str, words) -> str:
     """``text`` without the *words* at either end (case-insensitive; the words are whole words of ``text``).
@@ -3374,7 +3200,7 @@ def _confident(verdicts: dict | None, name: str):
 def _allowed_values(command: PlanningCommandCommand, p: Param) -> tuple[str, ...]:
     """The values a ``str`` argument allows when its type does not say (``argument_checks.allowed_values``,
     the execution checker's reader: on a planning command, a ``One of: a, b`` list in its description)."""
-    from fastworkflow.utils.argument_checks import allowed_values  # argument_checks imports this module
+    from fastworkflow.parameters.rules import allowed_values
 
     info = command.input_model.model_fields.get(p.name) if command.input_model is not None else None
     return allowed_values(info) if info is not None else ()
@@ -3384,7 +3210,7 @@ def _request_numbers(request: str, args: dict, command: PlanningCommandCommand) 
     """The numbers ``request`` writes (digits, with a thousands separator or a minus sign, or number words)
     outside the str arguments' text. The execution side's reader (``argument_checks.written_numbers``), so
     "1,000" is 1000 and "-5" is -5 on both sides."""
-    from fastworkflow.utils.argument_checks import written_numbers  # argument_checks imports this module
+    from fastworkflow.parameters.rules import written_numbers
 
     texts = [str(args.get(p.name) or "") for p in command.params if p.type == "str"]
     return written_numbers(request, [text for text in texts if text])
@@ -3394,8 +3220,8 @@ def _spans(request: str, text: str) -> list[tuple[int, int]]:
     """Where ``text`` occurs in ``request`` (case-insensitive; any run of spaces, either apostrophe)."""
     if not text:
         return []
-    pattern = re.escape(_fold(text)).replace(r"\ ", r"\s+").replace("'", "['’]")
-    return [(m.start(), m.end()) for m in re.finditer(pattern, _fold(request), re.I)]
+    pattern = re.escape(rules.fold(text)).replace(r"\ ", r"\s+").replace("'", "['’]")
+    return [(m.start(), m.end()) for m in re.finditer(pattern, rules.fold(request), re.I)]
 
 
 def _whole_identifier(request: str, text: str, identifiers: tuple) -> tuple[str | None, bool]:
@@ -3567,21 +3393,6 @@ def _as_subject(request: str, text: str, subjects: list[str],
 def _request_subjects(command: PlanningCommandCommand, request: str) -> list[str]:
     from fastworkflow.split_merge import request_subjects
     return request_subjects(request, command.identifiers)
-
-
-#: Dashes folded to "-" when an argument is looked up in the request (non-breaking hyphen etc.).
-_DASHES = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"})
-
-
-def _fold(text: str) -> str:
-    """``text`` with each Unicode dash as "-" (one character for one: positions are kept)."""
-    return text.translate(_DASHES)
-
-
-def _written(text: str, folded: str, request: str) -> str | None:
-    """*text* as the request writes it (its own spelling, dashes and case ignored), or None."""
-    at = folded.find(_fold(text).lower()) if text else -1
-    return request[at:at + len(text)] if at >= 0 else None
 
 
 def _screen(command: PlanningCommandCommand, raw: dict, request: str) -> tuple[dict, dict[str, str]]:
@@ -3770,212 +3581,13 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
     PlanningCommandInputError (the planner fills the call once more, ``typed_planning_call``); a sure check
     that the request names no such argument raises PlanningCommandCallError.
     """
-    from fastworkflow.utils.signatures import is_sentinel_number
-    from fastworkflow.utils.argument_checks import allowed_member, not_allowed_why  # it imports this module
-
-    notes: list[str] = []
-    args: dict = {}
-    # verify "alone": no model fills the field; its default stands until a sure verdict replaces it
-    raw = {**raw, **{p.name: p.default for p in command.params if p.alone}}
-    folded = _fold(request).lower()
-    subjects = _request_subjects(command, request)
-    named = {subject.lower() for subject in subjects}
-    if vocabulary is None:
-        vocabulary = _vocabulary_for(command)
-    kinds = frozenset(v.lower() for p in command.params if p.type == "enum" for v in p.values)
-    single = {**raw, **{p.name: raw.get(p.name) if p.type == "list[str]" else _single(raw.get(p.name))
-                        for p in command.params}}
-    screened, refused = _screen(command, single, request)
-
-    def refuse(p: Param, value, why: str) -> None:
-        if p.required:
-            raise PlanningCommandInputError(f"{p.name}={value!r} {why}")
-        notes.append(f"{p.name}={value!r} {why}: default")
-        args[p.name] = p.default
-
-    for p in command.params:
-        shown = raw.get(p.name)   # the model's argument, as the notes show it
-        value = screened.get(p.name, single[p.name])
-        compared = shown          # what a changed spelling is noted against
-        sure = _confident(verdicts, p.name) if p.verify else None
-        if sure is not None and p.type == "enum" and (_empty(value) or _clean_str(value).lower() not in p.values):
-            notes.append(f"{p.name}={shown!r} -> {sure[0]!r} (check {sure[1]:.2f})")
-            args[p.name] = sure[0]
-            continue
-        if sure is not None and p.type == "str":
-            chosen = None if sure[0] == NO_SUBJECT else sure[0]
-            given = "" if _empty(value) or p.name in refused else strip_words(_clean_str(value), p.ignore)
-            if (chosen or "").lower() != given.lower():
-                notes.append(f"{p.name}={shown!r} -> {chosen or p.default!r} (check {sure[1]:.2f})")
-            if chosen is None:
-                if p.required:
-                    raise PlanningCommandCallError(f"{p.name}={shown!r}: the check finds no {p.name} in the request")
-                args[p.name] = p.default
-                continue
-            value = compared = chosen
-        elif p.name in refused:
-            refuse(p, shown, refused[p.name])
-            continue
-        if p.type == "list[str]":
-            # no check by type (design 2.46): the elements are cleaned; with in_request, each one the
-            # request does not write is dropped, and the request's own spelling of the rest is kept
-            items = [text for text in (_clean_str(item) for item in _list_items(value))
-                     if text and text != "None"]
-            if p.in_request:
-                kept = []
-                for item in items:
-                    exact = _written(item, folded, request)
-                    if exact is None:
-                        notes.append(f"{p.name}={item!r} is not written in the request: dropped")
-                    else:
-                        kept.append(exact)
-                if items and not kept and p.required:
-                    raise PlanningCommandInputError(f"{p.name}={shown!r} is not written in the request")
-                items = kept
-            if not items and p.required:
-                raise PlanningCommandInputError(f"missing required argument {p.name}")
-            args[p.name] = items if items else list(p.default)
-            continue
-        if _empty(value):
-            if p.required:
-                raise PlanningCommandInputError(f"missing required argument {p.name}")
-            args[p.name] = p.default
-            continue
-        if p.type == "bool":
-            if isinstance(value, str):
-                if value.strip().lower() not in ("true", "false"):
-                    raise PlanningCommandInputError(f"{p.name}={shown!r} is not true or false")
-                value = value.strip().lower() == "true"
-            args[p.name] = bool(value)
-        elif p.type == "int":
-            try:
-                number = int(str(value).strip())
-            except ValueError:
-                raise PlanningCommandInputError(f"{p.name}={shown!r} is not an integer") from None
-            if is_sentinel_number(number):   # the extractor's "not given" marker or a made-up extreme
-                if p.required:
-                    raise PlanningCommandInputError(f"missing required argument {p.name}")
-                number = p.default
-            args[p.name] = number
-        elif p.type == "float":
-            try:
-                number = float(str(value).strip())
-            except ValueError:
-                raise PlanningCommandInputError(f"{p.name}={shown!r} is not a number") from None
-            if not math.isfinite(number) or is_sentinel_number(number):   # the extractor's "not given" marker
-                if p.required:
-                    raise PlanningCommandInputError(f"missing required argument {p.name}")
-                number = p.default
-            args[p.name] = number
-        elif p.type == "enum":
-            text = _clean_str(value).lower()
-            if text not in p.values:
-                raise PlanningCommandInputError(f"{p.name}={shown!r} is not one of {', '.join(p.values)}")
-            args[p.name] = text
-        else:
-            text = strip_words(_clean_str(value), p.ignore)
-            if text.strip() == "None":
-                # the missing-value marker, not a value: the argument is absent (as the parameter
-                # screen treats it), so a required one is missing and an optional one takes its default
-                if p.required:
-                    raise PlanningCommandInputError(f"missing required argument {p.name}")
-                args[p.name] = p.default
-                continue
-            allowed = _allowed_values(command, p)
-            if allowed and text:
-                # the allowed-values rule shared with the execution checker (argument_checks.allowed_member):
-                # a value outside the field's "One of:" list is refused; one in it takes the declared spelling.
-                # The checks below still run (an in_request field keeps the request's spelling).
-                member = allowed_member(allowed, text)
-                if member is None:
-                    refuse(p, shown, not_allowed_why(allowed))
-                    continue
-                if member != text:
-                    notes.append(f"{p.name}={shown!r} -> {member!r} (a declared value)")
-                    text = compared = member
-            if text and text.lower() not in named:
-                # the free-text screens: a template token, a pronoun, a word of the workflow's own
-                # vocabulary. A value the request names as a record (a subject) always passes.
-                if _placeholder_like(text, folded):
-                    refuse(p, shown, PLACEHOLDER_WHY)
-                    continue
-                if is_pronoun_phrase(text):
-                    if len(subjects) != 1:
-                        refuse(p, shown, PRONOUN_WHY)
-                        continue
-                    notes.append(f"{p.name}={shown!r} -> {subjects[0]!r} (the request's one subject)")
-                    text = subjects[0]
-                elif is_kind_word(text, p.name, vocabulary, _kind_selector_options(p, vocabulary)):
-                    refuse(p, shown, KIND_WORD_WHY)
-                    continue
-            if not (p.in_request or p.subject):
-                # no request check without the option (design 2.46): the value as the model wrote it,
-                # after the free-text screens above, which refuse a placeholder, a pronoun or a word
-                # of the workflow's vocabulary whatever the field's options
-                args[p.name] = text
-                continue
-            at = folded.find(_fold(text).lower()) if text else -1
-            if at < 0:
-                if p.required:
-                    raise PlanningCommandInputError(f"{p.name}={shown!r} is not written in the request")
-                notes.append(f"{p.name}={shown!r} is not in the request: default")
-                args[p.name] = p.default
-                continue
-            exact = request[at:at + len(text)]
-            whole, cut = _whole_identifier(request, exact, command.identifiers)
-            if cut and whole is None:
-                refuse(p, shown, "is part of more than one identifier the request writes")
-                continue
-            exact = whole or exact
-            if p.subject:
-                named, why = _as_subject(request, exact, subjects, kinds)
-                if named is None:
-                    refuse(p, shown, why)
-                    continue
-                exact = named
-            if exact != str(compared):
-                notes.append(f"{p.name}={shown!r} -> {exact!r}")
-            args[p.name] = exact
-    for p in command.params:
-        if not p.in_request or p.type != "int":   # a str's in_request is the text check below, not a number
-            continue
-        written = _request_numbers(request, args, command)
-        if not written or args[p.name] in written:
-            continue
-        if len(written) == 1:
-            (only,) = written
-        elif p.default in written:
-            only = p.default
-        else:
-            raise PlanningCommandInputError(f"{p.name}={args[p.name]} is not a number the request writes "
-                                 f"({', '.join(map(str, sorted(written)))})")
-        notes.append(f"{p.name}={args[p.name]} -> {only} (the number the request writes)")
-        args[p.name] = only
-    for p in command.params:
-        if not p.in_request or p.type != "str":
-            continue
-        value = args[p.name]
-        if _empty(value) or (not p.required and value == p.default):
-            continue
-        if value not in request:
-            shown = raw.get(p.name, value)
-            if p.required:
-                raise PlanningCommandInputError(f"{p.name}={shown!r} is not written in the request")
-            notes.append(f"{p.name}={shown!r} is not written in the request: default")
-            args[p.name] = p.default
-    for p in command.params:
-        sure = _confident(verdicts, p.name) if p.verify and p.type != "str" else None
-        if sure is not None and args[p.name] != sure[0]:
-            notes.append(f"{p.name}={args[p.name]!r} -> {sure[0]!r} (check {sure[1]:.2f})")
-            args[p.name] = sure[0]
-    strs = [p for p in command.params if p.type == "str"]
-    for p in strs:
-        if p.required or args[p.name] == p.default:
-            continue
-        if any(o is not p and str(args[o.name]).lower() == str(args[p.name]).lower() for o in strs):
-            notes.append(f"{p.name}={args[p.name]!r} repeats another argument: default")
-            args[p.name] = p.default
-    return args, notes
+    checked = one_guard.check_plan(command, raw, request, verdicts, vocabulary)
+    if (stop := checked.stop) is not None:
+        error = (PlanningCommandCallError if stop.call else PlanningCommandInputError)(stop.message)
+        error.code = stop.code
+        error.gap = stop
+        raise error
+    return checked.values, checked.notes
 
 
 def command_names(available_commands: str) -> frozenset[str]:
@@ -4356,17 +3968,26 @@ def no_argument_call(command: PlanningCommandCommand) -> PlanningCommandCallPlan
                          phases=call_phases(command, {}))
 
 
-def extracted_arguments(command: PlanningCommandCommand, query: str, workflow=None) -> dict:
+def extracted_arguments(command: PlanningCommandCommand, query: str, workflow=None, *, note: str = "",
+                        resets: dict | None = None, unparsed: list | None = None) -> dict:
     """The planning command's arguments as the shared parameter extractor gives them for *query*, unchecked
     (fix-48np): ``InputForParamExtraction.extract_parameters`` on the planning command's ``Input``, on
-    LLM_PARAM_EXTRACTION, the extractor an execution command's parameters get. ``typed_planning_call``
-    checks them."""
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    LLM_PARAM_EXTRACTION, the extractor an execution command's parameters get (``parameters.fill.fill``, the one call of
+    it; a *note* is read after *query*). ``typed_planning_call`` checks them. With *resets* (a dict) the fields the
+    extractor's own "is this field given" check reset to not given are written into it (name -> probability). With
+    *unparsed* (a list) True is appended when the extractor's answers could not be parsed into the fields' types
+    (``Filled.unparsed``)."""
+    from fastworkflow.parameters import fill
 
     if command.input_model is None:
         raise PlanningCommandCallError(f"{command.name} has no Input to extract its arguments into")
     folder = getattr(workflow, "folderpath", None)
-    params = InputForParamExtraction(command=query).extract_parameters(command.input_model, command.name, folder)
+    filled = fill.fill(None, command.input_model, command.name, folder, text=query, note=note)
+    params = filled.params
+    if resets is not None and filled.reset_not_given:
+        resets.update(filled.reset_not_given)
+    if unparsed is not None and filled.unparsed:
+        unparsed.append(True)
     return {p.name: _given_or_none(getattr(params, p.name, None)) for p in command.params}
 
 
@@ -4423,10 +4044,9 @@ def _typed_fallback(command: PlanningCommandCommand, request: str, available_com
     import dspy
     from fastworkflow.utils.logging import logger
 
-    text = str(refusal)
+    stopped_at = refusal.gap.name if refusal.gap is not None else None
     gaps = [p.name for p in command.params if p.required and not p.alone
-            and (_empty(raw.get(p.name)) or text.startswith(f"{p.name}=")
-                 or text == f"missing required argument {p.name}")]
+            and (_empty(raw.get(p.name)) or p.name == stopped_at)]
     if not gaps:
         raise refusal
     from dspy.utils.exceptions import AdapterParseError
@@ -4445,8 +4065,8 @@ def _typed_fallback(command: PlanningCommandCommand, request: str, available_com
         raise refusal
     args, notes = checked({**raw, **filled})
     logger.info(f"planning command call {command.name}: {', '.join(sorted(filled))} from the typed fill "
-                f"(the extractor left it: {text})")
-    notes.insert(0, f"typed fill fallback for {', '.join(sorted(filled))}: {text}")
+                f"(the extractor left it: {refusal})")
+    notes.insert(0, f"typed fill fallback for {', '.join(sorted(filled))}: {refusal}")
     return args, notes
 
 
@@ -4495,31 +4115,50 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
     if not command.params:
         return no_argument_call(command)
     import dspy
+    from fastworkflow.parameters import pipeline
     from fastworkflow.utils.argument_checks import REFUSED_EXTRACTION_NOTE
 
+    seen: dict = {"verdicts": None, "reset": {}, "unparsed": []}
+
     def checked(raw: dict) -> tuple[dict, list[str]]:
-        return checked_arguments(command, raw, request, workflow, verdicts)
+        return checked_arguments(command, raw, request, workflow, seen["verdicts"])
+
+    def validate(raw: dict, attempt: int) -> pipeline.Verdict:
+        try:
+            return pipeline.Verdict(detail=checked(raw))
+        except PlanningCommandInputError as refused:
+            kind = _input_error_kind(refused, command, raw, request, seen["verdicts"])
+            if kind == pipeline.KIND_MISSING and attempt == 1 and seen["reset"]:
+                kind = pipeline.KIND_REFUSED   # a value the extractor gave, a check then reset to not given
+            return pipeline.Verdict(kind, str(refused), refused)
 
     with ThreadPoolExecutor(1) as pool:
         checks = pool.submit(contextvars.copy_context().run, check_verdicts, check_lm, command, request)
-        raw = extracted_arguments(command, request, workflow)
-        verdicts = checks.result()
-    try:
-        args, notes = checked(raw)
-    except PlanningCommandInputError as refused:
-        raw = extracted_arguments(command, f"{request}\n\n{REFUSED_EXTRACTION_NOTE.format(refusal=refused)}",
-                                  workflow)
+
+        def fill_text(note: str, attempt: int) -> dict:
+            raw = extracted_arguments(command, request, workflow, note=note, resets=seen["reset"] if attempt == 1 else None,
+                                      unparsed=seen["unparsed"] if attempt == 1 else None)
+            if attempt == 1:
+                seen["verdicts"] = checks.result()
+            return raw
+
+        # the extractor reads the request once more with the refusal after it; the guards still read the request alone
+        extracted = pipeline.extract(
+            fill_text, validate=validate, unparsed=lambda: bool(seen["unparsed"]),
+            retry_note=REFUSED_EXTRACTION_NOTE)
+    verdicts, raw = seen["verdicts"], extracted.params
+    if extracted.final.ok:
+        args, notes = extracted.final.detail
+    else:
         try:
-            args, notes = checked(raw)
-        except PlanningCommandInputError as refused_again:
-            try:
-                args, notes = _typed_fallback(command, request, available_commands, raw, refused_again, checked)
-            except PlanningCommandInputError as final:
-                # ``check_arguments`` stops at the first gap: work out every one, so the question names them all
-                # and the values the call already has are kept.
-                final.gaps = argument_gaps(command, raw, request, verdicts)
-                raise
-        notes.insert(0, f"first call refused, planned again: {refused}")
+            args, notes = _typed_fallback(command, request, available_commands, raw, extracted.final.detail, checked)
+        except PlanningCommandInputError as final:
+            # ``check_arguments`` stops at the first gap: work out every one, so the question names them all
+            # and the values the call already has are kept.
+            final.gaps = argument_gaps(command, raw, request, verdicts)
+            raise
+    if extracted.retried:
+        notes.insert(0, f"first call refused, planned again: {extracted.first.detail}")
     steps = expand(command, args)
     prediction = dspy.ChainOfThought(step_signature(command))(
         user_query=request, skill_call=_call_text(command, args, steps), available_commands=available_commands)
@@ -4543,15 +4182,41 @@ def reextracted_arguments(command: PlanningCommandCommand, request: str, observa
     put after the request (``argument_checks.PHASE_FAILED_EXTRACTION_NOTE``), and the result goes through the
     same checks. Returns None when the checks refuse them or they equal *args* (the call is not restarted).
     Raises what the extractor raises."""
+    from fastworkflow.parameters import pipeline
     from fastworkflow.utils.argument_checks import PHASE_FAILED_EXTRACTION_NOTE
 
-    raw = extracted_arguments(command, f"{request}\n\n{PHASE_FAILED_EXTRACTION_NOTE.format(observation=observation)}",
-                              workflow)
-    try:
-        new_args, _notes = checked_arguments(command, raw, request, workflow, verdicts)
-    except PlanningCommandInputError:
+    def fill_text(note: str, attempt: int) -> dict:
+        return extracted_arguments(command, request, workflow, note=note)
+
+    def validate(raw: dict, attempt: int) -> pipeline.Verdict:
+        try:
+            return pipeline.Verdict(detail=checked_arguments(command, raw, request, workflow, verdicts))
+        except PlanningCommandInputError as refused:
+            return pipeline.Verdict(_input_error_kind(refused), str(refused), refused)
+
+    # one fill with the phase's note after the request, no retry: a refusal is the end of it
+    extracted = pipeline.extract(
+        fill_text, validate=validate,
+        first_note=PHASE_FAILED_EXTRACTION_NOTE.format(observation=observation))
+    if not extracted.final.ok:
         return None
+    new_args, _notes = extracted.final.detail
     return None if new_args == args else new_args
+
+
+def _input_error_kind(refused: "PlanningCommandInputError", command: PlanningCommandCommand | None = None,
+                      raw: dict | None = None, request: str = "", verdicts: dict | None = None) -> str:
+    """How the pipeline classifies a refusal of a planning call's arguments: ``missing`` when only required arguments
+    are absent (nothing the model produced was refused), else ``refused``. Read from the guard's own code (``code``
+    "missing"), never from the message text; the guard stops at its first gap, so when *command* and *raw* are given a
+    value refused after the first missing one counts too (``argument_gaps``, no model call)."""
+    from fastworkflow.parameters import pipeline
+
+    if getattr(refused, "code", "") != "missing":
+        return pipeline.KIND_REFUSED
+    if command is not None and raw is not None and argument_gaps(command, raw, request, verdicts).invalid:
+        return pipeline.KIND_REFUSED
+    return pipeline.KIND_MISSING
 
 
 def replanned_call(command: PlanningCommandCommand, call: PlanningCommandCallPlan, args: dict,

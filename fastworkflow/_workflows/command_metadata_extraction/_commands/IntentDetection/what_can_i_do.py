@@ -156,10 +156,8 @@ class ResponseGenerator:
         
         response = f"{workflow_def_text}\n\n{commands_text}"
 
-        nlu_pipeline_stage = workflow.context.get(
-            "NLU_Pipeline_Stage", 
-            fastworkflow.NLUPipelineStage.INTENT_DETECTION)
-        success = nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
-        if not success:
+        from fastworkflow import intent_loop
+
+        if intent_loop.waiting_for(workflow.context) is not None:
             raise fastworkflow.Refused(response)
         return response 

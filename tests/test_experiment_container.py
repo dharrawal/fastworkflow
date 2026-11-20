@@ -1249,11 +1249,9 @@ class TestHarness:
         assert segments[0]["evidence_run_id"].startswith("evr-")  # `[XR10]`
         posture = segments[0]["record"]["experiment"]["cache_posture"]
         assert posture["FW_LM_CACHE"] == "0"
-        assert posture["FW_UTTERANCE_CACHE_SCOPE"] == "workflow"
         # ...and the posture is not merely echoed into its own record: the
         # process env dict really carries the values the seams read.
         assert fastworkflow.get_env_var("FW_LM_CACHE") == "0"
-        assert fastworkflow.get_env_var("FW_UTTERANCE_CACHE_SCOPE") == "workflow"
         # Recorded either way, so a sweep that ran without the DSPy memory
         # policy is visible in its own evidence rather than silently different.
         assert "dspy_memory_policy" in posture
@@ -1482,30 +1480,26 @@ class TestDeterminismSeams:
         dspy_utils.get_lm("LLM_AGENT")
         assert captured["cache"] is False
 
-    def test_the_utterance_cache_can_be_sharded_per_attempt(
-        self, tmp_path, restore_env_vars
-    ):
-        """`[XR16]`: `___convo_info/cache.sqlite3` is keyed on nothing today.
+    def test_the_pending_which_command_question_is_session_state_not_a_shared_file(self, tmp_path):
+        """`[XR16]`: the suggested commands of an ambiguity question used to live in ``___convo_info/cache.sqlite3``,
+        keyed on nothing, so attempts shared it. The question is now one
+        piece of plain data in the CME context (``intent_loop``), saved with the session, so two attempts cannot see
+        each other's and no file is written for it."""
+        import json
 
-        Attempt 2 would otherwise inherit attempt 1's disambiguation decisions —
-        correlated attempts, which is exactly what pass^k must not have — and a
-        treatment arm would inherit the baseline arm's, both running against the
-        same workflow folder.
-        """
+        from fastworkflow import intent_loop
         from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
             CommandNamePrediction,
         )
 
-        convo = str(tmp_path / "convo")
-        fastworkflow.init({})
-        shared = CommandNamePrediction._get_cache_path_cache(convo, "wid-a")
-        assert Path(shared).name == "cache.sqlite3"
-
-        fastworkflow.init({"FW_UTTERANCE_CACHE_SCOPE": "workflow"})
-        a = CommandNamePrediction._get_cache_path_cache(convo, "wid-a")
-        b = CommandNamePrediction._get_cache_path_cache(convo, "wid-b")
-        assert a != b
-        assert Path(a).name == "cache-wid-a.sqlite3"
+        assert not any(hasattr(CommandNamePrediction, name) for name in (
+            "_get_cache_path_cache", "_store_suggested_commands", "_get_suggested_commands"))
+        a = intent_loop.open_question("find it", [{"name": "Library/find_book", "description": "", "closest": True}])
+        b = intent_loop.open_question("find it", [{"name": "Library/find_member", "description": "", "closest": True}])
+        intent_loop.ask(a)
+        assert json.loads(json.dumps(a)) == a                      # JSON-safe: saved whole with the session
+        assert a["choices"] != b["choices"] and b["question"] == ""
+        assert not list((tmp_path).rglob("cache*.sqlite3"))
 
 
 class TestDerivedOutcomeIsNotAScore:

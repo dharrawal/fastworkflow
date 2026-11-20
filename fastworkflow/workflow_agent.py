@@ -25,12 +25,13 @@ from dspy.experimental import Choice, TypeSafe
 import fastworkflow
 from fastworkflow import tracing
 from fastworkflow import approval_binding
+from fastworkflow import intent_loop
 from fastworkflow import turn_progress
 from fastworkflow import subtask_pool
 from fastworkflow import planning_commands
 from fastworkflow.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
-    refusal_names_an_input, planning_refusal_parameter_request)
+    refusal_names_an_input)
 from fastworkflow.split_merge import (
     JoinedSubtask, Reduction, definite_descriptions, merge_subtasks, reduce_to_cap, request_subjects, subjects_in,
     unnamed_subjects, with_referent, without_repeated_clauses)
@@ -888,21 +889,18 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
-    nlu_stage = cme_workflow.context.get("NLU_Pipeline_Stage")
+    waiting_for = intent_loop.waiting_for(cme_workflow.context)
 
     # Intent ambiguity / misunderstanding: the NLU's reply already lists the
     # candidate commands (ambiguity) or this context's commands (misunderstanding),
     # so the agent chooses from it. Abort first so its next command is routed
     # fresh rather than read as an answer to the clarification prompt.
-    if nlu_stage in (
-        fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-        fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
-    ):
+    if waiting_for == intent_loop.WAITING_INTENT:
         abort_confirmation = _execute_workflow_query(
             'abort', chat_session_obj=chat_session_obj, internal=True)
         return f'{response_text}\n{abort_confirmation}'
     # Handle parameter extraction errors with abort
-    if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
+    if waiting_for == intent_loop.WAITING_PARAMETERS:
         abort_confirmation = _execute_workflow_query(
             'abort', chat_session_obj=chat_session_obj, internal=True)
         # Thread the active planner LM so replanning uses the same planner LM
@@ -937,34 +935,22 @@ def _apply_reply_intent(agent, intent: str) -> None:
 
 def _refusal_may_ask_attended(chat_session_obj) -> bool:
     """Whether a refusal may be put to the user as a question that suspends the turn (Topology B):
-    ask_user is available to the turn (attended, no queue-based blocking ask), and the turn has
-    not already been put a refusal question (the reply gets one re-run, no second question).
+    the turn can ask (``waiting.can_ask``: attended, no queue-based blocking ask). How often it asks is the
+    parameter loop's asking rule (``parameter_clarification``), not decided here.
 
     The callers add their own check that nothing ran yet in the turn (a re-run would repeat its
     side effects): a planning command call's refusal checks the whole turn, a fast-path call its own outputs.
     """
-    return (
-        getattr(chat_session_obj, "_turn_unattended", True) is False
-        and getattr(chat_session_obj, "user_message_queue", True) is None
-        and not getattr(chat_session_obj, "_planning_command_refusal_answered", True)
-    )
+    from fastworkflow import waiting
 
-
-def _refusal_may_ask_attended_no_answer_check(chat_session_obj) -> bool:
-    """``_refusal_may_ask_attended`` without the "already asked once" rule: no agent model keeps asking while each reply
-    makes progress (``WorkflowExecutionContext.refusal_question_for`` counts it)."""
-    return (
-        getattr(chat_session_obj, "_turn_unattended", True) is False
-        and getattr(chat_session_obj, "user_message_queue", True) is None
-    )
+    return waiting.can_ask(chat_session_obj)
 
 
 def _planning_command_refusal_may_ask(chat_session_obj) -> bool:
     """Whether a refused planning command call may be put to the user, suspending the turn (Topology B).
 
     Only when ask_user is available to the turn (attended, no queue-based blocking ask), no
-    run has happened yet in the turn (a re-run would repeat its side effects), and the turn has
-    not already been put a refusal question (the reply gets one re-run, no second question).
+    run has happened yet in the turn (a re-run would repeat its side effects).
     Every other case keeps the text planner's fallback.
     """
     return (
@@ -974,7 +960,7 @@ def _planning_command_refusal_may_ask(chat_session_obj) -> bool:
 
 
 def planning_command_refusal_to_ask(chat_session_obj, command: PlanningCommandCommand,
-                                    refusal: PlanningCommandInputError) -> str | None:
+                                    refusal: PlanningCommandInputError, request_text: str = "") -> str | None:
     """The question a refused planning command call puts to the user, or None when the text planner
     plans the request instead.
 
@@ -982,10 +968,15 @@ def planning_command_refusal_to_ask(chat_session_obj, command: PlanningCommandCo
     of the command's inputs (``refusal_names_an_input``): a missing or guessed value is the user's to
     give. A refusal that names no input says the command does not fit the request, which the user
     cannot fix by answering, so it is not put to them.
+
+    The execution context opens the parameter clarification loop for it (``_open_parameter_loop``: the one
+    place that decides whether to ask and keeps the question's state, for every caller), with *request_text*
+    as the text the call's values were read from. A session object that has no loop gets the same decision
+    and the question's text only.
     """
-    if getattr(chat_session_obj, "no_agent_mode", False):
-        # No agent model: one question for every missing argument, asked again while the replies make progress.
-        return chat_session_obj.refusal_question_for(command, refusal)
+    open_loop = getattr(chat_session_obj, "_open_parameter_loop", None)
+    if open_loop is not None:
+        return open_loop(command, refusal, request_text=request_text)
     if not _planning_command_refusal_may_ask(chat_session_obj):
         return None
     if not refusal_names_an_input(command, refusal):
@@ -1864,8 +1855,8 @@ def planning_names_on_path(workflow) -> list[str]:
     """The planning commands the matcher could choose from for *workflow*'s current state, in lookup order: the
     commands of each scope of ``planning_scopes`` (nearest scope first, the root's last), each scope's by name.
 
-    The one source of "the plans available here": ``match_planning_command`` offers exactly these, scope by scope, so a
-    listing of them, and the check of a plan a client names, can never disagree with what the matcher could have picked.
+    The one source of "the plans available here": the intent loop's decision offers exactly these, scope by scope, so a
+    listing of them, and the check of a plan a client names, can never disagree with what the decision could have picked.
     """
     if workflow is None or not getattr(workflow, "folderpath", None):
         return []
@@ -1887,28 +1878,22 @@ def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLE
                        scope: str | None = None) -> str:
     """The planning command matcher's job types: one ``- name: description`` line per planning command, followed by
     ``e.g. "...", "..."`` when the planning command declares ``plain_utterances`` (at most ``examples``).
-    With ``scope`` given (``""`` for root, or a context name), only that scope's planning commands are listed."""
-    utterances = planning_command_utterances(workflow_folderpath)
-    lines = []
-    for name, description, _ in load_planning_commands(workflow_folderpath):
-        if scope is not None and _planning_scope(name) != scope:
-            continue
-        shown = [" ".join(u.split()) for u in utterances.get(name, ())[:max(0, examples)]]
-        shown = [u for u in shown if u]
-        lines.append(f"- {name}: {description}" + (
-            f" e.g. {', '.join(json.dumps(u, ensure_ascii=False) for u in shown)}" if shown else ""))
+    With ``scope`` given (``""`` for root, or a context name), only that scope's planning commands are listed.
+
+    The commands and their texts come from the detector contract (``intent_detector.planning_candidates``,
+    the planning candidates of each scope), and each line is ``intent_detector.candidate_line``: the text is
+    what it always was, byte for byte (``tests/test_intent_matcher_engine.py`` compares it with the old builder)."""
+    from fastworkflow import intent_detector
+
+    lines = [intent_detector.candidate_line(candidate.name, candidate.description, candidate.examples, examples)
+             for candidate in intent_detector.planning_candidates(workflow_folderpath)
+             if scope is None or _planning_scope(candidate.name) == scope]
     return "\n".join(lines)
 
 
-#: A matched planning command's steps are offered to the planner only at or above this Jev
-#: probability (measured offline: at 0.5, 96.6% of sub-tasks get a template, 1.1% a wrong one).
+#: The bar of ``run_listing.planning_candidates``: a planning command is the confident one of a listing's gathering at
+#: or above this probability. It decides no plan: "which command does this text mean" is the intent loop's alone.
 PLANNING_COMMAND_MATCH_THRESHOLD = 0.5
-
-#: The bar of a VETO: a draft that runs unreviewed in agent mode (nobody to answer its review) does not bind a planning
-#: command to a sub-task when Jev's "none" is at or above this (the agent plans it instead). A separate, higher bar than
-#: the match's: on recorded runs a veto at 0.5 was a coin flip (as many reasonable bindings destroyed as wrong ones
-#: prevented), no bound sub-task had a "none" at 0.9 or above, and requests no command covers had 0.93 to 1.00.
-PLANNING_NONE_VETO_THRESHOLD = 0.9
 
 #: The planner's instructions (the planner signatures use them as their docstring unchanged).
 PLANNER_INSTRUCTIONS = """
@@ -2072,117 +2057,10 @@ def _choice_value_and_probability(choice) -> tuple[str, float]:
     return value, float((choice.probabilities or {}).get(value, choice.confidence))
 
 
-@functools.lru_cache(maxsize=None)
-def _planning_command_matcher(workflow_folderpath: str):
-    """``{scope: (predictor, jev_lm)}`` choosing a sub-task's planning command per scope (``""`` for root),
-    or None without planning commands or a JEV_API_KEY."""
-    planning_commands = load_planning_commands(workflow_folderpath)
-    if not planning_commands:
-        return None
-    jev_lm = _jev_lm()
-    if jev_lm is None:
-        _warn_missing_jev_key(workflow_folderpath)
-        return None
-    utterances = planning_command_utterances(workflow_folderpath)
-    by_scope: dict[str, list[tuple[str, str]]] = {}
-    for name, description, _ in planning_commands:
-        by_scope.setdefault(_planning_scope(name), []).append((name, description))
-    matchers: dict[str, tuple] = {}
-    for scope, scope_planning_commands in by_scope.items():
-        options = tuple(scope_planning_commands) + (("none", "None of the job types fits this sub-task."),)
-        listing = "the available job types, one per line as '- name: description'"
-        if any(utterances.get(name) for name, _ in scope_planning_commands):
-            listing += ", some followed by example requests for that job (e.g. ...)"
-
-        class MatchPlanningCommand(dspy.Signature):
-            """Decide which job type a sub-task asks for."""
-
-            subtask: str = dspy.InputField(desc="one sub-task from a user request")
-            job_types: str = dspy.InputField(desc=listing)
-            job: Choice[options] = dspy.OutputField(
-                desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
-
-        matchers[scope] = (dspy.Predict(MatchPlanningCommand), jev_lm)
-    return matchers
-
-
-def match_planning_command(text: str, workflow_folderpath: str,
-                scopes: tuple[str, ...] = ("",), *, distribution: dict[str, float] | None = None
-                ) -> tuple[str, tuple[str, ...]] | None:
-    """``(name, steps)`` of the planning command ``text`` asks for along ``scopes`` (``""`` for root),
-    when Jev is confident; None otherwise.
-
-    Runs once for each scope on ``scopes`` that has planning commands, offering only that
-    scope's planning commands plus ``"none"``; the first confident match (>= ``PLANNING_COMMAND_MATCH_THRESHOLD``)
-    wins and later scopes are not asked. Never raises: a failed match only means the
-    planner gets no template.
-
-    ``distribution`` (optional, filled in place): the options' probabilities of each scope asked, the max per option,
-    so the listing can take the unsure candidates (run_listing.planning_candidates). No extra model call: it is the
-    same choice the match already made. Left empty when no match runs (no JEV_API_KEY, no planning commands).
-    """
-    try:
-        matcher = _planning_command_matcher(workflow_folderpath)
-        if matcher is None:
-            return None
-        planning_commands = load_planning_commands(workflow_folderpath)
-        by_scope: dict[str, dict[str, tuple[str, ...]]] = {}
-        for name, _, steps in planning_commands:
-            by_scope.setdefault(_planning_scope(name), {})[name] = steps
-        seen: set[str] = set()
-        for scope in scopes:
-            if scope in seen:
-                continue
-            seen.add(scope)
-            scope_steps = by_scope.get(scope)
-            scope_matcher = matcher.get(scope) if scope_steps else None
-            if not scope_steps or scope_matcher is None:
-                continue
-            predictor, jev_lm = scope_matcher
-            job_types = _matcher_job_types(workflow_folderpath, scope=scope)
-            with dspy.context(lm=jev_lm):
-                choice = predictor(subtask=text, job_types=job_types).job
-            value, probability = _choice_value_and_probability(choice)
-            if distribution is not None:
-                for option, option_probability in (choice.probabilities or {value: probability}).items():
-                    key = str(option)
-                    distribution[key] = max(distribution.get(key, 0.0), float(option_probability))
-            scope_label = scope or "root"
-            logger.info(f"planning command match in scope {scope_label!r} for {text!r}: {value} (confidence {probability:.2f})")
-            if value in scope_steps and probability >= PLANNING_COMMAND_MATCH_THRESHOLD:
-                return value, scope_steps[value]
-        return None
-    except Exception:  # noqa: BLE001 - a template is an optimisation; never fail the turn
-        logger.warning("could not match the sub-task to a planning command", exc_info=True)
-        return None
-
-
 def _template_text(steps: tuple[str, ...]) -> str:
     lines = "\n".join(f"- {step}" for step in steps)
     return (f"A job like this is usually done as:\n{lines}\n"
             "Adapt this to the request: drop steps it does not need and add steps it asks for.")
-
-
-def planner_planning_command_for(text: str, workflow_folderpath: str,
-                      scopes: tuple[str, ...] = ("",), *, distribution: dict[str, float] | None = None
-                      ) -> tuple[str, PlanningCommandCommand | None]:
-    """``(template, command)`` for the planning command ``text`` asks for along ``scopes`` (``""`` for root).
-
-    ``template`` is ``plan_template_for``'s text ("" when no planning command matches); ``command`` is
-    the matched planning command's parsed form (None when no planning command matches). A matched planning command's call runs
-    through the phase runner, whatever its shape.
-    """
-    matched = match_planning_command(text, workflow_folderpath, scopes=scopes, distribution=distribution)
-    if matched is None:
-        return "", None
-    name, steps = matched
-    return _template_text(steps), load_planning_command_map(workflow_folderpath).get(name)
-
-
-def plan_template_for(text: str, workflow_folderpath: str,
-                      scopes: tuple[str, ...] = ("",)) -> str:
-    """The matched planning command's steps as a planner template for ``text``; "" when no planning command matches."""
-    return planner_planning_command_for(text, workflow_folderpath, scopes=scopes)[0]
 
 
 #: A reply's non-answer intent applies only at or above this Jev probability.
@@ -2278,113 +2156,29 @@ def classify_user_reply(reply: str, question: str) -> str:
         if value != "answer" and probability >= REPLY_INTENT_THRESHOLD:
             return value
         return "answer"
-    except Exception:  # noqa: BLE001 - the reply is then taken as an answer; never fail the turn
-        logger.warning("could not classify the reply intent", exc_info=True)
+    except Exception as error:  # noqa: BLE001 - the reply is then taken as an answer; never fail the turn
+        from fastworkflow import remote_outage
+
+        remote_outage.report(error, "reply intent")
         return "answer"
 
 
-#: Jev's probability an ambiguous intent choice needs before it routes; below it the ambiguity prompt is shown.
-INTENT_TIEBREAK_THRESHOLD = 0.9
-_INTENT_TIEBREAK_OFF = frozenset({"off", "0", "false"})
-_INTENT_TIEBREAK_WILDCARD = "wildcard"
-_INTENT_TIEBREAK_PARAMETER_VALUE = "parameter_value"
-_INTENT_TIEBREAK_RESERVED = {
-    _INTENT_TIEBREAK_WILDCARD:
-        "None of these commands: the message is not a command of the current context.",
-    _INTENT_TIEBREAK_PARAMETER_VALUE:
-        "The message is a bare value answering an earlier question, not a command.",
-}
+def command_match_signature(options: tuple):
+    """The signature of the model matcher engine's one call (``intent_detector.MatcherEngine``): which of
+    *options* (``(name, description)`` pairs, ``none`` among them) a message asks for, given the commands
+    listed by scope. Defined here, where ``Choice`` annotations are evaluated, not kept as text."""
 
+    class MatchCommand(dspy.Signature):
+        """Decide which command a message to a workflow asks for."""
 
-def _intent_tiebreak_enabled() -> bool:
-    """False when FW_JEV_INTENT_TIEBREAK is set to off, 0 or false (case-insensitive)."""
-    value = str(fastworkflow.get_env_var("FW_JEV_INTENT_TIEBREAK", default="on"))
-    return value.strip().lower() not in _INTENT_TIEBREAK_OFF
+        message: str = dspy.InputField(desc="the message sent to the workflow")
+        commands: str = dspy.InputField(
+            desc="the available commands grouped by scope, the scope the user is in first, one per line as "
+                 "'- name: description', some followed by example messages for that command (e.g. ...)")
+        command: Choice[options] = dspy.OutputField(
+            desc="Which command does the message ask for? 'none' if none of them fits.")
 
-
-@functools.lru_cache(maxsize=None)
-def _command_first_sentences(workflow_folderpath: str, context: str) -> dict[str, str]:
-    """``{leaf command name: first sentence of its docstring}`` for the commands *context* offers."""
-    info = CommandMetadataAPI.get_enhanced_command_info(
-        subject_workflow_path=workflow_folderpath,
-        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=context,
-    )
-    sentences: dict[str, str] = {}
-    for cmd in info.get("commands", []) or []:
-        name = str(cmd.get("name") or "").rpartition("/")[2]
-        doc = " ".join(str(cmd.get("doc_string") or "").split())
-        if name and doc:
-            sentences[name] = re.split(r"(?<=[.!?])\s", doc, maxsplit=1)[0]
-        elif name:
-            # No docstring: the command's example utterances describe it instead. fix-jd9o.1 measured
-            # descriptions against bare names: 148/148 routes right with them, 148/151 without.
-            examples = [" ".join(str(u).split()) for u in (cmd.get("plain_utterances") or [])[:3]
-                        if str(u).strip()]
-            if examples:
-                sentences[name] = "e.g. " + "; ".join(examples)
-    return sentences
-
-
-def intent_tiebreak_descriptions(workflow_folderpath: str, context: str,
-                                 candidates: list[str]) -> dict[str, str]:
-    """``{candidate: description}`` for the candidates of an ambiguous intent: the first sentence of
-    each command's docstring in *context*, matched by leaf name. Never raises: {} on a failure."""
-    try:
-        sentences = _command_first_sentences(workflow_folderpath, context)
-        return {str(c): sentences[str(c).rpartition("/")[2]]
-                for c in candidates if sentences.get(str(c).rpartition("/")[2])}
-    except Exception:  # noqa: BLE001 - descriptions only sharpen Jev's choice; never fail the turn
-        logger.warning("could not read the command docstrings for the intent tie-break", exc_info=True)
-        return {}
-
-
-def choose_ambiguous_command(utterance: str, candidates: list[str],
-                             descriptions: dict[str, str]) -> tuple[str | None, float | None]:
-    """``(label, probability)`` of the candidate Jev chooses for an ambiguous *utterance*, when it is
-    confident (>= ``INTENT_TIEBREAK_THRESHOLD``); ``(None, probability)`` otherwise.
-
-    ``(None, None)`` without calling anything when there is no Jev key, the tie-break is switched off,
-    or there are fewer than two distinct candidates. Never raises.
-    """
-    try:
-        jev_lm = _jev_lm()
-        if jev_lm is None or not _intent_tiebreak_enabled():
-            return None, None
-        labels = list(dict.fromkeys(str(c) for c in candidates))
-        if len(labels) < 2:
-            return None, None
-        options = []
-        for label in labels:
-            leaf = label.rpartition("/")[2]   # a reserved label may come context-qualified
-            if leaf in _INTENT_TIEBREAK_RESERVED:
-                description = _INTENT_TIEBREAK_RESERVED[leaf]
-            else:
-                description = (descriptions.get(label)
-                               or label.rpartition("/")[2].replace("_", " "))
-            options.append((label, description))
-        options.append(("none", "None of these commands fits the message."))
-        options = tuple(options)
-
-        class IntentTiebreak(dspy.Signature):
-            """Decide which command a message to a workflow asks for."""
-
-            # The wording measured in fix-jd9o.1 (agent mode sends the agent's message, not the user's).
-            message: str = dspy.InputField(desc="the message sent to the workflow")
-            command: Choice[options] = dspy.OutputField(
-                desc="Which command does the message ask for? 'none' if none fits.")
-
-        with dspy.context(lm=jev_lm):
-            choice = dspy.Predict(IntentTiebreak)(message=utterance).command
-        value, probability = _choice_value_and_probability(choice)
-        logger.info(f"intent tie-break for {utterance!r} among {labels}: {value} "
-                    f"(confidence {probability:.2f})")
-        if value != "none" and probability >= INTENT_TIEBREAK_THRESHOLD:
-            return value, probability
-        return None, probability
-    except Exception:  # noqa: BLE001 - the ambiguity prompt is then shown as today; never fail the turn
-        logger.warning("could not choose among the ambiguous commands", exc_info=True)
-        return None, None
+    return MatchCommand
 
 
 #: Phrases that point at other parts of the request instead of naming them; a sub-task with one is broken.
@@ -2446,7 +2240,7 @@ SPLIT_CONVERSATION_DESC = ("earlier turns of the conversation, for resolving wor
 
 
 def split_into_subtasks(user_query: str, planner_lm=None,
-                        workflow_folderpath: str | None = None, conversation: str = "") -> list[str]:
+                        workflow_folderpath: str | None = None, conversation: str = "", workflow=None) -> list[str]:
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
 
     ``user_query`` is the user's new request only: it is what the merge treats as the request (its ground truth,
@@ -2467,6 +2261,9 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     one that names fewer of the request's records in two sub-tasks is used (``_breakage``).
     The model's split then goes through ``split_merge.merge_subtasks`` (code only), which joins parts that are not independent jobs and returns the
     request whole when one job is left.
+
+    ``workflow`` (the app workflow, optional): a split over the cap labels its parts with the plan the intent loop gives
+    each (``plan_label``) so parts of one plan can be joined; without it nothing is labelled.
     """
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
@@ -2516,7 +2313,7 @@ def split_into_subtasks(user_query: str, planner_lm=None,
         if len(subtasks) > MAX_SUBTASKS:
             # The number of items is never a reason to run the request whole: the list is brought down to the cap
             # (copies dropped, then parts joined). Only a split that listed nothing, or a reduction that failed, is whole.
-            reduction = _reduced_to_cap(user_query, subtasks, workflow_folderpath, conversation)
+            reduction = _reduced_to_cap(user_query, subtasks, workflow_folderpath, conversation, workflow)
             if reduction is None:
                 return [user_query]
             if reduction.merged:
@@ -2547,10 +2344,22 @@ def _with_referents(user_query: str, items: list[str], workflow_folderpath: str 
     return [item if isinstance(item, JoinedSubtask) else next(resolved) for item in items]
 
 
+def plan_label(workflow, text: str) -> str | None:
+    """The planning command *text* means, or None: the intent loop's decision for the part (``resolution.part_intent``,
+    memoised for the turn, so the resolution that follows does not decide the same text again). Only a match whose kind
+    is planning counts; an ambiguity or no match is "no plan" here. Never asks a question."""
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+    intent = resolution.part_intent(workflow, text)
+    if intent.outcome == resolution.MATCH and intent.kind == resolution.KIND_PLANNING:
+        return intent.command
+    return None
+
+
 def _reduced_to_cap(user_query: str, subtasks: list[str], workflow_folderpath: str | None,
-                    conversation: str) -> Reduction | None:
+                    conversation: str, workflow=None) -> Reduction | None:
     """``split_merge.reduce_to_cap`` on a split of more than MAX_SUBTASKS items, with Jev's checks when there is
-    a key (near copies, same request, the item's planning command); None if it fails.
+    a key (near copies, same request) and, given the app *workflow*, the part's plan (``plan_label``); None if it fails.
 
     Jev calls: at most ``REDUCTION_JEV_CALLS`` here, plus at most two per remaining sub-task in ``resolve_referents``.
     """
@@ -2558,14 +2367,13 @@ def _reduced_to_cap(user_query: str, subtasks: list[str], workflow_folderpath: s
         identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
 
         def label(text: str) -> str | None:
-            matched = match_planning_command(text, workflow_folderpath) if workflow_folderpath else None
-            return matched[0] if matched else None
+            return plan_label(workflow, text)
 
         reduction = reduce_to_cap(
             user_query, subtasks, MAX_SUBTASKS, identifiers, context=conversation,
             same_job=_same_request_check(user_query),
             near_copy=_same_request_check(user_query, NEAR_COPY_THRESHOLD),
-            label=label if _jev_lm() is not None else None)
+            label=label if workflow is not None else None)
         logger.info(f"the split listed {len(subtasks)} sub-tasks, over {MAX_SUBTASKS}: reduced to "
                     f"{len(reduction.items)} ({reduction.jev_calls} Jev calls)")
         return reduction
@@ -2866,13 +2674,11 @@ def build_query_with_next_steps(user_query: str,
     # The question to put to the user when the planning command call is refused and the turn may ask (see
     # _planning_command_refusal_may_ask); None when the text planner takes over as before.
     refusal_ask = None
-    refusal_request = None
     if initial_plan:
         # A phased planning command call (planning_phases): the runner reads it after this plan.
         chat_session_obj._phased_planning_command_call = None
         # A refused planning command call the turn asks the user about (set below; read by the execution context).
         chat_session_obj._planning_command_refusal = None
-        chat_session_obj._planning_command_refusal_request = None
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
             if planning_command is not None and initial_plan:
@@ -2888,8 +2694,7 @@ def build_query_with_next_steps(user_query: str,
                                 + (f" ({'; '.join(call.notes)})" if call.notes else ""))
                 except PlanningCommandInputError as exc:  # asked of the user, or the text planner takes over
                     planning_command_fallback = f"{type(exc).__name__}: {exc}"[:500]
-                    refusal_ask = planning_command_refusal_to_ask(chat_session_obj, planning_command, exc)
-                    refusal_request = planning_refusal_parameter_request(planning_command, exc)
+                    refusal_ask = planning_command_refusal_to_ask(chat_session_obj, planning_command, exc, request_text)
                     if refusal_ask is not None:
                         logger.info(f"planning command call {planning_command.name} refused, asking the user: {refusal_ask!r}")
                     else:
@@ -2908,7 +2713,6 @@ def build_query_with_next_steps(user_query: str,
         # No plan for the refused call: the turn waits on the user, and the execution context
         # reads the question and suspends (_call_agent_for_query).
         chat_session_obj._planning_command_refusal = refusal_ask
-        chat_session_obj._planning_command_refusal_request = refusal_request
         plan_source = "none"
     tracing.end_span(
         chat_session_obj,

@@ -539,7 +539,7 @@ class SuspensionRoundTripTests(LiveTurnFixture):
         self.assert_all_redacted(self.reads(agent, scope, "O1"), "during the turn")
 
         blob = json.loads(json.dumps(agent.export_suspended()))
-        ctx._awaiting_user = True
+        ctx._ask_agent_question("which one?")
         ctx.pop_active_workflow()
         ctx.close()
         reset_observation_state()

@@ -36,8 +36,12 @@ How a matched planning command runs (`workflow_agent.match_planning_command` mat
 2. The planner fills `Input` in one typed call.
 3. The arguments are checked: `check_arguments` checks each field against its type and its options
    (`copied_from_command_text` here), and the file's own rules run.
-4. A refused call is filled once more with the refusal in view. A second refusal is asked of the
-   user as a question when the turn may ask; otherwise the text planner takes over.
+4. A call whose value a guard or a validator refused is filled once more with the refusal in view (a value
+   that is simply missing is not read again). A second refusal is asked of the user as a question when the
+   turn may ask, if it names an input; otherwise the text planner takes over. The question is asked again while
+   each reply fills or fixes a value it listed, and once more after a reply that does not; the second reply in a
+   row with no progress, or `cancel`, ends it (the text planner or agent takes over, or with no agent model the
+   part is not run and the message names what is missing).
 5. The call's phases run, and the steps they return become the agent's plan. Code runs the steps it
    can (see the step grammar below).
 
@@ -193,8 +197,13 @@ dict of known options, or two keys that conflict fails the load, naming the key 
 - `copied_from_command_text: True` (`str`, `int` or `list[str]`): the value must be in the request. A `str` must
   appear in it exactly as written (a verbatim substring); a `list[str]` keeps each item the request
   writes. An `int` must be a number the request writes (digits, or the words zero to twenty outside the
-  other arguments' text); otherwise it takes the only number written, or its default when that one is
-  written, and with several candidates the call fails.
+  other arguments' text); a number the request does not write is refused, never replaced by the one
+  number it does write.
+- Without any option, a `str` or `int` is still held to being written in the request (case and dashes
+  ignored) unless the field is converted (`converted_from_command_text`) or declares a `pattern`; a value of
+  only punctuation, or an unwritten example from the field's description, is refused. The copy options add
+  their own behaviour (the subject must name a record, a list keeps the request's items) but no longer
+  decide whether a value is grounded.
 - `copied_from_command_text: {"ignore": ["group", "unit"]}` (`str` only): the named words are removed from either end of
   the value before the check, for example a kind word the model appends to a name ("Payroll group" becomes
   "Payroll"). `ignore` strips before the verbatim match.

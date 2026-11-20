@@ -20,6 +20,7 @@ from fastworkflow._workflows.command_metadata_extraction.intent_detection import
     ESCALATION_OUTCOMES,
 )
 from fastworkflow.command_executor import CommandExecutor
+from tests.test_nlu_span_emission import CLASSIFIER_REQUEST
 from fastworkflow.observability.decision_signals import DecisionUncertainty
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -114,11 +115,10 @@ def test_fuzzy_prematch_intent_span_carries_distance_and_threshold(hello_ctx):
     assert span.attributes["fuzzy_threshold"] is not None
 
 
+@pytest.mark.usefixtures("no_planner_key")
 def test_classifier_intent_span_carries_confidence_signal(hello_ctx):
     ctx, sink = hello_ctx
-    CommandExecutor.invoke_command(
-        ctx, "please compute the total of five plus three"
-    )
+    CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
 
     spans = [
         s

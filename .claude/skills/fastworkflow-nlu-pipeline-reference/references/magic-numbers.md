@@ -12,11 +12,7 @@ executing path today; "dead" = present but unreached.
 |---|---|---|---|
 | 0.3 | Max normalized Levenshtein distance for fuzzy command-name match | `fastworkflow/_workflows/command_metadata_extraction/intent_detection.py:111` | live |
 | 0.4 | `find_best_matches` default distance threshold (overridden at both NLU call sites) | `fastworkflow/utils/fuzzy_match.py:19` | default, mostly shadowed |
-| 0.85 | Cosine-similarity threshold for the utterance/clarification embedding cache | `intent_detection.py:118` (positional arg) | live |
-| 0.90 | `cache_match` default threshold — no caller uses it | `fastworkflow/cache_matching.py:131` | dead default |
-| 256 | `lru_cache` size for DistilBERT embeddings | `cache_matching.py:18` | live |
-| 128 | Tokenizer max_length for embeddings | `cache_matching.py:46` | live |
-| 5 | `majority_vote_predictions` n_predictions | `intent_detection.py:304` | dead (call commented out :122) |
+| 5 | `majority_vote_predictions` n_predictions | `intent_detection.py` (removed; no longer in the file) | gone |
 | 10 | max_workers cap in majority vote | `intent_detection.py:332` | dead |
 
 ## Intent-model training
@@ -82,6 +78,6 @@ executing path today; "dead" = present but unreached.
 grep -n "0.5129\|alpha = 0.15\|linspace\|threshold=0.3\|0.85\|threshold=0.90\|N=3\|max_retries = 2" \
   fastworkflow/model_pipeline_training.py \
   fastworkflow/_workflows/command_metadata_extraction/intent_detection.py \
-  fastworkflow/cache_matching.py fastworkflow/utils/signatures.py \
+  fastworkflow/utils/signatures.py \
   fastworkflow/workflow_execution_context.py
 ```

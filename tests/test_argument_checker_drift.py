@@ -42,6 +42,8 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow import planning_commands as pc
+from fastworkflow.parameters import check
+from fastworkflow.parameters import check as one_guard
 from fastworkflow import workflow_agent
 from fastworkflow.utils import argument_checks
 from fastworkflow.utils.signatures import INVALID_INT_VALUE, NOT_FOUND
@@ -247,44 +249,6 @@ def _replaced(verdict) -> bool:
 #: The deliberate differences (fix-48np.2, owner decision 2026-11-06). An entry is removed, or one added, only by
 #: an explicit decision, with the measurement for the path whose behaviour changes (fix-48np.2's notes, step 4).
 DIFFERENCES: dict[str, Difference] = {
-    "int-not-written": Difference(
-        what="An int the request does not write, when it writes exactly one number (or several, one of them the "
-             "field's default): planning replaces it with that number; execution refuses it (a value given) or "
-             "leaves it not given (a value the extractor did not give).",
-        why="On an execution command a replaced number is a silent wrong change to a command that acts; a refusal "
-            "asks the extractor once more, then the user.",
-        measured="fix-qjf4 (the app's extraction replay): replacing made wrong changes, so the execution rule "
-                 "refuses; the planning rule is gated by the strictness corpus.",
-        shows=lambda planning, execution: _replaced(planning) and execution in (REFUSED, NOT_GIVEN)),
-    "absent-int": Difference(
-        what="An int the extractor leaves out (None, its not-given number, or the default 0): planning refuses it "
-             "when the request writes two or more numbers, none of them the default; execution never refuses an "
-             "absent value. (An Optional[int] cannot carry the planning in_request option: option_params refuses "
-             "it, so the planning side of this row is an in_request int with a plain default.)",
-        why="An absent value is not a value the extractor gave; refusing it refuses a correct call.",
-        measured="22 of 974 Haiku calls (2.3%) refused by the planning rule on an absent Optional[int] in the "
-                 "app's extraction replay (fix-qjf4, tests/test_extraction_argument_checks.py).",
-        shows=lambda planning, execution: planning == REFUSED and execution == NOT_GIVEN),
-    "exemptions": Difference(
-        what="Which fields are read against the request: planning checks a str field only when it carries a "
-             "check option (in_request, opt in per field, design 2.46); execution checks every str field unless "
-             "it is exempt (json_schema_extra in_request False, or a declared pattern: opt out), and gives an "
-             "exempt field no description-example check.",
-        why="A planning command's author declares its checks; an execution command's Input predates the options, "
-            "so its checks are on by default and a converted value is exempted by the marker or a pattern.",
-        measured="0 refused user-stated gold values on tau-bench retail (153), airline (105) and the retail set "
-                 "(105); the airline JFK / 2024-05-20 false refusals motivated no example check on exempt fields.",
-        shows=lambda planning, execution: planning == ACCEPTED and execution == REFUSED),
-    "which-values": Difference(
-        what="Which values are checked: execution checks only values the LLM extractor produced, and reads a value "
-             "equal to the field's declared default as not given (the extractor is told to answer the default for "
-             "a value the request leaves out); planning checks every argument of the call, a default included.",
-        why="On the execution path a default is indistinguishable from \"not given\"; refusing it refuses a correct "
-            "call. (Values from other extraction methods, stored parameters, the XML form or a direct action, "
-            "never reach check_extracted_values: ParameterExtraction._llm_extract is its only caller.)",
-        measured="Execution gate: 0 of 1,189 values refused on passing Haiku runs, 32 of 107 wrong Nemotron values "
-                 "caught (fix-qjf4 replay).",
-        shows=lambda planning, execution: planning != NOT_GIVEN and execution == NOT_GIVEN),
     "planning-only": Difference(
         what="Planning-only concepts, not imposed on execution commands: subjects (the in_request \"subject\" "
              "option, and a pronoun read as the request's one subject or refused), identifier expansion (a "
@@ -366,12 +330,11 @@ EXECUTION_CASES = [
     Case("request-spelling", _EXEC, "drift_code", "find the member Ann Lee", {"name": "ann lee."}, "name"),
     Case("dash-variant", _EXEC, "drift_code", "find the member Ann Lee–Smith", {"name": "Ann Lee-Smith"}, "name"),
     Case("int-written", _EXEC, "drift_rows", "list the loans of book b1 from row 10", {"count": 10}, "count"),
-    Case("int-not-written", _EXEC, "drift_rows", "list the loans of book b1 from row 10", {"count": 20}, "count",
-         difference="int-not-written"),
+    Case("int-not-written", _EXEC, "drift_rows", "list the loans of book b1 from row 10", {"count": 20}, "count"),
     Case("absent-int-two-numbers", _EXEC, "drift_rows", "list the loans of book b1 for the 2 or 3 members who asked",
-         {"count": None}, "count", difference="absent-int"),
+         {"count": None}, "count"),
     Case("absent-int-sentinel", _EXEC, "drift_rows", "list the loans of book b1 for the 2 or 3 members who asked",
-         {"count": INVALID_INT_VALUE}, "count", difference="absent-int"),
+         {"count": INVALID_INT_VALUE}, "count"),
     Case("choice-outside", _EXEC, "drift_choice", "cancel it, the price dropped elsewhere",
          {"kind": "price dropped elsewhere"}, "kind", execution_field="kind_text", execution_model=ChoiceText),
     Case("choice-declared-spelling", _EXEC, "drift_choice", "find the member Ann", {"kind": "Member"}, "kind",
@@ -394,8 +357,7 @@ EXECUTION_CASES = [
     Case("escaped-unknown-marker", _EXEC, "drift_converted", "find twenty two books",
          {"due": "&lt;UNKNOWN&gt;"}, "due"),
     Case("number-word", _EXEC, "drift_rows", "show eight rows", {"count": 8}, "count"),
-    Case("number-word-not-written", _EXEC, "drift_rows", "show eight rows", {"count": 9}, "count",
-         difference="int-not-written"),
+    Case("number-word-not-written", _EXEC, "drift_rows", "show eight rows", {"count": 9}, "count"),
     Case("digits-inside-a-str", _EXEC, "drift_rows", "find Doyle and Sons 1",
          {"title": "Doyle and Sons 1", "count": 7}, "count"),
     # "One of:" in a description: one allowed-values rule on both paths (argument_checks.allowed_member, fix-48np.3)
@@ -410,27 +372,24 @@ _DIFF = "deliberate difference"
 DIFFERENCE_CASES = [
     # int-not-written
     Case("absent-int-one-number", _DIFF, "drift_rows", "list the loans of book b1 from row 10", {"count": None},
-         "count", difference="int-not-written"),
-    Case("int-not-written-default-written", _DIFF, "drift_page", "show 5 or 8 loans", {"size": 6}, "size",
-         difference="int-not-written"),
+         "count"),
+    Case("int-not-written-default-written", _DIFF, "drift_page", "show 5 or 8 loans", {"size": 6}, "size"),
     Case("int-agree-no-number", _DIFF, "drift_rows", "list the loans of the book", {"count": 20}, "count"),
     Case("int-agree-two-numbers", _DIFF, "drift_rows", "show 2 or 3 rows", {"count": 7}, "count"),
     # absent-int
-    Case("absent-int-zero", _DIFF, "drift_rows", "show 2 or 3 rows", {"count": 0}, "count", difference="absent-int"),
+    Case("absent-int-zero", _DIFF, "drift_rows", "show 2 or 3 rows", {"count": 0}, "count"),
     Case("absent-int-no-number", _DIFF, "drift_rows", "show the loans", {"count": None}, "count"),
     # exemptions
     Case("unoptioned-str-not-written", _DIFF, "book_details", "who has Foundation on loan", {"title": "Dune Messiah"},
-         "title", difference="exemptions"),
+         "title"),
     Case("unoptioned-str-invented", _DIFF, "transfer_loan", "Move Ann Lee's loan to the Main branch",
-         {"member": "Ann Lee", "branch": "North"}, "branch", difference="exemptions"),
+         {"member": "Ann Lee", "branch": "North"}, "branch"),
     Case("unoptioned-str-written", _DIFF, "book_details", "give me the details of Dune", {"title": "Dune"}, "title"),
     Case("unoptioned-str-placeholder", _DIFF, "book_details", "give me the details of it", {"title": "<title>"},
          "title"),
     # which-values
-    Case("int-equal-to-default", _DIFF, "drift_page", "show 2 or 3 loans", {"size": 5}, "size",
-         difference="which-values"),
-    Case("int-equal-to-default-one-number", _DIFF, "drift_page", "show loans of 3 books", {"size": 5}, "size",
-         difference="which-values"),
+    Case("int-equal-to-default", _DIFF, "drift_page", "show 2 or 3 loans", {"size": 5}, "size"),
+    Case("int-equal-to-default-one-number", _DIFF, "drift_page", "show loans of 3 books", {"size": 5}, "size"),
     # planning-only
     Case("subject-cut-short", _DIFF, "drift_subject", "Show the books of Ann Lee", {"name": "Ann"}, "name",
          difference="planning-only"),
@@ -492,7 +451,7 @@ def planning_verdict(command: pc.PlanningCommandCommand, case: Case):
             return REFUSED
         return f"refused for another reason: {text}"
     given, value = raw[case.field], args[case.field]
-    if pc._empty(given) or (given == param.default and value == param.default):
+    if pc._empty(given) or not check.is_given_value(given, param.default):   # not given: the default stands
         return NOT_GIVEN if value == param.default else _as(value)
     if value == given:
         return ACCEPTED
@@ -526,7 +485,7 @@ def execution_verdict(command: pc.PlanningCommandCommand, case: Case):
     check.apply(params)
     if name in check.refused:
         return REFUSED
-    if not argument_checks._given(info, given):
+    if not one_guard.is_given(info, given):
         return NOT_GIVEN
     if get_origin(info.annotation) is Literal:
         return _literal_verdict(info.annotation, given)

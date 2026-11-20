@@ -1606,7 +1606,7 @@ class ResponseGenerator:
     # Missing-parameter message lists bare command names only (no Context/ prefix, no .field suffix)
     assert (
         "abort and use the find_book or show_book or library_hours command(s) "
-        "to get book_uid information. OR..."
+        "to get book_uid information."
     ) in message
 
 

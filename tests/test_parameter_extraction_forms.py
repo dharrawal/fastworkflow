@@ -16,12 +16,13 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import NLUPipelineStage
+from fastworkflow.parameter_clarification import pending
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction as pe_module
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     CommandNamePrediction,
 )
+from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import park
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     NOT_FOUND,
     ParameterExtraction,
@@ -289,19 +290,19 @@ def _pending_round(stored, command=LIST):
     app_workflow._current_command_context_name = "Shelf"
     workflow.context = {
         "app_workflow": app_workflow,
-        "NLU_Pipeline_Stage": NLUPipelineStage.PARAMETER_EXTRACTION,
         "command_name": LIST,
         "command": command,
-        "stored_parameters": stored,
-        "stored_parameter_round": 1,
     }
+    park(workflow, LIST, stored, request_text=command)
     return workflow, app_workflow
 
 
 @pytest.fixture
-def no_prediction():
+def no_prediction(setup_test_environment):
+    """While a command is pending the reply goes to its extraction: the intent model is not asked (the reader of the
+    plain utterances of abort / you_misunderstood needs the framework initialised)."""
     predictor = MagicMock()
-    predictor.predict.return_value = CommandNamePrediction.Output()
+    predictor.predict.side_effect = AssertionError("the intent model was asked while a command was pending")
     with patch.object(wildcard, "CommandNamePrediction", return_value=predictor):
         yield
 
@@ -315,7 +316,7 @@ def recorded(no_prediction):
         def extract(self):
             calls.append({
                 "text": self.command,
-                "stored": self.cme_workflow.context.get("stored_parameters"),
+                "stored": (loop.to_state() if (loop := pending(self.cme_workflow.context)) else None),
             })
             return ParameterExtraction.Output(parameters_are_valid=False, error_msg="x")
 
@@ -331,15 +332,16 @@ def test_new_full_command_in_a_pending_round_is_a_fresh_extraction(recorded):
 
     assert recorded == [{"text": f"{LIST}: {new}", "stored": None}]
     assert workflow.context["command"] == new
-    assert "stored_parameter_round" not in workflow.context
+    assert pending(workflow.context) is None
 
 
 def test_answer_in_a_pending_round_merges_the_new_text(recorded):
     stale = _ListParams.model_construct(scope="shelf", scope_uid=NOT_FOUND)
     workflow, _ = _pending_round(stale)
+    pending_state = pending(workflow.context).to_state()
     wildcard.ResponseGenerator()(workflow, "3c85", None)
 
-    assert recorded == [{"text": f"{LIST}: 3c85", "stored": stale}]
+    assert recorded == [{"text": f"{LIST}: 3c85", "stored": pending_state}]
     assert workflow.context["command"] == LIST  # the pending command is kept
 
 

@@ -1,6 +1,6 @@
 import pytest
 import fastworkflow
-from fastworkflow import Workflow, NLUPipelineStage
+from fastworkflow import Workflow
 
 
 class TestAmbiguousIntentRegression:

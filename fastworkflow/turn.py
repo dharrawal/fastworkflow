@@ -316,9 +316,7 @@ TURN_CAPTURE_CONTRACT_VERSION = 2
 
 # Which matching layer decided, named for what ``intent_detection.py`` actually
 # writes to ``nlu_trace["matcher_layer"]`` — ``exact_prefix``,
-# ``fuzzy_prematch``, ``embedding_cache``, ``classifier``,
-# ``clarification_default``, ``jev_tiebreak`` (Jev picked among an ambiguous
-# intent's candidates) — plus ``direct_action`` for
+# ``fuzzy_prematch``, ``classifier``, ``clarification_default`` — plus ``direct_action`` for
 # ``process_action_turn``, which resolves an ``Action``'s command name with no
 # NLU at all and therefore emits no ``fw.nlu.intent`` span to read a layer off.
 #
@@ -332,9 +330,11 @@ RoutingTier = Literal[
     "direct_action",
     "exact_prefix",
     "fuzzy_prematch",
-    "embedding_cache",
     "classifier",
     "clarification_default",
+    # ``embedding_cache`` (the removed similarity cache) and ``jev_tiebreak`` (the removed
+    # tie-break) are never written now; they stay so a stored record that names one still loads.
+    "embedding_cache",
     "jev_tiebreak",
     # An emitter that did not say which layer decided. A real member rather
     # than a default, so "not recorded" never reads as a tier that ran.

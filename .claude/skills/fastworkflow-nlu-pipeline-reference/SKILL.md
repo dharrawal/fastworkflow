@@ -4,7 +4,7 @@ description: >
   Domain reference for fastWorkflow's NLU stack AS IMPLEMENTED IN THIS REPO: two-tier
   TinyBERT/DistilBERT intent classifiers, confidence thresholds, synthetic utterance
   generation (litellm + PersonaHub), DSPy parameter extraction, runtime matching layers
-  (fuzzy/embedding-cache/classifier), and per-role litellm model routing. Load this when
+  (exact/fuzzy/classifier/remote model), and per-role litellm model routing. Load this when
   you hear: "wrong command predicted", "ambiguous intent", "intent detection", "parameter
   extraction returned NOT_FOUND", "threshold.json", "confidence threshold", "utterance
   generation", "DSPy signature/cache", "LabeledFewShot", "litellm_proxy", "why did the
@@ -12,7 +12,7 @@ description: >
   label", "escalation label", "why is there no wildcard class in this context",
   "in_distribution_f1", "___command_info/versions", or when modifying anything under
   model_pipeline_training.py, intent_detection.py, nlu_labels.py, signatures.py,
-  generate_synthetic.py, heldout_evaluation.py, or cache_matching.py.
+  generate_synthetic.py, or heldout_evaluation.py.
   Do NOT load for step-by-step failure triage (use fastworkflow-debugging-playbook),
   for deciding whether one training run beat another or how many seeds to add (use
   fastworkflow-intent-training-convergence), the full env-var catalog
@@ -59,7 +59,7 @@ the end.
 | logits | Raw per-class scores from the classifier head, before normalization |
 | softmax confidence | `max(softmax(logits))` — the top class's probability; this repo's only "confidence" signal |
 | calibration | How well confidence tracks actual correctness. This repo tunes *decision thresholds* on held-out data but never calibrates the probabilities themselves (no temperature scaling) |
-| embedding | Fixed-length vector representing text; here the DistilBERT `[CLS]` token's last hidden state (`cache_matching.py:51`) |
+| embedding | Fixed-length vector representing text; here the DistilBERT `[CLS]` token's last hidden state |
 | cosine similarity | Angle-based vector similarity in [~-1, 1]; 1.0 = same direction |
 | Levenshtein distance | Minimum single-character edits between strings; "normalized" = divided by the longer length, so 0.0 = identical |
 | LabelEncoder | sklearn utility mapping label strings ↔ integer class ids (the ONLY load-bearing sklearn use in intent detection) |
@@ -80,7 +80,7 @@ whole NLU state machine:
 
 ```
 user text
-  └─> Stage 1  Intent detection   (intent_detection.py — 4-layer matching ladder)
+  └─> Stage 1  Intent detection   (intent_detection.py — matching ladder)
   └─> Stage 2  Parameter extraction (parameter_extraction.py + utils/signatures.py — regex/DSPy)
   └─> Stage 3  Command execution  (your command's ResponseGenerator — outside NLU)
 ```
@@ -88,7 +88,7 @@ user text
 Any gap (ambiguous intent, missing/invalid parameter) produces a **clarification turn**,
 never a guess — that is the framework's core reliability contract.
 
-## 1. Intent detection: the 4-layer matching ladder
+## 1. Intent detection: the matching ladder
 
 Order, from `_workflows/command_metadata_extraction/intent_detection.py` (`predict`, :36-167):
 
@@ -96,25 +96,15 @@ Order, from `_workflows/command_metadata_extraction/intent_detection.py` (`predi
 |---|---|---|---|---|
 | 1 | Exact first-token | First whitespace/`(`-delimited token, lowercased, looked up in valid command names | exact | :100-105 |
 | 2 | Fuzzy match | Normalized Levenshtein **distance** vs command names (input truncated-prefix compare) | distance ≤ 0.3 | :108-114 → `utils/fuzzy_match.py:17` |
-| 3 | Embedding cache | Cosine similarity vs previously-clarified utterances in `<app_workflow>/___convo_info/cache.db` | ≥ 0.85 | :118 → `cache_matching.py:131` |
-| 4 | Transformer classifier | `CommandRouter.predict` (two-tier BERT, next section) | trained thresholds | :121 |
+| 3 | Local model | `CommandRouter.predict` (next section) | trained thresholds | |
+
+(The similarity cache that sat between layers 2 and 3 was removed, fix-o5wi.8: it added nothing on unseen requests. After the local model come the remote decision model and then the question.)
 
 Sharp edges, all verified:
 
 - Layer 2's threshold is a **distance** (lower = closer), not a similarity. `find_best_matches`
   also compares against each candidate *truncated to the input's length* (`fuzzy_match.py:49`)
   — effectively prefix-biased matching.
-- Layer 3: the `cache_match` function *default* is 0.90 (`cache_matching.py:131`) but the only
-  call site passes **0.85** (`intent_detection.py:118`). The 0.90 default is never used.
-- Layer 3 is an O(n) linear scan opening the RocksDB (`speedict.Rdict`) per message, one
-  `cosine_similarity` call per cached entry (`cache_matching.py:168-179`). Embeddings are
-  memoized in-process via `lru_cache(256)` keyed on `(id(pipeline), text)` (:18-27).
-- **Learning loop**: after a successful ambiguity/misunderstanding clarification, the ORIGINAL
-  utterance (from `cme_workflow.context["command"]`) is stored with the resolved label and its
-  DistilBERT embedding (`intent_detection.py:151-162` → `store_utterance_cache`), so the next
-  similar utterance short-circuits at layer 3. Multiple labels per utterance are resolved by
-  highest frequency, tie-broken by most recent feedback date (`cache_matching.py:189-208`).
-  This is the implementation behind README's "1-shot adaptation" claim.
 - Special commands bypass the classifier entirely: `ErrorCorrection/abort` and
   `ErrorCorrection/you_misunderstood` (and `what_can_i_do` during ambiguity clarification) are
   matched only via layers 1-2 against their `plain_utterances` (:69-97).
@@ -128,7 +118,33 @@ Sharp edges, all verified:
   the suppressed labels. A top-k `parameter_value`
   deliberately never escalates.
 
+- **2026-11-17: layer 4 is one chain, and there is no engine setting** (`fix-o5wi.2`).
+  `INTENT_DETECTION_ENGINE` (`auto|classifier|matcher|hybrid`) is gone; a value left in an env
+  file is ignored with one warning. Since fix-o1lg S7 the layers live once in `intent_loop.resolve` (the CME's `CommandNamePrediction` and the plan path's `part_intent` both call it; `has_local_model` / `matcher_link` are gone, `engine_for` builds the links): (a) a context with a trained local
+  model asks it (`ClassifierEngine`), and a confident answer (one command, or a bare value;
+  `intent_detector.head_is_confident`) stands with no model call; (b) otherwise (a list, a lone
+  "not here", or no local model for the context: `has_local_model`) and `JEV_API_KEY` set, the
+  remote decision model is asked over the scope path (`matcher_link` -> `MatcherEngine`; match
+  at `INTENT_REMOTE_ACCEPT_THRESHOLD` or above, default 0.9, and "none"/another scope declines at
+  `INTENT_REMOTE_DECLINE_THRESHOLD`, default 0.9; both were 0.5 until 2026-11-18) and its answer
+  stands; when its call fails the local answer stands, and `remote_outage.report` logs it
+  (first, then every 5 minutes) and the span carries `remote_failed`; a confident local answer
+  naming a PLANNING command is checked the same way (the remote model confirms or it is asked);
+  (c) otherwise the ambiguity question (`_ask_which_command`) or, for a decline, the walk
+  climbs. The older Jev tie-break among the classifier's candidates
+  (`workflow_agent.choose_ambiguous_command`, `FW_JEV_INTENT_TIEBREAK`, 0.9) was removed: (b)
+  replaces it. The `fw.nlu.intent` span (v8) carries `engine` (`classifier`, `matcher`, or
+  `question` when no link was confident) and `engine_chain` (the links asked); `engine_mode` and
+  `jev_tiebreak` are no longer written. `FW_REQUIRE_HEADS=1` makes a context with no local model
+  a failure (the matcher does not stand in). `intent_detector.startup_report` prints the chain
+  in one line. A test that asserts the ambiguity prompt of an unsure local model must use the
+  `no_planner_key` fixture, or the remote model is called live.
+
 ## 2. Two-tier intent models (TinyBERT + DistilBERT)
+
+**2026-11-17: this section describes the `per_context` layout, which is no longer the default
+for an application workflow** (the framework's own workflows still use it). The default is the
+`embedding` layout described at the end of this section.
 
 **Not sklearn.** Despite CLAUDE.md's wording, intent models are two HuggingFace
 `AutoModelForSequenceClassification` checkpoints fine-tuned with torch
@@ -145,6 +161,68 @@ Sharp edges, all verified:
 | Batch size | 10 (:936) | 10 |
 | Max token length | 128 (train and inference) | 128 |
 | Split | `train_test_split(test_size=0.25, random_state=42)` (:914, now :1053 — see note below) | same data |
+
+**2026-11-16: a second layout.** `INTENT_MODEL_LAYOUT=workflow` (workflow env
+file, read by `fastworkflow train` only; `per_context` is everything this section describes
+above) trains ONE large model for the whole workflow instead of a pair per
+context: every command once, `parameter_value`, and one workflow-wide `wildcard` class made
+of the built-in vague replies. No tiny model, and no per-context "not here" rows: a context
+is answered by masking the output to its commands, and a best label outside the mask is
+returned as `wildcard`. Artifacts: `versions/<id>/workflow/` (`largemodel.pth/`,
+`label_encoder.pkl`, `scopes.json`) plus, per context, a sentinel `threshold.json` and
+`workflow_scope.json`. `CommandRouter` reads the layout from the context folder, so runtime
+code does not change; `predict_with_details` adds `p_in`, `p_out`, `escalation_margin` and
+always reports `model_tier` "large". Code: `fastworkflow/train/intent_model_layout.py`,
+`fastworkflow/train/workflow_model.py`. Measured against per-context heads rebuilt at three
+seeds on a held-out benchmark: strict top-1 53% against 23%, in-list 83% against 86%,
+escalation recall 44/44 against 3/44, wrong confident routes about 9% of requests against
+about 4%, about a fifth of the disk and memory. Not yet measured on a large workflow; its
+thresholds are known to be too easy to pass (`docs/single_intent_model_preregistration_v3.md`).
+
+**2026-11-17: the default layout is `embedding`** (`fix-o5wi.2`, reshaped by `fix-o5wi.9`;
+`intent_model_layout.DEFAULT_LAYOUT` is the one constant; the framework's own workflows are `embedding` too, on the
+pinned encoder `FRAMEWORK_ENCODER` = `BAAI/bge-small-en-v1.5`). Code: `fastworkflow/train/embedding_head.py`. Nothing is
+fine-tuned:
+
+- **Rows**: the `workflow` layout's rows (`workflow_model.assemble_rows`: every command once, `parameter_value`, the
+  workflow-wide `wildcard` of built-in vague replies) plus, per command, its humanised name and the first sentence of its
+  `Signature` docstring; every seed utterance (`plain_utterances`) has `sample_weight` 3 (`training_rows`, `SEED_WEIGHT`).
+- **Encoder**: frozen, `transformers.AutoModel`, `INTENT_EMBEDDING_MODEL` (default `intfloat/e5-base-v2`, mean pooling,
+  the prefix `query: ` on every text; `BAAI/bge-*` is CLS with no prefix; `INTENT_EMBEDDING_POOLING=cls|mean`).
+  L2-normalised, max length 128. `SentenceEncoder.get(id, pooling, prefix)`: one load per model id per process; it remembers
+  the last 256 single-text vectors, so the scopes of a walk share one forward pass.
+- **Head**: `LogisticRegression(C=100.0, max_iter=3000)` over every label, one linear-algebra thread, float64. Stored:
+  `head.npz` (`coef`, `intercept`, float32) and the label order in `scopes.json`. Inference is numpy.
+- **Threshold**: a constant, `INTENT_COMMIT_THRESHOLD` (default 0.65; `calibrated_commit_threshold` is the place a value
+  calibrated on recorded real requests will be read, `fix-o5wi.6`, None today). The cross-fit calibration of a threshold
+  and of a pass-up margin, and `INTENT_WRONG_COMMIT_TARGET` / `INTENT_FALSE_ESCALATION_TARGET`, were removed (a 0.5% target
+  gave 5 to 8% wrong on real requests); a removed setting left in an env file is ignored with one warning.
+- **Cross-fit, for the training report only** (`cross_fit_report`; five folds grouped by row text): accuracy over distinct
+  command rows and the most confused command pairs (both directions, counts and shares, top ten, how many exceed 10%),
+  with what to do (add seeds that separate the pair, or merge them). It sets nothing.
+- **Decision in a context** (`decide`; NOT renormalised inside the mask): best label overall `parameter_value` -> bare
+  value; `wildcard` -> "not here" (the vague replies). Else `p_in` = largest probability inside the mask, `p_out` = largest
+  outside it (reserved labels not counted): one command when `p_in >= threshold` and `p_in >= p_out`; else NOT confident:
+  the context's top three, and when `p_out > p_in` also `details["outside_labels"]` / `["outside_scores"]` (best ten
+  outside the mask). The head NEVER answers a lone "not here" for a command elsewhere. `ClassifierEngine(router,
+  reachable=...)` adds up to two reachable outside commands to the candidates (`details["handed_on"]`); the matcher, when
+  `JEV_API_KEY` is set, decides as before; else the ambiguity question offers the ancestor's command and the clarification
+  stage runs it on its own scope's record (`chosen_command_elsewhere` on the span).
+- **Artifacts**: `versions/<id>/workflow/` holds `head.npz` and `scopes.json` (`schema_version` 2; labels, encoder id,
+  pooling and prefix, each context's mask, threshold, row counts, cross-fit facts, times); each context folder holds the
+  sentinel `threshold.json` and `workflow_scope.json` with `"layout": "embedding"`, which is what `CommandRouter`
+  dispatches on. A head with `schema_version` 1 (a `margin`) is read with the older rule until retrained. The manifest
+  carries `intent_model_layout` and `intent_embedding_head`.
+- **Signature**: the layout, encoder id, pooling, prefix, commit threshold and the digests of `workflow_model.py` and
+  `embedding_head.py` are global inputs. Any command change refits the head (all or nothing).
+- **Measured** through the product trainer and router (`scripts/experiments/embedding_head.py product`, 2026-11-17,
+  library + retail, threshold 0.65, local model alone): development benchmarks 1 to 3 pooled (735 routing, 120 escalation):
+  59.6% right outright, 1.8% wrong confident, handed on with the right command 35.6% and without it 3.0%, ancestor among
+  the candidates 117/120; fourth benchmark, once (264, 46): 45.8%, 3.0%, 45.8%, 5.3%, 45/46 (previous head: 60.2% right
+  outright, 10.2% wrong confident). Operational, CPU: encoder load 0.6 s warm (+368 MB resident), head 9 to 10 s per
+  example workflow, 97,524 and 68,689 bytes, a request median 25 to 32 ms (10 threads) and 52 to 64 ms (1 thread). Not yet
+  measured on a large workflow. The framework workflows are pinned to bge-small because e5-base failed the review reply gate
+  (30/36, `look_up` 2/6, "hmm" answered `confirm`).
 
 One model **pair per command context**, trained by `train()`. Contexts trained =
 workflow's contexts minus the internal CME contexts, plus `'*'` (mapped to folder `global`
@@ -175,7 +253,7 @@ rather than string-comparing to `"wildcard"`.
 **Where the "not here" class comes from today (fix-1hs8).** The class is built from seeds of
 *foreign* commands (`not_here_seed_rows`: core commands, other contexts' commands, planning
 commands; one seed each under the shipped `sparse_1` arm). A head with none of those, such as a
-single-context workflow with no core commands (the built-in consultation review-reply head), would
+single-context workflow with no core commands (the built-in plan review-reply head), would
 have no class and would route a vague reply confidently to the nearest real command. Such a head is
 seeded instead from `BUILT_IN_VAGUE_REPLIES` (9 domain-neutral vague replies, used as written, no
 utterance generation) under the pseudo source `built_in/vague_reply`, repeated `BUILT_IN_VAGUE_WEIGHT`
@@ -378,8 +456,8 @@ More detail on all three phases: [references/dspy-and-synthetic-data.md](referen
 
 ## 5. Ambiguity clarification state machine
 
-`NLUPipelineStage` enum (`fastworkflow/__init__.py:13-18`), stored in the CME workflow's
-context dict:
+The pending question is read from the CME workflow's context records (`intent_loop.waiting_for`; the `NLUPipelineStage`
+enum was deleted); the old stage names below describe the same states:
 
 ```
 INTENT_DETECTION ──ambiguous (top-k)──> INTENT_AMBIGUITY_CLARIFICATION
@@ -402,8 +480,10 @@ no command at all". The only brake is the ambiguity threshold, and for retail it
 0.2395 / 0.3392 — anything clearing ~24–34% confidence executes. Filed as `fix-d28`; full
 probe write-up in `docs/intent_training_improvements_spec.md` §11 (M1/M2).
 
-- Suggested commands for the constrained re-selection are persisted in the app workflow's
-  `___convo_info/cache.db` Rdict (`intent_detection.py:189-217`).
+- The pending which-command question (the candidates of an ambiguity, or every command after "nothing matched") is one
+  JSON record, `intent_loop.open_question`, held in the CME context under `intent_loop` and saved with the session; the
+  reply is read by `intent_loop.read` / `answer` (the same reader the plan path uses). The old
+  `___convo_info/cache.sqlite3` store of suggested commands is gone (fix-o1lg S7).
 - In agent mode, ambiguity and misunderstanding are not resolved on the agent's behalf:
   `_execute_workflow_query` runs `abort` to reset the stage and returns the NLU's reply
   (the candidate list, or this context's commands) unchanged plus the abort confirmation,
@@ -411,7 +491,7 @@ probe write-up in `docs/intent_training_improvements_spec.md` §11 (M1/M2).
   intent-clarification agent tried first and, when it gave up, told the outer agent to
   `ask_user`; in measured downstream-workflow runs it resolved 0 of 9 cases.
 - Successful clarification feeds the layer-3 learning cache (§1).
-- Stale-state warning: `'command'`, `'stored_parameters'`, `'NLU_Pipeline_Stage'` in the CME
+- Stale-state warning: `'command'`, `'parameter_loop'`, `'intent_loop'` in the CME
   context are reset by `Workflow.end_command_processing` (`workflow.py:291-303`); a leaked
   flag forces the wrong mode next turn.
 
@@ -451,7 +531,6 @@ Top offenders (full table with all ~25 entries:
 | Value | What it gates | file:line |
 |---|---|---|
 | 0.3 | Fuzzy command-name match (max normalized Levenshtein distance) | `_workflows/command_metadata_extraction/intent_detection.py:111` |
-| 0.85 | Embedding-cache cosine threshold (call site; fn default 0.90 unused) | `intent_detection.py:118` / `cache_matching.py:131` |
 | 0.65 | `ModelPipeline` default confidence threshold (overwritten by trained value at load) | `model_pipeline_training.py:346,360,1059` |
 | 0.15 | alpha: DistilBERT-usage penalty in threshold scoring | `model_pipeline_training.py:255` |
 | 20 | linspace points swept in threshold search | `model_pipeline_training.py:227` |
@@ -466,7 +545,6 @@ Top offenders (full table with all ~25 entries:
 | 3 / 1.0 | BestOfN attempts / reward threshold in param extraction | `utils/signatures.py:295-299` |
 | 2 | agent-call retries on AdapterParseError | `workflow_execution_context.py:700` |
 | 0.2 / 0.7 | `DatabaseValidator.fuzzy_match` difflib cutoff / Levenshtein threshold | `utils/signatures.py:70,86` |
-| 256 | embedding lru_cache size | `cache_matching.py:18` |
 
 ## 8. Known doc rot (trust code, cite this when correcting docs)
 
@@ -507,8 +585,7 @@ grep -n "num_epochs\|lr=\|batch_size=10\|test_size" fastworkflow/model_pipeline_
 # Dead 0.5129 function still dead? (should only show the def, no call sites)
 grep -rn "find_optimal_confidence_threshold" fastworkflow/
 # Matching-ladder thresholds
-grep -n "threshold=0.3\|0.85" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
-grep -n "threshold=0.90" fastworkflow/cache_matching.py
+grep -n "threshold=0.3" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
 # Model defaults
 grep -n "INTENT_DETECTION" fastworkflow/model_pipeline_training.py
 # DSPy example-gen numbers and the non-filtering return

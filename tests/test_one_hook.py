@@ -77,8 +77,8 @@ def test_refused_with_field_asks_for_that_field_only_and_keeps_the_others(initia
     assert fields == ["seat"]
     assert diagnostics["invalid_fields"] == ["seat"]
     assert "seat B9 is taken; pick another" in message
-    assert "Provide corrected parameter values in the exact order specified below, separated by commas:\nseat" in message
-    assert "note" not in message.split("Provide corrected parameter values")[1]
+    assert message.endswith("Which seat should I use?")
+    assert "note" not in message.split("pick another")[1]   # the question asks for the seat only
     assert input_obj.note == "window side"
 
 
@@ -116,7 +116,7 @@ class PlanGenerator:
         pc.check_input(command, {"room": "attic"}, "pick the attic", None)
     assert refused.value.fields == ("room",)
     question = pc.refusal_question(command, refused.value)
-    assert "What should the room be?" in question
+    assert "Which room should I use?" in question
 def test_refused_without_field_refuses_the_call_and_asks_for_nothing(initialized, workflow_path):
     workflow = _workflow(workflow_path)
 

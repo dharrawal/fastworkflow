@@ -29,7 +29,8 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import ParameterExtraction
-from fastworkflow.utils import argument_checks, signatures
+from fastworkflow.parameters import check as one_guard, rules
+from fastworkflow.utils import signatures
 from fastworkflow.utils.argument_checks import check_extracted_values
 from fastworkflow.utils.signatures import NOT_FOUND
 
@@ -100,7 +101,7 @@ def test_an_invented_str_value_is_refused_retried_once_and_then_asked_for(extrac
     # still refused: treated as not given, so the required field is asked for (the NOT_FOUND path)
     assert output.parameters_are_valid is False
     assert output.cmd_parameters.query == NOT_FOUND
-    assert "Missing parameter values: query" in output.error_msg
+    assert "your request does not give the query" in output.error_msg
     assert "Values not used: query='Bob Jones' is not written in the request" in output.error_msg
 
 
@@ -247,7 +248,7 @@ def test_an_exempt_field_still_refuses_a_placeholder():
 
 
 def test_one_of_in_the_description_is_the_allowed_list():
-    assert argument_checks.allowed_values(_Fields.model_fields["kind"]) == ("book", "member", "branch")
+    assert rules.allowed_values(_Fields.model_fields["kind"]) == ("book", "member", "branch")
     assert _check("find the shelf Ann", name="Ann", kind="shelf").refused == {
         "kind": ("shelf", "is not one of book, member, branch")}
     assert _check("find the member Ann", name="Ann", kind="Member").respelled == {"kind": ("Member", "member")}
@@ -255,7 +256,7 @@ def test_one_of_in_the_description_is_the_allowed_list():
 
 def test_a_copied_description_example_is_refused():
     check = _check("add Ann Lee", name="Ann Lee", code="XY-12")
-    assert check.refused == {"code": ("XY-12", argument_checks.EXAMPLE_WHY)}
+    assert check.refused == {"code": ("XY-12", one_guard.EXAMPLE_WHY)}
     assert _check("add Ann Lee with code XY-12", name="Ann Lee", code="XY-12").refused == {}
 
 
@@ -272,7 +273,7 @@ def test_a_converted_value_equal_to_a_description_example_is_not_refused():
 
 
 def test_punctuation_alone_is_refused():
-    assert _check("find the member Ann", name="...").refused == {"name": ("...", argument_checks.NO_VALUE_WHY)}
+    assert _check("find the member Ann", name="...").refused == {"name": ("...", one_guard.NO_VALUE_WHY)}
 
 
 def test_values_not_given_are_not_checked():

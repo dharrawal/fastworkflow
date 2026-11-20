@@ -722,7 +722,22 @@ class CommandRouter:
             return
         if '*' in model_artifacts_folderpath:
             model_artifacts_folderpath = model_artifacts_folderpath.replace('*', GLOBAL_CONTEXT_FOLDER)
-            
+
+        # A context of a version trained in a one-model layout (``embedding`` or ``workflow``)
+        # holds no models of its own: a marker file points at the workflow's one model and says
+        # which kind it is. The layout is read from the folder, never from a setting, so the
+        # runtime serves whatever was published.
+        from fastworkflow.train import intent_model_layout
+
+        if intent_model_layout.is_workflow_scope_folder(model_artifacts_folderpath):
+            if (intent_model_layout.context_layout(model_artifacts_folderpath)
+                    == intent_model_layout.EMBEDDING):
+                self._init_embedding_layout(model_artifacts_folderpath)
+            else:
+                self._init_workflow_layout(model_artifacts_folderpath)
+            self._initialised = True
+            return
+
         self.tiny_path = f"{model_artifacts_folderpath}/tinymodel.pth"
         self.large_path = f"{model_artifacts_folderpath}/largemodel.pth"
         threshold_path = f"{model_artifacts_folderpath}/threshold.json"
@@ -748,6 +763,54 @@ class CommandRouter:
 
         self._initialised = True
 
+    def _init_workflow_layout(self, context_folderpath: str):
+        """Read this context through the workflow's one large model (the ``workflow`` layout).
+
+        The model is loaded once per artifact version and shared by every context of it
+        (`WorkflowModelPipeline`, keyed by the real path of the version's ``workflow`` folder),
+        so a context costs a mask and a threshold, not a model. The attributes a caller reads
+        on a router keep their names: ``modelpipeline`` exposes the large model as
+        ``distil_model`` / ``distil_tokenizer`` / ``device``, and
+        ``label_encoder_path`` is the workflow's one encoder (every label, not this context's).
+        """
+        # Lazy: workflow_model imports this module.
+        from fastworkflow.train import intent_model_layout, workflow_model
+
+        marker = intent_model_layout.read_scope_marker(context_folderpath)
+        model_dir = intent_model_layout.workflow_model_dir(context_folderpath)
+        router = workflow_model.WorkflowModelRouter(model_dir, marker["context"], large_only=True)
+        self._workflow_router = router
+        self.tiny_path = None  # there is no tiny model in this layout
+        self.large_path = os.path.join(model_dir, intent_model_layout.LARGE_MODEL_DIRNAME)
+        self.label_encoder_path = router.label_encoder_path
+        self.confidence_threshold = router.confidence_threshold
+        self.tiny_ambiguous_confidence_threshold = router.tiny_ambiguous_confidence_threshold
+        self.large_ambiguous_confidence_threshold = router.large_ambiguous_confidence_threshold
+        self.modelpipeline = router.modelpipeline
+
+    def _init_embedding_layout(self, context_folderpath: str):
+        """Read this context through the workflow's embedding head (the ``embedding`` layout).
+
+        The head is loaded once per artifact version and the encoder once per process
+        (`embedding_head.EmbeddingHeadPipeline`, `SentenceEncoder`), so a context costs a mask.
+        ``modelpipeline`` is the head's pipeline. There is no tiny or large model and no label
+        encoder file: the label order is in the model folder's ``scopes.json``.
+        """
+        # Lazy: embedding_head imports this module.
+        from fastworkflow.train import embedding_head, intent_model_layout
+
+        marker = intent_model_layout.read_scope_marker(context_folderpath)
+        model_dir = intent_model_layout.workflow_model_dir(context_folderpath)
+        router = embedding_head.EmbeddingHeadRouter(model_dir, marker["context"])
+        self._workflow_router = router
+        self.tiny_path = None
+        self.large_path = None
+        self.label_encoder_path = None
+        self.confidence_threshold = intent_model_layout.WORKFLOW_LAYOUT_TIER_THRESHOLD
+        self.tiny_ambiguous_confidence_threshold = router.threshold
+        self.large_ambiguous_confidence_threshold = router.threshold
+        self.modelpipeline = router.modelpipeline
+
     def predict(self, command: str) -> list[str]:
         """
         if we are confident we will return a single label otherwise we will return a list
@@ -767,7 +830,21 @@ class CommandRouter:
         the difference of; the winning label's own probability is
         ``confidence``, so the first score is that same number rather than a
         second measurement of it.
+
+        A context of a one-model layout answers through the workflow's one model: the same
+        keys (``model_tier`` is "embedding" for the embedding head and "large" for the
+        fine-tuned model), and ``p_in``, ``p_out`` and ``escalation_margin``, the numbers
+        behind "this request is not mine". Declining is
+        the single label ``wildcard`` and a bare value the single label ``parameter_value``,
+        as a per-context head reports them.
         """
+        workflow_router = getattr(self, "_workflow_router", None)
+        if workflow_router is not None:
+            labels, details = workflow_router.predict_with_details(command)
+            # `decision` restates what the labels already say; the details keep the documented keys.
+            details.pop("decision", None)
+            return labels, details
+
         results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
         used_distil = bool(results['used_distil'])
         ambiguous_threshold = (
@@ -798,7 +875,8 @@ def warm_intent_heads(workflow_folderpath: str) -> list[str]:
     ``<folderpath>/___command_info/<context folder>`` (``*`` is the ``global`` folder), the keys the intent
     detection and gathering paths use, so *workflow_folderpath* must be the one the turn path passes, the
     ``Workflow``'s resolved ``folderpath``. A folder without a trained head (no tinymodel, label encoder and
-    threshold) is skipped. Returns the context folder names warmed. Never raises: a failure is logged and the
+    threshold, and not a context of the ``workflow`` layout, whose one model is loaded by the first context
+    warmed and shared by the rest) is skipped. Returns the context folder names warmed. Never raises: a failure is logged and the
     turn path meets it again.
     """
     warmed: list[str] = []
@@ -806,10 +884,15 @@ def warm_intent_heads(workflow_folderpath: str) -> list[str]:
         root = os.path.join(workflow_folderpath, "___command_info")
         if not os.path.isdir(root):
             return warmed
+        from fastworkflow.train.intent_model_layout import workflow_head_present
+
         markers = ("tinymodel.pth", "label_encoder.pkl", "threshold.json")
         for name in sorted(os.listdir(root)):
             folder = os.path.join(root, name)
-            if name in ("versions", "current") or not all(os.path.exists(os.path.join(folder, m)) for m in markers):
+            if name in ("versions", "current"):
+                continue
+            if not (all(os.path.exists(os.path.join(folder, m)) for m in markers)
+                    or workflow_head_present(folder)):
                 continue
             try:
                 CommandRouter(folder).predict_with_details("warm up")
@@ -1708,11 +1791,11 @@ def is_internal_cme_folder(folderpath: str) -> bool:
     return real == cme or real.startswith(cme + os.sep)
 
 
-def is_internal_consultation_folder(folderpath: str) -> bool:
-    """True when *folderpath* is the internal consultation workflow (or inside it)."""
-    consultation = os.path.realpath(fastworkflow.get_internal_workflow_path("consultation"))
+def is_plan_metadata_extraction_folder(folderpath: str) -> bool:
+    """True when *folderpath* is the internal plan metadata extraction workflow (or inside it)."""
+    plan = os.path.realpath(fastworkflow.get_internal_workflow_path("plan_metadata_extraction"))
     real = os.path.realpath(folderpath)
-    return real == consultation or real.startswith(consultation + os.sep)
+    return real == plan or real.startswith(plan + os.sep)
 
 
 def arm_for_workflow(folderpath: Optional[str], explicit: Optional[str] = None) -> str:
@@ -2497,8 +2580,19 @@ def train(
     *,
     stop_before_fit: bool = False,
     not_here_samples: Optional[Mapping[str, Optional[Mapping[str, Sequence[str]]]]] = None,
+    intent_model_layout: Optional[str] = None,
 ) -> dict[str, dict[str, list[str]]]:
     """Train intent-classification models **per command context**.
+
+    ``intent_model_layout`` ``"embedding"`` fits ONE linear head over a frozen sentence encoder
+    for the whole workflow instead (`train.embedding_head.EmbeddingLayoutTrainer`), and
+    ``"workflow"`` fine-tunes ONE large model (`train.workflow_model.LayoutTrainer`): the
+    per-context loop below still builds each context's label set, utterances and provenance,
+    hands the context's own rows over, and fits nothing itself. No "not here" seed rows are
+    built, so the returned samples are empty. ``None`` (and ``"per_context"``) is the
+    per-context layout, whatever the default of the setting is. The setting is the
+    caller's to read (`train.intent_model_layout.layout_for_workflow`); this function never
+    reads it.
 
     ``contexts_to_train`` is the selective-retraining hook. ``None`` trains every
     context. Automatic planning passes a set when unchanged contexts can safely be
@@ -2560,6 +2654,27 @@ def train(
     # presents as part of a workflow silently becoming untrained.
     context_set_for_training = contexts_for_training(workflow_folderpath)
     used_not_here_samples: dict[str, dict[str, list[str]]] = {}
+
+    workflow_layout_trainer = None
+    if intent_model_layout not in (None, "per_context"):
+        if intent_model_layout not in ("workflow", "embedding"):
+            raise ValueError(f"unknown intent model layout {intent_model_layout!r}")
+        if contexts_to_train is not None or active_experiment_head_scope() is not None:
+            raise ValueError(
+                f"The '{intent_model_layout}' intent model layout trains one model for every "
+                f"context: it cannot train a selection of contexts or an experiment head layout."
+            )
+        # Lazy: both modules import this one.
+        if intent_model_layout == "embedding":
+            from fastworkflow.train import embedding_head
+
+            trainer_class = embedding_head.EmbeddingLayoutTrainer
+        else:
+            from fastworkflow.train import workflow_model
+
+            trainer_class = workflow_model.LayoutTrainer
+        workflow_layout_trainer = trainer_class(
+            workflow_folderpath, crd, seed=seed, benchmark_cases=benchmark_cases)
 
     # EXPERIMENT-ONLY (Phase 9 step 3). Under ANY active head layout the persona holdout is ONE
     # split over every owned command of the workflow, drawn here before any head trains, so a
@@ -2626,6 +2741,11 @@ def train(
             continue  # skip empty
 
         own_rows = len(utterance_command_tuples)
+        if workflow_layout_trainer is not None:
+            # The context's own rows are all the one model takes from it; the persona holdout
+            # and the reserved classes are the layout trainer's, and nothing is fitted here.
+            workflow_layout_trainer.add_context(ctx_name, map_cmd_2_uttlist, train_cmds)
+            continue
         escalation = select_escalation_rows(
             ctx_name,
             crd,
@@ -3159,6 +3279,12 @@ def train(
         heldout_reports.append(report)
 
     # End of context loop
+
+    if workflow_layout_trainer is not None:
+        if stop_before_fit:
+            workflow_layout_trainer.rows()  # the assembly, for a caller observing it
+            return used_not_here_samples
+        heldout_reports = workflow_layout_trainer.finish()
 
     if stop_before_fit:
         return used_not_here_samples

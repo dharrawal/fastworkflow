@@ -137,7 +137,7 @@ def test_a_conditional_step_suspends_with_a_question_and_the_pending_prompt_data
     assert len(data["done"]) == 1 and "find_book query=Dune" in data["done"][0]
     assert data["remaining"] == [] and list(data["facts"]) == []
     # The question is plain and self-sufficient: what ran, what is asked, how to answer, how to decline.
-    assert text == library_env.ctx._pending_clarification_request
+    assert text == library_env.ctx.waiting.question
     assert "ran 1 step" in text and "reached step 2" in text
     assert "Reply yes to run 'find_book query=Persuasion' now, or no to skip it" in text
     assert "Reply cancel to stop here without deciding." in text
@@ -381,6 +381,20 @@ def test_an_empty_missing_value_reply_asks_again_then_stops(library_env, monkeyp
     assert stop["open_step"]["kind"] == "missing_value" and "twice" in stop["open_step"]["reason"]
 
 
+def test_a_missing_value_reply_written_as_field_value_gives_the_value_not_the_label(library_env, monkeypatch):
+    """The step's reply goes through the reader every parameter question uses (``parameter_clarification.read_reply``,
+    fix-yu3l.4): the question form's ``<field>: <value>`` line is the value, as the value alone is."""
+    library_env.planning_command = _build_planning_command(MissingValue)
+    _plan(monkeypatch, library_env)
+    book = library_env.wf.root.books["b1"]
+    before = list(book.notes)
+    library_env.ctx.process_turn("look up the book Dune")
+
+    result = library_env.ctx.process_turn("text: the cover is torn")
+    assert result.status == TurnStatus.COMPLETED
+    assert "add_note text=the cover is torn" in _sent(library_env)
+    assert list(book.notes) == [*before, "the cover is torn"]
+
 # ---------------------------------------------------------------- everything else stays free work
 
 def test_a_prose_step_is_free_work_and_still_ends_with_the_stop(library_env, monkeypatch):
@@ -428,9 +442,10 @@ def test_an_unattended_turn_cannot_be_asked_so_a_decision_step_ends_with_the_sto
 
 # ---------------------------------------------------------------- a "/" command while the question is pending
 
-def test_a_slash_command_sent_while_the_question_is_pending_is_not_the_reply(library_env, monkeypatch):
-    """Documented, unchanged behaviour: a "/"-prefixed message goes to the deterministic path (``_process_message``), not
-    to the suspended phase. The question stays open and a later plain reply still answers it."""
+def test_a_slash_message_sent_while_the_question_is_pending_is_the_reply(library_env, monkeypatch):
+    """Changed (bd fix-fpyb.7, owner decision 2026-11-19): a "/"-prefixed message while any question is out is read as the
+    reply to it, with the "/" removed. It never reaches the deterministic path; here it cannot be read as yes or no, so
+    the question is asked once more, and a later plain reply still answers it."""
     library_env.planning_command = _build_planning_command(Conditional)
     _plan(monkeypatch, library_env)
     library_env.ctx.process_turn("look up the book Dune")
@@ -438,18 +453,19 @@ def test_a_slash_command_sent_while_the_question_is_pending_is_not_the_reply(lib
 
     def deterministic(cls, session, command):
         handled.append(command)
-        session._cme_workflow.context.pop("is_assistant_mode_command", None)   # as the real invoke_command ends
+        session.end_round()   # as the real invoke_command ends
         return fastworkflow.CommandOutput(command_response=fastworkflow.CommandResponse(response="done"))
 
     runner = CommandExecutor.__dict__["invoke_command"]
     monkeypatch.setattr(CommandExecutor, "invoke_command", classmethod(deterministic))
-    library_env.ctx.process_turn("/find_book query=Messiah")
+    again = library_env.ctx.process_turn("/find_book query=Messiah")
     monkeypatch.setattr(CommandExecutor, "invoke_command", runner)
 
     assert library_env.ctx._awaiting_user is True
-    assert library_env.ctx._phase_run["decision"]["asked"] == 1
-    # The "/" command went to the deterministic path on its own; it was not read as the reply.
-    assert handled == ["/find_book query=Messiah"]
+    # The "/" message was the reply (it could not be read as yes or no: asked once more), not a command of its own.
+    assert handled == []
+    assert again.answer.startswith("I could not read that reply as yes or no. ")
+    assert library_env.ctx._waiting.payload["decision"]["asked"] == 2
     assert _find_runs(library_env) == ["find_book query=Dune"]
     result = library_env.ctx.process_turn("yes")
     assert result.status == TurnStatus.COMPLETED
@@ -505,13 +521,12 @@ def test_a_paused_decision_survives_a_save_and_restore_of_the_context(library_en
 
     # As a new process: nothing live is left but what the blob holds.
     ctx._phase_run = ctx._phase_live = None
-    ctx._awaiting_user = False
-    ctx._pending_clarification_request = None
+    ctx._waiting = None
     ctx._workflow_tool_agent.clear_suspension()
     ctx.apply_serialized_state(blob)
 
-    assert ctx._awaiting_user is True and ctx._phase_run["decision"]["kind"] == "conditional"
-    assert ctx._pending_clarification_request == first.answer
+    assert ctx._awaiting_user is True and ctx._waiting.payload["decision"]["kind"] == "conditional"
+    assert ctx.waiting.question == first.answer
     result = ctx.process_turn("yes")
     assert result.status == TurnStatus.COMPLETED
     assert _find_runs(library_env) == ["find_book query=Dune", "find_book query=Persuasion"]

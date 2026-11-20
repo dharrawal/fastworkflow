@@ -95,11 +95,9 @@ class PlanFrame:
     #: frame counts from its restore; alias numbers are for tracing, and step indexes
     #: stay unique regardless.
     child_counts: dict[str, int] = field(default_factory=dict)
-    #: The turn frame's sub-task review gate (fix-3rsq.plan-review.2.6/.2.9): the review is open (the turn is awaiting
-    #: it), and the turn's sub-task plan (review_proposals.SubTaskProposal: the accepted proposal, or the draft). Only the
-    #: turn frame uses them; the serialised turn state carries them as top-level keys.
-    subtask_review_open: bool = False
-    framework_entry: bool = False
+    #: The turn frame's sub-task review gate (fix-3rsq.plan-review.2.6/.2.9): the turn's sub-task plan
+    #: (review_proposals.SubTaskProposal: the accepted proposal, or the draft). Only the turn frame uses it; the
+    #: serialised turn state carries it as a top-level key. An open review is the turn's waiting record (``waiting``).
     subtask_plan: Any = None
 
     @classmethod

@@ -16,11 +16,12 @@ import pytest
 
 import fastworkflow
 from fastworkflow import planning_commands as pc
-from fastworkflow import review_engine, review_proposals, workflow_agent
+from fastworkflow import prompt_payloads, review_engine, review_proposals, workflow_agent
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _added, _ask, _finish, annotated_library, grant_root, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.conftest import script_matcher
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -114,13 +115,21 @@ def _command(name: str = "Library/book_by_title") -> pc.PlanningCommandCommand:
     return workflow_agent.load_planning_command_map(str(LIBRARY))[name]
 
 
+def _gap_refusal(state: str, code: str, why: str, value) -> pc.PlanningCommandInputError:
+    """The refusal of a guard for the argument ``title``, its argument carried as data (``gap``)."""
+    from fastworkflow.parameters import check
+
+    text = "missing required argument title" if code == "missing" else f"title={value!r} {why}"
+    return pc.PlanningCommandInputError(text, gap=check.Gap("title", state, code, why, value, text))
+
+
 @pytest.mark.parametrize("refusal_factory, missing, invalid", [
     (lambda: pc.PlanningCommandInputError("validate_extracted_parameters: no such member",
                                           fields=("title", "title")), [], ["title"]),
-    (lambda: pc.PlanningCommandInputError("missing required argument title"), ["title"], []),
-    (lambda: pc.PlanningCommandInputError(f"title='everyone' {pc.PRONOUN_WHY}"), ["title"], []),
-    (lambda: pc.PlanningCommandInputError(f"title='x' {pc.PLACEHOLDER_WHY}"), ["title"], []),
-    (lambda: pc.PlanningCommandInputError("title='bad' is not one of a, b"), [], ["title"]),
+    (lambda: _gap_refusal("missing", "missing", "", None), ["title"], []),
+    (lambda: _gap_refusal("missing", "refused", pc.PRONOUN_WHY, "everyone"), ["title"], []),
+    (lambda: _gap_refusal("missing", "refused", pc.PLACEHOLDER_WHY, "x"), ["title"], []),
+    (lambda: _gap_refusal("invalid", "refused", "is not one of a, b", "bad"), [], ["title"]),
 ], ids=["field", "missing", "pronoun", "placeholder", "not-one-of"])
 def test_the_parameter_request_of_each_refusal_shape(refusal_factory, missing, invalid):
     command = _command()
@@ -133,8 +142,12 @@ def test_a_refusal_that_names_no_input_gives_no_parameter_request():
     assert pc.planning_refusal_parameter_request(
         command, pc.PlanningCommandInputError("the arguments break a rule of book_by_title: nope")) is None
     # A guard's refusal of a name that is not one of the command's inputs is not a form either.
+    from fastworkflow.parameters import check
+
     assert pc.planning_refusal_parameter_request(
-        command, pc.PlanningCommandInputError("nobody='x' is not valid")) is None
+        command, pc.PlanningCommandInputError(
+            "nobody='x' is not valid", gap=check.Gap("nobody", check.INVALID, "refused", "is not valid", "x",
+                                                    "nobody='x' is not valid"))) is None
 
 
 def test_a_refused_planning_call_suspends_tagged_planning_parameter_and_the_reply_clears_it(todo, monkeypatch):
@@ -149,8 +162,7 @@ def test_a_refused_planning_call_suspends_tagged_planning_parameter_and_the_repl
     def refuse(*args, **kwargs):
         raise refusal
 
-    monkeypatch.setattr("fastworkflow.review_proposals.planning_match",
-                        lambda workflow, text, exclude=None: ("", command, {}))
+    script_matcher(monkeypatch, lambda text: {command.name: 0.9, "none": 0.0})
     monkeypatch.setattr(workflow_agent, "typed_planning_call", refuse)
 
     # The approval fixtures stub the planner's whole query builder; this test needs the real one, whose typed
@@ -160,24 +172,27 @@ def test_a_refused_planning_call_suspends_tagged_planning_parameter_and_the_repl
                         lambda *args, **kwargs: REAL_BUILD_QUERY(*args, **{**kwargs, "planner_lm": unused_lm}))
     out = todo.ctx.process_turn("who wrote that book")
     assert out.status is TurnStatus.AWAITING_USER
-    assert todo.ctx._planning_command_refusal_pending is True
+    assert todo.ctx._resolution_pending is True
     artifacts = _last_artifacts(out)
     assert artifacts["question_kind"] == "planning_parameter"
     assert artifacts["parameter_request"] == expected
     assert "approval" not in artifacts and "review" not in artifacts
-    assert todo.ctx._pending_refusal_request == expected
+    assert todo.ctx._waiting.payload["loop"]["request"] == expected
 
-    # The reply re-runs the turn; the pending request is cleared before it runs.
+    # The reply resumes the part that asked (its own call, not the turn from the top); the question is no longer
+    # pending when it runs.
     seen = {}
 
-    def run_agent(message):
-        seen["pending"] = todo.ctx._pending_refusal_request
+    def call_agent(query, planner_user_query, **kwargs):
+        seen["pending"] = todo.ctx._resolution_pending
+        seen["planning_name"] = kwargs.get("planning_name")
         return dspy.Prediction(final_answer="done", exhausted=False)
 
-    monkeypatch.setattr(todo.ctx, "_run_agent", run_agent)
-    todo.ctx._rerun_after_planning_command_refusal("Dune")
-    assert seen["pending"] is None
-    assert todo.ctx._pending_refusal_request is None
+    monkeypatch.setattr(todo.ctx, "_call_agent_for_query", call_agent)
+    monkeypatch.setattr(todo.ctx, "_run_agent", lambda message: pytest.fail("the turn was run again from the top"))
+    todo.ctx._resume_plan_resolution("Dune")
+    assert seen == {"pending": False, "planning_name": command.name}
+    assert todo.ctx._resolution_pending is False
 
 
 # ----------------------------------------------------------------------
@@ -223,10 +238,11 @@ def test_a_subtask_review_is_tagged_review_and_an_edit_refreshes_it(gated, monke
 
 
 def test_a_lookup_failure_tags_unknown_with_no_payload(todo, annotated_library, grant_root, monkeypatch):
-    def boom(workflow):
+    def boom(ctx, held):
         raise RuntimeError("store unavailable")
 
-    monkeypatch.setattr(review_engine, "active_record", boom)
+    # The description's lookup (the record's payload builder; the agent's own question no longer reads the approval store).
+    monkeypatch.setattr(prompt_payloads, "payload_of", boom)
     todo.script.steps = [("ask_user", {"clarification_request": "Which book?"})]
     out = todo.ctx.process_turn("find a book")
     assert out.status is TurnStatus.AWAITING_USER

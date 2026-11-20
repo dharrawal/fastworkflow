@@ -1,4 +1,4 @@
-/* The chat SPA's parameter form, ambiguous-intent pills and shared form
+/* The chat SPA's parameter form, the which-command question and shared form
    renderer (fix-weih.5), exercised against the assembled page. Only the
    network edge (window.fetch) is replaced: it records every request to the
    workflow server, answers /invoke_assistant with a finished turn, and lets
@@ -127,12 +127,12 @@ function button(root, label) {
 function type(node, value) { node.value = value; node.dispatchEvent(new w.Event('input', {bubbles: true})); }
 
 async function main() {
-  for (const fn of ['tmRenderForm', 'tmDisableLiveForms', 'tmRenderParameterForm', 'tmRenderIntentChoices',
+  for (const fn of ['tmRenderForm', 'tmDisableLiveForms', 'tmRenderParameterForm', 'tmRenderPlanQuestion',
     'tmComposeCommandReply', 'tmRenderPromptForms']) {
     assert.equal(typeof w[fn], 'function', fn);
   }
   assert.deepEqual(plain(w.TM_PROMPT_ARTIFACT_KEYS),
-    ['question_kind', 'approval', 'review', 'parameter_request', 'intent_choices']);
+    ['question_kind', 'approval', 'review', 'parameter_request', 'plan_choice']);
   tm.connected = true;
   tm.baseUrl = BASE;
   tm.commandSchemas = SCHEMAS;
@@ -334,42 +334,43 @@ async function main() {
   assert.equal(composer.value, '/login user=ann', 'Edit as text leaves a required secret out');
   composer.value = '';
 
-  /* ---- case 7: ambiguous-intent pills ------------------------------------------- */
-  const ambiguous = () => failedTurn({intent_choices: ['Library/find_book', 'Library/find_member',
-    'Library/find_book']}, 'Ambiguous intent error for command x');
+  /* ---- case 7: the which-command question of the "/" path (the one plan_choice shape) ------------------------ */
+  const planChoice = (names) => ({question_kind: 'plan_choice', plan_choice: {request: 'x', sub_task: null,
+    choices: names.map((n) => ({name: n, description: n === 'Library/find_book' ? 'Find a book by title.' : '',
+      closest: true})), none_reply: 'none', decline: 'cancel', ambiguous: true, misunderstood: false}});
+  const ambiguous = () => failedTurn(planChoice(['Library/find_book', 'Library/find_member']),
+    'Ambiguous intent error for command x');
   mark = requests.length;
   const msg7 = paint(ambiguous());
-  const bar = msg7.querySelector('div.intentChoices');
+  const bar = msg7.querySelector('div.planQuestion');
   assert.ok(bar);
-  assert.equal(text(bar.querySelector('.intentLabel')), 'Multiple commands matched — choose one:');
-  const pills = Array.from(bar.querySelectorAll('button.intentPill'));
-  assert.deepEqual(pills.map((p) => p.textContent), ['find_book', 'find_member']);
-  assert.equal(pills[0].title, 'Find a book by title.');
-  assert.equal(pills[1].title, '');
-  assert.equal(pills[0].tagName, 'BUTTON');
-  button(bar, 'See all commands');
+  assert.equal(text(bar.querySelector('.planHead')), 'More than one command fits this request. Which one is meant?');
+  const pills = Array.from(bar.querySelectorAll('button.planBtn'));
+  assert.deepEqual(pills.map((p) => p.dataset.plan), ['Library/find_book', 'Library/find_member']);
+  assert.equal(text(pills[0].querySelector('.planDesc')), 'Find a book by title.');
+  button(bar, 'None of these');
   button(bar, 'Cancel');
   const dets = msg7.querySelector('details.paramDetails');
   assert.ok(dets && !dets.open);
   assert.ok(text(dets).indexOf('Ambiguous intent error for command x') !== -1);
   pills[0].click();
-  assert.equal(sentAfter(mark)[0].body.user_query, 'find_book');
+  assert.equal(sentAfter(mark)[0].body.user_query, 'Library/find_book');
   assert.equal(sentAfter(mark)[0].path, '/invoke_agent_stream');
   assert.ok(Array.from(bar.querySelectorAll('button')).every((b) => b.disabled), 'a click disables the bar');
   idle();
   mark = requests.length;
-  button(paint(ambiguous()), 'See all commands').click();
-  assert.equal(sentAfter(mark)[0].body.user_query, 'what can i do?');
+  button(paint(ambiguous()), 'None of these').click();
+  assert.equal(sentAfter(mark)[0].body.user_query, 'none');
   idle();
   mark = requests.length;
   button(paint(ambiguous()), 'Cancel').click();
-  assert.equal(sentAfter(mark)[0].body.user_query, 'abort');
+  assert.equal(sentAfter(mark)[0].body.user_query, 'cancel');
   idle();
   /* tmDisableLiveForms disables bars and forms that were never clicked */
   const liveBar = paint(ambiguous());
   const liveForm = paint(failedTurn({parameter_request: request('Plain/record_values', ['ratio'])}));
   w.tmDisableLiveForms();
-  assert.ok(Array.from(liveBar.querySelectorAll('.intentChoices button')).every((b) => b.disabled));
+  assert.ok(Array.from(liveBar.querySelectorAll('.planQuestion button')).every((b) => b.disabled));
   assert.ok(Array.from(liveForm.querySelectorAll('.paramForm button, .paramForm input, .paramForm textarea')).every((b) => b.disabled));
   /* typing a message disables them as well */
   const typedForm = paint(failedTurn({parameter_request: request('Plain/record_values', ['ratio'])}));
@@ -377,26 +378,26 @@ async function main() {
   composer.value = 'hello';
   w.tmSend();
   assert.ok(Array.from(typedForm.querySelectorAll('.paramForm button, .paramForm input, .paramForm textarea')).every((b) => b.disabled));
-  assert.ok(Array.from(typedBar.querySelectorAll('.intentChoices button')).every((b) => b.disabled));
+  assert.ok(Array.from(typedBar.querySelectorAll('.planQuestion button')).every((b) => b.disabled));
   idle();
 
   /* ---- case 8: guards ----------------------------------------------------------- */
   const noForm = (msg, why) => {
-    assert.equal(msg.querySelectorAll('.paramForm, .intentChoices, .paramDetails').length, 0, why);
+    assert.equal(msg.querySelectorAll('.paramForm, .planQuestion, .paramDetails').length, 0, why);
     assert.ok(!msg.classList.contains('hasForm'), why);
   };
   /* not the last output */
   const notLast = failedTurn({parameter_request: request('Plain/record_values', ['ratio'])});
   notLast.command_outputs.push({command_name: 'x', command_response: {success: true, response: 'fine', artifacts: {}}});
   noForm(paint(notLast), 'the request is on a non-last output');
-  const notLastPills = failedTurn({intent_choices: ['Library/find_book']});
+  const notLastPills = failedTurn(planChoice(['Library/find_book']));
   notLastPills.command_outputs.push({command_name: 'x', command_response: {success: true, response: 'fine'}});
   noForm(paint(notLastPills), 'pills on a non-last output');
   /* no schema, no input schema, an empty list */
   noForm(paint(failedTurn({parameter_request: request('Plain/unknown_cmd', ['x'])})), 'no schema');
   noForm(paint(failedTurn({parameter_request: request('Library/find_member', ['x'])})), 'input is null');
-  noForm(paint(failedTurn({intent_choices: []})), 'empty pills');
-  noForm(paint(failedTurn({intent_choices: [7, '']})), 'junk pills');
+  noForm(paint(failedTurn(planChoice([]))), 'empty choices');
+  noForm(paint(failedTurn(planChoice([7, '']))), 'junk choices');
   /* an asked field with no widget leaves the CME text as the only help */
   noForm(paint(failedTurn({parameter_request: request('Plain/tricky', ['box'])})), 'object field');
   /* not the last message in the log */
@@ -432,8 +433,8 @@ async function main() {
     'the stored records never loaded');
   assert.ok(!older.querySelector('.testPrompt'), 'an older restored turn is not mounted');
   assert.equal(latest.querySelectorAll('.testPrompt').length, 1, 'the latest restored turn is');
-  assert.equal(latest.querySelectorAll('.paramForm, .intentChoices').length, 0, 'no built-in form on a restored turn');
-  assert.equal(older.querySelectorAll('.paramForm, .intentChoices').length, 0);
+  assert.equal(latest.querySelectorAll('.paramForm, .planQuestion').length, 0, 'no built-in form on a restored turn');
+  assert.equal(older.querySelectorAll('.paramForm, .planQuestion').length, 0);
   assert.deepEqual(seen.map((x) => [x.live, x.outputs, x.status, x.restored]).sort(),
     [[false, 1, 'awaiting_user', '1'], [true, 1, 'awaiting_user', '1']]);
   assert.deepEqual(requests.slice(mark2).map((r) => r.path).sort(), ['/api/turn/tkA', '/api/turn/tkB'],
@@ -444,9 +445,9 @@ async function main() {
     '<b>bold</b> response'));
   assert.equal(msgM.querySelectorAll('img, b').length, 0);
   assert.ok(text(field(msgM, 'q')).indexOf('<img src=x onerror=alert(1)>') !== -1);
-  const msgP = paint(failedTurn({intent_choices: ['Library/<i onclick=x>']}, '<u>amb</u>'));
+  const msgP = paint(failedTurn(planChoice(['Library/<i onclick=x>']), '<u>amb</u>'));
   assert.equal(msgP.querySelectorAll('i, u').length, 0);
-  assert.equal(msgP.querySelector('.intentPill').textContent, '<i onclick=x>');
+  assert.equal(msgP.querySelector('.planBtn .planName').textContent, 'Library/<i onclick=x>');
 
   /* ---- repaint: no duplicate, typed text survives, a new request replaces it --------- */
   const repaintOut = failedTurn({parameter_request: request('Plain/record_values', ['ratio', 'ids'], [],
@@ -473,7 +474,7 @@ async function main() {
   const pillOut = ambiguous();
   const msgRP = paint(pillOut);
   w.tmRenderTurn(msgRP, pillOut);
-  assert.equal(msgRP.querySelectorAll('.intentChoices').length, 1);
+  assert.equal(msgRP.querySelectorAll('.planQuestion').length, 1);
   assert.equal(msgRP.querySelectorAll('details.paramDetails').length, 1);
 
   /* ---- a registered renderer is dispatched, mounted and reused ---- */
@@ -492,8 +493,9 @@ async function main() {
   };
   const renderersBefore = w.TM_PROMPT_RENDERERS.length;
   const builtInAt = w.TM_PROMPT_RENDERERS.indexOf(w.tmRenderParameterForm);
-  assert.ok(builtInAt !== -1 && w.TM_PROMPT_RENDERERS.indexOf(w.tmRenderIntentChoices) === builtInAt + 1,
-    'the two built-in renderers are registered, in order');
+  const planAt = w.TM_PROMPT_RENDERERS.indexOf(w.tmRenderPlanQuestion);
+  assert.ok(builtInAt !== -1 && planAt !== -1 && planAt < builtInAt,
+    'the two built-in renderers are registered, the which-command question in front');
   w.TM_PROMPT_RENDERERS.push(regRender);
   try {
     const regOut = failedTurn({test_prompt: 'one'});
@@ -506,7 +508,7 @@ async function main() {
     assert.equal(regMsg.querySelectorAll('.testPrompt').length, 1);
     const callsBefore = regCalls;
     const builtIn = paint(ambiguous());
-    assert.ok(builtIn.querySelector('.intentChoices'));
+    assert.ok(builtIn.querySelector('.planQuestion'));
     assert.equal(regCalls, callsBefore, 'a built-in prompt wins first and stops the search');
   } finally {
     w.TM_PROMPT_RENDERERS.splice(w.TM_PROMPT_RENDERERS.indexOf(regRender), 1);
@@ -529,7 +531,7 @@ async function main() {
 
   /* ---- artifacts link skips prompt keys only ------------------------------------------- */
   const only = paint(failedTurn({question_kind: 'agent', approval: {a: 1}, review: {}, parameter_request: null,
-    intent_choices: null}));
+    plan_choice: null}));
   assert.equal(only.querySelectorAll('.artifactsLink').length, 0, 'prompt keys alone make no link');
   const mix = paint(failedTurn({question_kind: 'agent', approval: {}, receipt: {id: 5}}));
   assert.equal(mix.querySelector('.artifactsLink').textContent, '1 artifact');

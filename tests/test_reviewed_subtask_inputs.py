@@ -23,6 +23,7 @@ from fastworkflow import review_proposals
 from fastworkflow.review_proposals import Means, SubTask, SubTaskInput
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils import signatures
+from tests.conftest import script_matcher
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401 - the fixtures
 from tests.test_round1_gate import EMMA, JOKE, _marker, _open_review, _split_into, gated  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
@@ -49,6 +50,18 @@ class _ScriptedLM(DummyLM):
         return super().forward(prompt=prompt, messages=messages, **kwargs)
 
 
+def _remote_answer(text: str) -> dict:
+    if "Emma" in text:
+        return {BOOK_BY_TITLE: 0.9, "none": 0.05}
+    if "find the book Persuasion" in text:
+        return {"Library/find_book": 0.9, "none": 0.05}
+    if "Ann" in text:
+        return {MEMBER_REPORT: 0.9, "none": 0.05}
+    if "Austen" in text:
+        return {AUTHOR_BOOKS: 0.9, "none": 0.05}
+    return {"none": 0.95}
+
+
 @pytest.fixture(autouse=True)
 def drafting(monkeypatch, no_planner_key):
     """Drafting on (the tests about drafting off turn it off again), Jev's field check off, and the extractor scripted.
@@ -59,6 +72,11 @@ def drafting(monkeypatch, no_planner_key):
     monkeypatch.setenv("FW_SUBTASK_WORKERS", "1")
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
     monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
+    # fix-o1lg.2: a planning command the local model picks is only a candidate until the remote decision model agrees,
+    # and a part with several candidates is asked about BEFORE the review. These tests are about the review's drafts,
+    # so the remote model's answer is scripted: a request about a book's title gets book_by_title, the Austen request
+    # gets author_books, "find the book Persuasion" gets find_book, the joke request (JOKE) gets member_report (drafted with member Ann), any other request gets "none" (an ad hoc part).
+    script_matcher(monkeypatch, _remote_answer)
     yield
 
 
@@ -298,9 +316,26 @@ def test_a_draft_refusal_accepted_as_shown_falls_back_to_the_agent_with_no_new_e
     lm = scripted({"reasoning": "a guess", "title": "Persuasion"}, {"reasoning": "again", "title": "Persuasion"},
                   JOKE_ANSWER)
     planner = _planner(gated, {"reasoning": "typed fill", "title": "Persuasion", "steps_before": [], "steps_after": []})
-    record = _review(gated, monkeypatch, [EMMA, JOKE])
+    # Rewritten twice (deliberate changes, not regressions). fix-o1lg.2: a planning command whose required value the
+    # draft could not fill is asked about BEFORE the review. fix-fpyb.8 step 6 (the owner's rule): `cancel` at a value
+    # question means one thing in every session, the part is dropped (see the next test); the way to let the agent try
+    # without the value is to answer with something it cannot use, and the second such reply in a row hands the part
+    # to the agent (the asking rule). The draft's calls are all made by then; the review then shows the refusal, and
+    # the rest of the test (accept as shown, the agent runs it, no new extraction) is unchanged.
+    _split_into(monkeypatch, [EMMA, JOKE])
+    asked = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
+    assert asked.status is TurnStatus.AWAITING_USER
+    assert gated.store.active() is None                          # no review yet: the question comes first
+    assert asked.command_outputs[-1].command_response.artifacts["question_kind"] == "planning_parameter"
+    assert asked.command_outputs[-1].command_response.artifacts["parameter_request"]["missing"] == ["title"]
+    assert len(lm.prompts) == 3 and len(planner.prompts) == 1
+    again = gated.ctx.process_turn("no")                         # a reply the part cannot use: asked once more
+    assert again.status is TurnStatus.AWAITING_USER and gated.store.active() is None
+    gated.ctx.process_turn("no")                                 # the second in a row: the agent takes over
+    record = _open_review(gated)
     assert _subtask(record, 1).inputs == []
     assert "Persuasion" in _subtask(record, 1).check
+    reviewed = (len(lm.prompts), len(planner.prompts))           # the two replies were each read by the extractor
 
     gated.script.steps = list(STEPS)
     out = gated.ctx.process_turn("accept")
@@ -308,7 +343,31 @@ def test_a_draft_refusal_accepted_as_shown_falls_back_to_the_agent_with_no_new_e
     assert out.status is TurnStatus.COMPLETED
     assert _calls(out, BOOK_BY_TITLE) == []
     assert _bindings(gated)[0]["match"] is False
-    assert len(lm.prompts) == 3 and len(planner.prompts) == 1   # all in the draft: nothing at run time
+    assert (len(lm.prompts), len(planner.prompts)) == reviewed   # no new extraction at run time
+
+
+def test_cancel_at_a_value_question_drops_that_part_and_the_review_shows_the_rest(gated, monkeypatch, scripted):
+    """The owner's rule: `cancel` at a value question drops that part in every session type (it comes back as a not-run
+    entry saying it was declined) and the later parts go on; the review shows only the remaining part."""
+    lm = scripted({"reasoning": "a guess", "title": "Persuasion"}, {"reasoning": "again", "title": "Persuasion"},
+                  JOKE_ANSWER)
+    _planner(gated, {"reasoning": "typed fill", "title": "Persuasion", "steps_before": [], "steps_after": []})
+    _split_into(monkeypatch, [EMMA, JOKE])
+    asked = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
+    assert asked.command_outputs[-1].command_response.artifacts["parameter_request"]["missing"] == ["title"]
+    gated.ctx.process_turn("cancel")
+    record = _open_review(gated)
+    proposal = __import__("fastworkflow.review_engine", fromlist=["x"]).proposal_of(record)
+    assert len(proposal.items) == 1                              # EMMA (part 1) is gone: JOKE is now item 1
+    assert proposal.items[0].means.name == MEMBER_REPORT
+    assert [(each.name, each.value) for each in proposal.items[0].inputs] == [("member", "Ann")]
+    assert len(lm.prompts) == 3                                  # no extra model call was made by the cancel
+
+    gated.script.steps = list(STEPS)
+    out = gated.ctx.process_turn("accept")
+    assert out.status is TurnStatus.COMPLETED
+    assert _calls(out, BOOK_BY_TITLE) == []                      # the dropped part never ran
+    assert [p.member for p in _calls(out, MEMBER_REPORT)] == ["Ann"]
 
 
 # ----------------------------------------------------------------------
@@ -462,11 +521,10 @@ def test_drafted_means_is_neither_shown_nor_editable(gated, monkeypatch, scripte
 
 
 def test_the_draft_runs_the_typed_fill_fallback_and_the_run_uses_its_value(gated, monkeypatch, scripted):
-    """author_books: the extractor and its retry miss the bare surname; the typed fill fallback (the one
+    """author_books: the extractor misses the bare surname (a missing value is not extracted again); the typed fill fallback (the one
     typed_planning_call runs) gives it, the review shows it, and the run uses it."""
     austen = "show every Austen book in the library"
     lm = scripted({"reasoning": "no author", "author": "NOT_FOUND"},
-                  {"reasoning": "still none", "author": "NOT_FOUND"},
                   JOKE_ANSWER)
     planner = _planner(gated, {"reasoning": "the surname is the author", "author": "Austen",
                                 "steps_before": [], "steps_after": []})
@@ -476,7 +534,7 @@ def test_the_draft_runs_the_typed_fill_fallback_and_the_run_uses_its_value(gated
     assert plan.items[0].inputs == [SubTaskInput(name="author", value="Austen", drafted=True)]
     assert not _subtask(record, 1).check
     drafted = len(lm.prompts)
-    assert drafted == 3 and len(planner.prompts) == 1 and austen in planner.prompts[0]
+    assert drafted == 2 and len(planner.prompts) == 1 and austen in planner.prompts[0]
 
     gated.script.steps = list(STEPS)
     out = gated.ctx.process_turn("accept")

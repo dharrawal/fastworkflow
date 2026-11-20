@@ -394,10 +394,12 @@ def test_an_execution_command_str_with_in_request_refuses_a_value_the_request_do
     class Input(GroupInput):
         pass
 
-    is_valid, message, *_ = _exec("Show the Payroll group").validate_parameters(
+    is_valid, message, _, fields = _exec("Show the Payroll group").validate_parameters(
         None, "Library/show_group", Input(name="Billing", titles=["Dune"]))
     assert not is_valid
-    assert message == "name='Billing' is not written in the request"
+    # the guard names its argument, so it is asked like any refused value (the standard question, the guard's reason in it)
+    assert fields == ["name"]
+    assert "name='Billing' is not written in the request" in message and "Which name should I use?" in message
 
 
 def test_the_same_execution_command_str_without_the_option_accepts_the_value():
@@ -412,9 +414,13 @@ def test_the_same_execution_command_str_without_the_option_accepts_the_value():
 def test_a_planning_command_str_with_in_request_refuses_and_the_same_str_without_it_accepts(tmp_path):
     with_option = _command(tmp_path / "a", _module('name: str = Field(description="n", json_schema_extra={"copied_from_command_text": True})'),
                            name="weigh")
-    without = _command(tmp_path / "b", _module('name: str = Field(description="n")'), name="weigh")
+    # one rule: a str with no option is grounded too; only a field that opts out (converted) accepts an unwritten value
+    plain = _command(tmp_path / "c", _module('name: str = Field(description="n")'), name="weigh")
+    without = _command(tmp_path / "b", _module('name: str = Field(description="n", json_schema_extra={"converted_from_command_text": True})'), name="weigh")
     with pytest.raises(PlanningCommandInputError, match="name='Billing' is not written in the request"):
         pc.check_arguments(with_option, {"name": "Billing"}, "Show the Payroll group")
+    with pytest.raises(PlanningCommandInputError, match="name='Billing' is not written in the request"):
+        pc.check_arguments(plain, {"name": "Billing"}, "Show the Payroll group")
     args, _ = pc.check_arguments(without, {"name": "Billing"}, "Show the Payroll group")
     assert args["name"] == "Billing"
 
@@ -429,8 +435,8 @@ def test_subject_strip_and_in_request_on_an_int_act_on_an_execution_command_as_o
     assert args["name"] == "Payroll"
 
     count = pc.option_command(GroupInput, "Library/show_group")
-    args, notes = pc.check_arguments(count, {"count": 5, "name": "Payroll"}, "Open 3 members of Payroll")
-    assert args["count"] == 3 and notes
+    with pytest.raises(PlanningCommandInputError, match=r"count=5 is not a number the request writes \(3\)"):
+        pc.check_arguments(count, {"count": 5, "name": "Payroll"}, "Open 3 members of Payroll")
 
     # the same through the execution command's validation step
     instance = GroupStripInput(name="Payroll group")
@@ -624,9 +630,9 @@ TUTORIAL_WORKFLOW = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath
                                  "tests", "planning_tutorial_workflow")
 
 
-def test_the_tutorial_workflows_checked_field_refuses_an_unwritten_value_and_an_unchecked_one_accepts_it():
+def test_the_tutorial_workflows_fields_refuse_an_unwritten_value_with_or_without_an_option():
     # book_by_title's title carries in_request (tutorial pages 4 and 12): a title the request does not write is refused.
-    # member_loans' member carries no option (the tutorial's member_loans has none), so the same kind of value passes.
+    # member_loans' member carries no option, and is grounded all the same (one rule for every str).
     commands = workflow_agent.load_planning_command_map(TUTORIAL_WORKFLOW)
 
     with pytest.raises(PlanningCommandInputError, match="title='Emma' is not written in the request"):
@@ -634,8 +640,10 @@ def test_the_tutorial_workflows_checked_field_refuses_an_unwritten_value_and_an_
     args, _ = pc.check_arguments(commands["book_by_title"], {"title": "Dune"}, "Who wrote Dune?")
     assert args["title"] == "Dune"
 
-    args, _ = pc.check_arguments(commands["member_loans"], {"member": "Ann Lee"}, "What has Raj Patel borrowed?")
-    assert args["member"] == "Ann Lee"
+    with pytest.raises(PlanningCommandInputError, match="member='Ann Lee' is not written in the request"):
+        pc.check_arguments(commands["member_loans"], {"member": "Ann Lee"}, "What has Raj Patel borrowed?")
+    args, _ = pc.check_arguments(commands["member_loans"], {"member": "Raj Patel"}, "What has Raj Patel borrowed?")
+    assert args["member"] == "Raj Patel"
 
 
 # ---------------------------------------------------------------- the two-option form (fix-3rsq.two-options)

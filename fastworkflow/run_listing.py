@@ -280,24 +280,29 @@ def command_info_root_of(workflow) -> str:
 
 def head_answers(workflow, sub_task: str, command_info_root: str | None = None) -> dict[str, dict]:
     """Each gather context's trained head answers *sub_task*: the labels the run gets and the top-k labels and scores
-    (``CommandRouter.predict_with_details``: local classifiers, no LLM call). A context with no trained head (no
-    ``threshold.json`` etc. in its folder) answers nothing (3.9). Blank text answers nothing either (fix-wfxt): the
-    head's predict refuses empty input, and there is no command in it to route."""
-    from fastworkflow.model_pipeline_training import CommandRouter
-    from fastworkflow.train.artifact_versioning import context_folder_name
-    from fastworkflow.train.score_lookup import HEAD_MARKERS
+    (local classifiers, no LLM call). The heads are asked through the detector contract (``intent_detector.engine_for``),
+    the same engines intent detection asks. CLASSIFIER ONLY (``allow_matcher=False``): gathering asks every reachable
+    context, and the model matcher that stands in for a missing head in intent detection would be one model call for
+    each, so a context with no trained head (no ``threshold.json`` etc. in its folder) answers nothing here (3.9).
+    Blank text answers nothing either (fix-wfxt): the head's predict refuses empty input, and
+    there is no command in it to route."""
+    from fastworkflow import intent_detector
 
     if not sub_task.strip():
         return {}
     root = command_info_root or command_info_root_of(workflow)
     answers: dict[str, dict] = {}
     for context in gather_contexts(workflow):
-        folder = os.path.join(root, context_folder_name(context))
-        if not all(os.path.exists(os.path.join(folder, marker)) for marker in HEAD_MARKERS):   # models are folders
+        engine = intent_detector.engine_for(
+            workflow.folderpath, context, command_info_root=root, allow_matcher=False)
+        if engine is None:
             continue
-        labels, details = CommandRouter(folder).predict_with_details(sub_task)
+        answer = engine.decide(sub_task)
+        # The head's own facts, read where they were always read: ``confident`` here is the head's word on its
+        # top label whatever that label is, which the answer's own ``confident`` (a match only) does not say.
+        details = answer.details
         answers[context] = {
-            "labels": [str(label) for label in labels],
+            "labels": [str(label) for label in answer.labels],
             "confident": bool(details["confident"]),
             "topk_labels": [str(label) for label in details["topk_labels"]],
             "topk_scores": [float(score) for score in details["topk_scores"]],
@@ -578,12 +583,13 @@ def command_shortlist_text(workflow, names: Iterable[str]) -> str:
 def has_trained_heads(workflow) -> bool:
     """True when the workflow has at least one trained head (a context folder of ``___command_info`` with the head's
     model files). The production THRESHOLD arm needs them to gather a shortlist; without them it gives FULL."""
-    from fastworkflow.train.score_lookup import HEAD_MARKERS
+    from fastworkflow.intent_detector import has_head
 
     root = command_info_root_of(workflow)
     if not os.path.isdir(root):
         return False
-    return any(os.path.isdir(folder) and all(os.path.exists(os.path.join(folder, marker)) for marker in HEAD_MARKERS)
+    # ``has_head`` knows both artifact layouts (per-context files, or a pointer to the workflow's one model).
+    return any(os.path.isdir(folder) and has_head(folder)
                for folder in (os.path.join(root, name) for name in os.listdir(root)))
 
 
@@ -627,6 +633,8 @@ class ArgumentCheck:
     args: dict = field(default_factory=dict)
     notes: tuple[str, ...] = ()
     refusal: str | None = None
+    #: The required arguments the refusal says are simply missing, by name (the guard's own record, ``gap``).
+    missing: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -645,5 +653,6 @@ def check_planned_arguments(command, raw: Mapping, sub_task: str,
     try:
         args, notes = planning_commands.check_arguments(command, dict(raw), request)
     except planning_commands.PlanningCommandCallError as refused:   # a refused input, or a sure check that fails the call
-        return ArgumentCheck(refusal=str(refused))
+        gap = getattr(refused, "gap", None)
+        return ArgumentCheck(refusal=str(refused), missing=(gap.name,) if gap is not None and gap.state == "missing" else ())
     return ArgumentCheck(args=args, notes=tuple(notes))

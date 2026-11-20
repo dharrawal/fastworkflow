@@ -21,6 +21,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
+from fastworkflow import model_pipeline_training
 from fastworkflow import planning_commands
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.command_executor import CommandExecutor
@@ -107,7 +108,7 @@ def literal_env(tmp_path, initialized_fastworkflow, monkeypatch):
     ctx.push_active_workflow(wf)
     LibraryRunner(wf)(ctx, "startup")
     consulted: list[str] = []
-    monkeypatch.setattr(intent_detection, "CommandRouter", refusing_router(consulted))
+    monkeypatch.setattr(model_pipeline_training, "CommandRouter", refusing_router(consulted))
     yield SimpleNamespace(ctx=ctx, wf=wf, folder=folder, consulted=consulted)
     ctx.pop_active_workflow()
     RoutingRegistry.clear_registry()
@@ -165,7 +166,8 @@ def test_a_planning_literal_refuses_a_non_member_with_the_routed_enum_text(liter
 
     assert planning_ok is False and routed_ok is False
     assert planning_invalid == routed_invalid == ["kind"]
-    assert planning_msg == routed_msg
+    # The question opens with the command's own name, so the two are compared after it.
+    assert planning_msg.split(" yet: ", 1)[1] == routed_msg.split(" yet: ", 1)[1]
     assert "Valid values: 'person', 'login', 'right', 'application', 'feed', 'group', 'unit'" \
         in planning_msg
 

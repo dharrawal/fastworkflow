@@ -127,3 +127,102 @@ function tmRenderPlanChoices(bubbleMsg, out) {
   }
   return root;
 }
+
+/* -- the plan-choice question [fix-yu3l.5] -------------------------------- */
+/* A turn somebody can answer does not end an unmatched part as not run: it asks which command or planning command is
+   meant (question_kind "plan_choice", artifact plan_choice: {request, sub_task, choices: [{name, description, closest}],
+   none_reply, decline, ambiguous, misunderstood}). The deterministic ("/") path asks the same question as a failed
+   completed turn, not a suspended one: the question is on the last command output either way (bd fix-o1lg S7). The same plan buttons are shown, but a click here is the REPLY to the pending question (the
+   plan's name as plain chat text), not a new turn with use_plan: the server binds the plan to the part that asked and
+   carries the turn on from there. "None of these" and Cancel send the replies the data names. The root is not a
+   .planChoices node, because tmRenderPlanChoices clears those on every paint of the turn. */
+
+function tmPlanQuestionChoices(payload) {
+  return tmIsPlainObject(payload) && Array.isArray(payload.choices)
+    ? tmPlansOf({ available_plans: payload.choices }) : [];
+}
+
+function tmRenderPlanQuestion(bubbleMsg, out) {
+  if (!out || bubbleMsg.dataset.restored === "1" || !tmIsLiveTurn(bubbleMsg)) { return null; }
+  var last = tmLastPromptArtifacts(out);
+  if (!last || last.artifacts.question_kind !== "plan_choice") { return null; }
+  var entry = last.entry;
+  var resp = entry && entry.command_response;
+  if (!resp || resp.success !== false) { return null; }
+  var payload = last.artifacts.plan_choice;
+  var plans = tmPlanQuestionChoices(payload);
+  /* Nothing to offer as buttons: the plain question stays, and the composer answers it. */
+  if (!plans.length) { return null; }
+  var key = "planQuestion:" + JSON.stringify(payload);
+  var prev = tmReusePrompt(bubbleMsg, key);
+  if (prev) { return tmMountPrompt(bubbleMsg, prev); }
+
+  var disabled = false;
+  var root = el("div", "planQuestion");
+  root.setAttribute("role", "group");
+  var part = payload.sub_task !== null && payload.sub_task !== undefined ? payload.sub_task : null;
+  if (part !== null) { root.dataset.part = String(part); }
+  var subject = part !== null ? "part " + part : "this request";
+  var head = el("div", "planHead", payload.misunderstood === true
+    ? "No command matched " + subject + ". Is one of these meant?"
+    : payload.ambiguous === true
+      ? "More than one command fits " + subject + ". Which one is meant?"
+      : "No plan matched " + subject + ". Which one should run it?");
+  head.id = "planQuestionHead" + (tmFormSeq += 1);
+  root.setAttribute("aria-labelledby", head.id);
+  root.appendChild(head);
+  if (typeof payload.request === "string" && payload.request.trim()) {
+    root.appendChild(el("div", "planRequest", payload.request));
+  }
+  function send(text) {
+    return function () { if (!disabled) { tmSendChatText(text); } };
+  }
+  var list = el("div", "planList");
+  root.appendChild(list);
+  plans.forEach(function (plan, index) {
+    var button = tmPlanButton(plan);
+    if (index >= TM_PLAN_CAP) { button.hidden = true; button.classList.add("planExtra"); }
+    button.addEventListener("click", send(plan.name));
+    list.appendChild(button);
+  });
+  if (plans.length > TM_PLAN_CAP) {
+    var more = el("button", "planMore", "show all (" + plans.length + ")");
+    more.type = "button";
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", function () {
+      var open = more.getAttribute("aria-expanded") !== "true";
+      Array.prototype.forEach.call(list.querySelectorAll(".planExtra"), function (node) { node.hidden = !open; });
+      more.setAttribute("aria-expanded", open ? "true" : "false");
+      more.textContent = open ? "show fewer" : "show all (" + plans.length + ")";
+    });
+    root.appendChild(more);
+  }
+  var actions = el("div", "intentActions");
+  var none = el("button", "planNone secondary", "None of these");
+  none.type = "button";
+  none.addEventListener("click", send(typeof payload.none_reply === "string" && payload.none_reply
+    ? payload.none_reply : "none"));
+  actions.appendChild(none);
+  var cancel = el("button", "planCancel ghost", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", send(typeof payload.decline === "string" && payload.decline
+    ? payload.decline : "cancel"));
+  actions.appendChild(cancel);
+  root.appendChild(actions);
+
+  var rec = { key: key, element: root,
+    setDisabled: function (flag) {
+      disabled = !!flag;
+      /* The "show all" toggle stays usable: it sends nothing. */
+      Array.prototype.forEach.call(root.querySelectorAll(".planBtn, .planNone, .planCancel"), function (node) {
+        node.disabled = disabled;
+      });
+      if (disabled) { root.classList.add("disabled"); } else { root.classList.remove("disabled"); }
+      root.setAttribute("aria-disabled", disabled ? "true" : "false");
+    },
+    nodes: [root, tmDetailsFor(last.text, false)] };
+  return tmMountPrompt(bubbleMsg, rec);
+}
+
+/* unshift, as the question form does: no other renderer claims this kind, and running first costs them nothing. */
+TM_PROMPT_RENDERERS.unshift(tmRenderPlanQuestion);

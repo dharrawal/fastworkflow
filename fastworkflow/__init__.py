@@ -16,13 +16,6 @@ from pydantic import BaseModel, model_validator
 import mmh3
 
 
-class NLUPipelineStage(Enum):
-    """Specifies the stages of the NLU Pipeline processing."""
-    INTENT_DETECTION = 0
-    INTENT_AMBIGUITY_CLARIFICATION = 1
-    INTENT_MISUNDERSTANDING_CLARIFICATION = 2
-    PARAMETER_EXTRACTION = 3
-
 class Action(BaseModel):
     command_name: str
     command: str = ""   # only use is to display autocomplete item in the UI
@@ -541,7 +534,6 @@ __all__ = (
     "MetricsSink",
     "ModelPipelineRegistry",
     "ModuleType",
-    "NLUPipelineStage",
     "NoOpMetricsSink",
     "NoOpTraceSink",
     "Optional",

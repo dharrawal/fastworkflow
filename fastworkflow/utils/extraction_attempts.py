@@ -11,6 +11,7 @@ the LM's own retries) ends the loop: sampling again would only wait out the time
 """
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
+from dspy.utils.exceptions import AdapterParseError
 
 from fastworkflow.utils import dspy_utils
 from fastworkflow.utils.logging import logger
@@ -22,7 +23,14 @@ RETRY_TEMPERATURE = 1.0
 class FirstAttemptGreedy(dspy.BestOfN):
     """``dspy.BestOfN`` whose first attempt is greedy (see the module docstring)."""
 
+    #: After ``forward``: True when no attempt gave an answer and every attempt failed because the answer could not be
+    #: parsed into the fields' types (a value outside a ``Literal`` or enum). The values are then not "missing": the
+    #: model produced something and the typed answer was refused. Read by ``fill.fill`` (``Filled.unparsed``).
+    unparsed = False
+
     def forward(self, **kwargs):
+        self.unparsed = False
+        errors = []
         lm = self.module.get_lm() or dspy.settings.lm
         start = lm.kwargs.get("rollout_id", 0)
         rollout_ids = [start + i for i in range(self.N)]
@@ -51,6 +59,7 @@ class FirstAttemptGreedy(dspy.BestOfN):
 
             except Exception as e:
                 logger.warning(f"Extraction attempt {idx + 1} failed (rollout id {rid}): {e}")
+                errors.append(e)
                 if dspy_utils.is_timeout_error(e):
                     # The model call timed out on every try it was given (``LLM_NUM_RETRIES_PARAM_EXTRACTION``):
                     # a sampling retry would be three more of them, and the longest wait of one extraction
@@ -58,9 +67,12 @@ class FirstAttemptGreedy(dspy.BestOfN):
                     # the caller's not-given handling applies, as for an attempt that raised on every try.
                     break
                 if idx > self.fail_count:
+                    self.unparsed = best_pred is None and all(isinstance(x, AdapterParseError) for x in errors)
                     raise e
                 self.fail_count -= 1
 
+        self.unparsed = best_pred is None and bool(errors) and all(isinstance(e, AdapterParseError) for e in errors)
         if best_trace:
             dspy.settings.trace.extend(best_trace)
         return best_pred
+

@@ -344,7 +344,14 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     # artifacts (e.g. ___command_info/global/threshold.json).
     from fastworkflow.model_pipeline_training import is_workflow_trained
     trained, missing_contexts = is_workflow_trained(workflow_path)
-    if not trained:
+    # A context with no trained head may run on the model matcher (intent_detector.startup_report decides).
+    from fastworkflow import intent_detector
+    from fastworkflow.utils.logging import logger as _logger
+    engine_problems, engine_notices = intent_detector.startup_report(workflow_path, missing_contexts, build=True)
+    for notice in engine_notices:
+        # The chain line. A warning only when a context has no trained local model.
+        (_logger.info if trained else _logger.warning)(notice)
+    if not trained and engine_problems:
         workflow_name = os.path.basename(os.path.normpath(workflow_path))
         raise RuntimeError(
             f"Workflow '{workflow_name}' is not trained "

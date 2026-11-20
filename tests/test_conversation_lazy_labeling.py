@@ -274,7 +274,10 @@ async def _chat_turn(
         if not ctx.awaiting_user:
             ctx._begin_turn(message)
         ctx.append_conversation_turn(f"{message} -> ok")
-        ctx._awaiting_user = status is fastworkflow.TurnStatus.AWAITING_USER
+        if status is fastworkflow.TurnStatus.AWAITING_USER:
+            ctx._ask_agent_question("which one?")
+        else:
+            ctx._waiting = None
         command_output = fastworkflow.CommandOutput(
             command_name="",
             command_response=fastworkflow.CommandResponse(response="ok"),

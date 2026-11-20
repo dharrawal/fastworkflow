@@ -49,7 +49,6 @@ from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the re
 from tests.test_field_sources import _build_workflow
 from tests.test_planning_command_contexts import LIBRARY_PLANNING_COMMAND, ROOT_PLANNING_COMMAND, RULE_CHECK, _with_rule_check
 from tests.test_planning_command_code_steps import Model
-from tests.test_text_planner_and_split import _fake_matcher
 from tests.test_step_helpers import (
     FoundBooks,
     LibraryRunner,
@@ -1049,7 +1048,7 @@ def test_assistant_mode_refuses_planning_command(planning_dispatch_library):
     # test_assistant_mode_planning). A needs-agent command, note_member (a prose step and no
     # __result__), is still refused, with its reasons.
     ctx = planning_dispatch_library.ctx
-    ctx._cme_workflow.context["is_assistant_mode_command"] = True
+    ctx.start_round()
     out = CommandExecutor.invoke_command(ctx, "note_member Lee note=hello")
     needs, reasons = planning_command_needs_agent(planning_dispatch_library.folder, "Library/note_member")
     assert needs is True
@@ -1060,7 +1059,7 @@ def test_assistant_mode_refuses_planning_command(planning_dispatch_library):
 def test_slash_prefixed_refuses_planning_command(planning_dispatch_library):
     # Changed (fix-3rsq.10.8): the slash form of a needs-agent command, note_member (count_books runs).
     ctx = planning_dispatch_library.ctx
-    ctx._prepare_message_routing("/note_member Lee note=hello")
+    ctx._route_message("/note_member Lee note=hello")
     out = CommandExecutor.invoke_command(ctx, "/note_member Lee note=hello")
     needs, reasons = planning_command_needs_agent(planning_dispatch_library.folder, "Library/note_member")
     assert needs is True
@@ -1633,29 +1632,13 @@ def _start(tmp_path, initialized, monkeypatch, *, extra_planning_commands=None):
     )
 
 
-#: The real planner_planning_command_for, captured before any test stubs it (_make_library_runner_env does).
-REAL_PLANNER_PLANNING_COMMAND_FOR = workflow_agent.planner_planning_command_for
-
-
-def use_the_real_planner_planning_command_for(monkeypatch) -> None:
-    """Undo the stub the library harness puts on ``planner_planning_command_for`` for its whole test."""
-    monkeypatch.setattr(workflow_agent, "planner_planning_command_for", REAL_PLANNER_PLANNING_COMMAND_FOR)
-
-
 @pytest.fixture
 def recipe_env(tmp_path, initialized_fastworkflow, monkeypatch):
     """A library copy with a root skill (hours_overview) and a Library skill (dune_search)."""
     state = _start(tmp_path, initialized_fastworkflow, monkeypatch,
                    extra_planning_commands={HOURS_RECIPE: ROOT_PLANNING_COMMAND, DUNE_RECIPE: LIBRARY_PLANNING_COMMAND})
-    use_the_real_planner_planning_command_for(monkeypatch)
     yield state
     state.ctx.pop_active_workflow()
-
-
-def _match_only(monkeypatch, scope: str, value: str) -> None:
-    """Jev's match, stubbed: the request asks for skill *value*, confidently, along *scope*."""
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher",
-                        lambda folder: {scope: _fake_matcher(value, 0.9)})
 
 
 def test_the_matched_planning_commands_are_on_the_planner_listing(recipe_env):

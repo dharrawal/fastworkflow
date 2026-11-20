@@ -257,6 +257,72 @@ def add_train_parser(subparsers):
     parser_train.set_defaults(func=lambda args: train_with_defaults(args))
 
 
+def add_learn_parser(subparsers):
+    """Add 'learn' (refit the local head from what the workflow recorded) and 'learned' (review and remove it)."""
+    parser_learn = subparsers.add_parser(
+        "learn",
+        help="Learn from use: refit the workflow's local intent head with its confirmed requests (behind a "
+             "cross-fit gate) and calibrate its commit threshold. Makes no model call.")
+    parser_learn.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_learn.add_argument("env_file_path", nargs="?", default=None,
+                              help="Path to the environment file (default: as for 'train')")
+    parser_learn.add_argument("passwords_file_path", nargs="?", default=None,
+                              help="Accepted for symmetry with 'train'; no key is used")
+    parser_learn.add_argument("--dry-run", action="store_true",
+                              help="Run the gate and the calibration and write nothing")
+    parser_learn.set_defaults(func=_learn_main)
+
+    parser_learned = subparsers.add_parser(
+        "learned", help="Review what a workflow recorded from use: list, remove or count its rows.")
+    learned_subparsers = parser_learned.add_subparsers(dest="action", required=True)
+    parser_list = learned_subparsers.add_parser("list", help="List the recorded requests, oldest first")
+    parser_list.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_list.add_argument("--confirmed", action="store_true", help="Only the rows a person or agent confirmed")
+    parser_remove = learned_subparsers.add_parser("remove", help="Delete recorded rows by id")
+    parser_remove.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_remove.add_argument("ids", nargs="+", type=int, help="Row ids, as 'learned list' prints them")
+    parser_stats = learned_subparsers.add_parser("stats", help="Count the recorded rows")
+    parser_stats.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_list.set_defaults(func=_learned_main)
+    parser_remove.set_defaults(func=_learned_main)
+    parser_stats.set_defaults(func=_learned_main)
+
+
+def _learn_main(args):
+    from dotenv import dotenv_values
+
+    import fastworkflow
+
+    workflow_path = os.path.abspath(args.workflow_folderpath)
+    if not os.path.isdir(workflow_path):
+        print(f"Error: '{workflow_path}' is not a workflow folder.", file=sys.stderr)
+        sys.exit(1)
+    env_file = args.env_file_path or find_default_env_files(workflow_path)[0]
+    if not os.path.isfile(env_file):
+        print(f"Error: Environment file not found at: {env_file}", file=sys.stderr)
+        sys.exit(1)
+    fastworkflow.init(env_vars=dotenv_values(env_file))
+    from .train import head_refit
+
+    print(head_refit.format_report(head_refit.learn(workflow_path, publish=not args.dry_run)))
+
+
+def _learned_main(args):
+    from . import intent_learning
+
+    workflow_path = os.path.abspath(args.workflow_folderpath)
+    if args.action == "stats":
+        for key, value in intent_learning.stats(workflow_path).items():
+            print(f"{key}: {value}")
+    elif args.action == "remove":
+        print(f"Removed {intent_learning.remove(workflow_path, args.ids)} of {len(args.ids)} row(s).")
+    else:
+        for row in intent_learning.rows(workflow_path, confirmed_only=args.confirmed):
+            rejected = f" (instead of {row['rejected_label']})" if row["rejected_label"] else ""
+            print(f"{row['id']}\t{row['ts'][:19]}\t{row['how']}\t{'confirmed' if row['confirmed'] else 'unconfirmed'}"
+                  f"\t{row['context']}\t{row['command']}{rejected}\t{row['text']}")
+
+
 def add_run_parser(subparsers):
     """Add subparser for the 'run' command (alias: 'run_cli').
 
@@ -1012,6 +1078,7 @@ def main():
     add_build_parser(subparsers)
     add_refine_parser(subparsers)
     add_train_parser(subparsers)
+    add_learn_parser(subparsers)
     add_run_parser(subparsers)
     add_run_fastapi_mcp_parser(subparsers)
     add_run_chatbot_parser(subparsers)

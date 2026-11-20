@@ -136,21 +136,23 @@ re-inserted from the previous report and tagged `carried_forward` with the versi
 Those numbers still describe the models this version ships, but a diff across two runs will show
 them as unchanged because nothing re-measured them, not because nothing moved.
 
-## When the classifier is unsure: the tie-break reads the first docstring sentence
+## When the local model is unsure: the remote decision model reads the docstring and the seeds
 
-A turn the classifier does not route alone (several candidates, the "routed without asking" gap
-in the report) is offered to Jev with `JEV_API_KEY` set (`choose_ambiguous_command`). Jev
-routes only when it is at least 0.9 sure; otherwise the turn asks as before. For each candidate it
-sees one thing: the first sentence of the command's `Signature` docstring, or the command's
-first three `plain_utterances` when there is no docstring.
+Intent detection is one chain. The trained local model answers a request alone when it is confident.
+When it is not (several candidates, or "not here"), and `JEV_API_KEY` is set, the remote decision
+model (`intent_detector.MatcherEngine`) is asked once about every command on the lookup path, and
+routes when it gives a command at least 0.5. Otherwise the turn asks, as it does without the key. The
+old tie-break among the classifier's candidates (`FW_JEV_INTENT_TIEBREAK`, 0.9) no longer exists.
 
-So write that first sentence as the command's plain purpose, in the words a user would use, and
-put conditions and usage notes in the sentences after it. Measured on a workflow's open commands:
-"Open an account of this identity by uid, once its listing has it." was never chosen, because a
-request that gives no uid does not seem to fit it (Jev at 0.36-0.82). "Open one of this identity's
-accounts (logins) to work on it." was chosen correctly in 5 of 6 such turns at 0.92-0.99, with no
-change on the neighbouring commands. Set `FW_JEV_INTENT_TIEBREAK=off` to compare routing without
-the tie-break.
+For each command the remote model sees two things: the command's `Signature` docstring on one line,
+and its first few `plain_utterances` as example requests. So write the docstring's first sentence as
+the command's plain purpose, in the words a user would use, and put conditions and usage notes in the
+sentences after it. Measured with the earlier tie-break on a workflow's open commands (the same
+model reading the same docstrings): "Open an account of this identity by uid, once its listing has
+it." was never chosen, because a request that gives no uid does not seem to fit it (0.36-0.82).
+"Open one of this identity's accounts (logins) to work on it." was chosen correctly in 5 of 6 such
+turns at 0.92-0.99, with no change on the neighbouring commands. Run without `JEV_API_KEY` to compare
+routing with the local model alone.
 
 ## Deciding whether a change helped
 

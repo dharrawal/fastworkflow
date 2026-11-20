@@ -195,7 +195,9 @@ def _break_a_command_file(folder: str) -> None:
 def test_fastworkflow_run_prints_the_load_problem_before_its_first_prompt(library):
     _break_a_command_file(library)
     env_files = [os.path.join(library, "fastworkflow.env"), os.path.join(library, "fastworkflow.passwords.env")]
-    cli = _cli("run", library, *env_files, env=_no_llm_env())
+    # The copy is not trained, and this test wants the run to stop there. Its passwords file holds the planner key,
+    # with which an untrained workflow now starts on the model matcher (fix-yu3l.3): the classifier is required here.
+    cli = _cli("run", library, *env_files, env={**_no_llm_env(), "FW_REQUIRE_HEADS": "1"})
     out = cli.stdout + cli.stderr
     problem = "Load problem: Library/broken_thing: PlanningCommandFormatError"
     assert problem in out

@@ -1,7 +1,7 @@
 """A user-typed "/" command that is held for approval must not leave the session on the assistant path (fix-weih.15).
 
 ``CommandExecutor.invoke_command`` holds a "/" command that needs approval and returns the held output. The
-``is_assistant_mode_command`` flag that ``_prepare_message_routing`` set for the "/" message used to stay set after the
+``is_assistant_mode_command`` flag that ``_route_message`` set for the "/" message used to stay set after the
 approval was answered, so ``_should_run_agent_for_message`` refused the agent for every later plain message and a later
 "/" command was read as natural language. The reply to a pending approval is routed by ``approval_binding.active_record``
 before the flag is read, so the flag is not needed while the approval is open; it is cleared when the reply resolves it.
@@ -20,11 +20,10 @@ from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F40
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
-FLAG = "is_assistant_mode_command"
 
 
 def _flag(todo) -> bool:
-    return FLAG in todo.ctx._cme_workflow.context
+    return todo.ctx.assistant_round
 
 
 def _held(todo, text):
@@ -101,7 +100,7 @@ def test_a_failed_slash_command_keeps_the_flag_for_the_pending_parameter_round(s
     ctx = session(True)
     out = ctx.process_turn(PARTIAL)
     assert "parameter_request" in out.command_outputs[-1].command_response.artifacts
-    assert FLAG in ctx._cme_workflow.context
+    assert ctx.assistant_round
     ctx.process_turn("abort")
     assert ctx.agent_invoked == []
 

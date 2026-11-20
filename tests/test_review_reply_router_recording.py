@@ -1,6 +1,6 @@
-"""The recorded answer of the consultation head (tests/recorded_router.py): that it is sound, and that the head still gives it.
+"""The recorded answer of the plan head (tests/recorded_router.py): that it is sound, and that the head still gives it.
 
-The reader tests (tests/test_consultation_reply_policy.py, tests/test_built_in_vague_replies.py,
+The reader tests (tests/test_plan_reply_policy.py, tests/test_built_in_vague_replies.py,
 tests/test_round1_handoff.py) feed the reader the head's answer for each reply from
 ``tests/fixtures/review_reply_router_answers.json``, so they need no trained head. The drift test below is the one
 that needs it: it asks the real head every recorded reply and fails, naming the replies, when a retrain changed a
@@ -13,10 +13,10 @@ import json
 import pytest
 
 from fastworkflow.model_pipeline_training import CommandRouter
-from tests import consultation_head as head
+from tests import plan_head as head
 from tests import recorded_router
 from tests.recorded_router import RecordedRouter, UnrecordedUtterance, installed, load_recording
-from tests.test_consultation_reply_policy import (  # noqa: F401  (the fixtures the reader tests use)
+from tests.test_plan_reply_policy import (  # noqa: F401  (the fixtures the reader tests use)
     _open_review_two_step, annotated_library, gated, initialized_fastworkflow, no_draft_extraction, no_live_model,
     script_param_extraction, todo)
 
@@ -64,7 +64,7 @@ def test_the_reader_asks_the_recorded_router_at_the_key_production_looks_up(gate
     assert record.state == "revised"
 
 
-@pytest.mark.requires_consultation_head
+@pytest.mark.requires_plan_head
 def test_recorded_router_matches_the_head():
     """Drift: the current head answers every recorded reply as it was recorded (label and ambiguity flag)."""
     recording = load_recording()
@@ -79,7 +79,7 @@ def test_recorded_router_matches_the_head():
     assert not drifted, (
         f"the head (current version {head.head_version_id()}) no longer answers {len(drifted)} of "
         f"{len(recording['answers'])} recorded replies as version {recording['metadata']['head_version_id']} did, "
-        "so the reader tests run on stale routing. Re-record with `pytest --record-review-router "
-        "tests/test_consultation_reply_policy.py tests/test_built_in_vague_replies.py tests/test_round1_handoff.py` "
-        "and review the diff of tests/fixtures/review_reply_router_answers.json.\n" + "\n".join(drifted)
+        "so the reader tests run on stale routing. Re-record with `pytest --record-review-router` over EVERY test file "
+        "that uses the `recorded_review_router` fixture (a reply is recorded only when a test asks it; the file list is "
+        "in tests/recorded_router.py) and review the diff of tests/fixtures/review_reply_router_answers.json.\n" + "\n".join(drifted)
     )

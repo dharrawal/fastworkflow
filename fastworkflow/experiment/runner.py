@@ -62,7 +62,6 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 # (`__init__.py:244-286`), so an arm that needs different values needs a
 # different process.
 LM_CACHE_VAR = "FW_LM_CACHE"
-UTTERANCE_CACHE_SCOPE_VAR = "FW_UTTERANCE_CACHE_SCOPE"
 
 
 class ExperimentAborted(RuntimeError):
@@ -887,9 +886,7 @@ class ExperimentHarness:
             # "DSPy Language Model not provided" from somewhere unrelated, long
             # after the harness had already been blamed and cleared.
             fastworkflow._env_vars[LM_CACHE_VAR] = "0"
-            fastworkflow._env_vars[UTTERANCE_CACHE_SCOPE_VAR] = "workflow"
             posture[LM_CACHE_VAR] = "0"
-            posture[UTTERANCE_CACHE_SCOPE_VAR] = "workflow"
 
         # The DSPy memory policy. A long agentic sweep in one process fills
         # DSPy's retention structures unbounded, and unlike the

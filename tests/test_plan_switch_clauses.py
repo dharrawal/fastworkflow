@@ -1,6 +1,6 @@
 """A plan-switch clause in a review reply is decided deterministically, whatever the plan is called (bd fix-1ma8.1).
 
-Real components, no mocks; the seams scripted are the neighbouring tests' (Jev's match, the planner LM, the consultation
+Real components, no mocks; the seams scripted are the neighbouring tests' (Jev's match, the planner LM, the plan
 head's recorded answers). Before this change the clause ``step N: use NAME`` was decided only when NAME was one of the
 step's listed alternatives; any other reply fell to the free-text reader, which folded "use NAME" into the goal of a
 neighbouring step (a switch lost and another step damaged), or guessed a plan for "switch step 7 to the plan that shows
@@ -14,13 +14,13 @@ import pytest
 from fastworkflow import review_engine as re_
 from fastworkflow.review_engine import Change, ProposalReplyPolicy, Verdict
 from fastworkflow.review_proposals import (
-    Candidate, EditRefused, Means, ProposedEdit, SubTask, SubTaskProposal, _proposed_edits_to_engine, build_round1_proposal)
+    EditRefused, Means, ProposedEdit, SubTask, SubTaskProposal, _proposed_edits_to_engine)
 
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401
-from tests.test_consultation_reply_policy import (  # noqa: F401
-    _wire_consultation, planner, script_param_extraction)
+from tests.test_plan_reply_policy import (  # noqa: F401
+    _wire_plan, planner, script_param_extraction)
 from tests.test_plan_match_ambiguity import (  # noqa: F401
-    AUTHOR, BY_TITLE, LOANS, _ambiguous_review, _items, _single, _two, no_heads)
+    AUTHOR, BY_TITLE, LOANS, _ambiguous_review, _items, _proposal, _single, _two, no_heads)
 from tests.test_round1_gate import EMMA, JOKE, gated, no_draft_extraction  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 from fastworkflow.turn import TurnStatus
@@ -37,8 +37,7 @@ def _never_read(seen: list):
 
 def _mixed() -> SubTaskProposal:
     """Step 1 has alternatives, step 2 has none (a plain goal), step 3 has none."""
-    plan = build_round1_proposal(["Who wrote Emma", "tell a joke", "count the books"], {
-        1: [Candidate(BY_TITLE, True, 0.55), Candidate(AUTHOR, True, 0.45), Candidate(LOANS, True, 0.3)]})
+    plan = _proposal(["Who wrote Emma", "tell a joke", "count the books"], {1: (BY_TITLE, [AUTHOR, LOANS])})
     assert [bool(item.alternatives) for item in plan.items] == [True, False, False]
     return plan
 
@@ -278,10 +277,10 @@ def test_a_goal_that_merely_mentions_use_is_not_refused():
 # ----------------------------------------------------------------------
 
 
-@pytest.fixture(params=["session reader", "consultation workflow"])
+@pytest.fixture(params=["session reader", "plan metadata extraction workflow"])
 def wiring(request, gated):
-    if request.param == "consultation workflow":
-        _wire_consultation(gated)
+    if request.param == "plan metadata extraction workflow":
+        _wire_plan(gated)
     return request.param
 
 
@@ -328,7 +327,9 @@ def test_failure_b_an_unnamed_switch_request_is_asked_about_and_no_plan_is_guess
     out = gated.ctx.process_turn("switch step 1 to the plan that shows who wrote the book")
     assert record.state == re_.AWAITING and [item.model_dump() for item in _items(record)] == before
     assert len(lm.history) == 0                                                  # the reader was not asked to guess
-    assert AUTHOR in out.answer and LOANS in out.answer and "step 1" in out.answer
+    # Since bd fix-o1lg S4/S5 a live review carries no alternatives (the ambiguity was asked before it), so the question
+    # names none; it still guesses no plan.
+    assert "Which plan should step 1 use?" in out.answer and "step 1" in out.answer
 
 
 @pytest.mark.usefixtures("recorded_review_router")

@@ -18,6 +18,8 @@ import threading
 
 import dspy
 import pytest
+
+from tests.conftest import script_matcher
 from dspy.utils import DummyLM
 
 import fastworkflow
@@ -86,11 +88,14 @@ def test_the_first_exception_in_call_order_is_raised_and_every_call_is_awaited(c
         finished.append("third")
         return "ok"
 
+    # A pool thread another test left behind is not this call's: only threads started here are counted.
+    before = set(threading.enumerate())
     with pytest.raises(ValueError, match="first failed"):
         subtask_pool.map_in_order([first, second, third])
     # none is left running: all three finished before the exception left map_in_order
     assert sorted(finished) == ["first", "second", "third"]
-    assert not [t for t in threading.enumerate() if t.name.startswith("ThreadPoolExecutor")]
+    assert not [t for t in threading.enumerate()
+                if t not in before and t.name.startswith("ThreadPoolExecutor")]
 
 
 def test_the_exception_is_the_same_as_the_sequential_one_for_the_first_failing_call():
@@ -330,24 +335,24 @@ def test_the_stage_events_of_a_pooled_draft_are_one_per_sub_task_and_in_order(li
 
 
 def test_a_failed_prefetched_match_is_asked_again_in_order(library_heads, monkeypatch, turn_memo):
-    """Every sub-task's Jev match is started together; one that fails there is dropped and the in-order loop asks that
+    """Every sub-task's intent is decided together; one that fails there is dropped and the in-order loop decides that
     text again, so the draft is made as it would have been."""
-    from fastworkflow import workflow_agent
+    from fastworkflow import intent_loop
 
     calls: list[str] = []
-    real = review_proposals.planning_match
+    real = intent_loop.resolve
 
-    def flaky(workflow, text, exclude=None):
+    def flaky(workflow, text, core=False):
         calls.append(text)
         if len(calls) == 1:
             raise RuntimeError("the first match failed")
-        return real(workflow, text, exclude)
+        return real(workflow, text, core=core)
 
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda folder: object())  # a Jev matcher exists
-    monkeypatch.setattr(review_proposals, "planning_match", flaky)
+    # the remote model's answer is the library_heads fixture's: a local plan pick is decided by it (fix-o1lg.2)
+    monkeypatch.setattr(intent_loop, "resolve", flaky)
     _keyed(monkeypatch, KeyedLM(ANSWERS))
 
     draft = review_proposals.draft_round1_proposal(library_heads, [EMMA, DUNE])
 
-    assert len(calls) == 4 and sorted(calls[:2]) == sorted([EMMA, DUNE])     # prefetch (one failed), then in order
+    assert len(calls) == 3 and sorted(calls[:2]) == sorted([EMMA, DUNE])     # prefetch (one failed), then in order
     assert [item.inputs[0].value for item in draft.items] == ["Emma", "Dune"]

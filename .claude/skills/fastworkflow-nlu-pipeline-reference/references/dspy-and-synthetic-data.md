@@ -106,8 +106,9 @@ Agent-mode fast path (`_workflows/command_metadata_extraction/parameter_extracti
 - If agentic (`run_as_agent` set, not an `/`-forced assistant command), regex-extract
   `<field>value</field>` XML first (:65-80, :296-357). ALL fields must be found and none
   may equal a `Field(examples=)` value (:327-337), else fall back to the DSPy path.
-- On a clarification re-entry (stored params present), the user's bare reply is slotted
-  into the sentinel-valued fields by comma-splitting — no LLM at all (:360-411).
+- On a clarification re-entry (stored params present), the user's reply is read in code by the one reply
+  reader (`parameters/read.py`): `name: value` lines, the whole reply when one value is open, comma parts in order
+  only when the count matches the open values and each part fits — no LLM at all.
 
 Agent-level `AdapterParseError` (DSPy couldn't parse the LLM's structured output) retry:
 whole agent call retried up to 2 attempts (`workflow_execution_context.py:696-707`).

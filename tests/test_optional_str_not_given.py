@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import ModuleType
+from fastworkflow import ModuleType, parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     NOT_FOUND,
     ParameterExtraction,
@@ -155,7 +155,8 @@ def test_the_reply_to_the_clarification_still_goes_to_the_required_field(run_rou
     first, _ = run_round(_FilterThenName, "find a person", cme,
                          llm_values={"filter": NOT_FOUND, "name": NOT_FOUND})
     assert not first.parameters_are_valid
-    assert cme.context["stored_parameters"].filter is None
+    loop = parameter_clarification.pending(cme.context)
+    assert loop.open == ["name"] and loop.values["filter"] is None
 
     second, diagnostics = run_round(_FilterThenName, "Ann", cme)
     assert diagnostics["extraction_method"] == "stored_merge"

@@ -26,7 +26,7 @@ from fastworkflow.model_pipeline_training import (
 from fastworkflow.train import selective_training
 from tests.test_not_here_class import MESSAGING, _private_copy
 
-CONSULTATION = fastworkflow.get_internal_workflow_path("consultation")
+PLAN_WORKFLOW = fastworkflow.get_internal_workflow_path("plan_metadata_extraction")
 
 # The owner's held-out vague replies and the vague strings the reply tests use. The built-in list
 # must not contain or repeat them, or the held-out measurement would measure memorisation.
@@ -47,8 +47,8 @@ def initialized_fastworkflow():
 
 
 @pytest.fixture
-def consultation_copy(tmp_path):
-    path = _private_copy(tmp_path, CONSULTATION, "consultation_copy")
+def plan_copy(tmp_path):
+    path = _private_copy(tmp_path, PLAN_WORKFLOW, "plan_copy")
     yield path
     RoutingRegistry.clear_registry()
 
@@ -65,26 +65,26 @@ def test_the_built_in_list_is_small_diverse_and_clear_of_the_held_out_replies():
     lowered = [text.lower() for text in BUILT_IN_VAGUE_REPLIES]
     assert len(set(lowered)) == len(lowered)
     assert not set(lowered) & HELD_OUT_VAGUE
-    corpus = os.path.join(CONSULTATION, "heldout_reply_corpus.jsonl")
+    corpus = os.path.join(PLAN_WORKFLOW, "heldout_reply_corpus.jsonl")
     with open(corpus, encoding="utf-8") as handle:
         texts = {json.loads(line)["text"].strip().lower() for line in handle if line.strip()}
     assert not set(lowered) & texts
 
 
-def test_a_single_context_workflow_without_foreign_commands_gets_the_built_in_class(consultation_copy):
-    crd = RoutingRegistry.get_definition(consultation_copy)
-    workflow = fastworkflow.Workflow.create(consultation_copy, workflow_id_str="vague-seed-single")
+def test_a_single_context_workflow_without_foreign_commands_gets_the_built_in_class(plan_copy):
+    crd = RoutingRegistry.get_definition(plan_copy)
+    workflow = fastworkflow.Workflow.create(plan_copy, workflow_id_str="vague-seed-single")
     ctx = "ProposalReview"
     selection = select_escalation_rows(ctx, crd, workflow, context_utterances=set())
     assert selection.included
     assert selection.rows == sorted(BUILT_IN_VAGUE_REPLIES)
     assert selection.not_here_samples == {BUILT_IN_VAGUE_SOURCE: list(BUILT_IN_VAGUE_REPLIES)}
-    assert not_here_samples_for_context(consultation_copy, crd, ctx) == selection.not_here_samples
+    assert not_here_samples_for_context(plan_copy, crd, ctx) == selection.not_here_samples
 
 
-def test_a_built_in_row_that_is_one_of_the_heads_own_utterances_is_not_taken_twice(consultation_copy):
-    crd = RoutingRegistry.get_definition(consultation_copy)
-    workflow = fastworkflow.Workflow.create(consultation_copy, workflow_id_str="vague-seed-own")
+def test_a_built_in_row_that_is_one_of_the_heads_own_utterances_is_not_taken_twice(plan_copy):
+    crd = RoutingRegistry.get_definition(plan_copy)
+    workflow = fastworkflow.Workflow.create(plan_copy, workflow_id_str="vague-seed-own")
     ctx = "ProposalReview"
     own = {BUILT_IN_VAGUE_REPLIES[0]}
     selection = select_escalation_rows(ctx, crd, workflow, context_utterances=own)
@@ -118,9 +118,9 @@ def test_the_internal_cme_arm_builds_no_class_and_no_built_in_rows():
     assert not_here_samples_for_context(cme, crd, sorted(crd.contexts)[0]) is None
 
 
-def test_the_signature_records_the_built_in_source_so_editing_the_list_retrains(consultation_copy):
+def test_the_signature_records_the_built_in_source_so_editing_the_list_retrains(plan_copy):
     signature, _unresolved = selective_training.compute_training_signature(
-        consultation_copy, ["ProposalReview"])
+        plan_copy, ["ProposalReview"])
     head = signature.contexts["ProposalReview"]
     assert head.wildcard_sources == [BUILT_IN_VAGUE_SOURCE]
     assert head.expects_wildcard_label
@@ -152,8 +152,8 @@ def test_a_routed_flag_without_a_command_name_is_unrouted(routed, name, expected
 
 # ---------------------------------------------------------------- the reader, against the head
 
-from tests.consultation_head import HEAD_DIR as _HEAD_DIR, head_trained  # noqa: E402
-from tests.test_consultation_reply_policy import (  # noqa: E402,F401  (fixtures the reader tests use)
+from tests.plan_head import HEAD_DIR as _HEAD_DIR, head_trained  # noqa: E402
+from tests.test_plan_reply_policy import (  # noqa: E402,F401  (fixtures the reader tests use)
     _PlannerLM,
     _open_review_two_step,
     annotated_library,
@@ -193,7 +193,7 @@ class _ReaderCases:
     asks again, which needs the head)."""
 
     def test_the_review_record_is_the_root_so_a_wildcard_answer_has_somewhere_to_walk(self, gated):
-        workflow = gated.ctx._consultation_workflow
+        workflow = gated.ctx._plan_workflow
         assert workflow.root is not None
         assert workflow._current_command_context is workflow.root
 
@@ -217,7 +217,7 @@ class TestReaderOnRecordedHeadAnswers(_ReaderCases):
     """Reader behaviour: the head's answer for each reply is the recording (tests/recorded_router.py). No head needed."""
 
 
-@pytest.mark.requires_consultation_head
+@pytest.mark.requires_plan_head
 @pytest.mark.usefixtures("_reader_init", "no_live_model", "no_draft_extraction")
 class TestReaderWithTrainedHead(_ReaderCases):
     """Head behaviour: the same replies asked of the trained head, which must route the vague ones to a wildcard
@@ -229,9 +229,9 @@ class TestReaderWithTrainedHead(_ReaderCases):
         # An absent head is the marker's to report (tests/conftest.py); this is about a head that is there.
         if head_trained() and request.function.__name__ == "test_a_vague_reply_asks_again_and_never_accepts_or_declines" \
                 and not _head_has_wildcard_class():
-            from tests import consultation_head
+            from tests import plan_head
 
             message = "this head has no wildcard class (retrain it with the built-in vague replies)"
-            if consultation_head.heads_required():
-                pytest.fail(f"{consultation_head.REQUIRE_HEADS_ENV} is set and {message}", pytrace=False)
+            if plan_head.heads_required():
+                pytest.fail(f"{plan_head.REQUIRE_HEADS_ENV} is set and {message}", pytrace=False)
             pytest.skip(message)

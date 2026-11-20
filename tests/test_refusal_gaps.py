@@ -11,7 +11,7 @@ import socket
 
 import pytest
 
-from fastworkflow import approval_binding, no_agent_mode, review_proposals
+from fastworkflow import approval_binding, no_agent_mode
 from fastworkflow.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import load_planning_command_map
@@ -21,6 +21,7 @@ from tests.scripted_extractor import ScriptedExtractor
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401
 from tests.test_round1_gate import gated  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.conftest import no_local_model, script_matcher
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -153,7 +154,7 @@ def test_the_draft_keeps_the_value_the_request_gave_and_the_question_asks_only_f
 
 def test_a_reply_that_makes_no_progress_is_asked_once_more_then_the_part_is_not_run_naming_what_is_missing(gated):
     _pinned_and_accepted(gated)
-    again = _reply(gated, "hmm, I am not sure")
+    again = _reply(gated, "hmm I am not sure")
 
     assert again.status is TurnStatus.AWAITING_USER and again.answer.startswith("That did not give a value I could use.")
     assert _request(again)["missing"] == ["member", "text"]
@@ -166,10 +167,10 @@ def test_a_reply_that_makes_no_progress_is_asked_once_more_then_the_part_is_not_
 def test_progress_resets_the_no_progress_count(gated):
     _pinned_and_accepted(gated)
     _reply(gated, "hmm")                                      # unclear: asked once more
-    assert gated.ctx._refusal_progress["stalled"] == 1
+    assert gated.ctx._waiting.payload["loop"]["stalled"] == 1
     progressed = _reply(gated, f"member: {MEMBER}")           # progress: the count starts again
     assert progressed.status is TurnStatus.AWAITING_USER and _request(progressed)["missing"] == ["text"]
-    assert gated.ctx._refusal_progress["stalled"] == 0
+    assert gated.ctx._waiting.payload["loop"]["stalled"] == 0
 
 
 @pytest.mark.parametrize("word", ["cancel", "abort"])
@@ -202,22 +203,29 @@ def test_the_progress_survives_a_save_between_the_question_and_the_reply(gated):
     _reply(gated, f"member: {MEMBER}")
     state = gated.ctx.serialize_state(channel_id="c")
 
-    assert state["refusal_progress"]["command"] == PLAN and state["refusal_progress"]["open"] == ["text"]
+    loop = state["waiting"]["payload"]["loop"]
+    assert loop["command"] == PLAN and loop["open"] == ["text"] and "pending" not in loop
+    assert loop["values"] == {"member": MEMBER}
     assert state["use_plan"] == PLAN
-    assert state["refusal_progress"]["asks"] == 2
+    assert loop["asks"] == 2
 
 
 def test_a_matched_part_is_asked_the_same_way(gated, monkeypatch):
-    command = load_planning_command_map(gated.wf.folderpath)[PLAN]
-    monkeypatch.setattr(review_proposals, "planning_match",
-                        lambda workflow, text, exclude=None: ("", command, {PLAN: 0.9}))
-    first = gated.ctx.process_turn(REQUEST, approval_surface=HOST)
-    asked = _reply(gated, "yes")
+    """A part the remote model matches (the local model has no answer here, so the part is drafted and reviewed). Since
+    bd fix-o1lg S4/S5 its missing values are asked BEFORE the review, and the review shows them given."""
+    no_local_model(monkeypatch)
+    script_matcher(monkeypatch, {REQUEST: {PLAN: 0.9, "none": 0.0}})
+    asked = gated.ctx.process_turn(REQUEST, approval_surface=HOST)
 
     assert asked.status is TurnStatus.AWAITING_USER and _request(asked)["missing"] == ["member", "text"]
     second = _reply(gated, f"member: {MEMBER}")
     assert _request(second)["missing"] == ["text"] and _request(second)["values"] == {"member": MEMBER}
-    done = _reply(gated, f"text: {NOTE}")
+    review = _reply(gated, f"text: {NOTE}")
+    artifacts = review.command_outputs[-1].command_response.artifacts
+    assert review.status is TurnStatus.AWAITING_USER and artifacts["question_kind"] == "review", artifacts
+    shown = {each["name"]: each.get("value") for each in artifacts["review"]["items"][0]["inputs"]}
+    assert shown == {"member": MEMBER, "text": NOTE}
+    done = _reply(gated, "yes")
     assert done.status is TurnStatus.COMPLETED and _ran_with(gated) == {"member": MEMBER, "text": NOTE}
 
 
@@ -240,9 +248,8 @@ def test_the_typed_call_path_asks_about_every_missing_argument_too(gated, monkey
     from dspy.utils import DummyLM
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", REAL_BUILD)
-    command = load_planning_command_map(gated.wf.folderpath)[PLAN]
-    monkeypatch.setattr(review_proposals, "planning_match",
-                        lambda workflow, text, exclude=None: ("", command, {PLAN: 0.9}))
+    script_matcher(monkeypatch, lambda text: {PLAN: 0.9, "none": 0.0})
+
     class Planner(DummyLM):
         """The planner's model: the typed fill finds nothing, and the text planner (read after a refusal that is not asked
         about) gives a one-line plan."""

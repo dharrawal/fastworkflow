@@ -10,15 +10,16 @@ are all still used. In this mode:
   other step code cannot run (a prose step, a value that must be found, a failed step, no path) or where its answer
   would need a model, it ends as a COMPLETED turn that carries a stop (``fw_not_run``), and the wording of the final
   answer is left to the client;
-- an ad hoc part (no planning command matched, the means ``from_scratch``) is not run: it comes back as the same
-  stop with a suggested plan.
+- an ad hoc part (no planning command matched, the means ``from_scratch``) is not planned here. A turn somebody can
+  answer asks which planning command is meant (``question_kind`` "plan_choice", ``fastworkflow/intent_clarification.py``)
+  and the reply resumes that part bound to the picked plan; a turn nobody can answer, and a reply that picks none,
+  ends the part as not run: it comes back as the same stop with a suggested plan.
 
 ``agent_model_specified`` is the one place that decides the mode. Everything else reads it through
 ``WorkflowExecutionContext.no_agent_mode``. With ``LLM_AGENT`` set, nothing in this module is consulted.
 """
 from __future__ import annotations
 
-import re
 from typing import Any, Optional
 
 import fastworkflow
@@ -51,6 +52,9 @@ QUESTION_KIND_PHASE_STEP = "phase_step"
 PHASE_STEP_ARTIFACT = "phase_step"
 #: The reply that declines to decide (the command then ends with its stop, ``reason`` "declined").
 DECLINE_REPLY = "cancel"
+#: The sentence a question put to a person ends with (which command, a parameter, a decision step): a reply is read
+#: by that question's reader for its answer and nothing else in it is acted on (bd fix-rpio).
+ANSWER_ONLY_NOTE = "Only your answer is read; anything else in the reply is ignored."
 #: A decision question is asked once more after a reply that cannot be read; the second one ends with the stop.
 MAX_DECISION_ASKS = 2
 #: A question about a planning command's missing arguments is asked again once after a reply that gives none of them;
@@ -120,7 +124,8 @@ def stop_entry(*, command: Optional[str], phase: Optional[str], open_step: Optio
                sub_task: Optional[int] = None, later_phases: Optional[list[str]] = None,
                nested: Optional[dict[str, Any]] = None, reason: Optional[str] = None,
                available_plans: Optional[list[dict[str, Any]]] = None,
-               request: Optional[str] = None) -> dict[str, Any]:
+               request: Optional[str] = None, results: Optional[dict[str, str]] = None,
+               partial_read: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """One stop, the shape a client reads (``fw_not_run`` is a list of these).
 
     ``command`` is the planning or plain command (None for an ad hoc part); ``phase`` the phase that stopped (None
@@ -133,7 +138,9 @@ def stop_entry(*, command: Optional[str], phase: Optional[str], open_step: Optio
     no open step (an ad hoc part, a command that could not be started) was not run. ``available_plans`` is
     only for an ad hoc part: the planning commands available here, ``{name, description, closest}`` each
     (the closest ones to the part first, see ``available_plans``), and ``request`` the part's own request text (what a
-    client sends back with ``use_plan`` to run the part bound to one of them).
+    client sends back with ``use_plan`` to run the part bound to one of them). ``results`` maps a ``done`` line to the
+    response text its command gave (when it gave one), and ``partial_read`` is ``{"pages", "rows_read", "total",
+    "rows"}`` of the paged read a page-cap stop cut short (``total`` None when the command reported none).
     """
     entry: dict[str, Any] = {
         "kind": KIND_NOT_RUN_HERE,
@@ -157,6 +164,10 @@ def stop_entry(*, command: Optional[str], phase: Optional[str], open_step: Optio
         entry["available_plans"] = list(available_plans)
     if request is not None:
         entry["request"] = request
+    if results:
+        entry["results"] = dict(results)
+    if partial_read:
+        entry["partial_read"] = partial_read
     return entry
 
 
@@ -257,9 +268,75 @@ def explanation(entry: dict[str, Any], listed_in: Optional[int] = None) -> str:
     else:
         where = f"it stopped at step {open_step.get('number')} ({open_step.get('reason')})"
     phase = f", in phase {entry['phase']!r}" if entry.get("phase") else ""
-    return (f"{command} ran as far as code can run it without an agent model: {ran}{phase}, then {where}. "
+    text = (f"{command} ran as far as code can run it without an agent model: {ran}{phase}, then {where}. "
             "The remaining steps are listed in the data (fw_not_run); the wording of the final answer is left "
             "to the client.")
+    if open_step.get("kind") in (STEP_ANSWER, STEP_PAGE_CAP):
+        text = f"{ran_statement(entry)}\n\n{text}"
+    return text
+
+
+#: Most values of one list a code-written statement of the facts shows (the data, ``fw_not_run``, has them all).
+FACT_LIST_CAP = 10
+
+
+def _fact_text(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        shown = ", ".join(str(item) for item in value[:FACT_LIST_CAP])
+        more = len(value) - FACT_LIST_CAP
+        return f"[{shown}{f', ... and {more} more' if more > 0 else ''}] ({len(value)} in all)"
+    return str(value)
+
+
+#: Most characters of one step's own result text a code-written statement shows (the data, ``fw_not_run``, has it all).
+RESULT_TEXT_CAP = 300
+
+
+def _result_text(text: str) -> str:
+    """*text* cut to its first lines within ``RESULT_TEXT_CAP`` characters, saying how much was cut."""
+    text = str(text).strip()
+    if len(text) <= RESULT_TEXT_CAP:
+        return text
+    kept = ""
+    for line in text.splitlines():
+        if len(kept) + len(line) + 1 > RESULT_TEXT_CAP:
+            break
+        kept += line + "\n"
+    kept = kept.rstrip() or text[:RESULT_TEXT_CAP]
+    return f"{kept} [... {len(text) - len(kept)} more characters not shown]"
+
+
+def ran_statement(entry: dict[str, Any]) -> str:
+    """Markdown stating what a stopped command's code ran and the facts it recorded, written in code from the stop's
+    ``done`` lines and ``facts``. A stop at a paged read's page cap says the read is partial, so a count in the facts is
+    of the rows read so far."""
+    results = entry.get("results") or {}
+    lines = ["**What ran**"]
+    for line in entry.get("done") or []:
+        lines.append(f"- {line}")
+        if results.get(line):
+            lines += [f"  > {part}" for part in _result_text(results[line]).splitlines()]
+    facts = entry.get("facts") or {}
+    if facts:
+        lines += ["", "**Facts recorded**"]
+        for phase_name, fields in facts.items():
+            if isinstance(fields, dict) and fields:
+                lines += [f"- {phase_name}:"] + [f"  - {key}: {_fact_text(value)}" for key, value in fields.items()]
+            else:
+                lines.append(f"- {phase_name}: {_fact_text(fields)}")
+    read = entry.get("partial_read")
+    if read:
+        total = read.get("total")
+        rows = read.get("rows") or []
+        lines += ["", "**Rows read so far**",
+                  f"- {read.get('rows_read', len(rows))} rows read"
+                  + (f" of {total} the command reported" if total is not None else " (the command reported no total)")]
+        if rows:
+            lines.append(f"- rows: {_fact_text(rows)}")
+    if (entry.get("open_step") or {}).get("kind") == STEP_PAGE_CAP:
+        lines += ["", "The read stopped at the page cap with rows still to read: any count above is of a partial "
+                      "read, not of the whole list."]
+    return "\n".join(lines)
 
 
 # ---- decision steps: the question a paused planning command asks and how its reply is read ------------------------
@@ -286,34 +363,6 @@ def declines(reply: str) -> bool:
     return _bare(reply) in _DECLINE
 
 
-_ACCEPT = frozenset({"yes", "y", "ok", "okay", "run", "run it", "go", "confirm", "true"})
-_PARAMETER_LINE = re.compile(r"^\s*([A-Za-z_]\w*)\s*[:=]\s*(.*?)\s*$")
-
-
-def read_parameter_reply(reply: str, names, open_names) -> tuple[str, dict[str, str]]:
-    """How a reply to a chosen plan's parameter question reads, strictly: ``("decline", {})`` for cancel and its synonyms,
-    ``("accept", {})`` for yes (run with the values shown), ``("values", {name: value})`` for ``name: value`` (or
-    ``name=value``) lines of the plan's own parameters, one per line, or for a bare value when exactly one parameter is
-    still open; anything else is ``("unclear", {})``. No model reads it."""
-    word = _bare(reply)
-    if word in _DECLINE:
-        return "decline", {}
-    if word in _ACCEPT:
-        return "accept", {}
-    known = {str(name).lower(): str(name) for name in names}
-    values: dict[str, str] = {}
-    for line in str(reply or "").splitlines():
-        match = _PARAMETER_LINE.match(line)
-        if match and match.group(1).lower() in known and match.group(2):
-            values[known[match.group(1).lower()]] = match.group(2)
-    if values:
-        return "values", values
-    open_names = list(open_names)
-    if len(open_names) == 1 and str(reply or "").strip():
-        return "values", {open_names[0]: str(reply).strip()}
-    return "unclear", {}
-
-
 def decision_question(entry: dict[str, Any], decision: dict[str, Any], *, retry: str = "") -> str:
     """The plain, self-sufficient question a decision step asks: what ran, what is asked, how to answer, how to decline.
 
@@ -336,10 +385,9 @@ def decision_question(entry: dict[str, Any], decision: dict[str, Any], *, retry:
         kind = f" ({decision['type']}" + (f": {decision['description']}" if decision.get("description") else "") + ")"
         ask = (f" Its command needs a value for {decision['field']}{kind} that the step does not give. Reply with "
                f"that value alone; the command then carries on with {carries}.")
-    decline = (f" Reply {DECLINE_REPLY} to stop here without deciding. While this question is open, every message sent "
-               f"to the agent (invoke_agent), including one that begins with '/', is read as the reply; to run a "
-               f"separate command meanwhile, send it to the assistant (invoke_assistant).")
-    return f"{retry}{where}{ask}{decline}".strip()
+    decline = (f" Reply {DECLINE_REPLY} to stop here without deciding. While this question is open, every message, "
+               f"including one that begins with '/', is read as the reply.")
+    return f"{retry}{where}{ask}{decline} {ANSWER_ONLY_NOTE}".strip()
 
 
 def phase_step_payload(entry: dict[str, Any], decision: dict[str, Any], facts: Any) -> dict[str, Any]:

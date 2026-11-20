@@ -2,66 +2,76 @@
  "answers": {
   "Also change step 2 to a short joke": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.567743182182312,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.7382390106067275,
     "confident": true,
-    "model_tier": "tiny",
-    "top_label": "ProposalReview/add",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.7382390106067275,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
     "topk_labels": [
-     "ProposalReview/add",
      "ProposalReview/edit",
-     "ProposalReview/look_up"
+     "ProposalReview/drop",
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.567743182182312,
-     0.1067042276263237,
-     0.08141099661588669
+     0.7382390106067275,
+     0.1379534725292185,
+     0.03154652328673766
     ]
    },
    "labels": [
-    "ProposalReview/add"
+    "ProposalReview/edit"
    ]
   },
   "DrChrono onboarding status": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.48034408688545227,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/edit",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.7139556196824063,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.7139556196824063,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/add",
     "topk_labels": [
+     "ProposalReview/add",
      "ProposalReview/edit",
-     "ProposalReview/confirm",
-     "ProposalReview/add"
+     "ProposalReview/confirm"
     ],
     "topk_scores": [
-     0.48034408688545227,
-     0.21837715804576874,
-     0.08062823861837387
+     0.7139556196824063,
+     0.16454477713946256,
+     0.04833319475658919
     ]
    },
    "labels": [
-    "ProposalReview/edit",
-    "ProposalReview/confirm",
     "ProposalReview/add"
    ]
   },
   "I don't know": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5581248998641968,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.6767943383146535,
     "confident": true,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.1563740555887449,
+    "p_out": 0.0,
     "top_label": "wildcard",
     "topk_labels": [
-     "wildcard",
-     "ProposalReview/drop",
+     "ProposalReview/look_up",
+     "ProposalReview/decline",
      "ProposalReview/edit"
     ],
     "topk_scores": [
-     0.5581248998641968,
-     0.10186717659235,
-     0.09243109077215195
+     0.1563740555887449,
+     0.0974910732901491,
+     0.03682430018336089
     ]
    },
    "labels": [
@@ -70,20 +80,24 @@
   },
   "I don't know whether IT Support is a unit or a group; use your best judgment": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.9473158717155457,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9918994068381789,
     "confident": true,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9918994068381789,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
-     "ProposalReview/decline",
-     "ProposalReview/confirm"
+     "ProposalReview/confirm",
+     "ProposalReview/decline"
     ],
     "topk_scores": [
-     0.9473158717155457,
-     0.014499606564640999,
-     0.00862848199903965
+     0.9918994068381789,
+     0.002004792599272205,
+     0.0014537387186106191
     ]
    },
    "labels": [
@@ -92,34 +106,40 @@
   },
   "I'm happy with that": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.5705565214157104,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "wildcard",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9704753766919707,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9704753766919707,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/confirm",
     "topk_labels": [
-     "wildcard",
-     "ProposalReview/decline",
-     "ProposalReview/confirm"
+     "ProposalReview/confirm",
+     "ProposalReview/edit",
+     "ProposalReview/decline"
     ],
     "topk_scores": [
-     0.5705565214157104,
-     0.1900792270898819,
-     0.18777714669704437
+     0.9704753766919707,
+     0.0011115959150631645,
+     0.000738432007221271
     ]
    },
    "labels": [
-    "wildcard",
-    "ProposalReview/decline",
     "ProposalReview/confirm"
    ]
   },
   "Lewis and Sons is a company": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.49594488739967346,
-    "confident": false,
-    "model_tier": "large",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9893375395193427,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9893375395193427,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
@@ -127,57 +147,61 @@
      "ProposalReview/decline"
     ],
     "topk_scores": [
-     0.49594488739967346,
-     0.28249648213386536,
-     0.07449142634868622
+     0.9893375395193427,
+     0.0014372978280820547,
+     0.0011969749242288993
     ]
    },
    "labels": [
-    "ProposalReview/edit",
-    "ProposalReview/confirm",
-    "ProposalReview/decline"
+    "ProposalReview/edit"
    ]
   },
   "No, that is one name. Make it a single step for 'Kline and Sons Ltd' and drop the second step.": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.541802167892456,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/drop",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9666640880794025,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9666640880794025,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
     "topk_labels": [
-     "ProposalReview/drop",
      "ProposalReview/edit",
-     "ProposalReview/look_up"
+     "ProposalReview/drop",
+     "ProposalReview/decline"
     ],
     "topk_scores": [
-     0.541802167892456,
-     0.27281489968299866,
-     0.06454203277826309
+     0.9666640880794025,
+     0.02153830911942332,
+     0.006191252042128761
     ]
    },
    "labels": [
-    "ProposalReview/drop",
-    "ProposalReview/edit",
-    "ProposalReview/look_up"
+    "ProposalReview/edit"
    ]
   },
   "Not just people: I want the kinds of records on file in the directory": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.8925235271453857,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.8811441730940371,
     "confident": true,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.8811441730940371,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
-     "ProposalReview/decline",
-     "ProposalReview/confirm"
+     "ProposalReview/look_up",
+     "ProposalReview/drop"
     ],
     "topk_scores": [
-     0.8925235271453857,
-     0.03402949497103691,
-     0.021964190527796745
+     0.8811441730940371,
+     0.07337772003232235,
+     0.01228226227721722
     ]
    },
    "labels": [
@@ -186,44 +210,50 @@
   },
   "Please remove step 2's status filter.": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.2800658345222473,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/edit",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9575412923483381,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9575412923483381,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/drop",
     "topk_labels": [
-     "ProposalReview/edit",
+     "ProposalReview/drop",
      "ProposalReview/look_up",
-     "ProposalReview/drop"
+     "ProposalReview/edit"
     ],
     "topk_scores": [
-     0.2800658345222473,
-     0.2691825330257416,
-     0.17249436676502228
+     0.9575412923483381,
+     0.01934434123092074,
+     0.012373647460879204
     ]
    },
    "labels": [
-    "ProposalReview/edit",
-    "ProposalReview/look_up",
     "ProposalReview/drop"
    ]
   },
   "Remove step 2; 'Sons Ltd' is part of the name in step 1, not a separate entity.": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.7926943302154541,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.7399735367324072,
     "confident": true,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.7399735367324072,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
      "ProposalReview/drop",
-     "ProposalReview/decline"
+     "ProposalReview/look_up"
     ],
     "topk_scores": [
-     0.7926943302154541,
-     0.09783932566642761,
-     0.033352531492710114
+     0.7399735367324072,
+     0.2524070593537867,
+     0.004444528305268502
     ]
    },
    "labels": [
@@ -232,20 +262,24 @@
   },
   "Steps 3 and 4 repeat steps 1 and 2. Please remove steps 3 and 4; everything else is fine.": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.8545364141464233,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.903269001924943,
     "confident": true,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.903269001924943,
+    "p_out": 0.0,
     "top_label": "ProposalReview/drop",
     "topk_labels": [
      "ProposalReview/drop",
-     "ProposalReview/look_up",
-     "ProposalReview/edit"
+     "ProposalReview/edit",
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.8545364141464233,
-     0.05056764557957649,
-     0.03316742926836014
+     0.903269001924943,
+     0.07337157850405386,
+     0.013771583065451069
     ]
    },
    "labels": [
@@ -254,44 +288,52 @@
   },
   "This is one recertification request. Step 1 already covers it all, so please drop steps 2, 3 and 4 and keep only step 1.": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.3882230818271637,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.503134886302592,
     "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/drop",
-    "topk_labels": [
-     "ProposalReview/drop",
-     "ProposalReview/edit",
-     "ProposalReview/look_up"
-    ],
-    "topk_scores": [
-     0.3882230818271637,
-     0.373658686876297,
-     0.11585687845945358
-    ]
-   },
-   "labels": [
-    "ProposalReview/drop",
-    "ProposalReview/edit",
-    "ProposalReview/look_up"
-   ]
-  },
-  "Yes, but also list which findings are driving her risk": {
-   "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5536836981773376,
-    "confident": true,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.503134886302592,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
      "ProposalReview/drop",
-     "wildcard"
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.5536836981773376,
-     0.08860207349061966,
-     0.08836597949266434
+     0.503134886302592,
+     0.431062336584071,
+     0.0437224023701613
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit",
+    "ProposalReview/drop",
+    "ProposalReview/add"
+   ]
+  },
+  "Yes, but also list which findings are driving her risk": {
+   "details": {
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9195986079557491,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9195986079557491,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/look_up",
+     "ProposalReview/add"
+    ],
+    "topk_scores": [
+     0.9195986079557491,
+     0.05765895816497921,
+     0.008761038247644789
     ]
    },
    "labels": [
@@ -300,10 +342,14 @@
   },
   "apply the same overview fix to each step": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.6162711381912231,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.4475985139940048,
     "confident": false,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.4475985139940048,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
@@ -311,9 +357,9 @@
      "ProposalReview/look_up"
     ],
     "topk_scores": [
-     0.6162711381912231,
-     0.26470649242401123,
-     0.04727591201663017
+     0.4475985139940048,
+     0.36395481205698627,
+     0.10721983414303016
     ]
    },
    "labels": [
@@ -324,92 +370,106 @@
   },
   "asdf": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.3761788010597229,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.45264447056045914,
     "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/confirm",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.45264447056045914,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
     "topk_labels": [
-     "ProposalReview/confirm",
      "ProposalReview/edit",
-     "parameter_value"
+     "ProposalReview/drop",
+     "ProposalReview/decline"
     ],
     "topk_scores": [
-     0.3761788010597229,
-     0.20589040219783783,
-     0.18958213925361633
+     0.45264447056045914,
+     0.03645480160153474,
+     0.035302553523246995
     ]
    },
    "labels": [
-    "ProposalReview/confirm",
     "ProposalReview/edit",
-    "parameter_value"
+    "ProposalReview/drop",
+    "ProposalReview/decline"
    ]
   },
   "cancel the third one": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.25936177372932434,
-    "confident": false,
-    "model_tier": "large",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9534187497432032,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9534187497432032,
+    "p_out": 0.0,
     "top_label": "ProposalReview/drop",
     "topk_labels": [
      "ProposalReview/drop",
      "ProposalReview/decline",
-     "ProposalReview/edit"
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.25936177372932434,
-     0.22287847101688385,
-     0.2114003598690033
+     0.9534187497432032,
+     0.038915615090509205,
+     0.0025088155109391926
     ]
    },
    "labels": [
-    "ProposalReview/drop",
-    "ProposalReview/decline",
-    "ProposalReview/edit"
+    "ProposalReview/drop"
    ]
   },
   "change step 2 to a shorter joke": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5230464339256287,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.49854721185292983,
     "confident": false,
-    "model_tier": "tiny",
-    "top_label": "ProposalReview/add",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.49854721185292983,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
     "topk_labels": [
-     "ProposalReview/add",
      "ProposalReview/edit",
-     "ProposalReview/drop"
+     "ProposalReview/drop",
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.5230464339256287,
-     0.11736789345741272,
-     0.09821072220802307
+     0.49854721185292983,
+     0.40552783689188254,
+     0.02729723755393153
     ]
    },
    "labels": [
-    "ProposalReview/add",
     "ProposalReview/edit",
-    "ProposalReview/drop"
+    "ProposalReview/drop",
+    "ProposalReview/add"
    ]
   },
   "cut step 3 down to five results": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.9219815135002136,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9757361592634298,
     "confident": true,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9757361592634298,
+    "p_out": 0.0,
     "top_label": "ProposalReview/drop",
     "topk_labels": [
      "ProposalReview/drop",
      "ProposalReview/edit",
-     "ProposalReview/look_up"
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.9219815135002136,
-     0.01892915926873684,
-     0.015353182330727577
+     0.9757361592634298,
+     0.015307435730935017,
+     0.004280517795204318
     ]
    },
    "labels": [
@@ -418,34 +478,40 @@
   },
   "fine, but drop the last one": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.32502877712249756,
-    "confident": false,
-    "model_tier": "large",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9466610831595149,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9466610831595149,
+    "p_out": 0.0,
     "top_label": "ProposalReview/drop",
     "topk_labels": [
      "ProposalReview/drop",
      "ProposalReview/edit",
-     "ProposalReview/decline"
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.32502877712249756,
-     0.19920392334461212,
-     0.1653885394334793
+     0.9466610831595149,
+     0.02846045452545655,
+     0.0031018947157557936
     ]
    },
    "labels": [
-    "ProposalReview/drop",
-    "ProposalReview/edit",
-    "ProposalReview/decline"
+    "ProposalReview/drop"
    ]
   },
   "go back and change step 2": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.8249881267547607,
-    "confident": true,
-    "model_tier": "large",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.47925826379757186,
+    "confident": false,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.47925826379757186,
+    "p_out": 0.0,
     "top_label": "ProposalReview/drop",
     "topk_labels": [
      "ProposalReview/drop",
@@ -453,31 +519,37 @@
      "ProposalReview/edit"
     ],
     "topk_scores": [
-     0.8249881267547607,
-     0.08632853627204895,
-     0.026832956820726395
+     0.47925826379757186,
+     0.30276077244095145,
+     0.16629330199995898
     ]
    },
    "labels": [
-    "ProposalReview/drop"
+    "ProposalReview/drop",
+    "ProposalReview/look_up",
+    "ProposalReview/edit"
    ]
   },
   "hell no": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5950911641120911,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9977294511498374,
     "confident": true,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9977294511498374,
+    "p_out": 0.0,
     "top_label": "ProposalReview/decline",
     "topk_labels": [
      "ProposalReview/decline",
      "ProposalReview/confirm",
-     "wildcard"
+     "ProposalReview/drop"
     ],
     "topk_scores": [
-     0.5950911641120911,
-     0.11279457062482834,
-     0.09169665724039078
+     0.9977294511498374,
+     0.0007757102228862909,
+     0.0003630222898572531
     ]
    },
    "labels": [
@@ -486,10 +558,66 @@
   },
   "hmm": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.6412097811698914,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.6509891481969535,
     "confident": true,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.24192769785538581,
+    "p_out": 0.0,
+    "top_label": "wildcard",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "ProposalReview/edit",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.24192769785538581,
+     0.03277256255173449,
+     0.024456596187243964
+    ]
+   },
+   "labels": [
+    "wildcard"
+   ]
+  },
+  "hmm not sure": {
+   "details": {
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.8657843398668857,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.05819243710229899,
+    "p_out": 0.0,
+    "top_label": "wildcard",
+    "topk_labels": [
+     "ProposalReview/look_up",
+     "ProposalReview/decline",
+     "ProposalReview/edit"
+    ],
+    "topk_scores": [
+     0.05819243710229899,
+     0.04573883206369402,
+     0.013566442370070386
+    ]
+   },
+   "labels": [
+    "wildcard"
+   ]
+  },
+  "hold on": {
+   "details": {
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.5045038828880751,
+    "confident": false,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.5045038828880751,
+    "p_out": 0.0,
     "top_label": "ProposalReview/confirm",
     "topk_labels": [
      "ProposalReview/confirm",
@@ -497,69 +625,27 @@
      "ProposalReview/add"
     ],
     "topk_scores": [
-     0.6412097811698914,
-     0.11222504079341888,
-     0.06454049050807953
-    ]
-   },
-   "labels": [
-    "ProposalReview/confirm"
-   ]
-  },
-  "hmm not sure": {
-   "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.5203679800033569,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/confirm",
-    "topk_labels": [
-     "ProposalReview/confirm",
-     "ProposalReview/decline",
-     "wildcard"
-    ],
-    "topk_scores": [
-     0.5203679800033569,
-     0.26875168085098267,
-     0.10348984599113464
+     0.5045038828880751,
+     0.30054444272855396,
+     0.060897442996699636
     ]
    },
    "labels": [
     "ProposalReview/confirm",
     "ProposalReview/decline",
-    "wildcard"
-   ]
-  },
-  "hold on": {
-   "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.4755793511867523,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/decline",
-    "topk_labels": [
-     "ProposalReview/decline",
-     "ProposalReview/confirm",
-     "wildcard"
-    ],
-    "topk_scores": [
-     0.4755793511867523,
-     0.35823649168014526,
-     0.05894489958882332
-    ]
-   },
-   "labels": [
-    "ProposalReview/decline",
-    "ProposalReview/confirm",
-    "wildcard"
+    "ProposalReview/add"
    ]
   },
   "in step 1 make the branch Central and drop step 2": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5379766821861267,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.5972516909729296,
     "confident": false,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.5972516909729296,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
@@ -567,9 +653,9 @@
      "ProposalReview/add"
     ],
     "topk_scores": [
-     0.5379766821861267,
-     0.12689776718616486,
-     0.08629283308982849
+     0.5972516909729296,
+     0.38935384421003094,
+     0.00511381019437028
     ]
    },
    "labels": [
@@ -580,42 +666,50 @@
   },
   "just do it": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5529241561889648,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.941396834909354,
     "confident": true,
-    "model_tier": "tiny",
-    "top_label": "ProposalReview/decline",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.941396834909354,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/confirm",
     "topk_labels": [
-     "ProposalReview/decline",
      "ProposalReview/confirm",
-     "wildcard"
+     "ProposalReview/decline",
+     "ProposalReview/look_up"
     ],
     "topk_scores": [
-     0.5529241561889648,
-     0.11052201688289642,
-     0.09584666788578033
+     0.941396834909354,
+     0.024552565381711872,
+     0.018788379180226657
     ]
    },
    "labels": [
-    "ProposalReview/decline"
+    "ProposalReview/confirm"
    ]
   },
   "look up step 1": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.625864565372467,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9862616939754946,
     "confident": true,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9862616939754946,
+    "p_out": 0.0,
     "top_label": "ProposalReview/look_up",
     "topk_labels": [
      "ProposalReview/look_up",
-     "ProposalReview/drop",
-     "ProposalReview/add"
+     "ProposalReview/edit",
+     "ProposalReview/drop"
     ],
     "topk_scores": [
-     0.625864565372467,
-     0.09048638492822647,
-     0.06518850475549698
+     0.9862616939754946,
+     0.007186966917079419,
+     0.002578538055675862
     ]
    },
    "labels": [
@@ -624,114 +718,132 @@
   },
   "make it about trains instead": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.5232409834861755,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.35961497371081974,
     "confident": false,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.35961497371081974,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
-     "ProposalReview/confirm",
-     "ProposalReview/decline"
+     "ProposalReview/decline",
+     "ProposalReview/drop"
     ],
     "topk_scores": [
-     0.5232409834861755,
-     0.1935790777206421,
-     0.19156156480312347
+     0.35961497371081974,
+     0.2810860464066101,
+     0.037351858614580256
     ]
    },
    "labels": [
     "ProposalReview/edit",
-    "ProposalReview/confirm",
-    "ProposalReview/decline"
+    "ProposalReview/decline",
+    "ProposalReview/drop"
    ]
   },
   "make it better somehow": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.4402613639831543,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/confirm",
-    "topk_labels": [
-     "ProposalReview/confirm",
-     "ProposalReview/decline",
-     "wildcard"
-    ],
-    "topk_scores": [
-     0.4402613639831543,
-     0.3080786168575287,
-     0.1516767293214798
-    ]
-   },
-   "labels": [
-    "ProposalReview/confirm",
-    "ProposalReview/decline",
-    "wildcard"
-   ]
-  },
-  "make step 2 shorter; use the library": {
-   "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.9353675246238708,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.7045916357664439,
     "confident": true,
-    "model_tier": "large",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.7045916357664439,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
-     "ProposalReview/drop",
-     "ProposalReview/decline"
+     "ProposalReview/confirm",
+     "ProposalReview/look_up"
     ],
     "topk_scores": [
-     0.9353675246238708,
-     0.015539887361228466,
-     0.013466318137943745
+     0.7045916357664439,
+     0.03408173675904799,
+     0.033652115711609136
     ]
    },
    "labels": [
     "ProposalReview/edit"
    ]
   },
-  "make the joke shorter": {
+  "make step 2 shorter; use the library": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.6711539030075073,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.4753507384443679,
     "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/decline",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.4753507384443679,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
     "topk_labels": [
-     "ProposalReview/decline",
-     "ProposalReview/confirm",
-     "wildcard"
+     "ProposalReview/edit",
+     "ProposalReview/drop",
+     "ProposalReview/look_up"
     ],
     "topk_scores": [
-     0.6711539030075073,
-     0.1385195553302765,
-     0.0735674649477005
+     0.4753507384443679,
+     0.3015033198073423,
+     0.16038798250172004
     ]
    },
    "labels": [
-    "ProposalReview/decline",
-    "ProposalReview/confirm",
+    "ProposalReview/edit",
+    "ProposalReview/drop",
+    "ProposalReview/look_up"
+   ]
+  },
+  "make the joke shorter": {
+   "details": {
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.710865460786678,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.17332017676730196,
+    "p_out": 0.0,
+    "top_label": "wildcard",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/drop",
+     "ProposalReview/decline"
+    ],
+    "topk_scores": [
+     0.17332017676730196,
+     0.07013506332684799,
+     0.01712899625971228
+    ]
+   },
+   "labels": [
     "wildcard"
    ]
   },
   "nah, it's fine, go ahead": {
    "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5623278021812439,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9931814960306128,
     "confident": true,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9931814960306128,
+    "p_out": 0.0,
     "top_label": "ProposalReview/confirm",
     "topk_labels": [
      "ProposalReview/confirm",
      "ProposalReview/decline",
-     "ProposalReview/add"
+     "ProposalReview/drop"
     ],
     "topk_scores": [
-     0.5623278021812439,
-     0.16656628251075745,
-     0.06118599697947502
+     0.9931814960306128,
+     0.00611189644035459,
+     5.587808684590501e-05
     ]
    },
    "labels": [
@@ -762,234 +874,261 @@
   },
   "no, change the second one to weekly": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.6810808777809143,
-    "confident": false,
-    "model_tier": "large",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9242742149804667,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9242742149804667,
+    "p_out": 0.0,
     "top_label": "ProposalReview/edit",
     "topk_labels": [
      "ProposalReview/edit",
-     "ProposalReview/add",
-     "ProposalReview/decline"
+     "ProposalReview/drop",
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.6810808777809143,
-     0.09971081465482712,
-     0.07168112695217133
+     0.9242742149804667,
+     0.034307822431328946,
+     0.012228866614414961
     ]
    },
    "labels": [
-    "ProposalReview/edit",
-    "ProposalReview/add",
-    "ProposalReview/decline"
+    "ProposalReview/edit"
    ]
   },
   "skip step 2 if there are no results": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.839855432510376,
-    "confident": true,
-    "model_tier": "large",
-    "top_label": "ProposalReview/drop",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.5637720364936473,
+    "confident": false,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.5637720364936473,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/look_up",
     "topk_labels": [
+     "ProposalReview/look_up",
      "ProposalReview/drop",
-     "ProposalReview/edit",
-     "ProposalReview/look_up"
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.839855432510376,
-     0.049317046999931335,
-     0.03870232403278351
+     0.5637720364936473,
+     0.3820102219774957,
+     0.046426689625911954
     ]
    },
    "labels": [
-    "ProposalReview/drop"
+    "ProposalReview/look_up",
+    "ProposalReview/drop",
+    "ProposalReview/add"
    ]
   },
   "something feels off": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.5640621781349182,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/confirm",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.7936382419446891,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.08339500159412205,
+    "p_out": 0.0,
+    "top_label": "wildcard",
     "topk_labels": [
-     "ProposalReview/confirm",
-     "wildcard",
-     "ProposalReview/decline"
+     "ProposalReview/decline",
+     "ProposalReview/drop",
+     "ProposalReview/look_up"
     ],
     "topk_scores": [
-     0.5640621781349182,
-     0.2005455493927002,
-     0.11389970779418945
+     0.08339500159412205,
+     0.04930390631698089,
+     0.031161916123897262
     ]
    },
    "labels": [
-    "ProposalReview/confirm",
-    "wildcard",
-    "ProposalReview/decline"
+    "wildcard"
    ]
   },
   "stop after step 2": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.7545846104621887,
-    "confident": false,
-    "model_tier": "large",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.8743011463028088,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.8743011463028088,
+    "p_out": 0.0,
     "top_label": "ProposalReview/drop",
     "topk_labels": [
      "ProposalReview/drop",
-     "ProposalReview/edit",
-     "ProposalReview/decline"
+     "ProposalReview/look_up",
+     "ProposalReview/add"
     ],
     "topk_scores": [
-     0.7545846104621887,
-     0.05728702247142792,
-     0.054761726409196854
+     0.8743011463028088,
+     0.06870203013010097,
+     0.032168654005428086
     ]
    },
    "labels": [
-    "ProposalReview/drop",
-    "ProposalReview/edit",
-    "ProposalReview/decline"
+    "ProposalReview/drop"
    ]
   },
   "unclear one": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.6310412883758545,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/decline",
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.48735069604453013,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.28654518235303383,
+    "p_out": 0.0,
+    "top_label": "wildcard",
     "topk_labels": [
-     "ProposalReview/decline",
      "ProposalReview/edit",
+     "ProposalReview/look_up",
      "ProposalReview/confirm"
     ],
     "topk_scores": [
-     0.6310412883758545,
-     0.17864996194839478,
-     0.11611480265855789
+     0.28654518235303383,
+     0.10247861867655597,
+     0.03902643266108834
     ]
    },
    "labels": [
-    "ProposalReview/decline",
-    "ProposalReview/edit",
-    "ProposalReview/confirm"
+    "wildcard"
    ]
   },
   "unclear two": {
    "details": {
-    "ambiguous_threshold": 0.7647250294685364,
-    "confidence": 0.5235016942024231,
-    "confident": false,
-    "model_tier": "large",
-    "top_label": "ProposalReview/decline",
-    "topk_labels": [
-     "ProposalReview/decline",
-     "ProposalReview/confirm",
-     "ProposalReview/edit"
-    ],
-    "topk_scores": [
-     0.5235016942024231,
-     0.17975571751594543,
-     0.17434298992156982
-    ]
-   },
-   "labels": [
-    "ProposalReview/decline",
-    "ProposalReview/confirm",
-    "ProposalReview/edit"
-   ]
-  },
-  "use Library/count_books": {
-   "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.4942411184310913,
-    "confident": false,
-    "model_tier": "tiny",
-    "top_label": "ProposalReview/edit",
-    "topk_labels": [
-     "ProposalReview/edit",
-     "ProposalReview/add",
-     "ProposalReview/drop"
-    ],
-    "topk_scores": [
-     0.4942411184310913,
-     0.09947337955236435,
-     0.09254974871873856
-    ]
-   },
-   "labels": [
-    "ProposalReview/edit",
-    "ProposalReview/add",
-    "ProposalReview/drop"
-   ]
-  },
-  "use book_by_title for the second part": {
-   "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.518688440322876,
-    "confident": false,
-    "model_tier": "tiny",
-    "top_label": "ProposalReview/edit",
-    "topk_labels": [
-     "ProposalReview/edit",
-     "ProposalReview/drop",
-     "wildcard"
-    ],
-    "topk_scores": [
-     0.518688440322876,
-     0.09432560205459595,
-     0.08892044425010681
-    ]
-   },
-   "labels": [
-    "ProposalReview/edit",
-    "ProposalReview/drop",
-    "wildcard"
-   ]
-  },
-  "we do not need the joke": {
-   "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5057627558708191,
-    "confident": false,
-    "model_tier": "tiny",
-    "top_label": "wildcard",
-    "topk_labels": [
-     "wildcard",
-     "ProposalReview/edit",
-     "ProposalReview/decline"
-    ],
-    "topk_scores": [
-     0.5057627558708191,
-     0.1295524537563324,
-     0.1221521645784378
-    ]
-   },
-   "labels": [
-    "wildcard",
-    "ProposalReview/edit",
-    "ProposalReview/decline"
-   ]
-  },
-  "what do you think?": {
-   "details": {
-    "ambiguous_threshold": 0.5380302568015299,
-    "confidence": 0.5972851514816284,
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.5950120082663142,
     "confident": true,
-    "model_tier": "tiny",
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.20573492398037307,
+    "p_out": 0.0,
     "top_label": "wildcard",
     "topk_labels": [
-     "wildcard",
+     "ProposalReview/edit",
      "ProposalReview/look_up",
      "ProposalReview/drop"
     ],
     "topk_scores": [
-     0.5972851514816284,
-     0.11115964502096176,
-     0.09386225044727325
+     0.20573492398037307,
+     0.10486463220015702,
+     0.026615639737125472
+    ]
+   },
+   "labels": [
+    "wildcard"
+   ]
+  },
+  "use Library/count_books": {
+   "details": {
+    "ambiguous_threshold": 0.78,
+    "confidence": 0.8395294279238105,
+    "confident": true,
+    "escalation_margin": 0.0,
+    "model_tier": "embedding",
+    "p_in": 0.8395294279238105,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/look_up",
+     "ProposalReview/add"
+    ],
+    "topk_scores": [
+     0.8395294279238105,
+     0.061240342456085846,
+     0.05441447208259243
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit"
+   ]
+  },
+  "use book_by_title for the second part": {
+   "details": {
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9587793136155021,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.9587793136155021,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/edit",
+    "topk_labels": [
+     "ProposalReview/edit",
+     "ProposalReview/look_up",
+     "ProposalReview/drop"
+    ],
+    "topk_scores": [
+     0.9587793136155021,
+     0.01644215347664703,
+     0.015642071967300174
+    ]
+   },
+   "labels": [
+    "ProposalReview/edit"
+   ]
+  },
+  "we do not need the joke": {
+   "details": {
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.5143283286145557,
+    "confident": false,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.5143283286145557,
+    "p_out": 0.0,
+    "top_label": "ProposalReview/decline",
+    "topk_labels": [
+     "ProposalReview/decline",
+     "ProposalReview/drop",
+     "ProposalReview/confirm"
+    ],
+    "topk_scores": [
+     0.5143283286145557,
+     0.38876000832534224,
+     0.021631975775437507
+    ]
+   },
+   "labels": [
+    "ProposalReview/decline",
+    "ProposalReview/drop",
+    "ProposalReview/confirm"
+   ]
+  },
+  "what do you think?": {
+   "details": {
+    "ambiguous_threshold": 0.65,
+    "confidence": 0.9502149634199449,
+    "confident": true,
+    "model_tier": "embedding",
+    "outside_labels": [],
+    "outside_scores": [],
+    "p_in": 0.026497349571183024,
+    "p_out": 0.0,
+    "top_label": "wildcard",
+    "topk_labels": [
+     "ProposalReview/confirm",
+     "ProposalReview/decline",
+     "ProposalReview/look_up"
+    ],
+    "topk_scores": [
+     0.026497349571183024,
+     0.01686891072803396,
+     0.0037451386937655527
     ]
    },
    "labels": [
@@ -998,10 +1137,10 @@
   }
  },
  "metadata": {
-  "head": "consultation/ProposalReview",
-  "head_version_id": "20261113T163953Z-d2aecd",
+  "head": "plan_metadata_extraction/ProposalReview",
+  "head_version_id": "20261118T003735Z-964d50",
   "re_record": "pytest --record-review-router <the files that use recorded_review_router>",
-  "recorded_at": "2026-11-15",
+  "recorded_at": "2026-11-18",
   "what": "CommandRouter.predict_with_details(reply) of the real head: labels and details as returned."
  }
 }

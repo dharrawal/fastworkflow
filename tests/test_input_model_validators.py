@@ -335,9 +335,9 @@ def test_a_refusal_with_no_field_is_put_in_the_hook_words_and_does_not_ask_the_u
         "owner is read only with kind='application'. What should I change?")
 
 
-def test_a_write_a_validator_makes_before_refusing_is_kept_on_the_execution_path():
-    """HEAD's hook changed the caller's parameters in place, so a write before a refusal stayed, and the
-    diagnostics named it in changed_fields."""
+def test_a_write_a_validator_makes_before_refusing_is_dropped_on_the_execution_path():
+    """One rule for both kinds (bd fix-qoyz step 6, decision F): a rewrite is kept when the validation passes and
+    dropped when it refuses. (HEAD's hook kept a write made before a refusal; the typed planning call dropped it.)"""
     class Rewrites(BaseModel):
         name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})
 
@@ -354,8 +354,8 @@ def test_a_write_a_validator_makes_before_refusing_is_kept_on_the_execution_path
         None, "Library/show_group", instance, diagnostics=diagnostics)
     assert not is_valid
     assert message == "refused after the rewrite"
-    assert instance.name == "REFUSE"
-    assert diagnostics["validation_hook"]["changed_fields"] == ["name"]
+    assert instance.name == "refuse"
+    assert diagnostics["validation_hook"]["changed_fields"] == []
 
 
 class Signature:

@@ -231,7 +231,7 @@ def _assistant_ctx(tmp_path, monkeypatch, name: str, text: str):
     ctx.bind_app_workflow(wf)
     ctx.push_active_workflow(wf)
     LibraryRunner(wf)(ctx, "startup")
-    ctx._cme_workflow.context["is_assistant_mode_command"] = True
+    ctx.start_round()
     script_command_extraction(monkeypatch, wf)
     return ctx, folder
 

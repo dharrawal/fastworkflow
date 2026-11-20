@@ -2402,6 +2402,9 @@ class CodeSteps:
         #: What the agent is told when code stopped on a full-list step at ``CODE_MAX_PAGES``
         #: pages (``_page_cap``); "" otherwise.
         self.page_hint = ""
+        #: The response text of every command run of each plan step code ran (step number -> one text per run, a
+        #: paged step one per page), as the command gave it: the no-agent stop's own results (``ran_statement``).
+        self.results: dict[int, list[str]] = {}
 
     def replacement_item(self, step: Any, text: str) -> tuple[Any, Optional[str], str]:
         """``(step, command, reason)`` for open *step* replaced by *text* (a step of its own number, read as
@@ -2486,11 +2489,33 @@ class CodeSteps:
             elif later is not None:
                 self._page_cap(step, command, pages, later)
         if not move:
+            from fastworkflow.observation_offloading.labels import strip_alias_line
+
+            self.results.setdefault(step.number, []).append(strip_alias_line(str(observation or "")))
             more = not paging and _more_pages(
                 observation, _command_paging(self._parameters(step.command)),
                 run=self._run_of(step_index))
             self._step_info[step_index] = (step.number, more)
         self._lookup = None if move else (step, step_index, observation)
+
+    def partial_read(self, step_number: int) -> Optional[dict[str, Any]]:
+        """What the pages code read of paged step *step_number* hold: ``{"pages", "rows_read", "total", "rows"}``
+        (``total`` None when the command reported none, ``rows`` the first list field of each page's Output, in
+        order), or None when no page of it has an Output."""
+        pages, rows, total = 0, [], None
+        for index in sorted(i for i, (number, _) in self._step_info.items() if number == step_number):
+            run = self._run_of(index)
+            output = run.get("output") if isinstance(run, Mapping) else None
+            if not isinstance(output, Mapping):
+                continue
+            listed = next((value for value in output.values() if isinstance(value, (list, tuple))), None)
+            if listed is None:
+                continue
+            pages += 1
+            rows.extend(listed)
+            if isinstance(output.get("total"), int) and not isinstance(output.get("total"), bool):
+                total = output["total"]
+        return {"pages": pages, "rows_read": len(rows), "total": total, "rows": rows} if pages else None
 
     def _page_cap(self, step: Any, command: str, pages: int, later: tuple[str, int]) -> None:
         """Code stops on full-list *step* after *pages* pages, with rows still to read from

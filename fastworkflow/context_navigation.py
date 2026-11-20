@@ -336,21 +336,6 @@ def navigation_steps_to_context(workflow, current: str, target: str) -> str | No
     return ", then ".join(_format_step(step) for step in path)
 
 
-def format_how_to_enter_context(workflow, current: str, target: str) -> str:
-    """Prescriptive steps to reach *target* from the workflow's current context."""
-    current_label = display_context_name(current)
-    target_label = display_context_name(target)
-    steps = navigation_steps_to_context(workflow, current, target)
-    if steps is None:
-        return (
-            f"How to enter {target_label} from {current_label}: "
-            "no declared navigation path."
-        )
-    if steps == "":
-        return f"You are already in {target_label}."
-    return f"How to enter {target_label} from {current_label}: {steps}."
-
-
 def render_unavailable_command(
     token: str,
     current: str,
@@ -595,6 +580,20 @@ def entering_commands(workflow_folderpath: str, context_name: str) -> list[str]:
         if edge.target == context_name
     }
     return sorted(shown)
+
+
+def context_entry_commands(workflow_folderpath: str) -> frozenset[str]:
+    """The commands that only enter a context: each declares ``@descends_to`` with no ``when_parameter`` (it always
+    enters) and takes no required input (``_required_parameters`` read the signature and found none). Such a command
+    does nothing about what a request asks except move the workflow, so a request is never routed to one by meaning
+    (``resolution.part_intent`` leaves them out of the remote decision model's options). A command whose signature
+    cannot be read is not counted. The framework's own navigation commands are core commands, left out elsewhere."""
+    effects, _ = _navigation_effects(workflow_folderpath)
+    if not effects:
+        return frozenset()
+    routing = RoutingRegistry.get_definition(workflow_folderpath)
+    return frozenset(name for name, effect in effects.items()
+                     if effect.when_parameter_present is None and _required_parameters(routing, name) == ())
 
 
 def declared_descends_to(routing, command_name: str) -> str | None:

@@ -162,7 +162,14 @@ def run_main(args):
     # artifacts (e.g. ___command_info/global/threshold.json).
     from fastworkflow.model_pipeline_training import is_workflow_trained
     trained, missing_contexts = is_workflow_trained(args.workflow_path)
-    if not trained:
+    # A context with no trained local model may run on the model matcher (JEV_API_KEY):
+    # intent_detector.startup_report is the one decision, and it says in one line what the chain is.
+    from fastworkflow import intent_detector
+    engine_problems, engine_notices = intent_detector.startup_report(
+        args.workflow_path, missing_contexts, build=True)
+    for notice in engine_notices:
+        console.print(f"[bold yellow]Note:[/bold yellow] {notice}")
+    if not trained and engine_problems:
         StartupProgress.end()
         workflow_name = os.path.basename(os.path.normpath(args.workflow_path))
         console.print(

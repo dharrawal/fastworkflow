@@ -83,8 +83,8 @@ def test_context_built_without_init_finalises_with_turn_defaults(monkeypatch):
     host._action_log = []
     assert host._turn_parts_of_answer is None
     assert host._last_nested_stop is None
-    assert host._pending_refusal_request is None
-    assert host._planning_command_refusal_request is None
+    assert host._plan_resolution is None
+    assert host._resolution_pending is False
     assert host._turn_plan_previews == {}
     assert host._ask_user_rounds == []
     host._turn_not_run.append({"sub_task": 1})

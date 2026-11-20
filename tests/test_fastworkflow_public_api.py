@@ -41,7 +41,6 @@ PUBLIC = (
     ("MetricsSink", "_ProtocolMeta", "fastworkflow.metrics"),
     ("ModelPipelineRegistry", "NoneType", ""),
     ("ModuleType", "EnumType", "fastworkflow"),
-    ("NLUPipelineStage", "EnumType", "fastworkflow"),
     ("NoOpMetricsSink", "type", "fastworkflow.metrics"),
     ("NoOpTraceSink", "type", "fastworkflow.tracing"),
     ("Optional", "_SpecialForm", "typing"),

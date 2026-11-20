@@ -13,7 +13,6 @@ __all__ = [
     "Grader",
     "LM_CACHE_VAR",
     "MissingExperimentLifecycleFeature",
-    "UTTERANCE_CACHE_SCOPE_VAR",
     "channel_for",
     "derived_outcome",
     "experiment_store_readiness",

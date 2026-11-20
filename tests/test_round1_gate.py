@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from fastworkflow._workflows.plan_metadata_extraction import resolution
+
 import fastworkflow
 from fastworkflow import review_proposals, tracing, workflow_agent
 from fastworkflow.approval_binding import Surface
@@ -83,7 +85,8 @@ def _confirmed(todo):
 
 def test_a_single_confident_sub_task_runs_directly_with_no_review(gated, monkeypatch):
     _split_into(monkeypatch, [FIND])
-    assert review_proposals.fast_path_for(gated.wf, [FIND]).reason == review_proposals.FAST_HEAD_CONFIDENT
+    intent = resolution.part_intent(gated.wf, FIND)
+    assert resolution.is_fast_path(intent) and intent.decided_by == resolution.BY_CLASSIFIER
     gated.script.steps = _finish()
     out = gated.ctx.process_turn(FIND)
     assert out.status is TurnStatus.COMPLETED
@@ -93,9 +96,9 @@ def test_a_single_confident_sub_task_runs_directly_with_no_review(gated, monkeyp
 
 def test_an_exact_command_name_runs_directly_with_no_review(gated, monkeypatch):
     _split_into(monkeypatch, ["count_books"])
-    fast = review_proposals.fast_path_for(gated.wf, ["count_books"])
-    assert fast is not None and fast.reason == review_proposals.FAST_EXACT_NAME
-    assert fast.name == "Library/count_books" and fast.is_planning is True
+    fast = resolution.part_intent(gated.wf, "count_books")
+    assert resolution.is_fast_path(fast) and fast.decided_by == resolution.BY_EXACT_NAME
+    assert fast.command == "Library/count_books" and fast.kind == resolution.KIND_PLANNING
     gated.script.steps = _finish()
     out = gated.ctx.process_turn("count_books")
     assert out.status is TurnStatus.COMPLETED
@@ -105,7 +108,7 @@ def test_an_exact_command_name_runs_directly_with_no_review(gated, monkeypatch):
 
 def test_an_unsure_single_sub_task_is_not_on_the_fast_path(gated, monkeypatch):
     _split_into(monkeypatch, [JOKE])
-    assert review_proposals.fast_path_for(gated.wf, [JOKE]) is None
+    assert not resolution.is_fast_path(resolution.part_intent(gated.wf, JOKE))
 
 
 # ----------------------------------------------------------------------
@@ -249,7 +252,13 @@ def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated,
     assert workflow_agent._jev_lm() is None
     draft = review_proposals.draft_round1_proposal(gated.wf, [EMMA, JOKE])
     assert calls == []
-    assert draft.items[0].means.name == "Library/book_by_title"
+    # The local model is confident of a PLANNING command here; with no key that is an ambiguity to ask about before
+    # the review (bd fix-o1lg.2), so the draft does not bind it. The decision still names it first.
+    assert draft.items[0].means.kind == "from_scratch"
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+    intent = resolution.part_intent(gated.wf, EMMA)
+    assert intent.outcome == resolution.AMBIGUOUS and intent.ambiguous[0] == "Library/book_by_title"
 
 
 # ----------------------------------------------------------------------

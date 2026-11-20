@@ -1,6 +1,6 @@
 """Switching a sub-task's plan from the review, by naming it (bd fix-1ma8.1).
 
-When a sub-task's planning-command match was ambiguous (``review_proposals.plan_alternatives``), the review names the
+When a sub-task's planning-command match was ambiguous (``resolution.draft_choice``), the review names the
 other plans that fit and says ``step N: use NAME`` switches to one. This module reads that reply, deterministically
 and with no model: it turns ``use B``, ``step N: use B``, ``use B for step N``, ``switch step N to B``, ``switch to B``
 and ``B instead`` into the existing means edit (``change N: means=planning:B``), which re-drafts the step's inputs
@@ -103,14 +103,14 @@ def _resolve_one(phrase: str, alternatives: list, exact_only: bool = False) -> t
     if exact_only or len(wanted) < MIN_FUZZY_CHARS or len(_clean_phrase(phrase).split()) > 1:
         # A sentence is never fuzzy-matched to a name: "the plan that shows ..." must not land on a plan by its first letters.
         return [], False
-    from fastworkflow._workflows.command_metadata_extraction.intent_detection import _FUZZY_PREMATCH_MAX_DISTANCE
+    from fastworkflow.intent_clarification import FUZZY_MAX_DISTANCE
 
     # Fuzzy on the names without their context prefix: the rule compares the leading characters of a name, and every name
     # of a context starts with the context's.
     by_leaf: dict[str, list[str]] = {}
     for each in alternatives:
         by_leaf.setdefault(each.name.rsplit("/", 1)[-1], []).append(each.name)
-    matched, _ = find_best_matches(phrase.replace(" ", "_"), list(by_leaf), threshold=_FUZZY_PREMATCH_MAX_DISTANCE)
+    matched, _ = find_best_matches(phrase.replace(" ", "_"), list(by_leaf), threshold=FUZZY_MAX_DISTANCE)
     return list(dict.fromkeys(name for leaf in matched for name in by_leaf[leaf])), True
 
 

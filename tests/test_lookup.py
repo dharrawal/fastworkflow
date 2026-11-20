@@ -76,6 +76,14 @@ HOURS_CANDIDATES = [
 ]
 
 
+def _decided_by_name(app, phrasing: str) -> bool:
+    """True when the intent loop settles *phrasing* by a command name (exact or fuzzy), with no head asked."""
+    from fastworkflow import intent_loop
+
+    return intent_loop.resolve(app, phrasing, core=True).decided_by in (
+        intent_loop.BY_EXACT_NAME, intent_loop.BY_FUZZY_NAME)
+
+
 def _short(name: str) -> str:
     return name.split("/")[-1]
 
@@ -87,8 +95,10 @@ def test_an_inherited_command_is_recognised_by_the_flattened_head_and_bound_to_t
     current Book, not the root, and filed under no other record."""
     app, cme, library = library_on_a_book
     book = app._current_command_context
-    hits = [(phrasing, name) for phrasing, name in _probe(cme, INHERITED_CANDIDATES, "Book")
-            if _short(name) in {"add_note", "show_notes"}]
+    # A phrasing close enough to the command's name ("show the notes") is decided by the intent loop's name layers
+    # before any head is asked; this test is about the head, so those phrasings are left out.
+    hits = [(phrasing, name) for phrasing, name in _probe(app, INHERITED_CANDIDATES, "Book")
+            if _short(name) in {"add_note", "show_notes"} and not _decided_by_name(app, phrasing)]
     if not hits:
         pytest.skip(f"the Book head names an inherited Record command confidently on none of "
                     f"{len(INHERITED_CANDIDATES)} probed phrasings")
@@ -188,8 +198,8 @@ def test_library_hours_by_natural_language_from_a_book(
     probed phrasing, and otherwise skips with the count, which is the stated expectation here."""
     app, cme, library = library_on_a_book
     book = app._current_command_context
-    hits = [phrasing for phrasing, name in _probe(cme, HOURS_CANDIDATES, "*")
-            if _short(name) == "library_hours"]
+    hits = [phrasing for phrasing, name in _probe(app, HOURS_CANDIDATES, "*")
+            if _short(name) == "library_hours" and not _decided_by_name(app, phrasing)]
     if not hits:
         pytest.skip(f"the library's global head is not confident on library_hours for any of "
                     f"{len(HOURS_CANDIDATES)} probed phrasings: reachable by exact name only")

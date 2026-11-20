@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 import fastworkflow
-from fastworkflow import NLUPipelineStage
+from fastworkflow import intent_loop
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
@@ -141,8 +141,7 @@ def _ran(out) -> list[str]:
 
 def _no_pending_round(ctx):
     context = ctx._cme_workflow.context
-    assert context.get("NLU_Pipeline_Stage", NLUPipelineStage.INTENT_DETECTION) \
-        == NLUPipelineStage.INTENT_DETECTION
+    assert intent_loop.waiting_for(context) is None
 
 
 @pytest.mark.parametrize("run_as_agent", [False, True], ids=["assistant_session", "agent_session"])

@@ -610,10 +610,6 @@ def test_the_listing_shows_a_planning_commands_template_steps_verbatim(copy_of):
 def test_without_a_jev_key_the_match_leaves_the_distribution_empty_and_the_listing_is_unchanged(copy_of, no_planner_key):
     """No JEV_API_KEY: no planning match runs, so the turn's distribution stays empty and every listing is as before."""
     library = _library_in(copy_of, name="no_jev_key")
-    distribution: dict[str, float] = {}
-    template, command = workflow_agent.planner_planning_command_for(
-        "who has Dune on loan", library.folderpath, scopes=("",), distribution=distribution)
-    assert distribution == {} and command is None
     sub_task = "who has Dune on loan"
     assert workflow_agent.planner_listing_text(library, sub_task, planning_probabilities=None) == \
         workflow_agent.planner_commands_text(library)

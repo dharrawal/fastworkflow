@@ -1,9 +1,7 @@
 import contextlib
 import sys
 import re
-import json
-import ast
-from typing import Any, Dict, List, Optional, Union, get_origin, get_args
+from typing import Any, Dict, List, Optional, get_args
 
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -18,12 +16,13 @@ from fastworkflow.observability.decision_signals import (
     slot_binding_source,
 )
 
-from fastworkflow.field_options import COMMAND_TEXT_AFTER_COMMAND_NAME
+from fastworkflow import no_agent_mode, parameter_clarification, waiting
+from fastworkflow.parameter_clarification import Extraction, ParameterLoop
+from fastworkflow.parameters import ask, fill, pipeline, read
 from fastworkflow.utils import argument_checks
-from fastworkflow.utils.input_validation import bound_fields, field_checked_class
 from fastworkflow.utils.signatures import (
     InputForParamExtraction,
-    INVALID, INVALID_INFORMATION_ERRMSG, MISSING_INFORMATION_ERRMSG,
+    MISSING_INFORMATION_ERRMSG,
     NOT_FOUND, PARAMETER_EXTRACTION_ERROR_MSG, _planning_command_of)
 
 
@@ -153,22 +152,7 @@ def unescape_punctuation(value: str) -> str:
     return _ESCAPED_PUNCTUATION.sub(r"\1", value)
 
 
-def _unwrap_optional(field_type):
-    """
-    Unwrap ``Optional[X]`` / ``Union[X, None]`` to its underlying type.
-
-    Returns ``(inner_type, origin)`` where ``origin`` is ``get_origin`` of the
-    unwrapped type (e.g. ``list`` for ``Optional[List[str]]``). Non-optional
-    types are returned unchanged.
-    """
-    origin = get_origin(field_type)
-    if origin is Union:
-        if non_none_types := [
-            t for t in get_args(field_type) if t is not type(None)
-        ]:
-            field_type = non_none_types[0]
-            origin = get_origin(field_type)
-    return field_type, origin
+_unwrap_optional = fill.unwrap_optional
 
 
 def _unique(names) -> list:
@@ -189,33 +173,120 @@ def _is_not_given(value: Any) -> bool:
     return False
 
 
-def parameter_request_for(command_name: str, params: Any, diagnostics: dict) -> Optional[dict]:
-    """The structured form of a failed parameter extraction, or None when no field is to blame.
+def extraction_of(params: Any, diagnostics: dict, reason: str = "") -> Extraction:
+    """What an extraction of *params* found, as the shared contract (``parameter_clarification.Extraction``).
 
-    ``missing`` and ``invalid`` come from the diagnostics ``validate_parameters`` filled (an invalid
-    field that is also missing is reported once, as missing). ``values`` are the other fields as the
-    user gave them, JSON-safe, without the not-given sentinels. A whole-call refusal names no field,
-    so both lists are empty and there is nothing to ask for field by field: None (fix-weih.2).
-    """
-    missing = _unique(diagnostics.get("missing_fields"))
-    invalid = [name for name in _unique(diagnostics.get("invalid_fields")) if name not in missing]
-    if not missing and not invalid:
-        return None
-    unresolved = set(missing) | set(invalid)
+    ``missing`` and ``invalid`` come from the diagnostics ``validate_parameters`` filled (an invalid field that is also
+    missing is reported once, as missing). ``values`` are the other fields as the user gave them, JSON-safe, without the
+    not-given sentinels. *reason* is the refusal a caller words for the whole call (what a refusal that names no field is
+    asked with, and the refusal of an extraction run outside the CME)."""
+    missing = tuple(_unique(diagnostics.get("missing_fields")))
+    invalid = tuple((name, "") for name in _unique(diagnostics.get("invalid_fields")) if name not in missing)
+    unresolved = {*missing, *(name for name, _ in invalid)}
     try:
         dumped = params.model_dump(mode="json", warnings=False)
-    except Exception:  # noqa: BLE001 - the artifact is optional; it must not fail the turn
-        logger.warning("parameter_request values could not be dumped", exc_info=True)
+    except Exception:  # noqa: BLE001 - the values are optional; they must not fail the turn
+        logger.warning("extracted values could not be dumped", exc_info=True)
         dumped = {}
-    return {
-        "command": command_name,
-        "missing": missing,
-        "invalid": invalid,
-        "values": {
-            key: value for key, value in dumped.items()
-            if key not in unresolved and not _is_not_given(value)
-        },
-    }
+    return Extraction(
+        values={key: value for key, value in dumped.items() if key not in unresolved and not _is_not_given(value)},
+        missing=missing, invalid=invalid, reason=reason)
+
+
+def refusal_names_no_input(diagnostics: dict) -> bool:
+    """Whether the validation of the values ended in a refusal that names no input: the ``Input``'s validators refused
+    (the structured ``validation_hook`` fact ``validate_parameters`` writes) and named no field, or a guard or a rule
+    of the roles refused the call and named no argument (``argument_refusal``, written only then or with a name:
+    the names are the missing and invalid fields, which are written last)."""
+    hook = diagnostics.get("validation_hook") or {}
+    if hook.get("message") is not None and not hook.get("refused_fields"):
+        return True
+    return bool(diagnostics.get("argument_refusal")) and not (
+        diagnostics.get("missing_fields") or diagnostics.get("invalid_fields"))
+
+
+def parameter_error_text(command_name: str, error_msg: str) -> str:
+    """The question the CME puts for a command whose values are not all given or are refused: the lead line, then the
+    extractor's own message (what it extracted so far, what is missing or refused and why, how to get out)."""
+    return ask.word(form=ask.FORM_LEAD, command_name=command_name, message=error_msg).text
+
+
+def parameters_class_of(folderpath: str, command_name: str, *, pending: bool = False):
+    """The class a command's parameters are read into: its ``Input``; and, when a parameter question of the command is
+    *pending*, the slot input of a command the plan review asks one value of (``Signature.SlotInput``, which no fresh
+    extraction reads). None when neither resolves."""
+    routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
+    params_class = routing.get_command_class(command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
+    if params_class is None and pending:
+        signature = routing.get_command_class(command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+        params_class = getattr(signature, "SlotInput", None) if signature else None
+    return params_class
+
+
+def _sentinel_for(params_class: type[BaseModel], name: str):
+    """The not-given value of one field: an empty list for a list field, ``NOT_FOUND`` for the rest."""
+    info = params_class.model_fields.get(name)
+    _, origin = _unwrap_optional(info.annotation) if info is not None else (None, None)
+    return [] if origin in (list, List) else NOT_FOUND
+
+
+def model_of(loop: ParameterLoop, params_class: type[BaseModel]) -> BaseModel:
+    """The pending loop as the extractor's working form: an instance of the command's ``Input`` built without
+    validation (``model_construct``), the values kept and each open field holding its not-given value."""
+    data = {name: value for name, value in loop.values.items() if name not in loop.open}
+    data.update({name: _sentinel_for(params_class, name) for name in loop.open})
+    return params_class.model_construct(**data)
+
+
+def park(cme_workflow: fastworkflow.Workflow, command_name: str, params: BaseModel, *, question: str = "",
+         request_text: str = "") -> ParameterLoop:
+    """Leave the CME parked at *command_name*'s parameter question: *params* (built with ``model_construct``, the fields
+    it still lacks holding their not-given values) become the pending loop, with *question* as the text the user saw.
+    The one way a caller outside the extractor (the plan review's slot question) starts that state."""
+    fields = type(params).model_fields
+    asked = [name for name, info in fields.items() if ParameterExtraction._is_asked_field(info, getattr(params, name, None))]
+    dumped = params.model_dump(mode="json", warnings=False)
+    loop = ParameterLoop(command=command_name, kind=parameter_clarification.KIND_EXECUTION,
+                         request_text=request_text, values={name: value for name, value in dumped.items() if name not in asked})
+    parameter_clarification.record_round(loop, Extraction(values=loop.values, missing=tuple(asked)), question)
+    parameter_clarification.store(cme_workflow.context, loop, after=parameter_clarification.AFTER_EDIT_SLOT)
+    return loop
+
+
+def round_ordinal(loop: Optional[ParameterLoop]) -> Optional[int]:
+    """How many extraction attempts already ran for the pending loop: the 0-based ordinal of the attempt about to run (0
+    is the first attempt, 1 the first retry). None when the loop's count is not a positive integer (a loop is only ever
+    saved after a question, so a count below one is corruption, not a first attempt)."""
+    if loop is None:
+        return 0
+    return loop.asks if type(loop.asks) is int and loop.asks > 0 else None
+
+
+def _llm_guard(request: str, diagnostics: dict):
+    """``(check, settle)`` of the execution command's LLM path, for ``pipeline.extract``: the guard
+    (``argument_checks.check_extracted_values``) on the values against *request*, writing the refusals it finds
+    (``argument_check_refusals`` and ``argument_check_retry`` on the first look) and, once the check stage is resolved
+    (after the one second pass, if there was one), the refusals that remain (``argument_check_refusals_final``), the
+    respellings and the not-given value of each refused field."""
+    def check(params: BaseModel, attempt: int) -> pipeline.Verdict:
+        found = argument_checks.check_extracted_values(params, request)
+        if not found.refused:
+            return pipeline.Verdict(detail=found)
+        if attempt == 1:
+            diagnostics["argument_check_refusals"] = found.refusal_texts()
+            diagnostics["argument_check_retry"] = True
+        return pipeline.Verdict(pipeline.KIND_REFUSED, "; ".join(found.refusal_texts()), found)
+
+    def settle(params: BaseModel, verdict: pipeline.Verdict) -> None:
+        found = verdict.detail
+        if found.refused:   # what is still refused once the one second pass (if any) is over
+            diagnostics["argument_check_refusals_final"] = found.refusal_texts()
+        if found.respelled:
+            diagnostics["argument_check_respelled"] = {
+                name: str(spelled) for name, (_, spelled) in found.respelled.items()}
+        found.apply(params)
+
+    return check, settle
 
 
 class ParameterExtraction:
@@ -232,6 +303,8 @@ class ParameterExtraction:
         self.app_workflow = app_workflow
         self.command_name = command_name
         self.command = command
+        #: ``validate_parameters``' answer on the values ``_llm_extract`` returned (None when they did not come from it)
+        self._validation = None
 
     def extract(self) -> "ParameterExtraction.Output":
         """Extract, wrapped in a ``fw.nlu.param_extraction`` span (D3 as
@@ -283,19 +356,15 @@ class ParameterExtraction:
 
     def _extract_impl(self, diagnostics: dict) -> "ParameterExtraction.Output":
         app_workflow_folderpath = self.app_workflow.folderpath
-        app_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(app_workflow_folderpath)
-
-        command_parameters_class = (
-            app_command_routing_definition.get_command_class(
-                self.command_name, ModuleType.COMMAND_PARAMETERS_CLASS
-            )
-        )
-        stored_params = self._get_stored_parameters(self.cme_workflow)
+        loop = parameter_clarification.pending(self.cme_workflow.context)
+        if loop is not None and loop.command != self.command_name:
+            loop = None
+        command_parameters_class = parameters_class_of(
+            app_workflow_folderpath, self.command_name, pending=loop is not None)
         if not command_parameters_class:
-            if stored_params is not None:
-                command_parameters_class = type(stored_params)
-            else:
-                return self.Output(parameters_are_valid=True)
+            return self.Output(parameters_are_valid=True)
+        stored_params = model_of(loop, command_parameters_class) if loop is not None else None
+        self._validation = None
 
         # The caller prefixes "<command_name>: " (wildcard.py). Strip exactly that,
         # so the parsers below see the text as sent ("cmd k=v", not ": cmd k=v")
@@ -312,54 +381,35 @@ class ParameterExtraction:
             self.command)
 
         # If we have missing fields (in parameter extraction error state), try to apply the command directly
-        diagnostics["retry_round"] = bool(stored_params)
-        # WHICH round, not just whether this is one (fix-8ko2). The flag alone
-        # left a consumer counting extraction spans and hoping the count was
-        # the ordinal, which it is not when a span was dropped.
-        #
-        # The round can be genuinely unknown, and then the attribute is OMITTED
-        # rather than sent as a 0 that would read as "first attempt". See
-        # _get_stored_round for when that happens; the short version is that
-        # this module is not the only writer of the state it counts.
-        round_ordinal = self._get_stored_round(self.cme_workflow)
-        if round_ordinal is not None:
-            diagnostics["retry_round_ordinal"] = round_ordinal
+        diagnostics["retry_round"] = loop is not None
+        # WHICH round, not just whether this is one (fix-8ko2): the loop counts its questions, and a loop is cleared
+        # with the command it belongs to, so a count never outlives it. The attribute is omitted when the count cannot
+        # be read, rather than sent as a 0 that would read as "first attempt".
+        round_ordinal_value = round_ordinal(loop)
+        if round_ordinal_value is not None:
+            diagnostics["retry_round_ordinal"] = round_ordinal_value
         # Agentic mode is "not an assistant-mode command, in an agent session". Computed once: it
         # picks the extraction branch below and gates the parameter_request artifact (fix-weih.2).
         is_agentic_mode = bool(
-            "is_assistant_mode_command" not in self.cme_workflow.context
-            and "run_as_agent" in self.app_workflow.context
-            and self.app_workflow.context["run_as_agent"]
+            not waiting.port_of(self.cme_workflow.context).assistant
+            and ask.audience_of(self.app_workflow.context) == ask.AGENT
         )
-        if stored_params:
+        if stored_params is not None:
             new_params = self._extract_and_merge_missing_parameters(stored_params, self.command)
             diagnostics["extraction_method"] = "stored_merge"
         else:
             if is_agentic_mode:
-                # Try regex-based extraction first in agentic mode
-                new_params = self._extract_parameters_from_xml(self.command, command_parameters_class)
+                # The agent's own command text is read in code first (``fill.fill_from_agent_text``): xml, the
+                # ``name=value`` form (fix-hia1.10), the guarded positional form (fix-hia1.16) and the bare command
+                # name. They stay the deterministic regex source, so the slot-binding signal contract does not
+                # change; ``deterministic_form`` says which one bound.
                 diagnostics["extraction_method"] = "xml_regex"
-
-                # Then the ``name=value`` form (fix-hia1.10) and the guarded
-                # positional form (fix-hia1.16), parsed in code. Both stay the
-                # deterministic regex source, so the slot-binding signal contract
-                # does not change; ``deterministic_form`` says which one bound.
-                if new_params is None:
-                    new_params = self._extract_parameters_from_key_values(
-                        self.command, command_parameters_class, self.command_name,
-                        code_written=bool(self.app_workflow.context.get("by_code")))
-                    if new_params is not None:
-                        diagnostics["deterministic_form"] = "key_value"
-                if new_params is None:
-                    new_params = self._extract_parameters_from_positional(
-                        self.command, command_parameters_class, self.command_name)
-                    if new_params is not None:
-                        diagnostics["deterministic_form"] = "positional"
-                if new_params is None:
-                    new_params = self._extract_parameters_from_bare(
-                        self.command, command_parameters_class, self.command_name)
-                    if new_params is not None:
-                        diagnostics["deterministic_form"] = "bare"
+                filled = fill.fill_from_agent_text(
+                    self.command, command_parameters_class, self.command_name,
+                    by_code=bool(self.app_workflow.context.get("by_code")))
+                new_params = None if filled is None else filled.params
+                if filled is not None and filled.source != "xml":
+                    diagnostics["deterministic_form"] = filled.source
 
                 # If regex extraction fails, fall back to LLM-based extraction
                 if new_params is None:
@@ -395,11 +445,26 @@ class ParameterExtraction:
                         input_for_param_extraction, command_parameters_class,
                         app_workflow_folderpath, diagnostics)
 
-        is_valid, error_msg, suggestions, missing_invalid_fields = \
+        # The Input's validators see the request with the user's replies after it (the text a planning command's
+        # validators see: ``ParameterLoop.text``); the reply of this round joins the loop's replies first.
+        if loop is not None and self.command:
+            loop.replies.append(self.command)
+        validation, self._validation = self._validation, None
+        is_valid, error_msg, suggestions, missing_invalid_fields = validation if validation is not None else \
             input_for_param_extraction.validate_parameters(
             self.app_workflow, self.command_name, new_params,
-            diagnostics=diagnostics
+            diagnostics=diagnostics,
+            command_text=loop.text() if loop is not None else None
         )
+
+        if not is_valid and refusal_names_no_input(diagnostics):
+            # A refusal that names no input (a validator's ``Refused(message)`` with no field, an ``Input`` rule that
+            # names none, a validator that raised) is not a question: no single answer is being asked for. The command
+            # ends as a failed output carrying the validator's message, with no pending parameter loop (the user reads
+            # why and sends a new request; the agent reads it as the command's failure). A planning command's call is
+            # treated the same way (``planning_commands.refusal_names_an_input``).
+            parameter_clarification.clear(self.cme_workflow.context)
+            return self.Output(parameters_are_valid=False, error_msg=error_msg, cmd_parameters=new_params)
 
         # Set all the missing and invalid fields to appropriate sentinel values before storing
         current_values = {
@@ -420,30 +485,37 @@ class ParameterExtraction:
         # Reconstruct the model instance without validation
         new_params = new_params.__class__.model_construct(**current_values)
 
-        self._store_parameters(self.cme_workflow, new_params)
-
         if not is_valid:
-            if refusals := diagnostics.get("argument_check_refusals_final"):
-                # Why a value the request seemed to give is asked for again (fix-qjf4).
-                error_msg = "Values not used: " + "; ".join(refusals) + "\n" + error_msg
-            if params_str := self._format_parameters_for_display(new_params):
-                error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
-
-            if "run_as_agent" not in self.app_workflow.context:
-                error_msg += "\nEnter 'abort' to get out of this error state and/or execute a different command."
-                error_msg += "\nEnter 'you misunderstood' if the wrong command was executed."
-            else:
-                error_msg += "\nCheck your command name if the wrong command was executed."
+            error_msg = ask.word(
+                form=ask.FORM_FRAME, message=error_msg, refusals=diagnostics.get("argument_check_refusals_final") or (),
+                shown=self._format_parameters_for_display(new_params),
+                audience=ask.audience_of(self.app_workflow.context)).text
+            extraction = extraction_of(new_params, diagnostics)
+            if loop is None:
+                loop = ParameterLoop(
+                    command=self.command_name, kind=parameter_clarification.KIND_EXECUTION, request_text=self.command)
+            round_ = parameter_clarification.record_round(
+                loop, extraction, parameter_error_text(self.command_name, error_msg))
+            if round_.kind == parameter_clarification.EXHAUSTED:
+                # The asking rule's stop (``parameter_clarification``): the second reply in a row that fixed none of the
+                # values the last question listed. The command ends as a failed output naming what is missing, with no
+                # pending question, in every session type (progress is known only here, after the extraction, so it
+                # is not the reader's ``stop`` action).
+                parameter_clarification.clear(self.cme_workflow.context)
+                return self.Output(
+                    parameters_are_valid=False,
+                    error_msg=(f"{self.command_name} was not run: no usable answer was given in "
+                               f"{no_agent_mode.MAX_NO_PROGRESS} replies in a row ({round_.describe})."),
+                    cmd_parameters=new_params)
+            parameter_clarification.store(self.cme_workflow.context, loop)
             return self.Output(
                 parameters_are_valid=False,
                 error_msg=error_msg,
                 cmd_parameters=new_params,
                 suggestions=suggestions,
-                parameter_request=(
-                    None if is_agentic_mode
-                    else parameter_request_for(self.command_name, new_params, diagnostics)))
+                parameter_request=None if is_agentic_mode else loop.request)
 
-        self._clear_parameters(self.cme_workflow)
+        parameter_clarification.clear(self.cme_workflow.context)
         return self.Output(
             parameters_are_valid=True,
             cmd_parameters=new_params)
@@ -458,193 +530,41 @@ class ParameterExtraction:
         refusal appended to the command text (``REFUSED_EXTRACTION_NOTE``, as ``typed_planning_call``
         does); the second answer is checked against the original command text, and a value still
         refused takes the field's not-given value, so a required field is asked for (the NOT_FOUND
-        path) and an optional one takes its default. A planning command's ``Input`` is left to
-        ``check_arguments``; ``FW_EXTRACTION_ARGUMENT_CHECKS=off`` turns the checks off.
+        path) and an optional one takes its default. The command's validators (``validate_parameters``) then judge
+        the values, and ``pipeline.extract`` makes ONE second pass for whichever of the guard or the validators
+        refuses a value first (never for a value that is simply missing). A planning command's ``Input`` is left to
+        ``check_arguments``; ``FW_EXTRACTION_ARGUMENT_CHECKS=off`` turns the guard off.
         """
-        def extract() -> BaseModel:
-            params = input_for_param_extraction.extract_parameters(
-                command_parameters_class, self.command_name, app_workflow_folderpath)
-            diagnostics["extraction_method"] = "llm"
-            if reset := getattr(input_for_param_extraction, "fields_reset_not_given", None):
-                diagnostics["fields_reset_not_given"] = {n: float(p) for n, p in reset.items()}
-            return params
+        first_unparsed: list = []
 
-        params = extract()
-        if not argument_checks.checks_enabled() or \
-                _planning_command_of(self.app_workflow, self.command_name) is not None:
-            return params
+        def fill_text(note: str, attempt: int) -> BaseModel:
+            filled = fill.fill(input_for_param_extraction, command_parameters_class, self.command_name,
+                               app_workflow_folderpath, note=note)
+            if attempt == 1 and filled.unparsed:
+                first_unparsed.append(True)
+            diagnostics["extraction_method"] = "llm"
+            if filled.reset_not_given is not None:
+                diagnostics["fields_reset_not_given"] = filled.reset_not_given
+            return filled.params
+
+        def validated(params: BaseModel, attempt: int) -> pipeline.Verdict:
+            if attempt == 2:
+                diagnostics.pop("missing_fields", None)
+                diagnostics.pop("invalid_fields", None)
+            result = input_for_param_extraction.validate_parameters(
+                self.app_workflow, self.command_name, params, diagnostics=diagnostics, command_text=None)
+            return _validation_verdict(result[0], result[1], diagnostics, result)
+
+        guarded = argument_checks.checks_enabled() and \
+            _planning_command_of(self.app_workflow, self.command_name) is None
         # The request is the command text the extractor read (self.command, prefix stripped, which
         # InputForParamExtraction.create was given): see argument_checks for why it is not more.
-        request = self.command
-        check = argument_checks.check_extracted_values(params, request)
-        if check.refused:
-            diagnostics["argument_check_refusals"] = check.refusal_texts()
-            diagnostics["argument_check_retry"] = True
-            input_for_param_extraction.command = f"{request}\n\n{check.note()}"
-            try:
-                params = extract()
-            except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
-                logger.warning(f"parameter extraction retry failed: {exc!r}")
-            finally:
-                # validate_parameters reads the request from here: the original command text
-                input_for_param_extraction.command = request
-            check = argument_checks.check_extracted_values(params, request)
-            if check.refused:
-                diagnostics["argument_check_refusals_final"] = check.refusal_texts()
-        if check.respelled:
-            diagnostics["argument_check_respelled"] = {
-                name: str(spelled) for name, (_, spelled) in check.respelled.items()}
-        check.apply(params)
-        return params
-
-    @staticmethod
-    def _get_stored_parameters(cme_workflow: fastworkflow.Workflow):
-        return cme_workflow.context.get("stored_parameters")
-
-    @staticmethod
-    def _get_stored_round(cme_workflow: fastworkflow.Workflow) -> Optional[int]:
-        """How many extraction attempts already ran for the stored parameters.
-
-        This is the 0-based ordinal of the attempt about to run: 0 is the first
-        attempt, 1 is the first retry. `None` means genuinely unknown, and the
-        caller omits the attribute rather than sending a 0 that would read as
-        "first attempt".
-
-        Unknown is not hypothetical. `stored_parameters` has writers this module
-        does not control, and none of them know about the counter:
-
-        - `Workflow.end_command_processing` deletes `stored_parameters` and
-          leaves the counter behind. A stale counter therefore cannot be
-          trusted to describe whatever is in the context now -- so the absence
-          of stored parameters is the authority, and it means round 0.
-        - `WorkflowExecutionContext._serialize_cme_continuation` persists
-          `stored_parameters` and `_apply_cme_continuation` rebuilds it, but
-          neither carries the counter. A rehydrated session therefore has real
-          stored parameters whose round nobody recorded. That is unknown, and
-          claiming 0 there would report a resumed third attempt as a first one.
-
-        Both writers live in files this change may not edit (see fix-7gp9 for
-        the persistence follow-up), so the rule is read-side: the counter is
-        believed only when it is present, an integer, positive, and sitting
-        beside the stored parameters it claims to count.
-        """
-        context = cme_workflow.context
-        if context.get("stored_parameters") is None:
-            # No error state for a round to be a round OF. Whatever an orphaned
-            # counter says, the next extraction is a first attempt.
-            return 0
-        round_index = context.get("stored_parameter_round")
-        if isinstance(round_index, bool) or not isinstance(round_index, int):
-            return None
-        # Storing always writes >= 1, so 0-or-negative beside stored parameters
-        # is corruption, not a first attempt.
-        return round_index if round_index > 0 else None
-
-    @staticmethod
-    def _store_parameters(cme_workflow: fastworkflow.Workflow, parameters):
-        # Read the prior round BEFORE installing, because the answer depends on
-        # whether stored parameters were already there: installing first would
-        # make every call look like a continuation of itself.
-        prior = ParameterExtraction._get_stored_round(cme_workflow)
-        cme_workflow.context["stored_parameters"] = parameters
-        if prior is None:
-            # Unknown does not become known by counting up from it. Leave the
-            # counter absent so the next read stays unknown instead of
-            # inventing an ordinal mid-sequence.
-            cme_workflow.context.pop("stored_parameter_round", None)
-        else:
-            cme_workflow.context["stored_parameter_round"] = prior + 1
-
-    @staticmethod
-    def _clear_parameters(cme_workflow: fastworkflow.Workflow):
-        if "stored_parameters" in cme_workflow.context:
-            del cme_workflow.context["stored_parameters"]
-        # The round counts this error state's attempts, so it ends with it.
-        # Leaving it behind would number the NEXT command's first extraction as
-        # a retry of a command that already succeeded.
-        if "stored_parameter_round" in cme_workflow.context:
-            del cme_workflow.context["stored_parameter_round"]
-
-    @staticmethod
-    def _extract_missing_fields(input_for_param_extraction, sws, command_name, stored_params):
-        stored_missing_fields = []
-        is_valid, error_msg, _ = input_for_param_extraction.validate_parameters(
-            sws, command_name, stored_params
-        )
-
-        if not is_valid:
-            if MISSING_INFORMATION_ERRMSG in error_msg:
-                missing_fields_str = error_msg.split(f"{MISSING_INFORMATION_ERRMSG}")[1].split("\n")[0]
-                stored_missing_fields = [f.strip() for f in missing_fields_str.split(",")]
-            if INVALID_INFORMATION_ERRMSG in error_msg:
-                invalid_section = error_msg.split(f"{INVALID_INFORMATION_ERRMSG}")[1]
-                if "\n" in invalid_section:
-                    invalid_fields_str = invalid_section.split("\n")[0]
-                    stored_missing_fields.extend(
-                        invalid_field.split(" '")[0].strip()
-                        for invalid_field in invalid_fields_str.split(", ")
-                    )
-        return stored_missing_fields
-
-    @staticmethod
-    def _merge_parameters(old_params, new_params, missing_fields):
-        """
-        Merge new parameters with old parameters, prioritizing new values when appropriate.
-        """
-        merged_data = {
-            field_name: getattr(old_params, field_name, None)
-            for field_name in list(type(old_params).model_fields.keys())
-        }
-
-        # all_fields = list(old_params.model_fields.keys())
-        missing_fields = missing_fields or []
-
-        for field_name in missing_fields:
-            merged_data[field_name] = getattr(new_params, field_name)
-
-        # Construct the model instance without validation
-        return old_params.__class__.model_construct(**merged_data)
-
-            # if hasattr(new_params, field_name):
-            #     new_value = getattr(new_params, field_name)
-            #     old_value = merged_data.get(field_name)
-
-            #     if new_value is not None and new_value != NOT_FOUND:
-            #         if isinstance(old_value, str) and INVALID in old_value and INVALID not in new_value:
-            #             merged_data[field_name] = new_value
-
-            #         elif old_value is None or old_value == NOT_FOUND:
-            #             merged_data[field_name] = new_value
-
-            #         elif isinstance(old_value, int) and old_value == INVALID_INT_VALUE:
-            #             with contextlib.suppress(ValueError, TypeError):
-            #                 merged_data[field_name] = int(new_value)
-
-            #         elif isinstance(old_value, float) and old_value == INVALID_FLOAT_VALUE:
-            #             with contextlib.suppress(ValueError, TypeError):
-            #                 merged_data[field_name] = float(new_value)
-
-            #         elif (field_name in missing_fields and
-            #             hasattr(old_params.model_fields.get(field_name), "json_schema_extra") and
-            #             old_params.model_fields.get(field_name).json_schema_extra and
-            #             "db_lookup" in old_params.model_fields.get(field_name).json_schema_extra):
-            #             merged_data[field_name] = new_value
-
-            #         elif field_name in missing_fields:
-            #             field_info = old_params.model_fields.get(field_name)
-            #             has_pattern = hasattr(field_info, "pattern") and field_info.pattern is not None
-
-            #             if not has_pattern:
-            #                 for meta in getattr(field_info, "metadata", []):
-            #                     if hasattr(meta, "pattern"):
-            #                         has_pattern = True
-            #                         break
-
-            #             if not has_pattern and hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-            #                 has_pattern = "pattern" in field_info.json_schema_extra
-
-            #             if has_pattern:
-            #                 merged_data[field_name] = new_value
+        check, settle = _llm_guard(self.command, diagnostics) if guarded else (None, None)
+        extracted = pipeline.extract(
+            fill_text, check=check, settle=settle, validate=validated,
+            retry_note=argument_checks.REFUSED_EXTRACTION_NOTE, unparsed=lambda: bool(first_unparsed))
+        self._validation = extracted.final.detail   # the validators' answer on these very values: read, not asked again
+        return extracted.params
 
     @staticmethod
     def _format_parameters_for_display(params):
@@ -689,429 +609,49 @@ class ParameterExtraction:
                 lines.append(f"{display_name}: {value.value}")
         return "\n".join(lines)
 
-    @staticmethod
-    def _apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
-        # Work on plain dict to avoid validation during assignment
-        params_data = {
-            field_name: getattr(default_params, field_name, None)
-            for field_name in list(type(default_params).model_fields.keys())
-        }
-
-        if "," in command:
-            parts = [part.strip() for part in command.split(",")]
-
-            if (
-                len(parts) == len(missing_fields) == 1
-                or len(parts) != len(missing_fields)
-                and parts
-                and missing_fields
-            ):
-                field = missing_fields[0]
-                if field in params_data:
-                    params_data[field] = parts[0]
-            elif len(parts) == len(missing_fields) and len(missing_fields) > 1:
-                for i, field in enumerate(missing_fields):
-                    if i < len(parts) and field in params_data:
-                        params_data[field] = parts[i]
-        elif missing_fields:
-            field = missing_fields[0]
-            if field in params_data:
-                params_data[field] = command.strip()
-
-        # Construct model without validation
-        return default_params.__class__.model_construct(**params_data)
-
+    # The four forms an agent's own command text is read in code live in ``fastworkflow.parameters.fill`` (bd fix-qoyz
+    # step 5); these names stay because the planning code steps and the CME's commands call them.
     @staticmethod
     def _extract_parameters_from_xml(command: str, command_parameters_class: type[BaseModel]) -> Optional[BaseModel]:
-        """
-        Extract parameters from XML-formatted command using regex.
-
-        Returns:
-            BaseModel instance with extracted parameters, or None if parsing fails
-        """
-        field_names = list(command_parameters_class.model_fields.keys())
-
-        # If no parameters are defined, return empty model immediately
-        if not field_names:
-            return command_parameters_class.model_construct()
-
-        extracted_data = {}
-
-        # Try to extract each parameter using XML tags
-        if len(field_names) == 1:
-            # If there's only one field, extract content from first XML tag
-            pattern = r'<[^>]+>(.+?)</[^>]+>'
-            if match := re.search(pattern, command, re.DOTALL):
-                parameter_value = match[1].strip()
-                extracted_data[field_names[0]] = parameter_value
-        else:
-            # Try to extract each parameter using XML tags
-            for field_name in field_names:
-                # Look for <field_name>value</field_name> pattern
-                pattern = rf'<{re.escape(field_name)}>(.+?)</{re.escape(field_name)}>'
-                # For list-typed fields, an agent may repeat the tag once per item
-                # (e.g. <item_ids>a</item_ids> <item_ids>b</item_ids>). re.search
-                # would keep only the first, silently dropping the rest, so collect
-                # ALL occurrences with findall and hand the list parser every value.
-                _, forigin = _unwrap_optional(
-                    command_parameters_class.model_fields[field_name].annotation
-                )
-                if forigin in (list, List):
-                    matches = re.findall(pattern, command, re.DOTALL)
-                    if len(matches) > 1:
-                        # Multiple repeated tags -> JSON array so the list parser
-                        # below collects every value (not just the first).
-                        extracted_data[field_name] = json.dumps([m.strip() for m in matches])
-                    elif len(matches) == 1:
-                        extracted_data[field_name] = matches[0].strip()
-                elif match := re.search(pattern, command, re.DOTALL):
-                    parameter_value = match[1].strip()
-                    extracted_data[field_name] = parameter_value
-
-        # Check if we extracted values for ALL fields (safest criteria for LLM fallback)
-        all_fields_extracted = len(extracted_data) == len(field_names)
-
-        # Check if agent used example values
-        if all_fields_extracted:
-            for field_name, extracted_value in extracted_data.items():
-                field_info = command_parameters_class.model_fields[field_name]
-                examples = getattr(field_info, "examples", None)
-                if examples and extracted_value in examples:
-                    all_fields_extracted = False
-                    break
-
-        if all_fields_extracted:
-            # Initialize all fields with their default values (if they exist) or None
-            params_data = {}
-            for field_name in field_names:
-                field_info = command_parameters_class.model_fields[field_name]
-                if field_info.default is not PydanticUndefined:
-                    params_data[field_name] = field_info.default
-                elif field_info.default_factory is not None:
-                    params_data[field_name] = field_info.default_factory()
-                else:
-                    params_data[field_name] = None
-
-            # Parse and type-correct extracted values
-            for field_name, raw_value in extracted_data.items():
-                field_info = command_parameters_class.model_fields[field_name]
-                field_type, origin = _unwrap_optional(field_info.annotation)
-
-                # Handle list types with robust parsing
-                if origin in (list, List):
-                    inner_type = get_args(field_type)[0] if get_args(field_type) else str
-                    parsed_list = None
-
-                    # Try JSON array format
-                    if raw_value.startswith('[') and raw_value.endswith(']'):
-                        with contextlib.suppress(Exception):
-                            parsed = json.loads(raw_value)
-                            if isinstance(parsed, list):
-                                parsed_list = parsed
-
-                    # Try Python literal format
-                    if parsed_list is None:
-                        with contextlib.suppress(Exception):
-                            parsed = ast.literal_eval(raw_value)
-                            if isinstance(parsed, list):
-                                parsed_list = parsed
-
-                    # Try comma-separated format
-                    if parsed_list is None and ',' in raw_value:
-                        parsed_list = [item.strip().strip('"').strip("'") for item in raw_value.split(',')]
-
-                    # Try space-separated format
-                    if parsed_list is None and ' ' in raw_value and not any(c in raw_value for c in ['[', ']', '{', '}', '"', "'"]):
-                        parsed_list = [item.strip() for item in raw_value.split() if item.strip()]
-
-                    # Single value treated as single-item list
-                    if parsed_list is None:
-                        cleaned = raw_value.strip().strip('"').strip("'")
-                        parsed_list = [cleaned] if cleaned else []
-
-                    # Type-convert list items to match the inner type
-                    if parsed_list:
-                        typed_list = []
-                        for item in parsed_list:
-                            if inner_type is str:
-                                typed_list.append(str(item))
-                            elif inner_type is int:
-                                with contextlib.suppress(ValueError, TypeError):
-                                    typed_list.append(int(item))
-                            elif inner_type is float:
-                                with contextlib.suppress(ValueError, TypeError):
-                                    typed_list.append(float(item))
-                            elif isinstance(inner_type, type) and issubclass(inner_type, BaseModel) and isinstance(item, dict):
-                                with contextlib.suppress(Exception):
-                                    typed_list.append(inner_type(**item))
-                            else:
-                                typed_list.append(item)
-                        params_data[field_name] = typed_list
-                    else:
-                        params_data[field_name] = []
-                else:
-                    # Non-list types: use raw value as-is
-                    params_data[field_name] = raw_value
-
-            # Construct model without validation
-            return command_parameters_class.model_construct(**params_data)
-
-        return None
+        """``fill.from_xml``: parameters from an XML-formatted command, or None."""
+        return fill.from_xml(command, command_parameters_class)
 
     @staticmethod
     def _is_own_command_token(token: str, command_name: str) -> bool:
-        """Whether *token* is this command's name, short or qualified (``Ctx/cmd``)."""
-        if not token or not command_name:
-            return False
-        token = token.lstrip("/").lower()
-        return token in (command_name.lower(), command_name.split("/")[-1].lower())
+        """``fill.is_own_command_token``: whether *token* is this command's name, short or qualified (``Ctx/cmd``)."""
+        return fill.is_own_command_token(token, command_name)
 
     @staticmethod
     def _bound_model(command_parameters_class: type[BaseModel],
                      converted: dict[str, Any]) -> Optional[BaseModel]:
-        """The parameters model holding *converted* (already type-converted), or None.
-
-        Each given value is checked against its own field (``bound_fields``: type, constraints and
-        the field's own validators): a value that does not check is no binding. No model validator
-        runs here (an ``Input``'s validators need the validation context, and ``validate_parameters``
-        runs them with it), so a model validator's refusal reaches the caller as a refusal, with
-        the binding kept. Fields not given take their defaults; a required one not given is left
-        for validation to report as missing.
-        """
-        from pydantic import ValidationError
-
-        try:
-            checked = bound_fields(command_parameters_class, converted)
-        except ValidationError:
-            return None
-        params_data: dict[str, Any] = {}
-        for name, info in command_parameters_class.model_fields.items():
-            if name in checked:
-                params_data[name] = checked[name]
-            elif info.default is not PydanticUndefined:
-                params_data[name] = info.default
-            elif info.default_factory is not None:
-                params_data[name] = info.default_factory()
-            else:
-                params_data[name] = None
-        return command_parameters_class.model_construct(**params_data)
+        """``fill.bound_model``: the parameters model holding *converted* (already type-converted), or None."""
+        return fill.bound_model(command_parameters_class, converted)
 
     @staticmethod
     def _extract_parameters_from_key_values(
             command: str, command_parameters_class: type[BaseModel],
             command_name: str = "", *, code_written: bool = False) -> Optional[BaseModel]:
-        """Parameters from a ``name=value`` command (``query=Ann Lee start=2``), or None.
-
-        Parsed in code, before the LLM fallback, only when the form is plain:
-
-        - The text is an optional leading command token, then ``name=value``
-          pairs; every name is a field of the parameters class, each at most once.
-          The leading token must be *command_name* itself, short or qualified, so
-          the arguments of a call routed to some other command are not bound
-          here (fix-hia1.12).
-        - A value runs to the next `` name=`` whose name is a field, or to the
-          end. Surrounding quotes go, and so does a trailing parenthetical note
-          (``" (this opens it)"``). ``None``/``null`` is no value.
-        - Values are converted by the parameters class: the given fields must
-          validate, and the only errors allowed are fields that were not given
-          and are required (validation later reports those as missing).
-
-        With *code_written* (``planning_phases.code_step`` and ``pick_step``), the examples
-        guard is skipped and a quoted value is taken whole, with nothing inside it read
-        as a key, a placeholder or a note (3.13). Without it, any doubt -- a ``word=``
-        that is not a field, an XML tag, a placeholder (``<...>``), an example value, an
-        empty value, a validation error -- returns None, and extraction goes on as before.
-        """
-        from pydantic import TypeAdapter, ValidationError
-        from fastworkflow.observation_offloading.finish_check import _QUOTED_VALUE_RE
-
-        fields = command_parameters_class.model_fields
-        text = (command or "").strip()
-        if not fields or "=" not in text:
-            return None
-        probe = (_QUOTED_VALUE_RE.sub(lambda m: "=" + "x" * (len(m.group(0)) - 1), text)
-                 if code_written else text)
-        if re.search(r"</?[A-Za-z_][\w.-]*>", probe):
-            return None
-        keys = list(re.finditer(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=", probe))
-        if not keys:
-            return None
-        lead = text[:keys[0].start()].strip()
-        if lead and not ParameterExtraction._is_own_command_token(lead, command_name):
-            return None
-        # Every ``word=`` must name a field: a value holding ``x=y`` is not plain.
-        if any(m.group(1) not in fields for m in keys):
-            return None
-        names = [m.group(1) for m in keys]
-        if len(set(names)) != len(names):
-            return None
-
-        raw: dict[str, Any] = {}
-        for i, match in enumerate(keys):
-            end = keys[i + 1].start() if i + 1 < len(keys) else len(text)
-            value = text[match.end():end].strip()
-            was_quoted = False
-            if code_written and len(value) >= 2 and value[0] in "\"'":
-                q = re.match(r"""^("[^"\n]*"|'[^'\n]*')\s*$""", value)
-                if q:
-                    value = q.group(1)[1:-1]
-                    was_quoted = True
-                elif i + 1 == len(keys):
-                    # Try stripping a trailing parenthetical note after the closing quote
-                    trimmed = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value).strip()
-                    q = re.match(r"""^("[^"\n]*"|'[^'\n]*')\s*$""", trimmed)
-                    if q:
-                        value = q.group(1)[1:-1]
-                        was_quoted = True
-            if not was_quoted:
-                if i + 1 == len(keys):
-                    value = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value)
-                value = value.strip().rstrip(",;").strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
-                    value = value[1:-1].strip()
-                if not value or re.search(r"[<>{}]|\.\.\.|\u2026", value):
-                    return None
-                if not code_written:
-                    examples = getattr(fields[match.group(1)], "examples", None)
-                    if examples and value in examples:
-                        return None
-            elif not value:
-                return None
-            # unescape_punctuation (fix-6lt7) disabled after benchmark pass 4, where no escaped value occurred:
-            # raw[match.group(1)] = (None if (not was_quoted and value in ("None", "null"))
-            #                        else unescape_punctuation(value))
-            raw[match.group(1)] = None if (not was_quoted and value in ("None", "null")) else value
-
-        converted: dict[str, Any] = {}
-        for name, value in raw.items():
-            annotation = fields[name].annotation
-            _, origin = _unwrap_optional(annotation)
-            if origin in (list, List) and isinstance(value, str):
-                if value.startswith("["):
-                    try:
-                        value = json.loads(value)
-                    except ValueError:
-                        return None
-                else:
-                    value = [part.strip().strip("\"'") for part in value.split(",")
-                             if part.strip()]
-            try:
-                converted[name] = TypeAdapter(annotation).validate_python(value)
-            except (ValidationError, TypeError, ValueError):
-                return None
-        return ParameterExtraction._bound_model(command_parameters_class, converted)
+        """``fill.from_key_values``: parameters from a ``name=value`` command, or None."""
+        return fill.from_key_values(command, command_parameters_class, command_name, code_written=code_written)
 
     @staticmethod
     def _extract_parameters_from_bare(
             command: str, command_parameters_class: type[BaseModel],
             command_name: str = "") -> Optional[BaseModel]:
-        """The parameters' defaults for a command sent with nothing after its name, or None.
-
-        Only when the text is empty or just *command_name* (short or qualified) and
-        every field has a default; a command with a required field goes on as before.
-        """
-        text = (command or "").strip()
-        if text and not ParameterExtraction._is_own_command_token(text, command_name):
-            return None
-        if any(info.is_required() for info in command_parameters_class.model_fields.values()):
-            return None
-        # The defaults are checked field by field, with no model validator: an Input's validators need
-        # the validation context, and a bare command's binding must not depend on them. A default that
-        # does not check is no binding.
-        try:
-            checked = field_checked_class(command_parameters_class)()
-        except Exception:  # noqa: BLE001 - a default that does not validate is no binding
-            return None
-        return command_parameters_class.model_construct(
-            _fields_set=set(),
-            **{name: getattr(checked, name) for name in command_parameters_class.model_fields})
+        """``fill.from_bare``: the parameters' defaults for a command sent with nothing after its name, or None."""
+        return fill.from_bare(command, command_parameters_class, command_name)
 
     @staticmethod
     def _is_positional_field(field_info) -> bool:
-        """A field marked ``json_schema_extra={'command_text_after_command_name': True}``."""
-        extra = getattr(field_info, "json_schema_extra", None)
-        return isinstance(extra, dict) and extra.get(COMMAND_TEXT_AFTER_COMMAND_NAME) is True
+        """``fill.is_positional_field``: a field marked ``command_text_after_command_name``."""
+        return fill.is_positional_field(field_info)
 
     @staticmethod
     def _extract_parameters_from_positional(
             command: str, command_parameters_class: type[BaseModel],
             command_name: str) -> Optional[BaseModel]:
-        """Parameters from a bare ``command_name value`` command, or None (fix-hia1.16).
-
-        Parsed in code, before the LLM fallback, only when nothing is in doubt:
-
-        - The text has no ``=`` and no XML, its first token is *command_name*
-          itself (short or qualified), and a value follows.
-        - The value goes to one target field: the field marked
-          ``json_schema_extra={'command_text_after_command_name': True}``, or else the class's only
-          ``str`` field (other types, such as an int ``start``, do not count).
-          Two marked fields, or two ``str`` fields and no mark, is no target.
-        - A leading word naming the target (``uid 203b``, ``query Ann Lee``) is
-          dropped; a leading word naming another field (``other_uid 2b55``)
-          declines.
-        - A value holding ``* ` ? \\``, `` / ``, ``<>{}`` or no letter or digit
-          declines. Matching surrounding quotes go. The whole remainder is the
-          value: a trailing number is not split off into another field.
-        - Only a marked field takes a value of several words; an unmarked field
-          takes a single token, so prose sent to a free-text field still goes to
-          the LLM.
-
-        The value is converted by the field's type; the usual validation runs
-        after, as for any other form.
-        """
-        from pydantic import TypeAdapter, ValidationError
-
-        fields = command_parameters_class.model_fields
-        text = (command or "").strip()
-        if not fields or "=" in text or re.search(r"</?[A-Za-z_][\w.-]*>", text):
-            return None
-        parts = text.split(None, 1)
-        if len(parts) < 2 or not ParameterExtraction._is_own_command_token(
-                parts[0], command_name):
-            return None
-        rest = parts[1].strip()
-
-        marked = [name for name, info in fields.items()
-                  if ParameterExtraction._is_positional_field(info)]
-        if marked:
-            if len(marked) != 1:
-                return None
-            target, multi_word = marked[0], True
-        else:
-            strings = [name for name, info in fields.items()
-                       if _unwrap_optional(info.annotation)[0] is str]
-            if len(strings) != 1:
-                return None
-            target, multi_word = strings[0], False
-
-        tail = target.rsplit("_", 1)[-1]
-        words = rest.split(None, 1)
-        first = words[0].rstrip(":").lower()
-        if first in (target.lower(), tail.lower()):
-            if len(words) < 2:
-                return None
-            rest = words[1].strip()
-        elif first in {name.lower() for name in fields} or (
-                len(words) > 1 and first.endswith(f"_{tail.lower()}")):
-            return None
-
-        if re.search(r"[*`?\\<>{}]| / ", rest) or not re.search(r"[A-Za-z0-9]", rest):
-            return None
-        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
-            rest = rest[1:-1].strip()
-            if not re.search(r"[A-Za-z0-9]", rest):
-                return None
-        if not multi_word and len(rest.split()) > 1:
-            return None
-        examples = getattr(fields[target], "examples", None)
-        if examples and rest in examples:
-            return None
-
-        try:
-            value = TypeAdapter(fields[target].annotation).validate_python(rest)
-        except (ValidationError, TypeError, ValueError):
-            return None
-        return ParameterExtraction._bound_model(command_parameters_class, {target: value})
+        """``fill.from_positional``: parameters from a bare ``command_name value`` command, or None."""
+        return fill.from_positional(command, command_parameters_class, command_name)
 
     @staticmethod
     def _unbound_lone_value(command: str, params: Optional[BaseModel],
@@ -1173,6 +713,12 @@ class ParameterExtraction:
             value is None or (isinstance(value, list) and len(value) == 0))
 
     @staticmethod
+    def _is_shown_value(value) -> bool:
+        """Whether the question showed *value* ("Extracted parameters so far"): a real value, not a "not given" one."""
+        return not (value in [NOT_FOUND, None, INVALID_INT_VALUE, INVALID_FLOAT_VALUE]
+                    or (isinstance(value, list) and len(value) == 0))
+
+    @staticmethod
     def _extract_and_merge_missing_parameters(stored_params: BaseModel, command: str):
         """
         Identify fields to fill by scanning for sentinel values and merge values
@@ -1180,11 +726,11 @@ class ParameterExtraction:
         existing behavior for token/field count mismatches and leaves values as
         strings (no type coercion).
 
-        The reply answers the clarification, so the fields it asked for
-        (``_is_asked_field``) are filled first, in declaration order, and an
-        unset Optional field only after them (fix-mbkw): "Ann" for a missing
-        ``name`` no longer lands in an Optional ``filter`` declared before it.
-        A comma-separated reply with one part per asked field fills those fields.
+        The reply is read by the one reader of parameter replies (``parameters.read``, the same rule a planning command's
+        reply is read by): ``name: value`` lines set the fields the question listed (the asked ones and the ones it
+        showed), one asked field takes the whole reply, several take its comma-separated parts in order when the counts
+        match, and only asked fields are ever filled from a value without a name. A reply that does not read leaves the
+        parameters as they were (the question is asked again).
         """
         # Initialize with existing values to avoid triggering validation
         model_fields = type(stored_params).model_fields
@@ -1196,7 +742,6 @@ class ParameterExtraction:
 
         # Determine which fields still need user-provided input based on sentinels
         asked_fields = []
-        other_fields = []
         for field_name in field_names:
             value = getattr(stored_params, field_name, None)
             if value in [
@@ -1207,36 +752,18 @@ class ParameterExtraction:
             ] or (isinstance(value, list) and len(value) == 0):
                 if ParameterExtraction._is_asked_field(model_fields[field_name], value):
                     asked_fields.append(field_name)
-                else:
-                    other_fields.append(field_name)
-        fields_to_fill = asked_fields + other_fields
-
-        if not fields_to_fill:
+        if not asked_fields:
             return stored_params
 
-        # Preserve existing mismatch handling and keep all values as strings
-        if "," in command:
-            parts = [part.strip() for part in command.split(",")]
-
-            if len(asked_fields) > 1 and len(parts) == len(asked_fields):
-                for field, part in zip(asked_fields, parts):
-                    params_data[field] = part
-            elif (
-                len(parts) == len(fields_to_fill) == 1
-                or len(parts) != len(fields_to_fill)
-                and parts
-            ):
-                field = fields_to_fill[0]
-                if field in params_data:
-                    params_data[field] = parts[0]
-            elif len(parts) == len(fields_to_fill) and len(fields_to_fill) > 1:
-                for i, field in enumerate(fields_to_fill):
-                    if i < len(parts) and field in params_data:
-                        params_data[field] = parts[i]
-        else:
-            field = fields_to_fill[0]
-            if field in params_data:
-                params_data[field] = command.strip()
+        listed = list(asked_fields) + [name for name in field_names if name not in asked_fields and
+                                       ParameterExtraction._is_shown_value(getattr(stored_params, name, None))]
+        slots = {name: read.slot_of(model_fields[name].annotation,
+                                    required=type(None) not in get_args(model_fields[name].annotation))
+                 for name in asked_fields}
+        reading = read.read(command, listed, asked_fields, slots=slots)
+        if reading.kind != read.VALUES:
+            return stored_params
+        params_data.update(reading.values)   # a value of None leaves an optional field empty
 
         # Return a new instance without validation
         return stored_params.__class__.model_construct(**params_data)
@@ -1269,34 +796,15 @@ def missing_value_reply_enabled() -> bool:
     return value.strip().lower() not in _MISSING_VALUE_REPLY_OFF
 
 
-def missing_value_question(command_name: str, missing_fields: list[str]) -> str:
-    """The missing-value prompt as the user saw it, reconstructed from stored state.
-
-    The prompt's text is not stored, so this rebuilds its lead line and its
-    'Missing parameter values' line from the command name and the stored fields.
-    """
-    return (f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
-            f"{MISSING_INFORMATION_ERRMSG}{', '.join(missing_fields)}")
-
-
-def pending_missing_fields(app_workflow, command_name: str, stored_params: BaseModel,
-                           command: str) -> list[str]:
-    """The fields the pending round still asks for, read from the markers it stored.
-
-    No validation is run: validation can call the workflow's hooks (database or backend
-    lookups), and this runs on every reply to the prompt. ``_extract_impl`` stored each
-    missing or invalid field with a "not given" marker, which ``_is_asked_field`` reads.
-    """
-    fields = type(stored_params).model_fields
-    return [name for name, info in fields.items()
-            if ParameterExtraction._is_asked_field(info, getattr(stored_params, name, None))]
-
-
 def classify_missing_value_reply(question: str, reply: str) -> str:
     """Jev's intent for a reply to the missing-value prompt: a non-answer intent at or above
     MISSING_VALUE_REPLY_THRESHOLD, otherwise "answer". Never raises: no Jev LM or any failure
     means "answer", which is the behaviour before this check.
     """
+    if no_agent_mode._bare(reply) in (read.NO_WORDS | no_agent_mode._YES):
+        # A bare yes or no is the value the question asked for when its field is a yes/no one, and the reader of the reply
+        # decides what it is otherwise (``parameters.read``): never "you misunderstood", and no model call.
+        return "answer"
     try:
         from dspy.experimental import Choice
         from fastworkflow.workflow_agent import _jev_lm
@@ -1306,12 +814,17 @@ def classify_missing_value_reply(question: str, reply: str) -> str:
             return "answer"
 
         class ClassifyMissingValueReply(dspy.Signature):
-            """Decide what a user's reply to the system's question does."""
+            """Decide what a user's reply to the system's question does. A reply that is a command written with a leading
+            slash and a command name (``/find_book``) asks for that command instead: it is not the value asked for."""
 
             question: str = dspy.InputField(desc="the question the system asked the user")
             reply: str = dspy.InputField(desc="the user's reply")
             intent: Choice[MISSING_VALUE_REPLY_OPTIONS] = dspy.OutputField(desc="What does the reply do?")
 
+        # The classifier reads the question without the note that only the answer is read: with the note in it, a
+        # reply that names another command ("/find_book") was classified as an answer (measured, bd fix-rpio).
+        question = "\n".join(line for line in str(question).splitlines()
+                             if line.strip() != no_agent_mode.ANSWER_ONLY_NOTE)
         with dspy.context(lm=jev_lm):
             choice = dspy.Predict(ClassifyMissingValueReply)(question=question, reply=reply).intent
         value = str(choice.value)
@@ -1327,14 +840,25 @@ def classify_missing_value_reply(question: str, reply: str) -> str:
 
 
 class ExtractedArguments(BaseModel):
-    """What ``extract_arguments`` found: the checked values (``params``, None when the command takes none),
-    whether they are valid, and why not (``refusal``: a refused value, or the missing required fields)."""
+    """What ``extract_arguments`` found: the checked values (``params``, None when the command takes none) and the
+    shared contract for them (``extraction``: what is still open, and the refusal as ``reason``); ``retried`` says the
+    extractor was asked a second time with the refusal."""
 
     params: Optional[BaseModel] = None
-    valid: bool = True
-    refusal: Optional[str] = None
-    missing: List[str] = []
+    extraction: Extraction = Extraction()
     retried: bool = False
+
+    @property
+    def valid(self) -> bool:
+        return not self.extraction.names and not self.extraction.reason
+
+    @property
+    def refusal(self) -> Optional[str]:
+        return self.extraction.reason or None
+
+    @property
+    def missing(self) -> List[str]:
+        return list(self.extraction.missing)
 
 
 def _start_argument_checks(app_workflow, extractor, command_name: str, params_class, text: str):
@@ -1357,6 +881,35 @@ def _start_argument_checks(app_workflow, extractor, command_name: str, params_cl
         return None, None
     pool = concurrent.futures.ThreadPoolExecutor(1)
     return pool.submit(contextvars.copy_context().run, planning_commands.check_verdicts, lm, command, text), pool
+
+
+#: The diagnostics keys that record a value the model produced and a screen refused (it is then cleared, so the
+#: field reads as "missing"): a placeholder, a number outside its bounds, a command's own name, a pronoun or a word
+#: of the workflow's vocabulary, or a value the not-given classifier reset. The extractor's own "not given" marker is not
+#: one of them.
+_SCREENED_VALUE_KEYS = ("placeholder_values", "out_of_range_values", "command_name_values", "word_screen_values",
+                        "fields_reset_not_given")
+
+
+def _screen_refused_a_value(diagnostics: dict) -> bool:
+    """Whether validation refused something the model produced (a field it names invalid, or a value a screen cleared)
+    rather than finding a required value simply absent. Read from the diagnostics' structured keys."""
+    return bool(diagnostics.get("invalid_fields")) or any(diagnostics.get(key) for key in _SCREENED_VALUE_KEYS)
+
+
+def _validation_verdict(valid: bool, message: str, diagnostics: dict, detail) -> pipeline.Verdict:
+    """The pipeline's verdict of one ``validate_parameters`` result: ok, ``missing`` when only required values are
+    simply absent (nothing the model produced was refused: no second pass), else ``refused``. Read from the
+    diagnostics' structured keys, never from the message text. *detail* is what the caller reads from it."""
+    if valid:
+        return pipeline.Verdict(detail=detail)
+    missing = list(diagnostics.get("missing_fields") or [])
+    reason = diagnostics.get("argument_refusal")   # a guard's own text, when it is what the message carries
+    refusal = (("missing required argument " + ", ".join(missing)) if missing and not
+               diagnostics.get("invalid_fields") else
+               reason if reason and reason in (message or "") else (message or "").strip()) or "the arguments are refused"
+    kind = pipeline.KIND_MISSING if missing and not _screen_refused_a_value(diagnostics) else pipeline.KIND_REFUSED
+    return pipeline.Verdict(kind, refusal, detail)
 
 
 def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, text: str,
@@ -1382,39 +935,46 @@ def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, te
         command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
     if not params_class:
         return ExtractedArguments()
-    extraction = ParameterExtraction(None, app_workflow, command_name, text)
     extractor = InputForParamExtraction.create(app_workflow, command_name, text)
 
-    def validated(params: BaseModel) -> ExtractedArguments:
+    def validated(params: BaseModel, attempt: int) -> pipeline.Verdict:
+        if attempt == 2:
+            diagnostics.pop("missing_fields", None)
+            diagnostics.pop("invalid_fields", None)
         valid, message, _, fields = extractor.validate_parameters(
             app_workflow, command_name, params, diagnostics, checks)
-        missing = list(diagnostics.get("missing_fields") or []) if not valid else []
-        refusal = None
-        if not valid:
-            refusal = ("missing required argument " + ", ".join(missing)) if missing and not \
-                diagnostics.get("invalid_fields") else (message or "").strip()
-        return ExtractedArguments(params=params, valid=valid, refusal=refusal, missing=missing)
+        verdict = _validation_verdict(valid, message, diagnostics, None)
+        refusal = verdict.refusal
+        return pipeline.Verdict(verdict.kind, refusal, ExtractedArguments(
+            params=params, extraction=extraction_of(params, {} if valid else diagnostics, "" if valid else refusal)))
+
+    planning = _planning_command_of(app_workflow, command_name) is not None
+    guarded = argument_checks.checks_enabled() and not planning
+
+    first_unparsed: list = []
+
+    def fill_text(note: str, attempt: int) -> BaseModel:
+        filled = fill.fill(extractor, params_class, command_name, folder, note=note)
+        if attempt == 1 and filled.unparsed:
+            first_unparsed.append(True)
+        # the first fill and the guard's retry report to the span's diagnostics; a planning command's retry does not
+        if not (planning and attempt == 2):
+            diagnostics["extraction_method"] = "llm"
+            if filled.reset_not_given is not None:
+                diagnostics["fields_reset_not_given"] = filled.reset_not_given
+        return filled.params
 
     # The option checks read only the Jev LM, the static command and *text*: start them beside the
     # extraction (as typed_planning_call does) and join where validation reads them.
     checks, pool = _start_argument_checks(app_workflow, extractor, command_name, params_class, text)
     try:
-        result = validated(extraction._llm_extract(extractor, params_class, folder, diagnostics))
-        if result.valid or _planning_command_of(app_workflow, command_name) is None:
-            return result
-        extractor.command = f"{text}\n\n{argument_checks.REFUSED_EXTRACTION_NOTE.format(refusal=result.refusal)}"
-        try:
-            params = extractor.extract_parameters(params_class, command_name, folder)
-        except Exception as exc:  # noqa: BLE001 - the retry is an extra: the first answer stands
-            logger.warning(f"argument extraction retry failed: {exc!r}")
-            return result
-        finally:
-            extractor.command = text      # validation reads the request from here
-        diagnostics.pop("missing_fields", None)
-        diagnostics.pop("invalid_fields", None)
-        second = validated(params)
-        second.retried = True
-        return second
+        check, settle = _llm_guard(text, diagnostics) if guarded else (None, None)
+        extracted = pipeline.extract(
+            fill_text, check=check, settle=settle, validate=validated, unparsed=lambda: bool(first_unparsed),
+            retry_note=argument_checks.REFUSED_EXTRACTION_NOTE)
+        result = extracted.final.detail
+        result.retried = extracted.retried
+        return result
     finally:
         if pool is not None:
             pool.shutdown(wait=True)

@@ -17,7 +17,10 @@ from dspy.utils.exceptions import LMTransportError
 
 import fastworkflow
 from fastworkflow import planning_commands as sc
-from fastworkflow import workflow_agent
+from fastworkflow import no_agent_mode, workflow_agent
+from fastworkflow import parameter_clarification as pcl
+from fastworkflow.parameter_clarification import Extraction, ParameterLoop
+from fastworkflow.waiting import KIND_PARAMETERS, Waiting
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.llm_credentials import syndata_llm_available
@@ -90,7 +93,7 @@ def test_a_refusal_from_a_planning_commands_own_rule_is_put_in_its_own_words():
     assert refused.value.fields == ("member",)
     assert sc.refusal_question(command, refused.value) == (
         "I can't run member loans yet: member is 'everyone', which names no one member; this skill "
-        "reads one member's loans: give that member's name. What should the member be?")
+        "reads one member's loans: give that member's name. Which member should I use?")
 
 
 def _refusal(command: sc.PlanningCommandCommand, values: dict, asked_in: str) -> sc.PlanningCommandInputError:
@@ -132,7 +135,7 @@ def test_an_attended_turn_asks_about_a_refusal_naming_an_input(workflow_env):
 
     question = workflow_agent.planning_command_refusal_to_ask(ctx, command, _refusal(command, {"member": ""}, REQUEST))
 
-    assert question == MEMBER_QUESTION
+    assert question == f"{MEMBER_QUESTION} {no_agent_mode.ANSWER_ONLY_NOTE}"
 
 
 @pytest.mark.parametrize("refusal", [NOT_THIS_JOB, INPUT_RULE], ids=["hook-names-no-field", "input-rule"])
@@ -161,7 +164,7 @@ def test_refused_planning_command_call_gets_the_refusal_question(request):
     question = sc.missing_argument_question(command, "member")
 
     assert question == MEMBER_QUESTION
-    assert question == sc.refusal_question(command, sc.PlanningCommandInputError("missing required argument member"))
+    assert question == sc.refusal_question(command, pcl.refusal_from_gaps(Extraction(missing=("member",))))
 
 
 def test_a_refusal_is_asked_in_an_attended_turn_that_has_not_asked_or_run(workflow_env):
@@ -189,13 +192,33 @@ def test_a_refusal_is_not_asked_when_a_message_queue_blocks_the_turn(workflow_en
     assert workflow_agent._planning_command_refusal_may_ask(ctx) is False
 
 
-def test_a_refusal_is_not_asked_once_the_turn_has_asked_one(workflow_env):
+def test_a_refusal_may_be_asked_again_after_a_question_the_asking_rule_decides_how_often(workflow_env):
     workflow_env()
     ctx, _wf = _session(RecordingTraceSink(), folder=PLANNING_COMMANDS)
     ctx._begin_turn(REQUEST)
-    ctx._planning_command_refusal_answered = True  # the reply to the first question has been run
+    # The reply to the first question has been run: the turn's loop records that it asked. Step 6 (consequence b): that no
+    # longer shuts the gate (the "once" rule is gone); the parameter loop's rule decides whether a next question is put.
+    ctx._part_loop = ParameterLoop(command="member_loans", asks=1)
 
-    assert workflow_agent._planning_command_refusal_may_ask(ctx) is False
+    assert workflow_agent._planning_command_refusal_may_ask(ctx) is True
+
+
+def test_a_loop_that_ended_on_replies_with_no_progress_is_never_asked_again(workflow_env):
+    """The hand-over is made once: after the stop the same refusal goes to the text planner or the agent, with no further
+    question, even when the part is re-run and a later reply closes a value."""
+    workflow_env()
+    ctx, _wf = _session(RecordingTraceSink(), folder=PLANNING_COMMANDS)
+    ctx._begin_turn(REQUEST)
+    command = _planning_command("member_loans")
+    refusal = _refusal(command, {"member": ""}, REQUEST)
+
+    assert ctx._open_parameter_loop(command, refusal, request_text=REQUEST) is not None       # the first question
+    loop = ctx._part_loop
+    loop.stalled = 2                                                                          # two replies with no progress
+    ctx._waiting = None                                                                       # the reply was taken
+
+    assert ctx._open_parameter_loop(command, refusal, request_text=REQUEST) is None
+    assert ctx._waiting is None
 
 
 def test_a_refusal_is_not_asked_once_a_command_has_run_in_the_turn(workflow_env):
@@ -212,15 +235,15 @@ def test_the_refusal_flags_survive_a_save_and_restore(workflow_env):
     workflow_env()
     sink = RecordingTraceSink()
     ctx, _wf = _session(sink, folder=PLANNING_COMMANDS)
-    ctx._planning_command_refusal_pending = True
-    ctx._planning_command_refusal_answered = True
+    ctx._part_loop = ParameterLoop(command="member_loans", asks=1, open=["member"], request_text=REQUEST)
+    ctx._waiting = Waiting(KIND_PARAMETERS, payload={"loop": ctx._part_loop.to_state(), "after": "resume_part"})
     state = ctx.serialize_state(channel_id="refusal-flags")
 
     restored, _wf = _session(sink, folder=PLANNING_COMMANDS)
     restored.apply_serialized_state(state)
 
-    assert restored._planning_command_refusal_pending is True
-    assert restored._planning_command_refusal_answered is True
+    assert restored._resolution_pending is True
+    assert restored._part_loop == ctx._part_loop and restored._waiting.payload == ctx._waiting.payload
 
 
 def test_a_save_from_before_the_refusal_flags_restores_them_as_unset(workflow_env):
@@ -228,15 +251,15 @@ def test_a_save_from_before_the_refusal_flags_restores_them_as_unset(workflow_en
     sink = RecordingTraceSink()
     ctx, _wf = _session(sink, folder=PLANNING_COMMANDS)
     older = {key: value for key, value in ctx.serialize_state(channel_id="older-save").items()
-             if key not in ("skill_refusal_pending", "skill_refusal_answered")}
+             if key not in ("skill_refusal_pending", "skill_refusal_answered", "plan_resolution")}
 
     restored, _wf = _session(sink, folder=PLANNING_COMMANDS)
-    restored._planning_command_refusal_pending = True
-    restored._planning_command_refusal_answered = True
+    restored._part_loop = ParameterLoop(command="member_loans", asks=1)
+    restored._waiting = Waiting(KIND_PARAMETERS, payload={"loop": restored._part_loop.to_state(), "after": "resume_part"})
     restored.apply_serialized_state(older)
 
-    assert restored._planning_command_refusal_pending is False
-    assert restored._planning_command_refusal_answered is False
+    assert restored._resolution_pending is False
+    assert restored._part_loop is None
 
 
 def test_a_failure_that_is_not_a_refusal_is_never_put_to_the_user(workflow_env, monkeypatch):
@@ -260,7 +283,7 @@ def test_a_failure_that_is_not_a_refusal_is_never_put_to_the_user(workflow_env, 
         ctx.pop_active_workflow()
 
     assert ctx._planning_command_refusal is None
-    assert ctx._planning_command_refusal_pending is False
+    assert ctx._resolution_pending is False
 
 
 # ---------------------------------------------------------------- planner LLM: the typed call is real

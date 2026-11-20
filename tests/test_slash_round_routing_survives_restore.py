@@ -11,13 +11,11 @@ import json
 
 import pytest
 
-from fastworkflow import NLUPipelineStage
 from tests.test_parameter_form_reply_contract import PARTIAL, _last, _ran, session  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
-FLAG = "is_assistant_mode_command"
 CONV_A, CONV_B = 901, 902
 
 
@@ -28,7 +26,7 @@ def _saved(ctx) -> dict:
 def _open_round(ctx):
     out = ctx.process_turn(PARTIAL)
     assert "parameter_request" in _last(out).artifacts
-    assert FLAG in ctx._cme_workflow.context
+    assert ctx.assistant_round
 
 
 def test_returning_to_a_parked_round_keeps_the_deterministic_path(session):
@@ -36,7 +34,7 @@ def test_returning_to_a_parked_round_keeps_the_deterministic_path(session):
     ctx.bind_observability_identity(conversation_id=CONV_A)
     _open_round(ctx)
     ctx.bind_observability_identity(conversation_id=CONV_B)
-    assert FLAG not in ctx._cme_workflow.context            # nothing leaks into the other conversation
+    assert not ctx.assistant_round            # nothing leaks into the other conversation
     ctx.bind_observability_identity(conversation_id=CONV_A)
     out = ctx.process_turn("abort")
     assert ctx.agent_invoked == []
@@ -57,7 +55,7 @@ def test_a_rebuilt_context_keeps_the_deterministic_path_mid_round(session):
     ctx = session(True)
     _open_round(ctx)
     state = _saved(ctx)
-    assert state["nlu_stage"] == NLUPipelineStage.PARAMETER_EXTRACTION.value
+    assert state["waiting"]["payload"]["loop"] is not None
     rebuilt = session(True)
     rebuilt.apply_serialized_state(state)
     out = rebuilt.process_turn("abort")
@@ -69,18 +67,18 @@ def test_a_state_saved_without_the_key_loads_as_before(session):
     ctx = session(True)
     _open_round(ctx)
     state = _saved(ctx)
-    state.pop("assistant_command", None)
+    state["waiting"]["assistant"] = False                   # the "/" round rides on the record (``Waiting.assistant``)
     rebuilt = session(True)
     rebuilt.apply_serialized_state(state)                   # loads; the flag is simply not restored
-    assert FLAG not in rebuilt._cme_workflow.context
+    assert not rebuilt.assistant_round
 
 
 def test_a_session_with_no_round_saves_no_flag(session):
     ctx = session(True)
-    assert not _saved(ctx).get("assistant_command")
+    assert _saved(ctx)["waiting"] is None
     rebuilt = session(True)
     rebuilt.apply_serialized_state(_saved(ctx))
-    assert FLAG not in rebuilt._cme_workflow.context
+    assert not rebuilt.assistant_round
 
 
 def test_a_finished_round_leaves_nothing_to_restore_so_the_agent_stays_reachable(session):
@@ -88,7 +86,7 @@ def test_a_finished_round_leaves_nothing_to_restore_so_the_agent_stays_reachable
     _open_round(ctx)
     ctx.process_turn("abort")
     state = _saved(ctx)
-    assert state["assistant_command"] is False
+    assert state["waiting"] is None and "assistant_command" not in state
     rebuilt = session(True)
     rebuilt.apply_serialized_state(state)
     with pytest.raises(AssertionError, match="the agent was invoked"):

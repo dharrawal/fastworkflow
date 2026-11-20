@@ -161,6 +161,14 @@ MODEL_ARTIFACT_MARKERS: frozenset[str] = frozenset(
     }
 )
 
+# The folder of a version that holds the workflow's one intent model when the workflow was
+# trained with INTENT_MODEL_LAYOUT=workflow (`intent_model_layout`, which imports nothing heavy
+# and whose name for the folder this is). It sits beside the context folders and is not a
+# context: it gets no compatibility entry, and readers reach it through a context folder's
+# `workflow_scope.json`.
+WORKFLOW_MODEL_DIRNAME: str = "workflow"
+WORKFLOW_SCOPE_FILENAME: str = "workflow_scope.json"
+
 # Hardlinks make `carry_forward_context` free instead of copying 276 MB per context.
 # The trade-off: a hardlinked file edited *in place* (`open(path, "w")` truncates the
 # shared inode) would mutate every version that shares it. Training never does that —
@@ -549,8 +557,25 @@ def ensure_versions_root(workflow_folderpath: str) -> Path:
     return root
 
 
+def is_workflow_model_dir(path: Path) -> bool:
+    """True for a version's ``workflow`` folder that holds the workflow's one intent model.
+
+    Told from a context that happens to be called ``workflow`` by what a context folder
+    always has and the model folder never does: ``threshold.json``.
+    """
+    return (
+        path.name == WORKFLOW_MODEL_DIRNAME
+        and path.is_dir()
+        and not (path / "threshold.json").exists()
+    )
+
+
 def version_context_names(workflow_folderpath: str, version_id: str) -> list[str]:
-    """Return the context folder names present in *version_id*, sorted."""
+    """Return the context folder names present in *version_id*, sorted.
+
+    The folder of the workflow's one intent model (the ``workflow`` layout) is not a context
+    and is left out, so publication routes the contexts and nothing else.
+    """
     vdir = version_dir(workflow_folderpath, version_id)
     if not vdir.is_dir():
         return []
@@ -558,6 +583,7 @@ def version_context_names(workflow_folderpath: str, version_id: str) -> list[str
         entry.name
         for entry in vdir.iterdir()
         if entry.is_dir() and not entry.name.startswith(".")
+        and not is_workflow_model_dir(entry)
     )
 
 
@@ -1754,6 +1780,7 @@ def prune_versions(
 def retain_current_and_previous(
     workflow_folderpath: str,
     previous_version: Optional[str],
+    also_keep: Sequence[str] = (),
 ) -> list[str]:
     """Keep only the current version and its previous successful version.
 
@@ -1783,8 +1810,9 @@ def retain_current_and_previous(
                 f"re-enable retention; older versions are retained until then."
             )
             return []
+        # *also_keep* is for a refit (`train.head_refit`): the full train its lineage descends from is kept too.
         retained = {
-            version_id for version_id in (current, previous_version) if version_id
+            version_id for version_id in (current, previous_version, *also_keep) if version_id
         }
         doomed = [
             info.version_id
@@ -1943,9 +1971,26 @@ def carry_forward_context(
         )
         return True
 
+    # A context of the ``workflow`` layout is two small files that point at the version's one
+    # model. Carried alone it would point at nothing, so the model folder comes with it, once.
+    model_source = version_dir(workflow_folderpath, from_version) / WORKFLOW_MODEL_DIRNAME
+    model_destination = version_dir(workflow_folderpath, to_version) / WORKFLOW_MODEL_DIRNAME
+    needs_model = (source / WORKFLOW_SCOPE_FILENAME).is_file()
+    if needs_model and not is_workflow_model_dir(model_source):
+        logger.warning(
+            f"Cannot carry forward context {context_name!r}: it reads the workflow model "
+            f"of version {from_version}, and {model_source} does not exist"
+        )
+        return False
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     if USE_HARDLINKS_FOR_CARRY_FORWARD:
         _link_tree(source, destination)
     else:
         shutil.copytree(source, destination, dirs_exist_ok=True)
+    if needs_model and not model_destination.exists():
+        if USE_HARDLINKS_FOR_CARRY_FORWARD:
+            _link_tree(model_source, model_destination)
+        else:
+            shutil.copytree(model_source, model_destination, dirs_exist_ok=True)
     return True

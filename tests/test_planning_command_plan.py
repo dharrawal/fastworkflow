@@ -19,7 +19,7 @@ from fastworkflow.planning import (StepFormError, command_inputs_for_steps, coun
                                 count_and_names_read, phase, planned, planning_command_parts, run)
 from fastworkflow.planning_phases import (Placeholder, check_bindings, concatenated_steps,
                                        phase_steps, runs_now, stops_after)
-from tests.test_planning_commands import HOURS_RECIPE, _match_only, recipe_env  # noqa: F401 - recipe_env is a fixture
+from tests.test_planning_commands import HOURS_RECIPE, recipe_env  # noqa: F401 - recipe_env is a fixture
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 
@@ -694,16 +694,15 @@ def test_a_no_input_phased_planning_command_call_has_no_arguments():
     assert call.args == {} and call.plan == "" and [p.name for p in call.phases] == ["sections", "late"]
 
 
-def test_planner_keeps_instructions_and_the_adapt_template(request, monkeypatch):
+def test_planner_keeps_instructions_and_the_adapt_template(request):
     assert workflow_agent.PLANNER_INSTRUCTIONS.strip().startswith("Carefully review the user_query")
 
     folder = request.getfixturevalue("recipe_env").wf.folderpath
-    _match_only(monkeypatch, "", HOURS_RECIPE)
-    template, command = workflow_agent.planner_planning_command_for("When are the branches open?", folder)
+    command = workflow_agent.load_planning_command_map(folder)[HOURS_RECIPE]
+    template = workflow_agent._template_text(command.template)
     assert template == (
         "A job like this is usually done as:\n- library_hours\n- say when the branches are open\n"
         "Adapt this to the request: drop steps it does not need and add steps it asks for.")
-    assert command is workflow_agent.load_planning_command_map(folder)[HOURS_RECIPE]
 
 
 EXAMPLE_TODO = str(Path(__file__).resolve().parent / "example_workflow")

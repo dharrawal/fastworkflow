@@ -1,14 +1,9 @@
-from typing import List, Optional
+from typing import Optional
 import os
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow import NLUPipelineStage, tracing
-from fastworkflow.cache_matching import cache_match, store_utterance_cache
+from fastworkflow import tracing
 from fastworkflow.observability.decision_signals import (
     DecisionUncertainty,
     UncertaintySignal,
@@ -17,20 +12,10 @@ from fastworkflow.observability.decision_signals import (
     classifier_topk_margin,
     fuzzy_distance,
 )
-from fastworkflow.kvstore import KVStore
-from fastworkflow.model_pipeline_training import (
-    CommandRouter,
-    GLOBAL_CONTEXT_FOLDER,
-)
-# The commands that enter a context are read from the descend edges (`@descends_to`
-# on each command, design 3.15), the one navigation declaration.
-from fastworkflow.context_navigation import entering_commands
-from fastworkflow.nlu_labels import (
-    PARAMETER_VALUE_LABEL, is_escalation, is_non_routable, label_of,
-)
+from fastworkflow import intent_clarification, intent_detector, intent_loop
+from fastworkflow.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+from fastworkflow.nlu_labels import is_escalation
 from fastworkflow.train.artifact_versioning import VERSIONS_DIRNAME
-
-from fastworkflow.utils.fuzzy_match import find_best_matches
 
 
 # A low-confidence top-k prediction containing an escalation label remains an
@@ -69,7 +54,7 @@ ESCALATION_OUTCOMES: frozenset[str] = frozenset({
 # the span can record what a distance was compared against — a distance with no
 # threshold beside it cannot be binned by a calibration report. The value is
 # unchanged.
-_FUZZY_PREMATCH_MAX_DISTANCE = 0.3  # Adjust threshold as needed
+_FUZZY_PREMATCH_MAX_DISTANCE = intent_clarification.FUZZY_MAX_DISTANCE
 
 # Identifies the matcher that produced a fuzzy distance, so a curve drawn from one
 # matcher is not silently continued by another. The name carries the two properties
@@ -98,61 +83,8 @@ _UNVERSIONED_ARTIFACT = "unversioned"
 _UNKNOWN_MODEL_TIER = "unknown-tier"
 
 
-def foreign_context_hint(
-    command_name: str,
-    owner_contexts: list[str],
-    enter_commands: dict[str, list[str]],
-) -> str:
-    """What to say when a real command name reaches a context that cannot run it.
-
-    The foreign-context matcher returns None for such a name and the parent walk
-    carries it up; when no context on that chain owns it either, the walk used to
-    end at `you_misunderstood`, which says only that nothing matched. That is true
-    and useless: the name IS a command, the runtime knows exactly which contexts
-    have it, and the caller is one navigation away from being able to run it. The
-    CME wildcard command now returns this hint as the whole response instead.
-
-    A hint, never an action: this composes text and nothing here navigates. The
-    difference matters because auto-navigating on a misrouted call would change
-    the workflow's state on the strength of a guess about what was meant.
-
-    Generic by construction. The owning contexts come from the routing
-    definition, and the entering command only from a command's own
-    `@descends_to` declaration -- never from the shape of a command's name.
-
-    *enter_commands* is keyed by owning context. With one owner the entering
-    commands are simply listed; with several, each is named beside the context
-    it enters, because a merged list cannot say which command opens which.
-    Owners that declare nothing are left out of the entry text, and still named
-    among the owners.
-    """
-    owners = ", ".join(owner_contexts)
-    plural = "contexts" if len(owner_contexts) > 1 else "context"
-    declared = [
-        (context_name, enter_commands[context_name])
-        for context_name in owner_contexts
-        if enter_commands.get(context_name)
-    ]
-    entry = ""
-    if len(owner_contexts) == 1 and declared:
-        entry = " Enter it with: " + ", ".join(
-            f"'{c}'" for c in declared[0][1]) + "."
-    elif declared:
-        entry = "".join(
-            f" Enter {context_name} with: "
-            + ", ".join(f"'{c}'" for c in commands) + "."
-            for context_name, commands in declared
-        )
-    if entry:
-        step = f"{entry} Then run '{command_name}' there."
-    else:
-        where = "that context" if len(owner_contexts) == 1 else "one of those contexts"
-        step = f" Move into {where} first, then run '{command_name}' there."
-    return (
-        f"'{command_name}' is a command of the {owners} {plural}, which this "
-        f"context and its parents do not provide.{step} Use 'what_can_i_do' to "
-        f"list the commands available where you are now."
-    )
+#: The hint is composed by the intent loop (the one place a foreign name is decided); kept under its name here.
+foreign_context_hint = intent_loop.foreign_context_hint
 
 
 def escalation_outcome_of(predictions: list[str]) -> str:
@@ -173,35 +105,6 @@ def escalation_outcome_of(predictions: list[str]) -> str:
     if len(predictions) == 1:
         return ESCALATION_OUTCOME_HONORED
     return ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY
-
-
-def _jev_intent_tiebreak(utterance: str, predictions: list[str], folderpath: str,
-                         context: str, nlu_trace: dict) -> Optional[str]:
-    """The label Jev chooses among the classifier's ambiguous *predictions*, or None.
-
-    Records the question and its answer in ``nlu_trace["jev_tiebreak"]`` whenever Jev was asked.
-    The import is lazy: ``workflow_agent`` imports this stack, so a top-level import would be circular.
-    """
-    from fastworkflow.workflow_agent import (
-        INTENT_TIEBREAK_THRESHOLD, choose_ambiguous_command, intent_tiebreak_descriptions)
-    candidates = [str(p) for p in predictions]
-    descriptions = intent_tiebreak_descriptions(folderpath, context, candidates)
-    label, probability = choose_ambiguous_command(utterance, candidates, descriptions)
-    if label is not None:
-        nlu_trace["jev_tiebreak"] = {
-            "choice": label,
-            "probability": probability,
-            "threshold": INTENT_TIEBREAK_THRESHOLD,
-            "candidates": candidates,
-        }
-        return label
-    if probability is not None:
-        nlu_trace["jev_tiebreak"] = {
-            "choice": None,
-            "probability": probability,
-            "threshold": INTENT_TIEBREAK_THRESHOLD,
-        }
-    return None
 
 
 def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str:
@@ -295,11 +198,11 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
         # confidence 1.0 here would enter a calibration curve as a real
         # measurement of a classifier that never ran.
         signals_absent_reason = "deterministic-resolution"
-    elif matcher_layer == "clarification_default":
-        # 'what can i do?' is a constant the code substitutes when no matcher
-        # claimed the utterance in a clarification stage. Nothing was measured and
-        # nothing could have been, so this is deterministic in the same sense as an
-        # exact match rather than an uncaptured measurement.
+    elif matcher_layer in ("clarification_default", "question_reply"):
+        # A reply to the which-command question is read by code (a name, a number, a word), and 'what can i do?'
+        # was a constant substituted when no matcher claimed the utterance in a clarification stage. Nothing was
+        # measured and nothing could have been, so this is deterministic in the same sense as an exact match rather
+        # than an uncaptured measurement.
         signals_absent_reason = "deterministic-resolution"
     elif matcher_layer == "fuzzy_prematch":
         signals.extend([
@@ -308,17 +211,10 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
             ),
             ambiguity_set_size(candidate_count, signal_version=_FUZZY_MATCHER_VERSION),
         ])
-    elif matcher_layer == "embedding_cache":
-        # The cosine similarity that decided this is on the span as
-        # `cache_similarity`, but §6.6.1's SignalKind enum has no member for an
-        # embedding similarity, so the structured record genuinely cannot carry it.
-        # "not-instrumented" is the honest report of a decision whose measurement
-        # the contract cannot represent yet.
-        signals_absent_reason = "not-instrumented"
-    elif matcher_layer == "jev_tiebreak":
-        # Jev chose among the classifier's candidates. Its probability is on the span as
-        # `jev_tiebreak`, but §6.6.1 has no signal kind for an LLM's probability, so the
-        # record says so. The candidate count is kept: the ambiguity was real.
+    elif matcher_layer == "matcher":
+        # The model matcher answered for the scope (the local model was not confident, or the
+        # scope has none). Its probabilities are on the span as `matcher`, but §6.6.1 has no
+        # signal kind for an LLM's probability. The candidate count is what the matcher kept.
         signals_absent_reason = "not-instrumented"
     elif matcher_layer == "classifier":
         signal_version = nlu_trace["classifier_signal_version"]
@@ -395,708 +291,197 @@ def _recorded_command_identity_uncertainty(
 
 
 class CommandNamePrediction:
-    class Output(BaseModel):
-        command_name: Optional[str] = None
-        error_msg: Optional[str] = None
-        is_cme_command: bool = False
-        # Set only when the first token names a command this context does not
-        # own. The walk carries the hint so the failure message at the end of
-        # the chain can say where the command actually lives; a resolved
-        # prediction leaves them None and nothing reads them.
-        known_name_owner_contexts: Optional[list[str]] = None
-        routing_hint: Optional[str] = None
-        # True when this context's head answered `parameter_value`: the utterance is
-        # a bare value, not a command here or anywhere else. Such an answer ends the
-        # parent-context walk where it is given (design 2.18, 3.9 step 4). A null
-        # command_name alone cannot tell it from a decline, which is why this exists.
-        answered_bare_value: bool = False
-        # The ambiguity prompt's routable candidates (fix-weih.2); set only with error_msg.
-        candidates: Optional[List[str]] = None
+    """The CME's intent stage: ``intent_loop.resolve`` for the request, wrapped in the ``fw.nlu.intent`` span.
+
+    The decision is the intent loop's (one decision for the whole walk, the same one the plan path makes: exact name,
+    foreign-name guard, fuzzy name, the local model over the whole walk, then the chain). What is this class's: the CME
+    may answer the framework's core commands (``core=True``), the span, and the facts the span reads."""
 
     def __init__(self, cme_workflow: fastworkflow.Workflow):
         self.cme_workflow = cme_workflow
         self.app_workflow = cme_workflow.context["app_workflow"]
         self.app_workflow_folderpath = self.app_workflow.folderpath
         self.app_workflow_id = self.app_workflow.id
+        #: The span facts of the last decision.
+        self.trace: dict = {}
 
-        self.convo_path = (
-            cme_workflow.context.get("convo_path")
-            or os.path.join(self.app_workflow_folderpath, "___convo_info")
-        )
-        self.cache_path = self._get_cache_path(self.app_workflow_id, self.convo_path)
-        self.path = self._get_cache_path_cache(self.convo_path, self.app_workflow_id)
-        # Built once per predictor and reused across the parent-chain walk,
-        # which asks the same question in every context it visits.
-        self._command_inventory: Optional[dict[str, tuple[str, ...]]] = None
-        self._enter_commands: dict[str, list[str]] = {}
+    def predict(self, command: str) -> intent_loop.Intent:
+        """The intent of *command* from where the application workflow stands, in one ``fw.nlu.intent`` span.
 
-    def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
-        """Predict, wrapped in a ``fw.nlu.intent`` span (D3 as amended).
+        One span per decision, with the context the command lives in (or the current context when nothing was
+        decided). It carries which layer decided (exact prefix / fuzzy pre-match / foreign name / classifier /
+        matcher), the classifier's confidence and threshold when it ran, and the candidate set on an ambiguity. Emission
+        never affects the decision: the helpers no-op without a bound host/sink.
 
-        One span per prediction attempt — the wildcard command's parent-chain
-        walk calls this once per context, and each attempt is recorded with
-        the context it ran against. The span carries which matching layer
-        decided (exact prefix / fuzzy pre-match / embedding cache /
-        classifier), the classifier's confidence and threshold when it ran,
-        and the candidate set on an ambiguity. Emission never affects the
-        prediction: the helpers no-op without a bound host/sink.
-
-        It also carries the §6.6.1 ``DecisionUncertainty`` for the
-        command-identity decision, assembled by ``command_identity_uncertainty``
-        from the facts below. That record is written to the span and read by
-        nothing else (FW-REQ-021 P0: representation only).
+        It also carries the §6.6.1 ``DecisionUncertainty`` for the command-identity decision, assembled by
+        ``command_identity_uncertainty`` from the facts below. That record is written to the span and read by nothing
+        else (FW-REQ-021 P0: representation only).
         """
         host = tracing.current_host()
         span = tracing.start_span(
             host,
             tracing.SPAN_NLU_INTENT,
             attributes={
-                "context": command_context_name,
-                "stage": nlu_pipeline_stage.name,
+                "context": self.app_workflow._current_command_context_name,
+                "stage": "INTENT_DETECTION",
                 "utterance": command,
             },
         )
         nlu_trace: dict = {}
         try:
-            output = self._predict_impl(
-                command_context_name, command, nlu_pipeline_stage, nlu_trace
-            )
+            intent = self._predict_impl(command, nlu_trace)
         except BaseException:
-            # No DecisionUncertainty here: the prediction did not complete, so
-            # there is no decision to characterise. The raw facts gathered so far
-            # still go out.
-            tracing.end_span(
-                host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace
-            )
+            # No DecisionUncertainty here: the prediction did not complete, so there is no decision to characterise.
+            # The raw facts gathered so far still go out.
+            tracing.end_span(host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace)
             raise
+        self.trace = nlu_trace
         tracing.end_span(
             host,
             span,
             status=tracing.STATUS_OK,
             attributes={
                 **nlu_trace,
-                "decision_uncertainty": _recorded_command_identity_uncertainty(
-                    span, nlu_trace
-                ),
-                "command_name": output.command_name,
-                "is_cme_command": output.is_cme_command,
-                "ambiguous": output.error_msg is not None,
-                # None = no local prediction; the caller walks up the context
-                # chain (or files a misunderstanding) — exactly the routing
+                "context": intent.context or self.app_workflow._current_command_context_name,
+                "decision_uncertainty": _recorded_command_identity_uncertainty(span, nlu_trace),
+                "command_name": intent.command,
+                "is_cme_command": intent.kind == intent_loop.KIND_CORE,
+                "ambiguous": intent.outcome == intent_loop.AMBIGUOUS,
+                # None = no command: the CME files a misunderstanding (or a routing hint) — exactly the routing
                 # signal a debugging agent needs.
-                "resolved": output.command_name is not None,
+                "resolved": intent.command is not None,
             },
         )
-        return output
+        return intent
 
-    def command_inventory(self) -> dict[str, tuple[str, ...]]:
-        """Every command name this app workflow owns, and the contexts owning it.
-
-        Keyed on the lowercased simple name, which is what the exact-name
-        matcher compares against, and valued with the context names so a span
-        can say where the call should have gone. Reserved labels (`wildcard`,
-        `parameter_value`) name no command and are left out.
-
-        Read from the same `RoutingDefinition` the per-context candidate set is
-        built from (`RoutingRegistry` caches it per workflow folder), so there
-        is no second source of truth to drift: this is that definition read
-        across every context instead of one. Planning commands are read from
-        `get_planning_command_names`, the same accessor the per-context set uses,
-        so a planning name owned by another context is guarded like a routed one.
-        """
-        if self._command_inventory is None:
-            app_crd = fastworkflow.RoutingRegistry.get_definition(
-                self.app_workflow_folderpath)
-            owners: dict[str, set[str]] = {}
-            for context_name, qualified_names in app_crd.contexts.items():
-                for qualified_name in qualified_names:
-                    simple_name = qualified_name.split('/')[-1]
-                    if is_non_routable(simple_name):
-                        continue
-                    owners.setdefault(simple_name.lower(), set()).add(context_name)
-            for context_name in app_crd.contexts:
-                for qualified_name in app_crd.get_planning_command_names(context_name):
-                    simple_name = qualified_name.split('/')[-1]
-                    if is_non_routable(simple_name):
-                        continue
-                    owners.setdefault(simple_name.lower(), set()).add(context_name)
-            self._command_inventory = {
-                name: tuple(sorted(contexts)) for name, contexts in owners.items()
-            }
-        return self._command_inventory
-
-    def enter_commands_for(self, context_name: str) -> list[str]:
-        """The command(s) a workflow declares as entering *context_name*.
-
-        Read from the descend edges (`context_navigation.entering_commands`): each
-        command whose `@descends_to` names the context, with the values it needs.
-        Empty when no command declares it. Nothing here is allowed to raise: a hint
-        that names the context alone is worth more than a failed turn.
-        """
-        if context_name in self._enter_commands:
-            return self._enter_commands[context_name]
-        declared = entering_commands(self.app_workflow_folderpath, context_name)
-        self._enter_commands[context_name] = declared
-        return declared
-
-    def routing_hint_for(self, command_name: str, owner_contexts: list[str]) -> str:
-        """The hint for one foreign known name, entering commands resolved."""
-        enter_commands = {
-            context_name: self.enter_commands_for(context_name)
-            for context_name in owner_contexts
-        }
-        return foreign_context_hint(command_name, owner_contexts, enter_commands)
-
-    def foreign_owner_contexts(
-        self,
-        normalized_command_name: str,
-        command_name_dict: dict[str, str],
-        command_context_name: str,
-    ) -> list[str]:
-        """Contexts owning *normalized_command_name*, when this one does not.
-
-        Empty when the token names no command of this workflow (ordinary free
-        text, which is what the classifier is for) and empty when this
-        context's own candidate set contains it (already matched above). A
-        non-empty result is the foreign-context condition: a real command name,
-        reached in a context that cannot execute it.
-
-        Compared in lowercase on both sides: the inventory is keyed on the
-        lowercased name while `command_name_dict` keeps each command's own
-        spelling, so a case-sensitive test would call a context's own
-        mixed-case command foreign. The current context is dropped from the
-        owners for the same reason -- a context may never refuse a name as
-        belonging somewhere else when the somewhere else is itself.
-        """
-        if normalized_command_name in {name.lower() for name in command_name_dict}:
-            return []
-        return [
-            context_name
-            for context_name in self.command_inventory().get(normalized_command_name, ())
-            if context_name != command_context_name
-        ]
-
-    def _predict_impl(
-        self,
-        command_context_name: str,
-        command: str,
-        nlu_pipeline_stage: NLUPipelineStage,
-        nlu_trace: dict,
-    ) -> "CommandNamePrediction.Output":
-        # sourcery skip: extract-duplicate-method
-
-        # Set before any matching so the attribute is always present: an absent
-        # escalation outcome would be indistinguishable from "no escalation", and
-        # only the classifier below can produce an escalation label at all.
-        nlu_trace["escalation_outcome"] = ESCALATION_OUTCOME_NOT_EVALUATED
-
-        model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
-        # The router is built only where a classifier or the embedding cache is consulted (below),
-        # never for an exact command name: an exact name needs no model, and a context with no
-        # trained model (the global scope of a workflow with no global model) must still take one (3.9).
-        command_router = None
-        modelpipeline = None
-
-        def ensure_router():
-            # Re-use the already-built ModelPipeline attached to the router instead of
-            # instantiating a fresh one. This avoids reloading HF checkpoints and transferring
-            # tensors each time we see a new message for the same context.
-            nonlocal command_router, modelpipeline
-            if command_router is None:
-                command_router = CommandRouter(model_artifact_path)
-                modelpipeline = command_router.modelpipeline
-            return command_router
-
-        crd = fastworkflow.RoutingRegistry.get_definition(
-            self.cme_workflow.folderpath)
-        cme_command_names = crd.get_command_names('IntentDetection')
-
-        valid_command_names = set()
-        if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-            valid_command_names = self._get_suggested_commands(self.path)
-        elif nlu_pipeline_stage in (
-                NLUPipelineStage.INTENT_DETECTION, NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION):
-            app_crd = fastworkflow.RoutingRegistry.get_definition(
-                self.app_workflow_folderpath)
-            # A planning command is typed by name like a routed one: its name must be in
-            # this exact-match set, or its words fall to the classifier, which has no
-            # planning labels (training excludes them). Never added to the classifier path.
-            valid_command_names = (
-                set(cme_command_names) |
-                set(app_crd.get_command_names(command_context_name)) |
-                set(app_crd.get_planning_command_names(command_context_name))
-            )
-
-        command_name_dict = {
-            fully_qualified_command_name.split('/')[-1]: fully_qualified_command_name 
-            for fully_qualified_command_name in valid_command_names
-        }
-
-        if nlu_pipeline_stage in (
-                NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION):
-            # what_can_i_do is special in both clarification stages
-            # We will not predict, just match plain utterances with exact or fuzzy match
-            # Both stages also fall back to the plain utterance 'what can i do?'
-            # when nothing matches (below), so it must be a key in both.
-            command_name_dict |= {
-                plain_utterance: 'IntentDetection/what_can_i_do'
-                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
-                    'IntentDetection/what_can_i_do'
-                ].plain_utterances
-            }
-
-        if nlu_pipeline_stage != NLUPipelineStage.INTENT_DETECTION:
-            # abort is special. 
-            # We will not predict, just match plain utterances with exact or fuzzy match
-            command_name_dict |= {
-                plain_utterance: 'ErrorCorrection/abort'
-                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
-                    'ErrorCorrection/abort'
-                ].plain_utterances
-            }
-
-        if nlu_pipeline_stage != NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION:
-            # you_misunderstood is special. 
-            # We will not predict, just match plain utterances with exact or fuzzy match
-            command_name_dict |= {
-                plain_utterance: 'ErrorCorrection/you_misunderstood'
-                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
-                    'ErrorCorrection/you_misunderstood'
-                ].plain_utterances
-            }
-
-        # A command name ends at whitespace or a '(' -- ANY whitespace, not a
-        # space alone: `list_orders\n<scope>all</scope>` otherwise makes the
-        # whole line the tentative name, so neither the matcher nor the foreign-
-        # name guard sees one. "" splits to [], hence the guard.
-        tentative_command_name = (
-            command.split(None, 1)[0].split("(", 1)[0] if command.strip() else "")
-        normalized_command_name = tentative_command_name.lstrip("/").lower()
-        # The typed token is lowercased, but `command_name_dict` keeps each
-        # command's own spelling, so the exact match looks the token up by its
-        # lowercase form and resolves to the key as spelled.
-        exact_key = {
-            name.lower(): name for name in command_name_dict
-        }.get(normalized_command_name)
-        command_name = None
-        if exact_key is not None:
-            command_name = exact_key
-            command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
-            nlu_trace["matcher_layer"] = "exact_prefix"
-        elif (
-            nlu_pipeline_stage in (
-                NLUPipelineStage.INTENT_DETECTION,
-                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION)
-            and (owner_contexts := self.foreign_owner_contexts(
-                normalized_command_name, command_name_dict, command_context_name))
-        ):
-            # R1 a known command name may not be answered by a
-            # context that does not own it. The exact-name matcher above is
-            # scoped to THIS context's command set, so a root ('*') or sibling
-            # command typed verbatim -- `fetch_result_page <handle>O9</handle>`,
-            # `show_items <filter>...`, `list_orders` -- is invisible to
-            # layers 1 and 2 here and would be adjudicated by this context's
-            # classifier, which answered four of them with a confident
-            # "No orders found." (69 silent
-            # misroutes across 31 stored runs).
-            #
-            # None is already the signal that drives the parent-chain walk
-            # (`_commands/wildcard.py`), so returning it here carries the
-            # call up to the context that does own the name, where the
-            # deterministic matcher resolves it. Nothing below this line runs:
-            # no fuzzy candidates, no embedding cache, no classifier. A name
-            # whose owner is not on this chain now reaches the routing hint
-            # below instead of a lucky classifier guess -- loud instead of silent.
-            #
-            # INTENT_DETECTION and INTENT_MISUNDERSTANDING_CLARIFICATION only.
-            # The ambiguity stage matches against a constrained suggestion set,
-            # where "not in this context's set" is the normal case rather than
-            # a misroute. The misunderstanding stage matches this context's
-            # full command set, the same set intent detection uses, so a real
-            # command name missing from it is the same misroute there; without
-            # the guard it fell to the 'what can i do?' default and the owner
-            # was never named.
-            hint = self.routing_hint_for(normalized_command_name, owner_contexts)
-            nlu_trace["matcher_layer"] = MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
-            nlu_trace["known_name_foreign_context"] = True
-            nlu_trace["known_name_owner_contexts"] = owner_contexts
-            # On the span beside the event it belongs to, so a summary can count
-            # how often the hint was given and how often the next call followed
-            # it, without re-deriving the text from the inventory.
-            nlu_trace["known_name_foreign_context_hint"] = hint
-            return CommandNamePrediction.Output(
-                command_name=None,
-                known_name_owner_contexts=owner_contexts,
-                routing_hint=hint,
-            )
-        else:
-            # Use Levenshtein distance for fuzzy matching with the full command part after @
-            # No match is ([], None), never (None, None) — len() here is safe.
-            best_matched_commands, best_distance = find_best_matches(
-                command.replace(" ", "_"),
-                command_name_dict.keys(),
-                threshold=_FUZZY_PREMATCH_MAX_DISTANCE
-            )
-            # The distance used to be thrown away with `_` (FW-REQ-021 clause 1:
-            # a signal must not be discarded after its threshold comparison). It
-            # is a DISTANCE, so lower is a better match; the threshold beside it
-            # is a maximum, and `SIGNAL_DOMAINS["fuzzy-score"]` records that
-            # polarity for anyone binning these values. It is None above the
-            # threshold, because `find_best_matches` returns ([], None) there.
-            nlu_trace["fuzzy_distance"] = best_distance
-            nlu_trace["fuzzy_threshold"] = _FUZZY_PREMATCH_MAX_DISTANCE
-            nlu_trace["candidate_count"] = len(best_matched_commands)
-            if (
-                len(best_matched_commands) > 1
-                and nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
-            ):
-                # Commands sharing a prefix tie at distance 0, because scoring
-                # compares only the leading len(input) characters, and
-                # command_name_dict iterates a set — so picking [0] would choose
-                # nondeterministically between them across processes. Leave the
-                # name unset so the classifier and its ambiguity prompt decide.
-                # The clarification stages are deliberately excluded: they have
-                # no classifier to fall back to.
+    def _predict_impl(self, command: str, nlu_trace: dict) -> intent_loop.Intent:
+        intent = intent_loop.resolve(self.app_workflow, command, core=True)
+        nlu_trace.update(self._facts_of(intent))
+        if intent.outcome == intent_loop.AMBIGUOUS and intent.decided_by == intent_loop.BY_QUESTION:
+            if escalation_signals := self.escalation_signals_in(self._labels_of(intent)):
                 logger.warning(
-                    f"Fuzzy pre-match tied across {best_matched_commands} for "
-                    f"utterance '{command}' in context '{command_context_name}'. "
-                    "Deferring to the classifier instead of picking one."
-                )
-                nlu_trace["fuzzy_prematch_tie"] = [str(c) for c in best_matched_commands]
-            elif best_matched_commands:
-                command_name = best_matched_commands[0]
-                nlu_trace["matcher_layer"] = "fuzzy_prematch"
+                    f"Top-k escalation signal discarded for utterance '{command}'. "
+                    f"predictions={self._labels_of(intent)}, suppressed={escalation_signals}. The classifier ranked "
+                    "an escalation label alongside local candidates; the user will be prompted with the local "
+                    "candidates only and the 'this belongs to an ancestor context' signal is dropped.")
+                nlu_trace["escalation_labels_discarded"] = [str(label) for label in escalation_signals]
+        return intent
 
-        if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
-            if not command_name:
-                # return_details asks for the similarity alongside the label. The
-                # match itself is unchanged — the same threshold, the same winner —
-                # but the number it was compared against is no longer discarded
-                # (FW-REQ-021 clause 1). A hit is a 2-tuple, a miss is still None,
-                # so the walrus test behaves exactly as it did.
-                ensure_router()
-                if cache_result := cache_match(
-                    self.path, command, modelpipeline, 0.85, return_details=True
-                ):
-                    command_name, cache_similarity = cache_result
-                    nlu_trace["matcher_layer"] = "embedding_cache"
-                    nlu_trace["cache_similarity_threshold"] = 0.85
-                    # A cosine similarity: HIGHER is a better match, the opposite
-                    # of the fuzzy distance above, and the threshold beside it is a
-                    # minimum. Recorded as a plain attribute because §6.6.1's
-                    # SignalKind enum has no member for it.
-                    nlu_trace["cache_similarity"] = float(cache_similarity)
-                    nlu_trace["candidate_count"] = 1
-                else:
-                    predictions, classifier_details = (
-                        command_router.predict_with_details(command)
-                    )
-                    # predictions = majority_vote_predictions(command_router, command)
-                    nlu_trace["matcher_layer"] = "classifier"
-                    nlu_trace["classifier"] = classifier_details
-                    # `.get`, not `[...]`: the details dict belongs to
-                    # `CommandRouter`, and a router that reports no tier must not be
-                    # able to fail a turn from inside the resolution path. The test
-                    # doubles that inject labels return an empty dict on purpose.
-                    nlu_trace["classifier_signal_version"] = _classifier_signal_version(
-                        model_artifact_path,
-                        classifier_details.get("model_tier", _UNKNOWN_MODEL_TIER),
-                    )
-                    nlu_trace["candidate_count"] = len(predictions)
-                    nlu_trace["escalation_outcome"] = escalation_outcome_of(predictions)
+    @staticmethod
+    def _labels_of(intent: intent_loop.Intent) -> list[str]:
+        deciding = intent.deciding
+        return [str(label) for label in deciding.labels] if deciding is not None else []
 
-                    if len(predictions)==1:
-                        command_name = predictions[0].split('/')[-1]
-                    elif jev_label := _jev_intent_tiebreak(
-                            command, predictions, self.app_workflow_folderpath,
-                            command_context_name, nlu_trace):
-                        # Jev chose among the candidates, confidently: route to it as if the
-                        # classifier had. The ambiguity prompt is not shown. The choice is not
-                        # written to the utterance cache: only the clarification stages do that.
-                        command_name = jev_label.split('/')[-1]
-                        nlu_trace["matcher_layer"] = "jev_tiebreak"
-                    else:
-                        # If confidence is low, treat as ambiguous command (type 1)
-                        if escalation_signals := self.escalation_signals_in(predictions):
-                            logger.warning(
-                                f"Top-k escalation signal discarded in "
-                                f"context '{command_context_name}' for utterance "
-                                f"'{command}'. predictions={predictions}, "
-                                f"suppressed={escalation_signals}. The classifier ranked "
-                                "an escalation label alongside local candidates; the user "
-                                "will be prompted with the local candidates only and the "
-                                "'this belongs to an ancestor context' signal is dropped."
-                            )
-                            nlu_trace["escalation_labels_discarded"] = [
-                                str(label) for label in escalation_signals
-                            ]
-
-                        error_msg = self._formulate_ambiguous_command_error_message(
-                            predictions, "run_as_agent" in self.app_workflow.context)
-
-                        # Store suggested commands
-                        nlu_trace["candidates"] = [str(p) for p in predictions]
-                        # The runtime is about to ask, and the answer resolves this:
-                        # requirements §4.14's reducible uncertainty, recorded where
-                        # the asking happens rather than inferred afterwards from
-                        # the shape of the record.
-                        nlu_trace["reducible"] = True
-                        self._store_suggested_commands(self.path, predictions, 1)
-                        return CommandNamePrediction.Output(
-                            error_msg=error_msg,
-                            candidates=[str(p) for p in predictions if not is_non_routable(p)])
-
-        elif nlu_pipeline_stage in (
-            NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-            NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-        ) and not command_name:
-            command_name = "what can i do?"
-            nlu_trace["matcher_layer"] = "clarification_default"
-            # The fuzzy pre-match above found nothing and left a count of 0; the
-            # default that replaces it is one command, chosen by the code.
-            nlu_trace["candidate_count"] = 1
-
-        answered_bare_value = (
-            command_name is not None and label_of(command_name) == PARAMETER_VALUE_LABEL
-        )
-        fully_qualified_command_name = self.resolve_fully_qualified_command_name(
-            command_name, command_name_dict)
-        if fully_qualified_command_name is None:
-            is_cme_command=False
+    def _facts_of(self, intent: intent_loop.Intent) -> dict:
+        """The span facts of a decision, read off its engine answers (the keys the span contract names)."""
+        trace: dict = {"escalation_outcome": ESCALATION_OUTCOME_NOT_EVALUATED}
+        # What the name layers found, key by key (the span contract is read from these lines).
+        facts = intent.facts
+        if "matcher_layer" in facts:
+            trace["matcher_layer"] = facts["matcher_layer"]
+        if "known_name_foreign_context" in facts:
+            trace["known_name_foreign_context"] = facts["known_name_foreign_context"]
+            trace["known_name_owner_contexts"] = facts["known_name_owner_contexts"]
+            trace["known_name_foreign_context_hint"] = facts["known_name_foreign_context_hint"]
+        if "fuzzy_distance" in facts:
+            trace["fuzzy_distance"] = facts["fuzzy_distance"]
+            trace["fuzzy_threshold"] = facts["fuzzy_threshold"]
+        if "fuzzy_prematch_tie" in facts:
+            trace["fuzzy_prematch_tie"] = facts["fuzzy_prematch_tie"]
+        if "candidate_count" in facts:
+            trace["candidate_count"] = facts["candidate_count"]
+        answers = intent.answers
+        head = matcher = None
+        for answer in answers:
+            details = answer.details or {}
+            if answer.engine == intent_detector.ENGINE_MATCHER:
+                matcher = answer
+                if isinstance(details.get("classifier"), dict):
+                    head = head or details["classifier"]
+            else:
+                head = details
+        classifier_answer = next((a for a in reversed(answers) if a.engine == intent_detector.ENGINE_CLASSIFIER), None)
+        if not answers:
+            return trace
+        deciding = intent.deciding
+        context = intent.context or self.app_workflow._current_command_context_name
+        if head is not None:
+            trace["classifier"] = head
+            trace["classifier_signal_version"] = _classifier_signal_version(
+                f"{self.app_workflow_folderpath}/___command_info/{context}",
+                head.get("model_tier", _UNKNOWN_MODEL_TIER))
+            labels = [str(label) for label in (classifier_answer.labels if classifier_answer is not None else ())]
+            if labels:
+                trace["candidate_count"] = len(labels)
+                trace["escalation_outcome"] = escalation_outcome_of(labels)
+        failed = next((a.details for a in answers if a.details.get("matcher_error")), None)
+        if matcher is None and failed is not None:
+            # The remote model was asked and its call failed: the local answer stands, carrying what happened.
+            trace["matcher"] = {"error": failed["matcher_error"], "error_class": failed.get("matcher_error_class"),
+                                "status_code": failed.get("matcher_status_code")}
+            trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER, intent_detector.ENGINE_MATCHER]
+        elif matcher is not None:
+            trace["matcher"] = matcher.details
+            trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER, intent_detector.ENGINE_MATCHER] \
+                if head is not None else [intent_detector.ENGINE_MATCHER]
+            trace["escalation_outcome"] = escalation_outcome_of([str(label) for label in matcher.labels])
+            trace["candidate_count"] = len(matcher.labels) if matcher.kind != intent_detector.NOT_MINE else 0
         else:
-            is_cme_command=(
-                fully_qualified_command_name in cme_command_names or 
-                fully_qualified_command_name in crd.get_command_names('ErrorCorrection')
-            )
-
-        if (
-            nlu_pipeline_stage
-            in (
-                NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
-            )
-            # A reserved label resolves to None; the clarification cache keys on a
-            # real command name, so there is nothing to store for it.
-            and fully_qualified_command_name is not None
-            and not fully_qualified_command_name.endswith('abort')
-            and not fully_qualified_command_name.endswith('what_can_i_do')
-            and not fully_qualified_command_name.endswith('you_misunderstood')
-        ):
-            command = self.cme_workflow.context["command"]
-            ensure_router()
-            store_utterance_cache(self.path, command, command_name, modelpipeline)
-
-        return CommandNamePrediction.Output(
-            command_name=fully_qualified_command_name,
-            is_cme_command=is_cme_command,
-            answered_bare_value=answered_bare_value,
-        )
-
-    @staticmethod
-    def _get_cache_path(workflow_id, convo_path):
-        """
-        Generate cache file path based on workflow ID
-        """
-        base_dir = convo_path
-        # Create directory if it doesn't exist
-        os.makedirs(base_dir, exist_ok=True)
-        return os.path.join(base_dir, f"{workflow_id}.sqlite3")
-
-    @staticmethod
-    def _get_cache_path_cache(convo_path, workflow_id=None):
-        """
-        Path to the utterance/clarification cache.
-
-        Shared across sessions by default, which is the point of the cache: a
-        disambiguation learned in one session helps the next.
-
-        `FW_UTTERANCE_CACHE_SCOPE=workflow` shards it by workflow id instead.
-        Repeated independent runs must not have correlated attempts, and this
-        file is read on the runtime turn path (`cache_match`) and written on it
-        (`store_utterance_cache`) while being keyed on nothing -- so a second
-        run would inherit the first run's disambiguation decisions whenever
-        both run against the same workflow folder. The sibling
-        `_get_cache_path` is already sharded this way; this is the same
-        treatment, opt-in so ordinary runs keep their shared cache.
-        """
-        base_dir = convo_path
-        # Create directory if it doesn't exist
-        os.makedirs(base_dir, exist_ok=True)
-        scope = fastworkflow.get_env_var("FW_UTTERANCE_CACHE_SCOPE", default="shared")
-        if scope == "workflow" and workflow_id is not None:
-            return os.path.join(base_dir, f"cache-{workflow_id}.sqlite3")
-        return os.path.join(base_dir, "cache.sqlite3")
-
-    # Store the suggested commands with the flag type
-    @staticmethod
-    def _store_suggested_commands(cache_path, command_list, flag_type):
-        """
-        Store the list of suggested commands for the constrained selection
-
-        Args:
-            cache_path: Path to the cache database
-            command_list: List of suggested commands
-            flag_type: Type of constraint (1=ambiguous, 2=misclassified)
-        """
-        with KVStore(cache_path) as db:
-            # predict() returns a numpy ndarray of labels; JSON needs plain strs.
-            db["suggested_commands"] = [str(c) for c in list(command_list)]
-            db["flag_type"] = int(flag_type)
-
-    # Get the suggested commands
-    @staticmethod
-    def _get_suggested_commands(cache_path):
-        """
-        Get the list of suggested commands for the constrained selection
-        """
-        with KVStore(cache_path) as db:
-            return db.get("suggested_commands", [])
-
-    @staticmethod
-    def _get_count(cache_path):
-        with KVStore(cache_path) as db:
-            return db.get("utterance_count", 0)  # Default to 0 if key doesn't exist
-
-    @staticmethod
-    def _print_db_contents(cache_path):
-        with KVStore(cache_path) as db:
-            print("All keys in database:", list(db.keys()))
-            for key in db.keys():
-                print(f"Key: {key}, Value: {db[key]}")
-
-    @staticmethod
-    def _store_utterance(cache_path, utterance, label):
-        """
-        Store utterance in existing or new database
-        Returns: The utterance count used
-        """
-        with KVStore(cache_path) as db:
-            # Get existing counter or initialize to 0
-            utterance_count = db.get("utterance_count", 0)
-
-            # Create and store the utterance entry
-            utterance_data = {
-                "utterance": utterance,
-                "label": label
-            }
-
-            db[utterance_count] = utterance_data
-
-            # Increment and store the counter
-            utterance_count += 1
-            db["utterance_count"] = utterance_count
-
-            return utterance_count - 1  # Return the count used for this utterance
-
-    # Function to read from database
-    @staticmethod
-    def _read_utterance(cache_path, utterance_id):
-        """
-        Read a specific utterance from the database
-        """
-        with KVStore(cache_path) as db:
-            return db.get(utterance_id)['utterance']
-    @staticmethod
-    def resolve_fully_qualified_command_name(
-        command_name: Optional[str], command_name_dict: dict[str, str]) -> Optional[str]:
-        """Map a predicted label to a fully qualified command name, or None.
-
-        Reserved labels (`wildcard`, `parameter_value`) name no command, so they
-        must resolve to None rather than be looked up in `command_name_dict` —
-        which would raise KeyError. None is what drives the parent-chain walk in
-        the CME wildcard command.
-        """
-        if not command_name or is_non_routable(command_name):
-            return None
-        return command_name_dict[command_name]
+            trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER]
+        errored = next((a.details for a in answers if a.details.get("error_class") or a.details.get("matcher_error_class")), None)
+        if errored is not None:
+            trace["remote_failed"] = {
+                "error_class": errored.get("error_class") or errored.get("matcher_error_class"),
+                "status_code": errored.get("status_code") or errored.get("matcher_status_code")}
+        trace["engine"] = deciding.engine
+        trace["engine_fallback"] = deciding.fallback
+        trace["matcher_layer"] = "matcher" if deciding.engine == intent_detector.ENGINE_MATCHER else "classifier"
+        if intent.decided_by == intent_loop.BY_QUESTION:
+            trace["candidates"] = list(intent.ambiguous)
+            trace["candidate_count"] = len(intent.ambiguous)
+            # The runtime is about to ask, and the answer resolves this: requirements §4.14's reducible uncertainty,
+            # recorded where the asking happens.
+            trace["reducible"] = True
+            trace["engine"] = intent_detector.ENGINE_QUESTION
+        return trace
 
     @staticmethod
     def escalation_signals_in(route_choice_list: list[str]) -> list[str]:
         """Return the escalation labels present in a prediction list."""
-        return [
-            route_choice for route_choice in route_choice_list
-            if is_escalation(route_choice)
-        ]
+        return [route_choice for route_choice in route_choice_list if is_escalation(route_choice)]
 
-    @staticmethod
-    def _formulate_ambiguous_command_error_message(
-        route_choice_list: list[str], run_as_agent: bool) -> str:
-        command_list = (
-            "\n".join([
-                f"{route_choice.split('/')[-1].lower()}"
-                for route_choice in route_choice_list if not is_non_routable(route_choice)
-            ])
-        )
+    def read_reply(self, record: dict, reply: str) -> tuple[intent_loop.Answer, Optional[intent_loop.Intent]]:
+        """The reply to the pending which-command question, read by the intent loop's one reader, in one
+        ``fw.nlu.intent`` span (stage ``INTENT_AMBIGUITY_CLARIFICATION`` or ``INTENT_MISUNDERSTANDING_CLARIFICATION``).
+        The span says how the reply read (``matcher_layer`` ``question_reply``) and which command it picked. Returns the
+        answer and, for a pick, where the command lives (``intent_loop.choose``; None for any other answer, and for a
+        command no scope of the path has). A command of another scope than the current one is recorded on the span as
+        ``chosen_command_elsewhere``: it runs on that scope's record, as a climb would."""
+        stage = ("INTENT_MISUNDERSTANDING_CLARIFICATION" if record.get("misunderstood")
+                 else "INTENT_AMBIGUITY_CLARIFICATION")
+        host = tracing.current_host()
+        span = tracing.start_span(
+            host, tracing.SPAN_NLU_INTENT,
+            attributes={"context": self.app_workflow._current_command_context_name, "stage": stage,
+                        "utterance": reply})
+        nlu_trace: dict = {}
+        try:
+            answered = intent_loop.answer(record, reply, aliases=intent_loop.core_aliases())
+            chosen = intent_loop.choose(self.app_workflow, answered.name) if answered.kind == intent_loop.PICK else None
+            if chosen is not None and chosen.context != self.app_workflow._current_command_context_name \
+                    and chosen.kind != intent_loop.KIND_CORE:
+                nlu_trace["chosen_command_elsewhere"] = answered.name
+        except BaseException:
+            tracing.end_span(host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace)
+            raise
+        nlu_trace["matcher_layer"] = "question_reply"
+        nlu_trace["escalation_outcome"] = ESCALATION_OUTCOME_NOT_EVALUATED
+        nlu_trace["candidate_count"] = len(record.get("choices") or ())
+        tracing.end_span(
+            host, span, status=tracing.STATUS_OK,
+            attributes={**nlu_trace, "engine": "user", "command_name": answered.name,
+                        "resolved": answered.name is not None, "ambiguous": answered.kind == intent_loop.ASK_AGAIN,
+                        "is_cme_command": chosen is not None and chosen.kind == intent_loop.KIND_CORE,
+                        "decision_uncertainty": _recorded_command_identity_uncertainty(span, nlu_trace)})
+        return answered, chosen
 
-        return (
-            "The command is ambiguous. "
-            + (
-                "Choose the correct command name from these possible options and update your command:\n"
-                if run_as_agent
-                else "Please choose a command name from these possible options:\n"
-            )
-            + f"{command_list}\n\nor type 'what can i do' to see all commands\n"
-            + ("or type 'abort' to cancel" if run_as_agent else '')
-        )
-
-
-# TODO - generation is deterministic. They all return the same answer
-# TODO - Need 'temperature' for intent detection pipeline
-def majority_vote_predictions(command_router, command: str, n_predictions: int = 5) -> list[str]:
-    """
-    Generate N prediction sets in parallel and return the set that wins the majority vote.
-    
-    This function improves prediction reliability by running multiple parallel predictions
-    and selecting the most common result through majority voting. This helps reduce
-    the impact of random variations in model predictions.
-    
-    Args:
-        command_router: The CommandRouter instance to use for predictions
-        command: The input command string
-        n_predictions: Number of parallel predictions to generate (default: 5)
-                      Can be configured via N_PARALLEL_PREDICTIONS environment variable
-        
-    Returns:
-        The prediction set that received the majority vote. Falls back to a single
-        prediction if all parallel predictions fail.
-        
-    Note:
-        Uses ThreadPoolExecutor with max_workers limited to min(n_predictions, 10)
-        to avoid overwhelming the system with too many concurrent threads.
-    """
-    def get_single_prediction():
-        """Helper function to get a single prediction"""
-        return command_router.predict(command)
-    
-    # Generate N predictions in parallel
-    prediction_sets = []
-    with ThreadPoolExecutor(max_workers=min(n_predictions, 10)) as executor:
-        # Submit all prediction tasks
-        futures = [executor.submit(get_single_prediction) for _ in range(n_predictions)]
-        
-        # Collect results as they complete
-        for future in as_completed(futures):
-            try:
-                prediction_set = future.result()
-                prediction_sets.append(prediction_set)
-            except Exception as e:
-                logger.warning(f"Prediction failed: {e}")
-                # Continue with other predictions even if one fails
-    
-    if not prediction_sets:
-        # Fallback to single prediction if all parallel predictions failed
-        logger.warning("All parallel predictions failed, falling back to single prediction")
-        return command_router.predict(command)
-    
-    # Convert lists to tuples so they can be hashed and counted
-    prediction_tuples = [tuple(sorted(pred_set)) for pred_set in prediction_sets]
-    
-    # Count occurrences of each unique prediction set
-    vote_counts = Counter(prediction_tuples)
-    
-    # Get the prediction set with the most votes
-    winning_tuple = vote_counts.most_common(1)[0][0]
-    
-    # Convert back to list and return
-    return list(winning_tuple)

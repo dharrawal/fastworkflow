@@ -58,25 +58,24 @@ Inside wildcard's ResponseGenerator
 
 | Step | Lines | Behavior |
 |---|---|---|
-| Predict command name | `:39-40` | `CommandNamePrediction.predict(context_name, command, nlu_stage)` |
+| Predict command name | `:39-40` | `CommandNamePrediction.predict(command)` (one decision for the whole walk, `intent_loop.resolve`; the per-scope step and its stage argument were removed in fix-o1lg S7) |
 | Ambiguity | `:42-57` | set stage `INTENT_AMBIGUITY_CLARIFICATION`, store `command`, return `success=False` |
 | Core/CME command | `:65-89` | `perform_action` on the CME workflow itself; mark `command_handled` for INTENT_DETECTION-stage hits and `abort` |
 | Context-parent walk | `:99-107` | if no command found, retry prediction while walking `app_workflow.get_parent(...)` up the live chain (this is where `_<Context>.py` `get_parent` earns its keep; there is no hierarchy file) |
 | Out-of-scope | `:109-124` | force `ErrorCorrection/you_misunderstood` |
 | Param extraction | `:140-164` | `ParameterExtraction(...).extract()`; invalid → `PARAMETER EXTRACTION ERROR ...`, `success=False`, stage stays `PARAMETER_EXTRACTION` |
-| Success | `:166-179` | `workflow.end_command_processing()` (resets stage to INTENT_DETECTION, clears `command`/`stored_parameters` — `workflow.py:291-303`), return artifacts `{command, command_name, cmd_parameters}` |
+| Success | `:166-179` | `workflow.end_command_processing()` (resets stage to INTENT_DETECTION, clears `command`/`parameter_loop` — `workflow.py:291-303`), return artifacts `{command, command_name, cmd_parameters}` |
 
 Intent-detection resolution order (`intent_detection.py:99-134`):
 exact first-token match against `command_name_dict` → Levenshtein fuzzy
-(`find_best_matches`, threshold 0.3) → embedding `cache_match` at 0.85 cosine →
-transformer `command_router.predict`; multiple predictions → ambiguity error + suggested
+(`find_best_matches`, threshold 0.3) →
+local model `command_router.predict` → remote decision model → question; multiple predictions → ambiguity error + suggested
 commands stored. `abort` and `you_misunderstood` are matched ONLY by exact/fuzzy plain
 utterance, never by the classifier (`intent_detection.py:79-97`). Model/threshold detail
 belongs to fastworkflow-nlu-pipeline-reference.
 
-The NLU state machine value lives in `cme_workflow.context["NLU_Pipeline_Stage"]`
-(`NLUPipelineStage`, `fastworkflow/__init__.py:13-18`: INTENT_DETECTION,
-INTENT_AMBIGUITY_CLARIFICATION, INTENT_MISUNDERSTANDING_CLARIFICATION, PARAMETER_EXTRACTION).
+What the CME waits for is read from its pending records in `cme_workflow.context`
+(`intent_loop.waiting_for`: `intent` when an `intent_loop` record is open, `parameters` for a `parameter_loop`, else nothing).
 
 ## 4. Agent path (Topology B)
 
@@ -94,11 +93,11 @@ INTENT_AMBIGUITY_CLARIFICATION, INTENT_MISUNDERSTANDING_CLARIFICATION, PARAMETER
 3. Tool calls land in `_execute_workflow_query` (`workflow_agent.py:122-259`), which calls
    the SAME `CommandExecutor.invoke_command` as the deterministic path, captures failures
    as `CommandOutput(success=False)` without masking the exception (`:152-181`), and after
-   each call inspects `NLU_Pipeline_Stage`: AMBIGUITY/MISUNDERSTANDING auto-`abort` and
-   return the NLU reply unchanged for the agent to choose from, and a PARAMETER_EXTRACTION
+   each call inspects `intent_loop.waiting_for`: a pending which-command question auto-`abort`s and
+   returns the NLU reply unchanged for the agent to choose from, and a pending parameter question
    error state auto-`abort`s and replans (`:237-252`).
-4. If the result has `suspended=True` → set `_awaiting_user`, remember the message and
-   clarification, `_note_agent_suspension` (appends the role-inverted ask_user entry,
+4. If the result has `suspended=True` → put the turn's `agent` waiting record (`_ask_agent_question`: the
+   clarification and the message; `_awaiting_user` is read from the record), `_note_agent_suspension` (appends the role-inverted ask_user entry,
    `:214-231`), return `_awaiting_user_output` (a CommandOutput whose response is the
    clarification, with `artifacts["awaiting_user"]=True`, `:741-751`).
 5. Else `_reset_agent_suspension` + `_finalize_agent_output` (`:753-802`): final answer
@@ -114,7 +113,7 @@ ask_user tool closure (workflow_agent.py:444-457)
 fastWorkflowReAct._run_loop catches it (react.py:250-262)
   self._suspended = {trajectory, idx, input_args, max_iters, clarification}
   return Prediction(suspended=True, clarification=..., exhausted=False)
-WEC._process_agent_message sees suspended → _awaiting_user = True (wec:808-813)
+WEC._process_agent_message sees suspended → the `agent` waiting record is put; `_awaiting_user` reads it (wec:808-813)
 ```
 
 Resume (next `process_turn` while `_awaiting_user`):
@@ -141,8 +140,8 @@ suspected CLI spinner hang (unreproduced — "needs runtime verification").
 
 Cross-process resume: `serialize_state` (`wec:312-356`) exports
 `{schema_version, channel_id, session_key, app/cme workflow ids, workflow_folderpath,
-awaiting_user, suspended_user_message, pending_clarification_request,
-react (export_suspended blob incl. iteration_counter — react.py:120-131), nlu_stage,
+waiting (the one record of the question: kind, question, payload),
+react (export_suspended blob incl. iteration_counter — react.py:120-131),
 current_command_context_name, action_log, conversation_history_turns}` — round-tripped
 through `json.dumps(default=str)` so it is JSON-portable. `apply_serialized_state`
 (`wec:358-405`) restores everything except navigation depth (fix-cgs) and only warns on

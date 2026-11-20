@@ -162,10 +162,9 @@ parity is sacred: NEVER modify tau-bench tools/tasks for benchmark runs.
   (publish the fork + artifacts) lands.
 - Any pass^k / reliability number — none has been measured under the E0 harness (E0 is
   unbuilt as of 2026-07-09; no `eval/` dir exists).
-- "1-shot adaptation from intent-detection mistakes" (README.md:373) is implemented
-  (`fastworkflow/cache_matching.py:53 store_utterance_cache`) but its test coverage and
-  cross-session persistence claims are unaudited — treat elaborations beyond the README
-  sentence as unverified.
+- "1-shot adaptation from intent-detection mistakes" is NOT a claim any more: the similarity
+  cache behind it was removed (fix-o5wi.8) and the README says learning from corrections is planned
+  (recorded rows plus a background refit of the head). Do not reintroduce the claim.
 
 Full claims register with per-claim status: [references/external-claims-register.md](references/external-claims-register.md).
 

@@ -1,5 +1,7 @@
 # Out-of-Scope Utterance Rejection: Design Proposal
 
+> **Update (fix-o5wi.8):** the similarity cache this proposal reads and reuses (`fastworkflow/cache_matching.py`, `cache_match`, `get_embedding`, the adaptive correction cache) was removed from intent detection. Every passage below that cites it describes a component that no longer exists.
+
 > **Status:** UNRESOLVED DESIGN PROPOSAL; `fix-d28` REMAINS OPEN. The soft fallback
 > wording is implemented, but no satisfactory out-of-scope solution has been established.
 > `ErrorCorrection/you_misunderstood.py` now presents the capability list without
@@ -1379,7 +1381,7 @@ detector.
 
 The sparse "not here" class (`wildcard` label) is built only from seeds of foreign commands
 (`not_here_seed_rows`). A head with no foreign command (a single-context workflow without core
-commands, e.g. the built-in consultation review-reply head) therefore had no class at all, and a
+commands, e.g. the built-in plan review-reply head) therefore had no class at all, and a
 vague reply ("hmm", "it depends") was routed confidently to the nearest real command and acted on.
 Such a head is now seeded from a short built-in list of domain-neutral vague replies
 (`BUILT_IN_VAGUE_REPLIES`, recorded under the source name `built_in/vague_reply` in the head's

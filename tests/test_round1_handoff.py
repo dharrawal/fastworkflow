@@ -34,7 +34,7 @@ from tests.test_round1_gate import (  # noqa: F401 - the gated context and the g
 from tests.test_turn_result_capture import (  # noqa: F401 - the shared fixtures
     _make_agent_ctx, _set_agents, initialized_fastworkflow)
 
-# The free-text reply tests reach the consultation head through the reader (``process_turn`` -> the CME wildcard
+# The free-text reply tests reach the plan head through the reader (``process_turn`` -> the CME wildcard
 # command); they run on the head's recorded answers (tests/recorded_router.py) so a retrain cannot turn them red and a
 # clean checkout runs them. The others never ask the head.
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow", "recorded_review_router")
@@ -323,7 +323,7 @@ def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals
     second.ctx.apply_serialized_state(state)
     restored = ab.store_for(second.wf).active()
     assert restored is not None and restored.id == record.id and restored.state == REVISED
-    assert second.ctx._turn_frame().subtask_review_open is True
+    assert second.ctx._waiting.kind == "review" and second.ctx._waiting.payload["record_id"] == record.id
 
     second.script.steps = [("finish", {})] * 3              # the review frame, then the two goals
     out = second.ctx.process_turn("accept")
@@ -343,28 +343,30 @@ def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals
 def test_the_fast_path_check_the_draft_and_the_run_share_one_head_lookup_and_one_jev_match(gated, monkeypatch):
     """A single unsure sub-task: the fast-path check and the draft ask the heads for it once, and the Jev match runs once
     per scope in the draft; the accepted run asks neither again."""
-    workflow_agent._planning_command_matcher.cache_clear()
-    jev = CountingLM([{"job": "none"}] * 50)
-    monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: jev)
+    # The remote decision model is asked once per part by the one intent decision (fix-o1lg.1): scripted, counted.
+    from tests.conftest import script_matcher
+    jev_asks = script_matcher(monkeypatch, {JOKE: {"none": 0.95}})
+    # The heads are asked inside the one intent decision (fix-o1lg.1), no longer through run_listing.head_answers:
+    # count that decision (and so the head lookup it makes) for the part.
+    from fastworkflow import intent_loop
     head_asks: list = []
-    real_head_answers = run_listing.head_answers
+    real_decide = intent_loop.resolve
 
-    def counting_head_answers(workflow, sub_task, command_info_root=None):
-        head_asks.append(sub_task)
-        return real_head_answers(workflow, sub_task, command_info_root)
+    def counting_decide(workflow, text, core=False):
+        head_asks.append(text)
+        return real_decide(workflow, text, core=core)
 
-    monkeypatch.setattr(run_listing, "head_answers", counting_head_answers)
+    monkeypatch.setattr(intent_loop, "resolve", counting_decide)
     try:
         _split_into(monkeypatch, [JOKE])
         gated.ctx.process_turn(JOKE)
         _open_review(gated)
-        after_draft_jev = jev.calls
+        after_draft_jev = len(jev_asks)
         after_draft_heads = head_asks.count(JOKE)
         gated.script.steps = [("finish", {}), ("finish", {})]   # the review frame, then the goal
         out = gated.ctx.process_turn("accept")
         assert out.status is TurnStatus.COMPLETED
     finally:
-        workflow_agent._planning_command_matcher.cache_clear()
-    assert after_draft_jev > 0                              # the Jev match did run (once per scope)
-    assert jev.calls == after_draft_jev                     # and the accepted run did not ask it again
+        assert after_draft_jev > 0                              # the Jev match did run (once per scope)
+    assert len(jev_asks) == after_draft_jev                  # and the accepted run did not ask it again
     assert after_draft_heads == 1 and head_asks.count(JOKE) == 1

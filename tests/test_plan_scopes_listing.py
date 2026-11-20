@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import approval_binding, no_agent_mode, review_proposals, workflow_agent
+from fastworkflow import approval_binding, no_agent_mode, workflow_agent
 from fastworkflow.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext
@@ -18,6 +18,7 @@ from tests.scripted_extractor import script_extractor
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401
 from tests.test_round1_gate import gated  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.conftest import script_matcher
 import fastworkflow
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -93,9 +94,10 @@ def test_the_narrow_enumeration_finds_none_while_the_matcher_path_has_the_librar
 
 def test_the_listing_shows_the_plans_of_every_scope_on_the_path_with_the_closest_flagged_across_scopes(gated, monkeypatch):
     _in_a_member_context(gated, monkeypatch)
-    monkeypatch.setattr(review_proposals, "planning_match", lambda workflow, text, exclude=None: (
-        "", None, {ROOT_PLAN: 0.6, LIBRARY_PLAN: 0.3, "none": 0.1}))
-    out = gated.ctx.process_turn(REQUEST, approval_surface=UNVERIFIED)
+    script_matcher(monkeypatch, {REQUEST: {ROOT_PLAN: 0.45, LIBRARY_PLAN: 0.3, "none": 0.1}})     # no match: ad hoc
+    # Unattended: the listing of a part that is not run is the subject (an attended turn asks which plan is meant
+    # first, fix-yu3l.5).
+    out = gated.ctx.process_turn(REQUEST, approval_surface=UNVERIFIED, unattended=True)
 
     (stop,) = out.command_outputs[-1].command_response.artifacts[NOT_RUN_ARTIFACT]
     plans = stop["available_plans"]
@@ -109,8 +111,7 @@ def test_the_listing_shows_the_plans_of_every_scope_on_the_path_with_the_closest
 
 def test_use_plan_accepts_a_root_scope_plan_from_a_member_context_binds_it_and_runs_it(gated, monkeypatch):
     _in_a_member_context(gated, monkeypatch)
-    monkeypatch.setattr(review_proposals, "planning_match",
-                        lambda *a, **k: pytest.fail("a chosen plan must not be matched"))
+    script_matcher(monkeypatch, lambda text: pytest.fail("a chosen plan must not be matched"))
     script_extractor(monkeypatch, *[{"reasoning": "the words", "query": "Dune"}] * 12)
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "on")
     asked = gated.ctx.process_turn(REQUEST, use_plan=ROOT_PLAN, approval_surface=UNVERIFIED)

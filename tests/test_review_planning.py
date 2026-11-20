@@ -17,7 +17,7 @@ import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import planning_commands as pc
 from fastworkflow.review_engine import AWAITING, CONFIRMED, EXPIRED, REVISED, open_review
-from fastworkflow.review_proposals import (Candidate, PlanProposal, SubTaskProposal, build_round1_proposal)
+from fastworkflow.review_proposals import PlanProposal, SubTaskProposal
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the library copy, and the guards
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
@@ -214,25 +214,6 @@ def test_a_sub_task_has_no_completion_field_because_completion_comes_only_from_t
     assert not {"done", "completed", "complete", "success", "status"} & set(SubTask.model_fields)
     assert "finish check" in (SubTask.__doc__ or "")
     assert "CommandOutput.success" in (SubTask.__doc__ or "")
-
-
-def test_the_round_one_builder_prefers_a_planning_command_then_a_plain_one_then_from_scratch():
-    from fastworkflow.review_proposals import Means, SubTaskInput
-
-    candidates = {
-        1: [Candidate("Library/send", is_planning=False, score=0.9),
-            Candidate("Library/book_loans", is_planning=True, score=0.4)],   # a planning command in top-k wins
-        2: [Candidate("Library/notify", is_planning=False, score=0.6)],       # the best plain command
-        # sub-task 3 has no candidate: from scratch
-    }
-    proposal = build_round1_proposal(
-        ["lend Dune to Ann", "tell Ann", "summarise"], candidates,
-        inputs={2: [SubTaskInput(from_subtask=1)]}, outcomes={1: "Ann holds a loan on Dune"})
-    assert proposal.items[0].means == Means(kind="planning", name="Library/book_loans")
-    assert proposal.items[0].outcome == "Ann holds a loan on Dune"
-    assert proposal.items[1].means == Means(kind="plain", name="Library/notify")
-    assert proposal.items[1].inputs[0].from_subtask == 1
-    assert proposal.items[2].means == Means() and proposal.items[2].outcome == ""
 
 
 def test_a_proposal_review_accepts_more_than_two_replies_and_expires_at_its_cap(todo):

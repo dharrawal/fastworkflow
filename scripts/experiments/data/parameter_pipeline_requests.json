@@ -1,0 +1,1944 @@
+{
+ "_about": "Hand-written by the harness's author (fix-qoyz), so these requests are easier than real traffic: they are short, plain, and each gold was decided by the author who wrote the text. Use them to compare variants against each other, not to estimate production rates. gold: a value (the field as it should be extracted), \"missing\" (a REQUIRED value the request does not give: any value produced is MADE UP), or null (an OPTIONAL value the request does not give: the default / not given is right). Classes: a all required given plainly; b a required value not given; c a value in an awkward form; d an optional value not given; e a value-like word that is not the value. `split` (dev|confirm) is fixed, stratified by class; `loose` lists free-text fields compared by containment instead of equality.",
+ "rows": [
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "a",
+   "text": "find the book Middlemarch",
+   "gold": {
+    "query": "Middlemarch",
+    "start": null
+   },
+   "split": "dev",
+   "id": "r001"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "a",
+   "text": "search the catalogue for George Eliot",
+   "gold": {
+    "query": "George Eliot",
+    "start": null
+   },
+   "split": "confirm",
+   "id": "r002"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "a",
+   "text": "find books by Frank Herbert, starting from row 6",
+   "gold": {
+    "query": "Frank Herbert",
+    "start": 6
+   },
+   "split": "dev",
+   "id": "r003"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_member",
+   "kind": "execution",
+   "cls": "a",
+   "text": "look up the member Jane Doe",
+   "gold": {
+    "query": "Jane Doe"
+   },
+   "split": "confirm",
+   "id": "r004"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_member",
+   "kind": "execution",
+   "cls": "a",
+   "text": "is there a member called Ann Lee",
+   "gold": {
+    "query": "Ann Lee"
+   },
+   "split": "dev",
+   "id": "r005"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_book",
+   "kind": "execution",
+   "cls": "a",
+   "text": "open book b7",
+   "gold": {
+    "book_uid": "b7"
+   },
+   "split": "confirm",
+   "id": "r006"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_member",
+   "kind": "execution",
+   "cls": "a",
+   "text": "open member m3",
+   "gold": {
+    "member_uid": "m3"
+   },
+   "split": "dev",
+   "id": "r007"
+  },
+  {
+   "workflow": "library",
+   "command": "Record/add_note",
+   "kind": "execution",
+   "cls": "a",
+   "text": "add a note saying the binding is loose",
+   "gold": {
+    "text": "the binding is loose"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "confirm",
+   "id": "r008"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_overdue",
+   "kind": "execution",
+   "cls": "a",
+   "text": "how many loans are overdue at Central",
+   "gold": {
+    "branch": "Central"
+   },
+   "split": "dev",
+   "id": "r009"
+  },
+  {
+   "workflow": "library",
+   "command": "library_hours",
+   "kind": "execution",
+   "cls": "a",
+   "text": "what are the opening hours at Riverside",
+   "gold": {
+    "branch": "Riverside"
+   },
+   "split": "confirm",
+   "id": "r010"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_overdue",
+   "kind": "execution",
+   "cls": "d",
+   "text": "how many loans are overdue",
+   "gold": {
+    "branch": null
+   },
+   "split": "dev",
+   "id": "r011"
+  },
+  {
+   "workflow": "library",
+   "command": "library_hours",
+   "kind": "execution",
+   "cls": "d",
+   "text": "when does the library open",
+   "gold": {
+    "branch": null
+   },
+   "split": "confirm",
+   "id": "r012"
+  },
+  {
+   "workflow": "library",
+   "command": "library_hours",
+   "kind": "execution",
+   "cls": "d",
+   "text": "show me the library hours",
+   "gold": {
+    "branch": null
+   },
+   "split": "dev",
+   "id": "r013"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_overdue",
+   "kind": "execution",
+   "cls": "d",
+   "text": "tally the late loans across all branches",
+   "gold": {
+    "branch": null
+   },
+   "split": "confirm",
+   "id": "r014"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "d",
+   "text": "find the book Persuasion",
+   "gold": {
+    "query": "Persuasion",
+    "start": null
+   },
+   "split": "dev",
+   "id": "r015"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "d",
+   "text": "look for Emma by Jane Austen",
+   "gold": {
+    "query": "Emma by Jane Austen",
+    "start": null
+   },
+   "loose": [
+    "query"
+   ],
+   "split": "confirm",
+   "id": "r016"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "b",
+   "text": "find a book for me",
+   "gold": {
+    "query": "missing",
+    "start": null
+   },
+   "split": "dev",
+   "id": "r017"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_member",
+   "kind": "execution",
+   "cls": "b",
+   "text": "look up a member",
+   "gold": {
+    "query": "missing"
+   },
+   "split": "confirm",
+   "id": "r018"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_book",
+   "kind": "execution",
+   "cls": "b",
+   "text": "open the book",
+   "gold": {
+    "book_uid": "missing"
+   },
+   "split": "dev",
+   "id": "r019"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_member",
+   "kind": "execution",
+   "cls": "b",
+   "text": "please open that member's record",
+   "gold": {
+    "member_uid": "missing"
+   },
+   "split": "confirm",
+   "id": "r020"
+  },
+  {
+   "workflow": "library",
+   "command": "Record/add_note",
+   "kind": "execution",
+   "cls": "b",
+   "text": "add a note to this record",
+   "gold": {
+    "text": "missing"
+   },
+   "split": "dev",
+   "id": "r021"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "b",
+   "text": "search the catalogue, starting at row 3",
+   "gold": {
+    "query": "missing",
+    "start": 3
+   },
+   "split": "confirm",
+   "id": "r022"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "c",
+   "text": "find the book Pride and Prejudice",
+   "gold": {
+    "query": "Pride and Prejudice",
+    "start": null
+   },
+   "split": "dev",
+   "id": "r023"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "c",
+   "text": "find The Lion, the Witch and the Wardrobe",
+   "gold": {
+    "query": "The Lion, the Witch and the Wardrobe",
+    "start": null
+   },
+   "split": "confirm",
+   "id": "r024"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_member",
+   "kind": "execution",
+   "cls": "c",
+   "text": "find the member Mary-Jane O'Neil",
+   "gold": {
+    "query": "Mary-Jane O'Neil"
+   },
+   "split": "dev",
+   "id": "r025"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_member",
+   "kind": "execution",
+   "cls": "c",
+   "text": "look up Patel",
+   "gold": {
+    "query": "Patel"
+   },
+   "split": "confirm",
+   "id": "r026"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_book",
+   "kind": "execution",
+   "cls": "c",
+   "text": "open b0042",
+   "gold": {
+    "book_uid": "b0042"
+   },
+   "split": "dev",
+   "id": "r027"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "c",
+   "text": "find Emma, begin at row twenty",
+   "gold": {
+    "query": "Emma",
+    "start": 20
+   },
+   "split": "confirm",
+   "id": "r028"
+  },
+  {
+   "workflow": "library",
+   "command": "Record/add_note",
+   "kind": "execution",
+   "cls": "c",
+   "text": "jot down: \"returned late, twice\"",
+   "gold": {
+    "text": "returned late, twice"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "dev",
+   "id": "r029"
+  },
+  {
+   "workflow": "library",
+   "command": "library_hours",
+   "kind": "execution",
+   "cls": "c",
+   "text": "hours for riverside please",
+   "gold": {
+    "branch": "riverside"
+   },
+   "split": "confirm",
+   "id": "r030"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_book",
+   "kind": "execution",
+   "cls": "e",
+   "text": "open b12, not the member m4",
+   "gold": {
+    "book_uid": "b12"
+   },
+   "split": "dev",
+   "id": "r031"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_member",
+   "kind": "execution",
+   "cls": "e",
+   "text": "open member m9; the book b2 can wait",
+   "gold": {
+    "member_uid": "m9"
+   },
+   "split": "confirm",
+   "id": "r032"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "e",
+   "text": "find the book Dune, I need 3 copies",
+   "gold": {
+    "query": "Dune",
+    "start": null
+   },
+   "split": "dev",
+   "id": "r033"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_overdue",
+   "kind": "execution",
+   "cls": "e",
+   "text": "how many overdue loans are there, at least 5 I'd guess, at Central",
+   "gold": {
+    "branch": "Central"
+   },
+   "split": "confirm",
+   "id": "r034"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_member",
+   "kind": "execution",
+   "cls": "e",
+   "text": "run find_member for Ann Lee",
+   "gold": {
+    "query": "Ann Lee"
+   },
+   "split": "dev",
+   "id": "r035"
+  },
+  {
+   "workflow": "library",
+   "command": "Record/add_note",
+   "kind": "execution",
+   "cls": "e",
+   "text": "add a note: ask member m3 about the late return",
+   "gold": {
+    "text": "ask member m3 about the late return"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "confirm",
+   "id": "r036"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_book",
+   "kind": "execution",
+   "cls": "e",
+   "text": "find the book from shelf 12 called Persuasion",
+   "gold": {
+    "query": "Persuasion",
+    "start": null
+   },
+   "split": "dev",
+   "id": "r037"
+  },
+  {
+   "workflow": "library",
+   "command": "library_hours",
+   "kind": "execution",
+   "cls": "e",
+   "text": "I want the hours, not for Central but for Riverside",
+   "gold": {
+    "branch": "Riverside"
+   },
+   "split": "confirm",
+   "id": "r038"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/open_book",
+   "kind": "execution",
+   "cls": "e",
+   "text": "open the book, I think the member is m4",
+   "gold": {
+    "book_uid": "missing"
+   },
+   "split": "dev",
+   "id": "r039"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/author_books",
+   "kind": "planning",
+   "cls": "a",
+   "text": "list every book by Frank Herbert with the copies of each",
+   "gold": {
+    "author": "Frank Herbert"
+   },
+   "split": "dev",
+   "id": "r040"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/author_books",
+   "kind": "planning",
+   "cls": "a",
+   "text": "what do you have by Jane Austen",
+   "gold": {
+    "author": "Jane Austen"
+   },
+   "split": "confirm",
+   "id": "r041"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/author_books",
+   "kind": "planning",
+   "cls": "b",
+   "text": "list every book we own with the copies of each",
+   "gold": {
+    "author": "missing"
+   },
+   "split": "dev",
+   "id": "r042"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/author_books",
+   "kind": "planning",
+   "cls": "b",
+   "text": "what titles does that author have on the shelves",
+   "gold": {
+    "author": "missing"
+   },
+   "split": "confirm",
+   "id": "r043"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/author_books",
+   "kind": "planning",
+   "cls": "c",
+   "text": "all the books by Ursula K. Le Guin",
+   "gold": {
+    "author": "Ursula K. Le Guin"
+   },
+   "split": "dev",
+   "id": "r044"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/author_books",
+   "kind": "planning",
+   "cls": "c",
+   "text": "everything by Austen",
+   "gold": {
+    "author": "Austen"
+   },
+   "split": "confirm",
+   "id": "r045"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/author_books",
+   "kind": "planning",
+   "cls": "e",
+   "text": "use author_books to show the Herbert titles",
+   "gold": {
+    "author": "Herbert"
+   },
+   "split": "confirm",
+   "id": "r046"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_by_title",
+   "kind": "planning",
+   "cls": "a",
+   "text": "who wrote Persuasion",
+   "gold": {
+    "title": "Persuasion"
+   },
+   "split": "dev",
+   "id": "r047"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_by_title",
+   "kind": "planning",
+   "cls": "a",
+   "text": "who is the author of Emma, and how many copies do we have",
+   "gold": {
+    "title": "Emma"
+   },
+   "split": "confirm",
+   "id": "r048"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_by_title",
+   "kind": "planning",
+   "cls": "b",
+   "text": "who wrote that book, and how many copies do we have",
+   "gold": {
+    "title": "missing"
+   },
+   "split": "dev",
+   "id": "r049"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_by_title",
+   "kind": "planning",
+   "cls": "c",
+   "text": "who wrote Pride and Prejudice",
+   "gold": {
+    "title": "Pride and Prejudice"
+   },
+   "split": "dev",
+   "id": "r050"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_by_title",
+   "kind": "planning",
+   "cls": "c",
+   "text": "who wrote the book 'Gone with the Wind'",
+   "gold": {
+    "title": "Gone with the Wind"
+   },
+   "split": "confirm",
+   "id": "r051"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_by_title",
+   "kind": "planning",
+   "cls": "e",
+   "text": "how many copies of Dune Messiah are there, we sold 5 last week",
+   "gold": {
+    "title": "Dune Messiah"
+   },
+   "split": "dev",
+   "id": "r052"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_loans",
+   "kind": "planning",
+   "cls": "a",
+   "text": "who has Dune out on loan",
+   "gold": {
+    "title": "Dune"
+   },
+   "split": "dev",
+   "id": "r053"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_loans",
+   "kind": "planning",
+   "cls": "b",
+   "text": "who has the book on loan at the moment",
+   "gold": {
+    "title": "missing"
+   },
+   "split": "confirm",
+   "id": "r054"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_loans",
+   "kind": "planning",
+   "cls": "c",
+   "text": "who is borrowing The Lion, the Witch and the Wardrobe",
+   "gold": {
+    "title": "The Lion, the Witch and the Wardrobe"
+   },
+   "split": "dev",
+   "id": "r055"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/book_loans",
+   "kind": "planning",
+   "cls": "e",
+   "text": "list the loans of Emma, as of the Central branch",
+   "gold": {
+    "title": "Emma"
+   },
+   "split": "confirm",
+   "id": "r056"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_books",
+   "kind": "planning",
+   "cls": "a",
+   "text": "how many books match Herbert",
+   "gold": {
+    "query": "Herbert"
+   },
+   "split": "confirm",
+   "id": "r057"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_books",
+   "kind": "planning",
+   "cls": "a",
+   "text": "how many titles match Austen",
+   "gold": {
+    "query": "Austen"
+   },
+   "split": "dev",
+   "id": "r058"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_books",
+   "kind": "planning",
+   "cls": "b",
+   "text": "how many books match",
+   "gold": {
+    "query": "missing"
+   },
+   "split": "dev",
+   "id": "r059"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_books",
+   "kind": "planning",
+   "cls": "c",
+   "text": "count the books matching George Eliot",
+   "gold": {
+    "query": "George Eliot"
+   },
+   "split": "confirm",
+   "id": "r060"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_books",
+   "kind": "planning",
+   "cls": "c",
+   "text": "count the books with \"war and peace\" in the title",
+   "gold": {
+    "query": "war and peace"
+   },
+   "split": "dev",
+   "id": "r061"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/count_books",
+   "kind": "planning",
+   "cls": "e",
+   "text": "how many books match Dune, give me the top 5",
+   "gold": {
+    "query": "Dune"
+   },
+   "split": "dev",
+   "id": "r062"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_record",
+   "kind": "planning",
+   "cls": "a",
+   "text": "find the book Emma",
+   "gold": {
+    "name": "Emma",
+    "kind": "book"
+   },
+   "split": "confirm",
+   "id": "r063"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_record",
+   "kind": "planning",
+   "cls": "a",
+   "text": "find the member Raj Patel",
+   "gold": {
+    "name": "Raj Patel",
+    "kind": "member"
+   },
+   "split": "dev",
+   "id": "r064"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_record",
+   "kind": "planning",
+   "cls": "d",
+   "text": "look up Persuasion",
+   "gold": {
+    "name": "Persuasion",
+    "kind": null
+   },
+   "split": "dev",
+   "id": "r065"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_record",
+   "kind": "planning",
+   "cls": "b",
+   "text": "find a record for me",
+   "gold": {
+    "name": "missing",
+    "kind": null
+   },
+   "split": "confirm",
+   "id": "r066"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_record",
+   "kind": "planning",
+   "cls": "b",
+   "text": "find the member record",
+   "gold": {
+    "name": "missing",
+    "kind": "member"
+   },
+   "split": "dev",
+   "id": "r067"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_record",
+   "kind": "planning",
+   "cls": "c",
+   "text": "find the member Mary-Jane O'Neil",
+   "gold": {
+    "name": "Mary-Jane O'Neil",
+    "kind": "member"
+   },
+   "split": "confirm",
+   "id": "r068"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/find_record",
+   "kind": "planning",
+   "cls": "e",
+   "text": "find the record named Chen, the member list is long",
+   "gold": {
+    "name": "Chen",
+    "kind": null
+   },
+   "split": "confirm",
+   "id": "r069"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/member_report",
+   "kind": "planning",
+   "cls": "a",
+   "text": "report on Mia Chen, include her loans and notes",
+   "gold": {
+    "member": "Mia Chen",
+    "loans": true,
+    "notes": true
+   },
+   "split": "confirm",
+   "id": "r070"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/member_report",
+   "kind": "planning",
+   "cls": "d",
+   "text": "tell me about Raj Patel",
+   "gold": {
+    "member": "Raj Patel",
+    "loans": null,
+    "notes": null
+   },
+   "split": "confirm",
+   "id": "r071"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/member_report",
+   "kind": "planning",
+   "cls": "b",
+   "text": "give me the report with loans and notes",
+   "gold": {
+    "member": "missing",
+    "loans": true,
+    "notes": true
+   },
+   "split": "confirm",
+   "id": "r072"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/member_report",
+   "kind": "planning",
+   "cls": "b",
+   "text": "show me that member's loans",
+   "gold": {
+    "member": "missing",
+    "loans": true,
+    "notes": null
+   },
+   "split": "dev",
+   "id": "r073"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/member_report",
+   "kind": "planning",
+   "cls": "c",
+   "text": "report on Patel",
+   "gold": {
+    "member": "Patel",
+    "loans": null,
+    "notes": null
+   },
+   "split": "dev",
+   "id": "r074"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/member_report",
+   "kind": "planning",
+   "cls": "c",
+   "text": "tell me about Mary-Jane O'Neil and the notes on her record",
+   "gold": {
+    "member": "Mary-Jane O'Neil",
+    "loans": null,
+    "notes": true
+   },
+   "split": "confirm",
+   "id": "r075"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/member_report",
+   "kind": "planning",
+   "cls": "e",
+   "text": "member report for Ann Lee, list loans but I don't want notes",
+   "gold": {
+    "member": "Ann Lee",
+    "loans": true,
+    "notes": null
+   },
+   "split": "dev",
+   "id": "r076"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/note_member",
+   "kind": "planning",
+   "cls": "a",
+   "text": "note on Mia Chen's record that she asked for large print",
+   "gold": {
+    "member": "Mia Chen",
+    "text": "she asked for large print"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "dev",
+   "id": "r077"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/note_member",
+   "kind": "planning",
+   "cls": "b",
+   "text": "add a note to Mia Chen's record",
+   "gold": {
+    "member": "Mia Chen",
+    "text": "missing"
+   },
+   "split": "confirm",
+   "id": "r078"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/note_member",
+   "kind": "planning",
+   "cls": "b",
+   "text": "note that the card was renewed",
+   "gold": {
+    "member": "missing",
+    "text": "the card was renewed"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "dev",
+   "id": "r079"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/note_member",
+   "kind": "planning",
+   "cls": "c",
+   "text": "add a note on Raj Patel's record: \"returned late, twice\"",
+   "gold": {
+    "member": "Raj Patel",
+    "text": "returned late, twice"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "dev",
+   "id": "r080"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/note_member",
+   "kind": "planning",
+   "cls": "c",
+   "text": "Patel's record, note: asked for large print and braille",
+   "gold": {
+    "member": "Patel",
+    "text": "asked for large print and braille"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "confirm",
+   "id": "r081"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/note_member",
+   "kind": "planning",
+   "cls": "e",
+   "text": "add a note on Ann Lee's record that her card expired in 2023",
+   "gold": {
+    "member": "Ann Lee",
+    "text": "her card expired in 2023"
+   },
+   "loose": [
+    "text"
+   ],
+   "split": "confirm",
+   "id": "r082"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/overdue_summary",
+   "kind": "planning",
+   "cls": "d",
+   "text": "give me the library overview",
+   "gold": {
+    "branch": null
+   },
+   "split": "dev",
+   "id": "r083"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/overdue_summary",
+   "kind": "planning",
+   "cls": "d",
+   "text": "a status report on the library: branches and overdue loans",
+   "gold": {
+    "branch": null
+   },
+   "split": "confirm",
+   "id": "r084"
+  },
+  {
+   "workflow": "library",
+   "command": "Library/overdue_summary",
+   "kind": "planning",
+   "cls": "a",
+   "text": "overdue summary for the Central branch",
+   "gold": {
+    "branch": "Central"
+   },
+   "split": "confirm",
+   "id": "r085"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "calculate",
+   "kind": "execution",
+   "cls": "a",
+   "text": "calculate (2 + 3) * 4",
+   "gold": {
+    "expression": "(2 + 3) * 4"
+   },
+   "split": "dev",
+   "id": "r086"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "calculate",
+   "kind": "execution",
+   "cls": "a",
+   "text": "what is 10 / 2 + 3",
+   "gold": {
+    "expression": "10 / 2 + 3"
+   },
+   "split": "confirm",
+   "id": "r087"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "calculate",
+   "kind": "execution",
+   "cls": "b",
+   "text": "please calculate something for me",
+   "gold": {
+    "expression": "missing"
+   },
+   "split": "confirm",
+   "id": "r088"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "calculate",
+   "kind": "execution",
+   "cls": "b",
+   "text": "work out the total",
+   "gold": {
+    "expression": "missing"
+   },
+   "split": "dev",
+   "id": "r089"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "calculate",
+   "kind": "execution",
+   "cls": "c",
+   "text": "compute (15.5 + 4.5) * 2",
+   "gold": {
+    "expression": "(15.5 + 4.5) * 2"
+   },
+   "split": "dev",
+   "id": "r090"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "calculate",
+   "kind": "execution",
+   "cls": "c",
+   "text": "compute 100-3*7+(2+2)",
+   "gold": {
+    "expression": "100-3*7+(2+2)"
+   },
+   "split": "confirm",
+   "id": "r091"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "calculate",
+   "kind": "execution",
+   "cls": "e",
+   "text": "calculate 18 / 3, the order W123 total is a different matter",
+   "gold": {
+    "expression": "18 / 3"
+   },
+   "split": "dev",
+   "id": "r092"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "cancel_pending_order",
+   "kind": "execution",
+   "cls": "a",
+   "text": "cancel order #W2378156, it is no longer needed",
+   "gold": {
+    "order_id": "#W2378156",
+    "reason": "no longer needed"
+   },
+   "split": "dev",
+   "id": "r093"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "cancel_pending_order",
+   "kind": "execution",
+   "cls": "a",
+   "text": "cancel order W1234567 because I ordered it by mistake",
+   "gold": {
+    "order_id": "W1234567",
+    "reason": "ordered by mistake"
+   },
+   "split": "confirm",
+   "id": "r094"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "cancel_pending_order",
+   "kind": "execution",
+   "cls": "d",
+   "text": "cancel my pending order #W5551212",
+   "gold": {
+    "order_id": "#W5551212",
+    "reason": null
+   },
+   "split": "dev",
+   "id": "r095"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "cancel_pending_order",
+   "kind": "execution",
+   "cls": "b",
+   "text": "cancel my pending order",
+   "gold": {
+    "order_id": "missing",
+    "reason": null
+   },
+   "split": "confirm",
+   "id": "r096"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "cancel_pending_order",
+   "kind": "execution",
+   "cls": "b",
+   "text": "cancel the order, I ordered it by mistake",
+   "gold": {
+    "order_id": "missing",
+    "reason": "ordered by mistake"
+   },
+   "split": "dev",
+   "id": "r097"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "cancel_pending_order",
+   "kind": "execution",
+   "cls": "c",
+   "text": "cancel #W0012345",
+   "gold": {
+    "order_id": "#W0012345",
+    "reason": null
+   },
+   "split": "dev",
+   "id": "r098"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "cancel_pending_order",
+   "kind": "execution",
+   "cls": "e",
+   "text": "cancel order #W2378156, item 4560 is too pricey and it is no longer needed",
+   "gold": {
+    "order_id": "#W2378156",
+    "reason": "no longer needed"
+   },
+   "split": "confirm",
+   "id": "r099"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "exchange_delivered_order_items",
+   "kind": "execution",
+   "cls": "a",
+   "text": "exchange items 34742388 and 59475928 from order #W3000001 for 45854949 and 68789960, refund difference to paypal_1234567",
+   "gold": {
+    "order_id": "#W3000001",
+    "item_ids": [
+     "34742388",
+     "59475928"
+    ],
+    "new_item_ids": [
+     "45854949",
+     "68789960"
+    ],
+    "payment_method_id": "paypal_1234567"
+   },
+   "split": "dev",
+   "id": "r100"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "exchange_delivered_order_items",
+   "kind": "execution",
+   "cls": "b",
+   "text": "exchange item 34742388 from order #W3000001 for item 45854949",
+   "gold": {
+    "order_id": "#W3000001",
+    "item_ids": [
+     "34742388"
+    ],
+    "new_item_ids": [
+     "45854949"
+    ],
+    "payment_method_id": "missing"
+   },
+   "split": "confirm",
+   "id": "r101"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "exchange_delivered_order_items",
+   "kind": "execution",
+   "cls": "b",
+   "text": "I want to exchange my delivered items for 45854949 and pay with credit_card_7654321",
+   "gold": {
+    "order_id": "missing",
+    "item_ids": "missing",
+    "new_item_ids": [
+     "45854949"
+    ],
+    "payment_method_id": "credit_card_7654321"
+   },
+   "split": "dev",
+   "id": "r102"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_email",
+   "kind": "execution",
+   "cls": "a",
+   "text": "find the user with email sam.lee@mailbox.org",
+   "gold": {
+    "email": "sam.lee@mailbox.org"
+   },
+   "split": "confirm",
+   "id": "r103"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_email",
+   "kind": "execution",
+   "cls": "b",
+   "text": "find a user by email",
+   "gold": {
+    "email": "missing"
+   },
+   "split": "confirm",
+   "id": "r104"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_email",
+   "kind": "execution",
+   "cls": "c",
+   "text": "find the customer whose email is Jane.Doe+shop@Mail.Example.co.uk",
+   "gold": {
+    "email": "Jane.Doe+shop@Mail.Example.co.uk"
+   },
+   "split": "confirm",
+   "id": "r105"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_email",
+   "kind": "execution",
+   "cls": "e",
+   "text": "find the user by email john@shop.com, order W1234567 is unrelated",
+   "gold": {
+    "email": "john@shop.com"
+   },
+   "split": "dev",
+   "id": "r106"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_name_zip",
+   "kind": "execution",
+   "cls": "a",
+   "text": "find user John Smith, zip 90210",
+   "gold": {
+    "first_name": "John",
+    "last_name": "Smith",
+    "zip": "90210"
+   },
+   "split": "dev",
+   "id": "r107"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_name_zip",
+   "kind": "execution",
+   "cls": "a",
+   "text": "look up the customer Maria Garcia in zip 10001",
+   "gold": {
+    "first_name": "Maria",
+    "last_name": "Garcia",
+    "zip": "10001"
+   },
+   "split": "confirm",
+   "id": "r108"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_name_zip",
+   "kind": "execution",
+   "cls": "b",
+   "text": "find user John Smith",
+   "gold": {
+    "first_name": "John",
+    "last_name": "Smith",
+    "zip": "missing"
+   },
+   "split": "dev",
+   "id": "r109"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_name_zip",
+   "kind": "execution",
+   "cls": "b",
+   "text": "find the customer in zip 10001",
+   "gold": {
+    "first_name": "missing",
+    "last_name": "missing",
+    "zip": "10001"
+   },
+   "split": "confirm",
+   "id": "r110"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_name_zip",
+   "kind": "execution",
+   "cls": "c",
+   "text": "find the customer Doe in zip 12345",
+   "gold": {
+    "first_name": "missing",
+    "last_name": "Doe",
+    "zip": "12345"
+   },
+   "split": "dev",
+   "id": "r111"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_name_zip",
+   "kind": "execution",
+   "cls": "c",
+   "text": "find Smith, John, zip nine-oh-two-one-oh",
+   "gold": {
+    "first_name": "John",
+    "last_name": "Smith",
+    "zip": "90210"
+   },
+   "split": "confirm",
+   "id": "r112"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "find_user_id_by_name_zip",
+   "kind": "execution",
+   "cls": "e",
+   "text": "find John Smith, zip 90210, he has order #W1234567 pending",
+   "gold": {
+    "first_name": "John",
+    "last_name": "Smith",
+    "zip": "90210"
+   },
+   "split": "confirm",
+   "id": "r113"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_order_details",
+   "kind": "execution",
+   "cls": "a",
+   "text": "get the details for order #W2378156",
+   "gold": {
+    "order_id": "#W2378156"
+   },
+   "split": "dev",
+   "id": "r114"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_order_details",
+   "kind": "execution",
+   "cls": "a",
+   "text": "show me order W9988776",
+   "gold": {
+    "order_id": "W9988776"
+   },
+   "split": "confirm",
+   "id": "r115"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_order_details",
+   "kind": "execution",
+   "cls": "b",
+   "text": "show me the order details",
+   "gold": {
+    "order_id": "missing"
+   },
+   "split": "dev",
+   "id": "r116"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_order_details",
+   "kind": "execution",
+   "cls": "b",
+   "text": "what is in my order",
+   "gold": {
+    "order_id": "missing"
+   },
+   "split": "confirm",
+   "id": "r117"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_order_details",
+   "kind": "execution",
+   "cls": "c",
+   "text": "details for order 2378156",
+   "gold": {
+    "order_id": "2378156"
+   },
+   "split": "dev",
+   "id": "r118"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_order_details",
+   "kind": "execution",
+   "cls": "c",
+   "text": "order #w2378156 details please",
+   "gold": {
+    "order_id": "#w2378156"
+   },
+   "split": "confirm",
+   "id": "r119"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_order_details",
+   "kind": "execution",
+   "cls": "e",
+   "text": "show the order details, I paid with credit_card_1234567",
+   "gold": {
+    "order_id": "missing"
+   },
+   "split": "dev",
+   "id": "r120"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_product_details",
+   "kind": "execution",
+   "cls": "a",
+   "text": "details for product 6086499569",
+   "gold": {
+    "product_id": "6086499569"
+   },
+   "split": "dev",
+   "id": "r121"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_product_details",
+   "kind": "execution",
+   "cls": "b",
+   "text": "tell me about the product",
+   "gold": {
+    "product_id": "missing"
+   },
+   "split": "dev",
+   "id": "r122"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_product_details",
+   "kind": "execution",
+   "cls": "c",
+   "text": "product id 6086-499-569",
+   "gold": {
+    "product_id": "6086499569"
+   },
+   "split": "dev",
+   "id": "r123"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_product_details",
+   "kind": "execution",
+   "cls": "e",
+   "text": "details for product 6086499569 from order #W2378156",
+   "gold": {
+    "product_id": "6086499569"
+   },
+   "split": "confirm",
+   "id": "r124"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_product_details",
+   "kind": "execution",
+   "cls": "e",
+   "text": "product details please, my order W2378156 has 3 items",
+   "gold": {
+    "product_id": "missing"
+   },
+   "split": "dev",
+   "id": "r125"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_user_details",
+   "kind": "execution",
+   "cls": "a",
+   "text": "show details for user sara_doe_496",
+   "gold": {
+    "user_id": "sara_doe_496"
+   },
+   "split": "confirm",
+   "id": "r126"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_user_details",
+   "kind": "execution",
+   "cls": "b",
+   "text": "show the user details",
+   "gold": {
+    "user_id": "missing"
+   },
+   "split": "confirm",
+   "id": "r127"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_user_details",
+   "kind": "execution",
+   "cls": "c",
+   "text": "user id: Sara_Doe_496",
+   "gold": {
+    "user_id": "sara_doe_496"
+   },
+   "split": "confirm",
+   "id": "r128"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "get_user_details",
+   "kind": "execution",
+   "cls": "e",
+   "text": "get user details, I looked up john@shop.com earlier",
+   "gold": {
+    "user_id": "missing"
+   },
+   "split": "confirm",
+   "id": "r129"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_address",
+   "kind": "execution",
+   "cls": "a",
+   "text": "change the address of order #W1111111 to 123 Elm St, Apt 2, Boston, MA, USA, 02108",
+   "gold": {
+    "order_id": "#W1111111",
+    "address1": "123 Elm St",
+    "address2": "Apt 2",
+    "city": "Boston",
+    "state": "MA",
+    "country": "USA",
+    "zip": "02108"
+   },
+   "split": "dev",
+   "id": "r130"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_address",
+   "kind": "execution",
+   "cls": "b",
+   "text": "change the shipping address of order #W1111111 to 500 Oak Ave, Austin, TX, USA, 78701",
+   "gold": {
+    "order_id": "#W1111111",
+    "address1": "500 Oak Ave",
+    "address2": "missing",
+    "city": "Austin",
+    "state": "TX",
+    "country": "USA",
+    "zip": "78701"
+   },
+   "split": "dev",
+   "id": "r131"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_address",
+   "kind": "execution",
+   "cls": "b",
+   "text": "update the address on my pending order",
+   "gold": {
+    "order_id": "missing",
+    "address1": "missing",
+    "address2": "missing",
+    "city": "missing",
+    "state": "missing",
+    "country": "missing",
+    "zip": "missing"
+   },
+   "split": "confirm",
+   "id": "r132"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_items",
+   "kind": "execution",
+   "cls": "a",
+   "text": "in order #W2222222 change item 62727828 to 2352352 and pay the difference with paypal_5551234",
+   "gold": {
+    "order_id": "#W2222222",
+    "item_ids": [
+     "62727828"
+    ],
+    "new_item_ids": [
+     "2352352"
+    ],
+    "payment_method_id": "paypal_5551234"
+   },
+   "split": "confirm",
+   "id": "r133"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_items",
+   "kind": "execution",
+   "cls": "b",
+   "text": "in order #W2222222 change item 62727828, pay with paypal_5551234",
+   "gold": {
+    "order_id": "#W2222222",
+    "item_ids": [
+     "62727828"
+    ],
+    "new_item_ids": "missing",
+    "payment_method_id": "paypal_5551234"
+   },
+   "split": "dev",
+   "id": "r134"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_payment",
+   "kind": "execution",
+   "cls": "a",
+   "text": "switch order #W3333333 to pay with credit_card_1122334",
+   "gold": {
+    "order_id": "#W3333333",
+    "payment_method_id": "credit_card_1122334"
+   },
+   "split": "dev",
+   "id": "r135"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_payment",
+   "kind": "execution",
+   "cls": "b",
+   "text": "switch the payment on order #W3333333",
+   "gold": {
+    "order_id": "#W3333333",
+    "payment_method_id": "missing"
+   },
+   "split": "confirm",
+   "id": "r136"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_payment",
+   "kind": "execution",
+   "cls": "b",
+   "text": "pay with gift_card_9988776 instead",
+   "gold": {
+    "order_id": "missing",
+    "payment_method_id": "gift_card_9988776"
+   },
+   "split": "dev",
+   "id": "r137"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_pending_order_payment",
+   "kind": "execution",
+   "cls": "c",
+   "text": "change the payment of order W3333333 to PayPal, paypal_1234567",
+   "gold": {
+    "order_id": "W3333333",
+    "payment_method_id": "paypal_1234567"
+   },
+   "split": "dev",
+   "id": "r138"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_user_address",
+   "kind": "execution",
+   "cls": "a",
+   "text": "set the address of user sara_doe_496 to 9 Pine Rd, Suite 5, Denver, CO, USA, 80203",
+   "gold": {
+    "user_id": "sara_doe_496",
+    "address1": "9 Pine Rd",
+    "address2": "Suite 5",
+    "city": "Denver",
+    "state": "CO",
+    "country": "USA",
+    "zip": "80203"
+   },
+   "split": "confirm",
+   "id": "r139"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "modify_user_address",
+   "kind": "execution",
+   "cls": "b",
+   "text": "set the address of user sara_doe_496 to 9 Pine Rd, Denver, CO, USA, 80203",
+   "gold": {
+    "user_id": "sara_doe_496",
+    "address1": "9 Pine Rd",
+    "address2": "missing",
+    "city": "Denver",
+    "state": "CO",
+    "country": "USA",
+    "zip": "80203"
+   },
+   "split": "confirm",
+   "id": "r140"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "return_delivered_order_items",
+   "kind": "execution",
+   "cls": "a",
+   "text": "return item 57347828 from order #W4444444, refund to gift_card_5550001",
+   "gold": {
+    "order_id": "#W4444444",
+    "item_ids": [
+     "57347828"
+    ],
+    "payment_method_id": "gift_card_5550001"
+   },
+   "split": "dev",
+   "id": "r141"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "return_delivered_order_items",
+   "kind": "execution",
+   "cls": "a",
+   "text": "return items 57347828 and 8646987326 from order #W4444444, refund to paypal_4040404",
+   "gold": {
+    "order_id": "#W4444444",
+    "item_ids": [
+     "57347828",
+     "8646987326"
+    ],
+    "payment_method_id": "paypal_4040404"
+   },
+   "split": "confirm",
+   "id": "r142"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "return_delivered_order_items",
+   "kind": "execution",
+   "cls": "b",
+   "text": "return item 57347828 from order #W4444444",
+   "gold": {
+    "order_id": "#W4444444",
+    "item_ids": [
+     "57347828"
+    ],
+    "payment_method_id": "missing"
+   },
+   "split": "dev",
+   "id": "r143"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "return_delivered_order_items",
+   "kind": "execution",
+   "cls": "b",
+   "text": "return the items from order #W4444444, refund to paypal_4040404",
+   "gold": {
+    "order_id": "#W4444444",
+    "item_ids": "missing",
+    "payment_method_id": "paypal_4040404"
+   },
+   "split": "confirm",
+   "id": "r144"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "transfer_to_human_agents",
+   "kind": "execution",
+   "cls": "a",
+   "text": "transfer me to a human, my refund has been stuck for a week",
+   "gold": {
+    "summary": "my refund has been stuck for a week"
+   },
+   "loose": [
+    "summary"
+   ],
+   "split": "dev",
+   "id": "r145"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "transfer_to_human_agents",
+   "kind": "execution",
+   "cls": "b",
+   "text": "transfer me to a human agent",
+   "gold": {
+    "summary": "missing"
+   },
+   "split": "dev",
+   "id": "r146"
+  },
+  {
+   "workflow": "retail_workflow",
+   "command": "transfer_to_human_agents",
+   "kind": "execution",
+   "cls": "c",
+   "text": "put me through to a person, tell them \"wrong size, sent back twice, no refund\"",
+   "gold": {
+    "summary": "wrong size, sent back twice, no refund"
+   },
+   "loose": [
+    "summary"
+   ],
+   "split": "confirm",
+   "id": "r147"
+  }
+ ]
+}

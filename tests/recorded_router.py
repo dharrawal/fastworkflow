@@ -1,4 +1,4 @@
-"""A recorded answer of the consultation ProposalReview head, installed where production caches its router.
+"""A recorded answer of the plan ProposalReview head, installed where production caches its router.
 
 The review's reply reader asks the head one question per free-text reply: ``CommandRouter(path).predict_with_details``
 (``CommandNamePrediction._predict_impl``). Whether the reader then confirms, declines, edits or asks again is the
@@ -14,10 +14,15 @@ the cache entry it displaced, so ordering does not matter.
 
 Re-record after a retrain (needs the head), over every file that uses the fixture::
 
-    pytest --record-review-router tests/test_consultation_reply_policy.py tests/test_built_in_vague_replies.py \\
-        tests/test_round1_handoff.py
+    pytest --record-review-router $(python - <<'EOF'
+import glob; print(" ".join(f for f in sorted(glob.glob("tests/test_*.py")) if "recorded_review_router" in open(f).read()))
+EOF
+)
 
-``test_recorded_router_matches_the_head`` (marked ``requires_consultation_head``) reports which replies the current
+(a reply is recorded only when a test asks it, so a file left out keeps the stale answer of the previous head:
+an incomplete re-record shows as drift in ``test_recorded_router_matches_the_head``)
+
+``test_recorded_router_matches_the_head`` (marked ``requires_plan_head``) reports which replies the current
 head now answers differently.
 """
 from __future__ import annotations
@@ -32,11 +37,11 @@ import pytest
 from _pytest.stash import StashKey
 
 from fastworkflow.model_pipeline_training import GLOBAL_CONTEXT_FOLDER, CommandRouter
-from tests import consultation_head as head
+from tests import plan_head as head
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "review_reply_router_answers.json"
 #: The string the reader builds: ``f"{app_workflow_folderpath}/___command_info/{context}"``.
-ROUTER_PATH = f"{head.CONSULTATION}/___command_info/{head.HEAD_CONTEXT}"
+ROUTER_PATH = f"{head.PLAN_WORKFLOW}/___command_info/{head.HEAD_CONTEXT}"
 _RECORD_OPTION = "record_review_router"
 _STASH = StashKey[dict]()
 
@@ -122,7 +127,7 @@ def _merge_into_fixture(seen: dict) -> None:
     recording["answers"].update(seen)
     recording["answers"] = dict(sorted(recording["answers"].items()))
     recording["metadata"] = {
-        "head": f"consultation/{head.HEAD_CONTEXT}",
+        "head": f"plan_metadata_extraction/{head.HEAD_CONTEXT}",
         "head_version_id": head.head_version_id(),
         "recorded_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d"),
         "what": "CommandRouter.predict_with_details(reply) of the real head: labels and details as returned.",
@@ -136,7 +141,7 @@ def _merge_into_fixture(seen: dict) -> None:
 
 @pytest.fixture
 def recorded_review_router(request):
-    """Reader tests: the head's recorded answers for the consultation ProposalReview context, for this test only.
+    """Reader tests: the head's recorded answers for the plan ProposalReview context, for this test only.
 
     With ``--record-review-router`` the real head answers instead and the answers are written to the fixture file.
     """

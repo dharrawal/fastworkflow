@@ -216,9 +216,7 @@ def test_a_pending_approval_is_not_lost_by_accident(app_module, client, monkeypa
 
 def test_a_pending_agent_question_is_refused_then_discarded_on_request(app_module, client):
     channel_id, headers, _wf, ctx = _new_channel(app_module, client, client.uid, pinned=True)
-    ctx._awaiting_user = True
-    ctx._suspended_user_message = "original"
-    ctx._pending_clarification_request = "Pick one?"
+    ctx._ask_agent_question("Pick one?", "original")
 
     refused = client.post("/end_session", headers=headers, json={"discard_pending": False})
 

@@ -926,9 +926,11 @@ f"exp:{experiment_id}:{task_id}:{attempt}"`, so attempts never share a
    `_get_cache_path(workflow_id, …)` is sharded per workflow id (so `[XR18]`'s
    unique `workflow_id_str` already isolates it), but
    `_get_cache_path_cache(convo_path)` (`:595-604`) is the **fixed literal**
-   `cache.sqlite3`, keyed on nothing. It is read at `cache_match` (`:482`) and
-   written at `store_utterance_cache` (`:577`) on the runtime turn path. So
-   attempt 2 inherits attempt 1's disambiguation decisions — correlated attempts,
+   `cache.sqlite3`, keyed on nothing. (Update, fix-o5wi.8: the similarity cache that read and wrote it is gone; it then held only the suggested
+   commands of an ambiguity question. Update, fix-o1lg S7: that store is gone too. The pending which-command question is plain
+   data in the CME context (`intent_loop`), saved with the session, so attempts cannot share it and there is nothing to shard.) It was read at `cache_match` and
+   written at `store_utterance_cache` on the runtime turn path. So
+   attempt 2 inherited attempt 1's disambiguation decisions — correlated attempts,
    which is exactly what `pass^k` must not have — and, worse, the **treatment arm
    inherits the baseline arm's**, because both run against the same workflow
    folder.

@@ -105,10 +105,18 @@ def library(annotated_library):  # noqa: F811
 
 
 @pytest.fixture
-def library_heads(library):
-    """The library copy, for a test that needs its trained heads to pick each sub-task's means."""
+def library_heads(library, monkeypatch):
+    """The library copy, for a test that needs its trained heads to pick each sub-task's means.
+
+    A planning command the local model picks is checked by the remote decision model (fix-o1lg.2: with no remote
+    answer the pick is only a candidate, and the part is asked about, not bound), so that model's answer is scripted
+    here: a request about a book's title gets ``Library/book_by_title``, any other request gets "none"."""
     if not has_trained_heads(library):
         pytest.skip("the library example's trained heads are not on this machine (fastworkflow train it first)")
+    from tests.conftest import script_matcher
+
+    script_matcher(monkeypatch, lambda text: ({"Library/book_by_title": 0.9, "none": 0.05}
+                                              if ("Emma" in text or "Dune" in text) else {"none": 0.95}))
     return library
 
 
@@ -125,7 +133,7 @@ def test_the_shared_extractor_fills_a_planning_command_with_no_cme_workflow(scri
     assert result.valid and result.refusal is None and not result.retried
     assert result.params.title == "Dune"
     assert len(lm.prompts) == 1 and "who wrote Dune" in lm.prompts[0]
-    assert dict(wf.context) == before          # nothing stored on the app workflow (no stored_parameters, no stage)
+    assert dict(wf.context) == before          # nothing stored on the app workflow (no parameter loop, no stage)
 
 
 def test_a_planning_value_not_in_the_request_is_refused_by_check_arguments_retried_once_and_refused(scripted):
@@ -262,6 +270,24 @@ def test_with_no_producer_before_it_the_value_is_not_marked(library, scripted):
     drafted = draft_inputs(library, item, "open it", [])
 
     assert drafted.inputs == () and drafted.refusal == "missing required argument book_uid"
+
+
+def test_a_missing_value_is_kept_by_name_on_the_item_and_the_review_line_reads_the_names(library, scripted):
+    scripted({"reasoning": "no title", "title": "NOT_FOUND"}, {"reasoning": "still none", "title": "NOT_FOUND"})
+    item = SubTask(goal="find the book", means=Means(kind="planning", name="Library/book_by_title"))
+
+    drafted = review_proposals.drafted_item(library, item, "find the book", [])
+
+    assert drafted.check_missing == ["title"] and drafted.check == "missing required argument title"
+    # the line reads the names, not the text: change the text and the line stays; drop the names and it is the refusal
+    reworded = drafted.model_copy(update={"check": "the title is needed"})
+    assert "the required value 'title' is missing" in review_proposals._check_line(1, reworded)
+    assert 'change 1: title=...' in review_proposals._check_line(1, reworded)
+    assert review_proposals._check_line(1, reworded.model_copy(update={"check_missing": []})) == \
+        "Cannot run as shown: the title is needed."
+    given = reworded.model_copy(update={"inputs": [SubTaskInput(name="title", value="Emma")]})
+    assert review_proposals._check_line(1, given) == ""          # given since the draft: the note is stale
+    assert "check_missing" not in SubTask(goal="g").model_dump()  # empty: absent from the serialized item
 
 
 def test_drafted_inputs_are_run_as_the_review_shows_them():

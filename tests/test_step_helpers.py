@@ -852,10 +852,9 @@ def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
         return user_query
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_planning_command_for",
-        lambda text, folder_path, **_: ("", state.planning_command),
-    )
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: state.planning_command)
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
@@ -958,10 +957,9 @@ def _make_library_runner_env(
         return user_query
 
     monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_planning_command_for",
-        lambda text, folder_path, **_: ("", state.planning_command),
-    )
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: state.planning_command)
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],

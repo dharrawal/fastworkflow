@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from fastworkflow import intent_loop
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from fastworkflow.utils.react import NoSuspendedAgentStateError
 from fastworkflow.workflow_agent import _ask_user_tool
@@ -339,7 +340,7 @@ def test_awaiting_user_without_suspended_raises_conflict(
 ):
     """fix-quw: desynced awaiting_user must not become a bare RuntimeError/500."""
     ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
-    ctx._awaiting_user = True
+    ctx._ask_agent_question("which one?")
     mock_agent = MagicMock()
     mock_agent.export_suspended.return_value = None
     _set_agents(ctx, mock_agent)
@@ -371,10 +372,8 @@ def test_cancel_pending_clears_awaiting_user(
 
 @pytest.mark.parametrize(
     "stage",
-    [
-        fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-        fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
-    ],
+    [{"request": "frobnicate the widget", "ambiguous": True}, {"request": "frobnicate the widget", "misunderstood": True}],
+    ids=["ambiguity", "misunderstanding"],
 )
 def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     initialized_fastworkflow,
@@ -402,11 +401,10 @@ def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     def fake_invoke(cls, session, command: str):
         calls.append(command)
         if command.split("/")[-1] == "abort":
-            ctx.cme_workflow.context["NLU_Pipeline_Stage"] = (
-                fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+            intent_loop.clear(ctx.cme_workflow.context)
             response = "Command aborted"
         else:
-            ctx.cme_workflow.context["NLU_Pipeline_Stage"] = stage
+            intent_loop.store(ctx.cme_workflow.context, dict(stage))
             response = nlu_reply
         return fastworkflow.CommandOutput(
             command_name=command,
@@ -424,8 +422,7 @@ def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     assert observation == f"{nlu_reply}\nCommand aborted"
     assert calls[0] == "frobnicate the widget"
     assert [c.split("/")[-1] for c in calls[1:]] == ["abort"]
-    assert ctx.cme_workflow.context["NLU_Pipeline_Stage"] == (
-        fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+    assert intent_loop.waiting_for(ctx.cme_workflow.context) is None
     assert "ask_user" not in observation
 
 

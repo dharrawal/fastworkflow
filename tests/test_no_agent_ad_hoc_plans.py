@@ -2,7 +2,11 @@
 the matcher's closest ones first (fix-1ma8.5).
 
 Driven as tests/test_no_agent_review.py is: the real agent context on the annotated library copy with its trained heads;
-the scripted seams are the planner's split, its text plan and Jev's planning-command match (its distribution)."""
+the scripted seams are the planner's split, its text plan and Jev's planning-command match (its distribution).
+
+The turns here are unattended: a turn somebody can answer asks which plan is meant before it ends a part as not run
+(fix-yu3l.5, tests/test_plan_choice_question.py), and these tests are about the entry and the text of a part that IS not
+run."""
 from __future__ import annotations
 
 import pytest
@@ -15,6 +19,7 @@ from tests.test_approval_binding import (  # noqa: F401 - the real agent on the 
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, JOKE, _split_into, gated  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.conftest import script_matcher
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -45,13 +50,9 @@ def _no_agent(initialized_fastworkflow, no_agent_model, no_planner_key, gated, m
 
 
 def _jev(monkeypatch, distributions: dict[str, dict[str, float]] | None = None):
-    """Jev's match, scripted: no planning command fits any part, and the distribution of a part's text is its entry."""
-    distributions = distributions or {}
-
-    def match(workflow, text, exclude=None):
-        return "", None, dict(distributions.get(text, {}))
-
-    monkeypatch.setattr(review_proposals, "planning_match", match)
+    """The remote decision model, scripted: the distribution of a part's text is its entry (a text not listed gets no
+    answer). Every scripted score is below the match bar (0.5), so no command fits any part and each is ad hoc."""
+    script_matcher(monkeypatch, distributions or {})
 
 
 def _stops(out):
@@ -65,8 +66,8 @@ def _context_plans(gated) -> list[str]:
 
 
 def test_the_text_leads_with_the_no_match_statement_and_lists_the_closest_first_flagged(gated, monkeypatch):
-    _jev(monkeypatch, {JOKE: {"Library/book_by_title": 0.5, "Library/overdue_summary": 0.25, "none": 0.2}})
-    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST)
+    _jev(monkeypatch, {JOKE: {"Library/book_by_title": 0.45, "Library/overdue_summary": 0.25, "none": 0.2}})
+    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST, unattended=True)
 
     assert out.status is TurnStatus.COMPLETED
     (stop,) = _stops(out)
@@ -98,7 +99,7 @@ def test_the_text_leads_with_the_no_match_statement_and_lists_the_closest_first_
 def test_a_match_below_the_floor_or_none_is_not_closest(gated, monkeypatch):
     floor = run_listing.UNSURE_CANDIDATE_FLOOR
     _jev(monkeypatch, {JOKE: {"Library/book_by_title": floor - 0.05, "none": 0.9}})
-    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST)
+    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST, unattended=True)
 
     (stop,) = _stops(out)
     assert not any(p["closest"] for p in stop["available_plans"])
@@ -106,20 +107,27 @@ def test_a_match_below_the_floor_or_none_is_not_closest(gated, monkeypatch):
     assert "\n\nPlanning commands available here:\n- `Library/author_books`" in out.answer
 
 
-def test_no_matcher_result_lists_the_context_plans_by_name_with_none_closest(gated, monkeypatch):
+def test_no_matcher_result_lists_the_context_plans_with_the_local_models_closest_first(gated, monkeypatch):
+    """No remote answer: the local model's unsure ranking is the decision's, so it orders the closest plans (bd
+    fix-o1lg: one ranked candidate list; before, only the remote model's distribution could flag a plan closest)."""
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
+
     _jev(monkeypatch)
-    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST)
+    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST, unattended=True)
 
     (stop,) = _stops(out)
-    assert [p["name"] for p in stop["available_plans"]] == _context_plans(gated)
-    assert not any(p["closest"] for p in stop["available_plans"])
+    assert sorted(p["name"] for p in stop["available_plans"]) == _context_plans(gated)
+    scores = resolution.part_intent(gated.wf, JOKE).planning_scores()
+    assert stop["available_plans"] == no_agent_mode.available_plans(gated.wf, scores)
+    closest = [p["name"] for p in stop["available_plans"] if p["closest"]]
+    assert all(scores[name] >= run_listing.UNSURE_CANDIDATE_FLOOR for name in closest)
 
 
 def test_at_most_the_closest_three_are_flagged(gated, monkeypatch):
     names = _context_plans(gated)
     assert len(names) > review_proposals.MAX_PLAN_ALTERNATIVES + 1
-    _jev(monkeypatch, {JOKE: {name: 0.9 - 0.01 * i for i, name in enumerate(names)}})
-    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST)
+    _jev(monkeypatch, {JOKE: {name: 0.45 - 0.01 * i for i, name in enumerate(names)}})
+    out = gated.ctx.process_turn(JOKE, approval_surface=UNVERIFIED_HOST, unattended=True)
 
     (stop,) = _stops(out)
     flagged = [p["name"] for p in stop["available_plans"] if p["closest"]]
@@ -127,10 +135,10 @@ def test_at_most_the_closest_three_are_flagged(gated, monkeypatch):
 
 
 def test_a_split_turn_lists_the_plans_in_full_once_and_each_parts_closest_per_part(gated, monkeypatch):
-    _jev(monkeypatch, {JOKE: {"Library/book_by_title": 0.5},
-                       HAIKU: {"Library/note_member": 0.6, "Library/count_books": 0.3}})
+    _jev(monkeypatch, {JOKE: {"Library/book_by_title": 0.45},
+                       HAIKU: {"Library/note_member": 0.45, "Library/count_books": 0.3}})
     _split_into(monkeypatch, [JOKE, HAIKU])
-    out = gated.ctx.process_turn(f"{JOKE} and {HAIKU}", approval_surface=UNVERIFIED_HOST)
+    out = gated.ctx.process_turn(f"{JOKE} and {HAIKU}", approval_surface=UNVERIFIED_HOST, unattended=True)
 
     first, second = _stops(out)
     assert (first["sub_task"], second["sub_task"]) == (1, 2)

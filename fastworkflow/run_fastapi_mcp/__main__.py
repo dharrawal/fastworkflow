@@ -462,6 +462,18 @@ async def lifespan(_app: FastAPI):
                 logger.critical(f"startup problem: {problem}")
             raise RuntimeError(f"startup problem: {'; '.join(sorted(startup_problems))}")
 
+        # The detection chain is named once in the log (intent_detector.startup_report), with the contexts
+        # that have no trained local model and run on the model matcher. A workflow that may not start that
+        # way is reported here and refused where it always was, when its session starts.
+        from fastworkflow import intent_detector
+
+        engine_problems, engine_notices = intent_detector.startup_report(ARGS.workflow_path, build=True)
+        for notice in engine_notices:
+            # The chain line. A warning only when it names a context with no trained local model.
+            (logger.warning if "no trained local model" in notice else logger.info)(notice)
+        for problem in engine_problems:
+            logger.error(f"startup problem: {problem}")
+
         # Advisory: contexts with no get_state hook pin the sessions that hold them (read from the context
         # model, nothing instantiated). Not an error and no behaviour change.
         if (pin_line := checkpoint.startup_pinning_warning(ARGS.workflow_path)) is not None:
@@ -2403,7 +2415,7 @@ async def invoke_assistant(
 
             def assistant_work_fn():
                 # Resolve the assistant prefix inside the turn (under the lock).
-                if "is_assistant_mode_command" in ctx.cme_workflow.context:
+                if ctx.assistant_round:
                     assistant_query = request.user_query
                 else:
                     assistant_query = f"/{request.user_query.lstrip('/')}"

@@ -21,6 +21,7 @@ from tests.test_approval_binding import (  # noqa: F401 - the real agent on the 
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, FIND, JOKE, _marker, _open_review, _split_into, gated  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.conftest import script_matcher
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -54,19 +55,10 @@ def _no_agent(initialized_fastworkflow, no_agent_model, no_planner_key, gated, m
 
 @pytest.fixture(autouse=True)
 def _jev_is_confident_about_emma(monkeypatch):
-    """Jev's planning-command match, scripted (no key, no model): EMMA is matched to book_by_title confidently, and
-    nothing else is matched. The heads alone are only unsure about EMMA (a top-k pick), which no-agent mode does not
-    run (``review_proposals.confident_means``)."""
-    from fastworkflow import review_proposals
-    from fastworkflow.workflow_agent import load_planning_command_map
-
-    def match(workflow, text, exclude=None):
-        if text == EMMA:
-            command = load_planning_command_map(workflow.folderpath)["Library/book_by_title"]
-            return "", command, {"Library/book_by_title": 0.9}
-        return "", None, {}
-
-    monkeypatch.setattr(review_proposals, "planning_match", match)
+    """The remote decision model, scripted (no key, no model): EMMA is matched to book_by_title confidently, and any
+    other text gets no answer (the local model's answer stands). The local model alone is only unsure about EMMA,
+    which no-agent mode does not run."""
+    script_matcher(monkeypatch, {EMMA: {"Library/book_by_title": 0.9, "none": 0.0}})
 
 
 def _reply(gated, message, token):
@@ -84,9 +76,27 @@ def _artifacts(out):
     return out.command_outputs[-1].command_response.artifacts
 
 
+def _asks_which_plan(out, sub_task):
+    """An attended turn asks which planning command is meant for an ad hoc part (fix-yu3l.5), BEFORE the review since
+    bd fix-o1lg S4/S5 (tests/test_plan_choice_question.py). The tests here answer ``none`` and read the stop as before."""
+    assert out.status is TurnStatus.AWAITING_USER, out.answer
+    artifacts = _artifacts(out)
+    assert artifacts["question_kind"] == "plan_choice" and artifacts["plan_choice"]["sub_task"] == sub_task, artifacts
+
+
+def _none_then_review(gated, out, sub_task, surface=None):
+    """Every part is resolved before the review: EMMA's plan lacks its title, which is asked for first; then the ad hoc
+    part *sub_task* is asked about, ``none`` keeps it ad hoc, and the review of the turn opens."""
+    if _artifacts(out).get("question_kind") == "planning_parameter":
+        assert _artifacts(out)["parameter_request"]["missing"] == ["title"]
+        out = gated.ctx.process_turn("title: Emma", approval_surface=surface or HOST)
+    _asks_which_plan(out, sub_task)
+    return gated.ctx.process_turn("none", approval_surface=surface or HOST)
+
+
 def test_a_host_surface_turn_opens_the_review_with_a_plan_preview_on_the_ad_hoc_item(gated, monkeypatch):
     _split_into(monkeypatch, [EMMA, JOKE])
-    out = gated.ctx.process_turn(f"{EMMA} and {JOKE}", approval_surface=HOST)
+    out = _none_then_review(gated, gated.ctx.process_turn(f"{EMMA} and {JOKE}", approval_surface=HOST), 2)
 
     # The review opened on a host surface, where it is skipped with an agent model.
     assert out.status is TurnStatus.AWAITING_USER
@@ -112,12 +122,13 @@ def test_a_host_surface_turn_opens_the_review_with_a_plan_preview_on_the_ad_hoc_
 
 def test_accepting_runs_the_runnable_item_and_returns_the_ad_hoc_item_as_a_stop(gated, monkeypatch):
     _split_into(monkeypatch, [EMMA, JOKE])
-    gated.ctx.process_turn(f"{EMMA} and {JOKE}", approval_surface=HOST)
+    _none_then_review(gated, gated.ctx.process_turn(f"{EMMA} and {JOKE}", approval_surface=HOST), 2)
     token = _token(gated)
     _reply(gated, "change 1: inputs=title=Emma", token)
     _reply(gated, "change 2: means=from_scratch", token)
     gated.script.steps = []
 
+    # Nothing is asked once the review is accepted (bd fix-o1lg S4/S5): the ad hoc part was asked about before it.
     out = _reply(gated, "accept", token)
 
     assert out.status is TurnStatus.COMPLETED
@@ -157,7 +168,11 @@ def test_an_unverified_host_identity_opens_no_review_and_the_runnable_part_runs(
     # D1: the host approval path takes a reply only from a verified end user, so a review opened for an unverified one
     # could never be accepted. No review is opened; the runnable part runs and the ad hoc part comes back as a stop.
     _split_into(monkeypatch, [HOURS, JOKE])
-    out = gated.ctx.process_turn(f"{HOURS} and {JOKE}", approval_surface=UNVERIFIED_HOST)
+    asked = gated.ctx.process_turn(f"{HOURS} and {JOKE}", approval_surface=UNVERIFIED_HOST)
+    # The ad hoc part asks which plan is meant (a question, not a review: it needs no verified identity).
+    _asks_which_plan(asked, 2)
+    assert _reviews(gated) == []
+    out = gated.ctx.process_turn("none", approval_surface=UNVERIFIED_HOST)
 
     assert out.status is TurnStatus.COMPLETED
     assert _reviews(gated) == [] and _marker(gated) == "not_reviewed"
@@ -168,10 +183,11 @@ def test_an_unverified_host_identity_opens_no_review_and_the_runnable_part_runs(
 
 def test_a_verified_host_identity_opens_the_review_and_yes_with_the_token_accepts_it(gated, monkeypatch):
     _split_into(monkeypatch, [HOURS, JOKE])
-    out = gated.ctx.process_turn(f"{HOURS} and {JOKE}", approval_surface=HOST)
+    out = _none_then_review(gated, gated.ctx.process_turn(f"{HOURS} and {JOKE}", approval_surface=HOST), 2)
     assert out.status is TurnStatus.AWAITING_USER and _marker(gated) == "open"
 
-    accepted = _reply(gated, "yes", _token(gated))
+    token = _token(gated)
+    accepted = _reply(gated, "yes", token)
 
     assert accepted.status is TurnStatus.COMPLETED and _marker(gated) == "reviewed"
     assert any(o.command_name == "library_hours" for o in accepted.command_outputs)
@@ -181,7 +197,13 @@ def test_a_verified_host_identity_opens_the_review_and_yes_with_the_token_accept
 @pytest.mark.parametrize("surface", [HOST, UNVERIFIED_HOST])
 def test_a_turn_where_nothing_would_run_never_opens_a_review(gated, monkeypatch, surface):
     _split_into(monkeypatch, [JOKE, MARS])
-    out = gated.ctx.process_turn(f"{JOKE} and {MARS}", approval_surface=surface)
+    asked = gated.ctx.process_turn(f"{JOKE} and {MARS}", approval_surface=surface)
+    # No review; each ad hoc part asks which plan is meant when the turn reaches it.
+    _asks_which_plan(asked, 1)
+    assert _reviews(gated) == []
+    asked = gated.ctx.process_turn("none", approval_surface=surface)
+    _asks_which_plan(asked, 2)
+    out = gated.ctx.process_turn("none", approval_surface=surface)
 
     assert out.status is TurnStatus.COMPLETED
     assert _reviews(gated) == [] and _marker(gated) == "not_reviewed"
@@ -192,23 +214,20 @@ def test_a_turn_where_nothing_would_run_never_opens_a_review(gated, monkeypatch,
 # ---------------------------------------------------------------- D2: a part runs bound only on a confident match
 
 
-def _draft(gated, sub_task, *, confident_only=True):
+def _draft(gated, sub_task):
     from fastworkflow import review_proposals
 
-    return review_proposals.draft_round1_proposal(gated.wf, [sub_task], confident_only=confident_only).items[0]
+    return review_proposals.draft_round1_proposal(gated.wf, [sub_task]).items[0]
 
 
 def test_an_unconfident_match_is_not_run_here_with_the_planners_suggestion(gated, monkeypatch):
-    from fastworkflow import review_proposals
-
-    # The end-to-end run bound this poem request to a find-by-title command: the heads only rank it in their top-k and Jev
-    # picks no planning command, so the unfiltered draft binds it and no-agent mode does not run it.
-    monkeypatch.setattr(review_proposals, "planning_match", lambda workflow, text, exclude=None: ("", None, {}))
-    assert _draft(gated, HAIKU, confident_only=False).means.kind != "from_scratch"
+    # The end-to-end run bound this poem request to a find-by-title command: the local model only ranks it among its
+    # candidates and the remote model gives no answer, so the draft (which binds only a match) leaves it ad hoc.
     assert _draft(gated, HAIKU).means.kind == "from_scratch"
 
+    # Unattended: what is not run is the subject (an attended turn asks which plan is meant first).
     _split_into(monkeypatch, [HAIKU, JOKE])
-    out = gated.ctx.process_turn(f"{HAIKU} and {JOKE}", approval_surface=UNVERIFIED_HOST)
+    out = gated.ctx.process_turn(f"{HAIKU} and {JOKE}", approval_surface=UNVERIFIED_HOST, unattended=True)
 
     assert out.status is TurnStatus.COMPLETED
     assert not any(o.command_name.startswith(("Record/", "Library/")) for o in out.command_outputs)
@@ -219,13 +238,10 @@ def test_an_unconfident_match_is_not_run_here_with_the_planners_suggestion(gated
 
 
 def test_a_confident_match_runs_bound(gated, monkeypatch):
-    from fastworkflow import review_proposals
-
-    # Jev's confident pick (scripted by the fixture above) and a head's confident label both bind.
+    # The remote model's confident pick (scripted by the fixture above) and the local model's confident label both bind.
     assert _draft(gated, EMMA).means.name == "Library/book_by_title"
     head = _draft(gated, FIND)
     assert (head.means.kind, head.means.name) == ("plain", "Library/find_member")
-    assert review_proposals.confident_means(gated.wf, FIND, head.means)
 
 
 def test_a_write_command_never_runs_from_an_unconfident_match(gated):
@@ -234,17 +250,15 @@ def test_a_write_command_never_runs_from_an_unconfident_match(gated):
 
     assert "Record/add_note" in write_commands(gated.wf.folderpath)
     reminder = "draft a reminder email to each member with an overdue loan"
-    # The unfiltered draft binds a note-writing planning command to it (the end-to-end defect); no-agent mode does not.
-    unfiltered = _draft(gated, reminder, confident_only=False).means
-    assert unfiltered.name in write_commands(gated.wf.folderpath)
-    means = review_proposals.Means(kind=review_proposals.MEANS_PLAIN, name="Record/add_note")
-    assert not review_proposals.confident_means(gated.wf, reminder, means)
-    assert _draft(gated, reminder).means.kind == "from_scratch"
+    # A best-ranked draft bound a note-writing planning command to it (the end-to-end defect); the draft binds only a
+    # match, so it is ad hoc.
+    assert _draft(gated, reminder).means == review_proposals.Means()
 
 
 def test_a_part_that_ran_bound_names_its_command_in_the_answer(gated, monkeypatch):
+    # Unattended: the answer of the part that ran is the subject (an attended turn asks about the ad hoc part first).
     _split_into(monkeypatch, [HOURS, JOKE])
-    out = gated.ctx.process_turn(f"{HOURS} and {JOKE}", approval_surface=UNVERIFIED_HOST)
+    out = gated.ctx.process_turn(f"{HOURS} and {JOKE}", approval_surface=UNVERIFIED_HOST, unattended=True)
 
     assert "(Ran library_hours.)" in out.answer
 
@@ -268,7 +282,8 @@ def test_an_unroutable_request_that_offers_candidates_is_answered_as_in_determin
     _deterministic_fallback(gated)
     out = gated.ctx.process_turn(UNROUTABLE)
 
-    assert _artifacts(out).get("intent_choices"), out.answer
+    asked = _artifacts(out)
+    assert asked.get("question_kind") == "plan_choice" and asked["plan_choice"]["choices"], out.answer
     assert out.answer.startswith("Ambiguous intent error"), out.answer
     assert no_agent_mode.NOT_PLANNED_NOTE not in out.answer and "no agent model" not in out.answer, out.answer
 
@@ -279,16 +294,16 @@ def test_the_note_is_added_when_a_reply_offers_no_candidate_command(gated):
 
     class Route:
         handled = routed = False
-        command_name = parameter_request = intent_choices = None
+        command_name = parameter_request = plan_choice = None
 
     _deterministic_fallback(gated)
     cme = gated.ctx._cme_workflow
     assert _no_agent_note(Route(), cme) == f"\n{no_agent_mode.NOT_PLANNED_NOTE}"
     with_candidates = Route()
-    with_candidates.intent_choices = ["Library/find_book", "Library/open_book", "Record/find_record"]
+    with_candidates.plan_choice = {"choices": [{"name": "Library/find_book"}, {"name": "Library/open_book"}]}
     assert _no_agent_note(with_candidates, cme) == ""
     empty = Route()
-    empty.intent_choices = []
+    empty.plan_choice = None
     assert _no_agent_note(empty, cme) == f"\n{no_agent_mode.NOT_PLANNED_NOTE}"
 
 
@@ -303,59 +318,29 @@ def test_the_same_request_is_answered_as_before_when_an_agent_model_is_set(gated
 
 
 
-# ---------------------------------------------------------------- D2: Jev's confident "none" against a head's planning pick
+# ---------------------------------------------------------------- D2: a confident local planning label decides alone
 
 SUMMARY = "run the library summary"      # heads: one confident label, the planning command Library/overdue_summary
 
 
-def _jev(monkeypatch, name=None, distribution=None):
-    from fastworkflow import review_proposals
-    from fastworkflow.workflow_agent import load_planning_command_map
-
-    def match(workflow, text, exclude=None):
-        command = load_planning_command_map(workflow.folderpath)[name] if name else None
-        return "", command, dict(distribution or {})
-
-    monkeypatch.setattr(review_proposals, "planning_match", match)
-
-
-def test_a_confident_jev_none_stops_a_head_confident_planning_command_from_running(gated, monkeypatch):
-    _jev(monkeypatch, None, {"none": 0.95})
+@pytest.mark.parametrize("distribution", [{"none": 0.95}, {"none": 0.3}, None],
+                         ids=["remote_none_confident", "remote_none_unsure", "remote_silent"])
+def test_a_confident_local_planning_label_is_checked_by_the_remote_model_and_never_runs_unreviewed(
+        gated, monkeypatch, distribution):
+    """Rewritten for bd fix-o1lg.2 (it pinned the opposite: a confident local planning label decided alone, on the fast
+    path). A local model's planning pick is checked by the remote model; when that does not confirm it (none, unsure,
+    or no answer) the part is asked about before anything runs, never run unreviewed."""
+    asked = script_matcher(monkeypatch, {} if distribution is None else {SUMMARY: distribution})
     out = gated.ctx.process_turn(SUMMARY, approval_surface=UNVERIFIED_HOST)
-
-    assert out.status is TurnStatus.COMPLETED and _marker(gated) != "fast_path"
-    assert not any(o.command_name == "Library/overdue_summary" for o in out.command_outputs)
-    (stop,) = _artifacts(out)[NOT_RUN_ARTIFACT]
-    assert stop["command"] is None and stop["means"] == "from_scratch"
+    assert _marker(gated) != "fast_path" and SUMMARY in asked
+    assert out.status is TurnStatus.AWAITING_USER and _artifacts(out)["question_kind"] == "plan_choice"
+    assert "Library/overdue_summary" in [each["name"] for each in _artifacts(out)["plan_choice"]["choices"]]
 
 
-def test_a_jev_pick_of_the_same_planning_command_runs_it(gated, monkeypatch):
-    from fastworkflow import review_proposals
-
-    _jev(monkeypatch, "Library/overdue_summary", {"Library/overdue_summary": 0.9, "none": 0.05})
-    assert review_proposals.confident_pick(gated.wf, SUMMARY).name == "Library/overdue_summary"
-    gated.ctx.process_turn(SUMMARY, approval_surface=UNVERIFIED_HOST)
-    assert _marker(gated) == "fast_path"
-
-
-@pytest.mark.parametrize("distribution", [{}, {"none": 0.3}], ids=["jev_silent", "none_not_confident"])
-def test_without_a_confident_jev_none_the_head_confident_planning_command_is_as_before(gated, monkeypatch, distribution):
-    from fastworkflow import review_proposals
-
-    # No verdict (no key, an error, a timeout) or a "none" below the match threshold: the head's pick stands, as before.
-    _jev(monkeypatch, None, distribution)
-    assert review_proposals.confident_pick(gated.wf, SUMMARY).name == "Library/overdue_summary"
-    gated.ctx.process_turn(SUMMARY, approval_surface=UNVERIFIED_HOST)
-    assert _marker(gated) == "fast_path"
-
-
-def test_a_confident_jev_none_does_not_touch_a_head_confident_plain_command(gated, monkeypatch):
-    from fastworkflow import review_proposals
-
-    _jev(monkeypatch, None, {"none": 0.95})
-    means = review_proposals.confident_pick(gated.wf, FIND)
-    assert (means.kind, means.name) == ("plain", "Library/find_member")
-
+def test_a_confident_local_plain_command_is_bound_whatever_the_remote_model_would_say(gated, monkeypatch):
+    asked = script_matcher(monkeypatch, {FIND: {"none": 0.95}})
+    means = _draft(gated, FIND).means
+    assert (means.kind, means.name) == ("plain", "Library/find_member") and asked == []
 
 
 # ---------------------------------------------------------------- the rendered review text marks an item that will not run
@@ -369,7 +354,7 @@ def _lines(text):
 
 def test_the_review_text_marks_an_ad_hoc_item_on_first_render_and_after_an_edit(gated, monkeypatch):
     _split_into(monkeypatch, [EMMA, JOKE])
-    out = gated.ctx.process_turn(f"{EMMA} and {JOKE}", approval_surface=HOST)
+    out = _none_then_review(gated, gated.ctx.process_turn(f"{EMMA} and {JOKE}", approval_surface=HOST), 2)
     record = _open_review(gated)
     first = _lines(record.rendering)
     assert not first[0].endswith(SUFFIX) and first[1].endswith(SUFFIX), first
@@ -391,13 +376,16 @@ def test_the_review_text_marks_an_ad_hoc_item_on_first_render_and_after_an_edit(
     dropped = _reply(gated, "drop 2", token)
     assert dropped.status is TurnStatus.AWAITING_USER, dropped.answer
     assert SUFFIX not in "\n".join(_lines(record.rendering)[1:])
-    assert _reply(gated, "accept", token).status is TurnStatus.COMPLETED
+    # The one item left is ad hoc: accepting reaches it, and it ends as not run (nothing is asked after the review).
+    done = _reply(gated, "accept", token)
+    assert done.status is TurnStatus.COMPLETED and _artifacts(done)[NOT_RUN_ARTIFACT][0]["command"] is None
 
 
 def test_with_an_agent_model_the_review_text_is_what_it_always_was(gated):
     from fastworkflow import review_engine, review_proposals
 
-    proposal = review_proposals.build_round1_proposal([EMMA, JOKE], {})
+    proposal = review_proposals.SubTaskProposal(items=[review_proposals.SubTask(goal=EMMA),
+                                                       review_proposals.SubTask(goal=JOKE)])
     assert any(item.means.kind == "from_scratch" for item in proposal.items)
     plain = review_engine.prompt_for(proposal, gated.wf)
     assert SUFFIX not in plain and plain == review_engine.prompt_for(proposal, gated.wf, no_agent=False)

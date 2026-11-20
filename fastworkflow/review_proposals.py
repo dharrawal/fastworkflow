@@ -9,10 +9,10 @@ is the name of the planning command that reviews it (``review_subtasks``, ``revi
 * sub-tasks: ``goal; goal; ...`` (outcomes, inputs and means are then set by edits or by the candidates builder);
 * plan: ``goal = step | step; goal = step``.
 
-``build_round1_proposal`` is stage 3: it builds the round-1 proposal from a split result and per-sub-task
-candidates. It is pure. ``draft_round1_proposal`` feeds it real candidates (the heads, the shortlist, optional Jev) for
-the turn's gate, and ``fast_path_for`` is the gate's fast-path predicate (fix-3rsq.plan-review.2.2, .2.3). The gate
-itself is in workflow_execution_context (``_subtask_gate``).
+``draft_round1_proposal`` drafts the round-1 proposal of a split result for the turn's gate: each part's means is the
+one decision of ``fastworkflow/_workflows/plan_metadata_extraction/resolution.py`` (``part_intent``: exact name, then the
+detection chain over execution and planning commands together; bd fix-o1lg). The gate itself is in
+workflow_execution_context (``_subtask_gate``).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 import dspy
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
@@ -31,19 +31,14 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from fastworkflow import subtask_pool, turn_cache, turn_progress
 from fastworkflow.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
 from fastworkflow.review_engine import (
-    KIND_PLAN, KIND_SUB_TASKS, PROPOSAL_SPECS, Add, Change, Drop, EditParseError, EditRefused, Merge, Proposal,
+    KIND_PLAN, KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, Proposal,
     Split, _SafeValues, register_proposal)
 
 logger = logging.getLogger(__name__)
 
-FROM_SCRATCH = "from_scratch"
 MEANS_PLANNING = "planning"
 MEANS_PLAIN = "plain"
 MEANS_FROM_SCRATCH = "from_scratch"
-
-#: The framework's proposal classes by spec name (the review command's lookup).
-PROPOSAL_CLASSES = PROPOSAL_SPECS
-
 
 class Means(BaseModel):
     """How a sub-task is done: a prebuilt planning command, a plain command, or built from scratch (round 2).
@@ -83,7 +78,6 @@ class Means(BaseModel):
 _FROM_SUBTASK = re.compile(r"^(?:(?P<name>[A-Za-z_]\w*)\s*=\s*)?from sub-task\s+(?P<number>\d+)$", re.IGNORECASE)
 _NAMED_VALUE = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>.*)$", re.DOTALL)
 _NAMED_COLON = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*:\s*(?P<value>.*)$", re.DOTALL)
-_ENTITY_INPUT_KEYS = frozenset({"name", "unit", "person", "right", "group", "application", "feed", "control"})
 
 
 class SubTaskInput(BaseModel):
@@ -122,14 +116,7 @@ class SubTaskInput(BaseModel):
         return cls(value=_strip_outer_quotes(text))
 
 
-#: bd fix-1ma8.1: a sub-task's planning-command match is AMBIGUOUS when another planning command clears
-#: ``run_listing.UNSURE_CANDIDATE_FLOOR`` (0.2, the shortlist's floor) and the winner leads it by less than this margin.
-#: Measured on a private 840-task-run benchmark (1,197 matched sub-tasks, Jev's per-option probabilities): a runner-up
-#: at or above the floor in 3.8% of them (45); a lead below 0.5 keeps 36 of those, 10 of them in a run that lost
-#: checklist lines (4% of all matched sub-tasks were), and marks 4.1% of the reviews. A lead of 0.5 or more is "a clear
-#: leader".
-PLAN_AMBIGUITY_CLEAR_MARGIN = 0.5
-#: The most other plans a review item names.
+#: The most other plans a review item names (``resolution.MAX_ALTERNATIVES``).
 MAX_PLAN_ALTERNATIVES = 3
 
 
@@ -162,6 +149,10 @@ class SubTask(BaseModel):
     #: What the framework's check said about the means, shown on the line: a refused planning-command argument
     #: (``check_planned_arguments``). Empty when the check passed or no check ran. Not a completion: an advisory note.
     check: str = ""
+    #: The required arguments ``check`` says are simply missing (as data: the review line asks for exactly these, never
+    #: reads them back from ``check``'s text). Empty when ``check`` is a refusal of something else. Not shown; absent
+    #: from the serialized item when empty.
+    check_missing: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     #: The means the draft drafted this sub-task's inputs for (``draft_inputs`` ran on its goal), or "" when it did not
     #: (drafting off, the draft failed, or the user added the sub-task; a split or merged one keeps its first item's).
     #: fix-48np.1: a sub-task whose means is still the drafted one is not drafted again at run time
@@ -173,10 +164,10 @@ class SubTask(BaseModel):
     #: inputs or means makes it differ, and the item then runs as the one job it reads. Not shown.
     parts: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     parts_fingerprint: str = Field(default="", json_schema_extra={"review_hidden": True})
-    #: The other planning commands that fit this sub-task about as well as its means (bd fix-1ma8.1; see
-    #: ``plan_alternatives``): at most ``MAX_PLAN_ALTERNATIVES``, best first, each with its one-line description. Empty
-    #: (and then absent from the serialized item, so an unambiguous review is byte-identical to before) unless the
-    #: match was ambiguous. The review text names them, the payload carries them, and ``step N: use NAME`` switches the
+    #: The other planning commands that fit this sub-task about as well as its means (bd fix-1ma8.1): the other planning
+    #: candidates of an ambiguous detection (``resolution.draft_choice``), at most ``MAX_PLAN_ALTERNATIVES``, best first,
+    #: each with its one-line description. Empty (and then absent from the serialized item, so an unambiguous review is
+    #: byte-identical to before) unless the match was ambiguous. The review text names them, the payload carries them, and ``step N: use NAME`` switches the
     #: means to one of them (the ``change N: means=planning:NAME`` edit). Not user-editable.
     alternatives: list[PlanAlternative] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     #: The item this one came from before this reply (set by ``apply_edits``; not serialized).
@@ -202,13 +193,11 @@ class SubTask(BaseModel):
         data = handler(self)
         if isinstance(data, dict) and not data.get("alternatives"):
             data.pop("alternatives", None)
+        if isinstance(data, dict) and not data.get("check_missing"):
+            data.pop("check_missing", None)
         return data
 
 
-_MULTI_INPUT_SPLIT = re.compile(
-    r"(?:[,;]|\s+and\s+)\s*(?=[A-Za-z_]\w*\s*[=:]|from sub-task\s+\d+)",
-    re.IGNORECASE,
-)
 _META_INPUT_KEYS = frozenset({"means", "goal", "outcome", "desired_outcome", "check"})
 
 
@@ -546,7 +535,7 @@ class SubTaskProposal(Proposal):
                 item = redraft_for_look_up(workflow, item, items, planner_lm=planner_lm)
                 item = _overlay_inputs(item, kept)
             elif before_item is None and item.means.kind == MEANS_FROM_SCRATCH:
-                built = build_round1_proposal([item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0]
+                built = decided_item(workflow, item.goal)
                 picked = built.means
                 item = item.model_copy(update={"means": picked, "alternatives": built.alternatives})
                 if item.means.kind != MEANS_FROM_SCRATCH:
@@ -554,7 +543,7 @@ class SubTaskProposal(Proposal):
                     item = _overlay_inputs(item, kept)
             elif (before_item is not None and item.goal != before_item.goal
                   and item.means == before_item.means):
-                built = build_round1_proposal([item.goal], {1: _candidates_for_subtask(workflow, item.goal)}).items[0]
+                built = decided_item(workflow, item.goal)
                 picked = built.means
                 if picked.kind != MEANS_FROM_SCRATCH:
                     item = item.model_copy(update={"means": picked, "alternatives": built.alternatives})
@@ -609,10 +598,9 @@ class PlanGoal(BaseModel):
 def _check_line(index: int, item: "SubTask") -> str:
     """The review line for a planning means whose drafted arguments the framework refuses: what is missing and how to
     give it (the reply grammar the review reads), else the refusal in its own words."""
-    match = re.match(r"^missing required arguments? (\w+(?:, \w+)*)$", item.check)
-    if match:
+    if item.check_missing:
         given = {each.name for each in item.inputs if each.value or each.from_subtask}
-        names = [name for name in match.group(1).split(", ") if name not in given]
+        names = [name for name in item.check_missing if name not in given]
         if not names:
             return ""             # the user has given them since the draft: the draft's note is stale
         quoted = " and ".join(repr(name) for name in names)
@@ -645,74 +633,21 @@ class PlanProposal(Proposal):
 
 
 # ----------------------------------------------------------------------
-# Stage 3: the round-1 builder (pure; tests only)
+# Stage 3: the round-1 draft's means, from the one decision (resolution.part_intent)
 # ----------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Candidate:
-    """One candidate means for a sub-task: a command or planning command name, and whether it is a planning
-    command. Built from the shortlist (run_listing) by the caller."""
+def decided_item(workflow, goal: str, *, exclude=()) -> "SubTask":
+    """A sub-task for *goal* whose means is what ``resolution.part_intent`` decides (``draft_choice``: a match is
+    bound, anything else is ``from_scratch``; an ambiguity is asked about before the review). No inputs are drafted
+    here."""
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
 
-    name: str
-    is_planning: bool
-    score: float = 0.0
-    #: A planning command's one-line description (the matcher's own listing); "" for a plain command.
-    description: str = ""
-
-
-def plan_alternatives(candidates: list[Candidate], chosen: Optional[Candidate]) -> list[PlanAlternative]:
-    """The planning commands that fit a sub-task about as well as its chosen means, or ``[]`` when the match is not ambiguous.
-
-    The match is ambiguous when another planning command (not ``chosen``) scores at least
-    ``run_listing.UNSURE_CANDIDATE_FLOOR`` AND ``chosen`` leads the best of them by less than
-    ``PLAN_AMBIGUITY_CLEAR_MARGIN``. Scores are the ones the draft already holds: the heads' planning-label scores and Jev's
-    per-option probabilities, the larger of the two for a name (``_candidates_for_subtask``), so a head that prefers
-    another plan than Jev does shows up as that plan's score and needs no signal of its own; nothing is computed
-    here. The best ``MAX_PLAN_ALTERNATIVES`` of them, best first. A means that is not a planning command has none.
-    """
-    from fastworkflow import run_listing
-
-    if chosen is None or not chosen.is_planning:
-        return []
-    runners = sorted((c for c in candidates
-                      if c.is_planning and c.name != chosen.name and c.score >= run_listing.UNSURE_CANDIDATE_FLOOR),
-                     key=lambda c: (-c.score, c.name))
-    if not runners or chosen.score - runners[0].score >= PLAN_AMBIGUITY_CLEAR_MARGIN:
-        return []
-    return [PlanAlternative(name=c.name, description=c.description) for c in runners[:MAX_PLAN_ALTERNATIVES]]
-
-
-def plan_ambiguity_record(proposal: "SubTaskProposal") -> list[dict]:
-    """The turn span's ``subtask_plan_ambiguity``: ``{subtask, means, alternatives}`` for each item of *proposal* whose
-    planning-command match was ambiguous. Names only (no goal text, no score)."""
-    return [{"subtask": number, "means": item.means.render(), "alternatives": [each.name for each in item.alternatives]}
-            for number, item in enumerate(proposal.items, 1) if item.alternatives]
-
-
-def build_round1_proposal(subtasks: list[str],
-                          candidates: dict[int, list[Candidate]],
-                          *, top_k: int = 3, inputs: Optional[dict[int, list[SubTaskInput]]] = None,
-                          outcomes: Optional[dict[int, str]] = None) -> SubTaskProposal:
-    """The round-1 proposal for a split result: one sub-task per goal, each given its best means.
-
-    A planning command among a sub-task's top-k candidates is preferred over a plain command (the
-    planning command already knows the steps); otherwise the best candidate; otherwise ``from_scratch``.
-    ``candidates`` is keyed by the sub-task's 1-based number. Inputs and outcomes default to none.
-    """
-    items: list[SubTask] = []
-    for number, goal in enumerate(subtasks, 1):
-        ranked = sorted(candidates.get(number, []), key=lambda c: -c.score)[:top_k]
-        planning = next((c for c in ranked if c.is_planning), None)
-        choice = (planning or (ranked[0] if ranked else None))
-        if choice is None:
-            means = Means()
-        else:
-            means = Means(kind=MEANS_PLANNING if choice.is_planning else MEANS_PLAIN, name=choice.name)
-        items.append(SubTask(goal=goal, outcome=(outcomes or {}).get(number, ""),
-                             inputs=list((inputs or {}).get(number, [])), means=means,
-                             alternatives=plan_alternatives(candidates.get(number, []), choice)))
-    return SubTaskProposal(items=items)
+    name, kind = resolution.draft_choice(resolution.part_intent(workflow, goal, exclude=exclude))
+    if name is None:
+        return SubTask(goal=goal, means=Means())
+    return SubTask(goal=goal, means=Means(kind=MEANS_PLANNING if kind == resolution.KIND_PLANNING else MEANS_PLAIN,
+                                          name=name))
 
 
 #: The review command's argument values for each proposal (a value is not a command name).
@@ -740,53 +675,51 @@ def draft_scope(proposal: "SubTaskProposal"):
         _draft_var.reset(token)
 
 
+_folder_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("fw_review_folder", default=None)
+
+
+@contextlib.contextmanager
+def workflow_scope(folder: Optional[str]):
+    """The workflow folder a reply is read for, for the length of the read: the input names its planning commands
+    declare (``declared_params``) are what the reply guards know about it. None keeps the enclosing scope; with no scope
+    at all, nothing is declared."""
+    if folder is None:
+        yield
+        return
+    token = _folder_var.set(folder)
+    try:
+        yield
+    finally:
+        _folder_var.reset(token)
+
+
+def declared_params(plan: Optional[str] = None) -> tuple:
+    """The ``Param`` records the scope's workflow declares: those of planning command *plan*, or of every planning
+    command when None. Empty outside a ``workflow_scope`` or for a workflow without planning commands."""
+    folder = _folder_var.get()
+    if not folder:
+        return ()
+    from fastworkflow import workflow_agent
+
+    commands = workflow_agent.load_planning_command_map(folder)
+    chosen = [commands[plan]] if plan in commands else ([] if plan else list(commands.values()))
+    return tuple(p for command in chosen for p in command.params)
+
+
+def declared_input_names() -> frozenset[str]:
+    """The input names the workflow's planning commands declare."""
+    return frozenset(p.name for p in declared_params())
+
+
+def entity_input_names() -> frozenset[str]:
+    """The declared inputs that hold a value written in the request (``copied_from_command_text`` or
+    ``record_named_in_command_text`` on a str): the entity a step is about."""
+    return frozenset(p.name for p in declared_params() if p.type == "str" and p.in_request)
+
+
 def draft_for(items_text: str) -> Optional["SubTaskProposal"]:
     """The gate's draft when a review is asked with ``DRAFT_ITEMS`` inside ``draft_scope``; None otherwise."""
     return _draft_var.get() if items_text == DRAFT_ITEMS else None
-
-
-#: The fast-path reasons (what let one sub-task run without a review).
-FAST_EXACT_NAME = "exact_name"
-FAST_HEAD_CONFIDENT = "head_confident"
-
-
-@dataclass(frozen=True)
-class FastPath:
-    """A sub-task that runs without a review: its command (qualified name), whether it is a planning command, and why."""
-
-    name: str
-    is_planning: bool
-    reason: str
-
-
-def fast_path_for(workflow, subtasks: list[str]) -> Optional[FastPath]:
-    """The fast-path predicate (owner decision 1): one sub-task, with an exact command name or a confident head match.
-
-    "Confident" is the signal intent detection routes alone on: the trained head's classifier was confident, so
-    ``CommandRouter.predict_with_details`` answered one label (its ``confident`` flag), which intent detection takes
-    without asking. Its threshold is the head's own, not a new one. An exact command name is intent detection's
-    exact-prefix match (``run_listing.exact_command_name``). Several sub-tasks, an unsure head, or no match is None.
-    No model call: the heads run locally.
-    """
-    from fastworkflow import planning_commands, run_listing
-
-    if len(subtasks) != 1:
-        return None
-    sub_task = subtasks[0]
-    planning = set(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands)
-    if name := run_listing.exact_command_name(workflow, sub_task):
-        return FastPath(name, name in planning, FAST_EXACT_NAME)
-    confident = run_listing.head_candidates(workflow, sub_task).confident_labels
-    if len(confident) == 1:
-        (name,) = confident
-        return FastPath(name, name in planning, FAST_HEAD_CONFIDENT)
-    return None
-
-
-def planning_intent_confirmation(workflow, path: FastPath, sub_task: str) -> Optional[str]:
-    """HOOK for fix-3rsq.plan-review.6: the one-line intent confirmation a planning command taken on the fast path
-    gets ("I'll run X: step -> step. OK?"). Round 1 asks nothing and returns None; the gate does not call it yet."""
-    return None
 
 
 def _planning_descriptions(folder: str) -> dict[str, str]:
@@ -801,174 +734,62 @@ def _planning_descriptions(folder: str) -> dict[str, str]:
 planning_descriptions = _planning_descriptions
 
 
-def _candidates_for_subtask(workflow, sub_task: str, *, exclude: Optional[set[str]] = None) -> list[Candidate]:
-    """Per-sub-task candidate means for the round-1 builder (``draft_round1_proposal``, look_up, add)."""
-    from fastworkflow import planning_commands, run_listing
-    from fastworkflow.workflow_agent import core_command_names
+def _prefetch_intents(workflow, subtasks: list[str]) -> bool:
+    """Decide every sub-task's intent together (``resolution.part_intent``), so the one-after-another loop that follows
+    finds each in the turn's memo and the remote model's calls wait together. True when it did, and then it also
+    announced each sub-task's match stage, in order.
 
-    folder = workflow.folderpath
-    planning = set(planning_commands.resolve_field_sources(folder).planning_commands)
-    core = core_command_names()
-    excluded = exclude or set()
-    heads = run_listing.head_candidates(workflow, sub_task)
-    _, _, probabilities = planning_match(workflow, sub_task)
-    scores = {**heads.execution_scores, **heads.planning_scores}
-    for name, probability in probabilities.items():
-        scores[name] = max(scores.get(name, 0.0), probability)
-    descriptions = _planning_descriptions(folder)
-    named = run_listing.gather(workflow, sub_task)
-    names = (run_listing.gather(workflow, sub_task, probabilities or None) | heads.labels
-             | heads.planning_scores.keys() | heads.execution_scores.keys())
-    return [Candidate(name, is_planning=name in planning, score=scores.get(name, 0.0),
-                      description=descriptions.get(name, ""))
-            for name in sorted(names)
-            if name not in core and name not in excluded
-            and (name in named or scores.get(name, 0.0) >= run_listing.UNSURE_CANDIDATE_FLOOR)]
-
-
-def _prefetch_matches(workflow, subtasks: list[str]) -> bool:
-    """Start the Jev match of every sub-task together, so the one-after-another loop that follows finds each in the turn's
-    memo (``planning_match``). True when it did, and then it also announced each sub-task's match stage, in order.
-
-    Only when there is something to wait on and a place to keep it: Jev's matcher exists (planning commands and a
-    ``JEV_API_KEY``), more than one distinct text, pooling on, and the turn's memo bound (the workers write into the
-    caller's memo; without one the loop would ask again). A failed prefetch is dropped: the loop asks that text again
-    and meets the same failure where it did before, so no outcome changes. Never raises.
+    Only when there is something to wait on and a place to keep it: the remote model can be asked, more than one
+    distinct text, pooling on, and the turn's memo bound (the workers write into the caller's memo). A failed prefetch
+    is dropped: the loop decides that text again. Never raises.
     """
-    from fastworkflow import workflow_agent
+    from fastworkflow import intent_detector
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
 
     texts = list(dict.fromkeys(subtasks))
-    if len(texts) < 2 or not subtask_pool.is_parallel(len(texts)) or not turn_cache.active():
-        return False
-    try:
-        if workflow_agent._planning_command_matcher(workflow.folderpath) is None:     # built once, before the workers
-            return False
-    except Exception:  # noqa: BLE001 - the loop meets the same failure
+    if (len(texts) < 2 or not subtask_pool.is_parallel(len(texts)) or not turn_cache.active()
+            or not intent_detector.matcher_available()):
         return False
 
-    def match(text: str) -> None:
+    def decide(text: str) -> None:
         try:
-            planning_match(workflow, text)
-        except Exception as exc:  # noqa: BLE001 - the sequential loop asks again
-            logger.info(f"the prefetched match failed ({type(exc).__name__}: {exc}); it is asked again in order")
+            resolution.part_intent(workflow, text)
+        except Exception as exc:  # noqa: BLE001 - the sequential loop decides again
+            logger.info(f"the prefetched intent failed ({type(exc).__name__}: {exc}); it is decided again in order")
 
     total = len(subtasks)
-    # one announcement per sub-task (a repeated text is announced too, though it is matched once)
     for number in range(1, total + 1):
         turn_progress.emit(turn_progress.STAGE_MATCH, number, total)
-    subtask_pool.map_in_order([functools.partial(match, text) for text in texts])
+    subtask_pool.map_in_order([functools.partial(decide, text) for text in texts])
     return True
 
 
-def jev_says_none(workflow, sub_task: str, bar: Optional[float] = None) -> bool:
-    """Whether Jev's planning-command match gave a confident "none" for *sub_task*: no planning command fits it, at or
-    above *bar* (default ``workflow_agent.PLANNING_COMMAND_MATCH_THRESHOLD``, the bar of a confident pick, which
-    no-agent mode uses). False when Jev gave no verdict (no key, an error, a timeout: the distribution is empty) or was
-    not confident about "none". The turn's memoised match (``planning_match``): the call the draft and the run make, no
-    further model call."""
-    from fastworkflow.workflow_agent import PLANNING_COMMAND_MATCH_THRESHOLD
+def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None, *,
+                          pinned_plan: Optional[str] = None) -> SubTaskProposal:
+    """The draft round-1 proposal for a split result (fix-3rsq.plan-review.2.3).
 
-    _, command, distribution = planning_match(workflow, sub_task)
-    return command is None and distribution.get("none", 0.0) >= (
-        PLANNING_COMMAND_MATCH_THRESHOLD if bar is None else bar)
-
-
-def confident_pick(workflow, sub_task: str) -> Means:
-    """The means *sub_task* may run bound with no agent model to judge it (no-agent mode), or ``Means()`` (ad hoc).
-
-    The signals are the ones that already decide routing, each with its own bar and no new threshold, in this order:
-    the sub-task names a command (``run_listing.exact_command_name``, intent detection's exact-name match); a planning
-    command Jev picked confidently (``planning_match`` returns a command only at
-    ``workflow_agent.PLANNING_COMMAND_MATCH_THRESHOLD``; a planning command is preferred, as the draft prefers it); the
-    trained head routed alone on it (``head_candidates`` ``confident_labels`` with exactly one label: the fast-path
-    predicate, the head's own threshold). A head's top-k score alone (an unsure head, a tie-break the
-    agent would settle) is not confident, so ``build_round1_proposal``'s best-ranked pick, which has no bar, does not
-    decide here. Jev never vouches for a plain command, so a plain write command (``command_writes``) runs only on the
-    caller's own naming or the head's confident routing. Core commands are not parts. No model call beyond Jev's
-    memoised match.
-    """
-    from fastworkflow import planning_commands, run_listing
-    from fastworkflow.workflow_agent import core_command_names
-
-    planning = set(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands)
-    core = core_command_names()
-
-    def means_of(name: str) -> Means:
-        return Means(kind=MEANS_PLANNING if name in planning else MEANS_PLAIN, name=name)
-
-    if (name := run_listing.exact_command_name(workflow, sub_task)) and name not in core:
-        return means_of(name)
-    _, command, _ = planning_match(workflow, sub_task)
-    if command is not None and command.name not in core:
-        return Means(kind=MEANS_PLANNING, name=command.name)
-    confident = [name for name in run_listing.head_candidates(workflow, sub_task).confident_labels
-                 if name not in core]
-    if len(confident) == 1:
-        # Jev judges planning commands: its confident "none" against a head's planning pick is a disagreement the
-        # agent would have settled, so the part is not run. Plain commands are not Jev's to judge.
-        if confident[0] in planning and jev_says_none(workflow, sub_task):
-            return Means()
-        return means_of(confident[0])
-    return Means()
-
-
-def confident_means(workflow, sub_task: str, means: Means) -> bool:
-    """Whether *means* is what ``confident_pick`` stands behind for *sub_task*."""
-    return means.kind != MEANS_FROM_SCRATCH and bool(means.name) and confident_pick(workflow, sub_task) == means
-
-
-def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None, *, confident_only: bool = False,
-                          none_veto: bool = False, pinned_plan: Optional[str] = None) -> SubTaskProposal:
-    """The draft round-1 proposal for a split result, from real candidates (fix-3rsq.plan-review.2.3).
-
-    Per sub-task, the candidates are: the heads' planning and execution top-k (``run_listing.head_candidates``), the
-    names the gather reads (``run_listing.gather``: the names the sub-task writes, the heads' labels and, when
-    ``JEV_API_KEY`` is set, Jev's planning-command distribution), and Jev's confident or unsure planning commands. Jev is
-    the existing matcher (``workflow_agent.match_planning_command``): it runs no model without the key and then leaves the
-    distribution empty. ``build_round1_proposal`` picks each sub-task's means (a planning command in the top-k first).
-    Each sub-task with a command for its means gets its inputs drafted from its text (``draft_inputs``, fix-48np:
-    the shared parameter extractor, and for a planning command the typed fill fallback on ``planner_lm``; the values
-    the review shows are the ones the run uses, fix-48np.1). A planning pick's refusal is shown on its line: the
-    drafted values' refusal, or, with no draft, ``check_planned_arguments`` of no arguments.
-
-    ``none_veto`` (agent mode, a draft that runs unreviewed): a planning-command pick for a sub-task that does not name
-    a command, when Jev's "none" is at or above ``workflow_agent.PLANNING_NONE_VETO_THRESHOLD``, is not bound: the
-    sub-task is ``from_scratch`` and the agent plans it. Jev's verdict is the turn's memoised match the draft already
-    made, so no model call is added.
+    Each sub-task's means is the one decision ``resolution.part_intent`` makes (``decided_item``): a match is bound;
+    anything else is ``from_scratch`` here, and an ambiguity is asked about before the review (``resolution.step``,
+    bd fix-o1lg S4/S5), which binds the answer. Each sub-task with a command for its means gets its
+    inputs drafted from its text (``draft_inputs``, fix-48np: the shared parameter extractor, and for a planning command
+    the typed fill fallback on ``planner_lm``; the values the review shows are the ones the run uses, fix-48np.1). A
+    planning pick's refusal is shown on its line: the drafted values' refusal, or, with no draft,
+    ``check_planned_arguments`` of no arguments.
     """
     total = len(subtasks)
     if pinned_plan:
-        # The client chose the plan (``use_plan``) for this one part: no match, no candidates, no alternatives (it is
-        # chosen), and no confidence bar (the choice stands); its inputs are drafted below as for any planning means.
+        # The client chose the plan (``use_plan``) for this one part: nothing is detected and no confidence bar (the
+        # choice stands); its inputs are drafted below as for any planning means.
         proposal = SubTaskProposal(items=[
             SubTask(goal=sub_task, means=Means(kind=MEANS_PLANNING, name=pinned_plan)) for sub_task in subtasks])
-        none_veto = confident_only = False
     else:
-        prefetched = _prefetch_matches(workflow, subtasks)
-        candidates = {}
+        prefetched = _prefetch_intents(workflow, subtasks)
+        items = []
         for number, sub_task in enumerate(subtasks, 1):
             if not prefetched:
                 turn_progress.emit(turn_progress.STAGE_MATCH, number, total)
-            candidates[number] = _candidates_for_subtask(workflow, sub_task)
-        proposal = build_round1_proposal(subtasks, candidates)
-    if none_veto and not confident_only:
-        from fastworkflow import run_listing
-        from fastworkflow.workflow_agent import PLANNING_NONE_VETO_THRESHOLD
-
-        proposal = SubTaskProposal(items=[
-            item.model_copy(update={"means": Means(), "alternatives": []})
-            if (item.means.kind == MEANS_PLANNING
-                and not run_listing.exact_command_name(workflow, sub_task)
-                and jev_says_none(workflow, sub_task, PLANNING_NONE_VETO_THRESHOLD))
-            else item
-            for item, sub_task in zip(proposal.items, subtasks)])
-    if confident_only:
-        # No agent model judges a pick here, so a means the signals above do not stand behind is not run: the part is
-        # ad hoc (``from_scratch``) and comes back as not run, with the planner's suggestion (``confident_means``).
-        picks = [confident_pick(workflow, sub_task) for sub_task in subtasks]
-        proposal = SubTaskProposal(items=[
-            item.model_copy(update={"means": pick, "alternatives": item.alternatives if pick == item.means else []})
-            for item, pick in zip(proposal.items, picks)])
+            items.append(decided_item(workflow, sub_task))
+        proposal = SubTaskProposal(items=items)
 
     # A draft reads the sub-tasks before it only through their MEANS (``_producers``), which the proposal already
     # holds, never their drafted inputs: so the drafts are independent and wait on the model together. Each draft is
@@ -1009,8 +830,8 @@ def _fingerprint(item: SubTask) -> str:
                       sort_keys=True, default=str)
 
 
-def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskProposal], planner_lm=None,
-                        *, confident_only: bool = False) -> tuple[list[str], Optional[SubTaskProposal]]:
+def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskProposal],
+                        planner_lm=None) -> tuple[list[str], Optional[SubTaskProposal]]:
     """``(subtasks, plan)`` with each joined item that is still as drafted replaced by its parts, in order.
 
     One level only: each part is drafted on its own (``draft_round1_proposal``, as a split sub-task is) and is a leaf. An
@@ -1026,8 +847,7 @@ def expand_joined_parts(workflow, subtasks: list[str], plan: Optional[SubTaskPro
     for number, item in enumerate(plan.items, 1):
         first_number[number] = len(expanded) + 1
         if item.parts and item.parts_fingerprint == _fingerprint(item):
-            for leaf in draft_round1_proposal(workflow, list(item.parts), planner_lm=planner_lm,
-                                              confident_only=confident_only).items:
+            for leaf in draft_round1_proposal(workflow, list(item.parts), planner_lm=planner_lm).items:
                 expanded.append(leaf.model_copy(update={"parts": [], "parts_fingerprint": ""}))
                 goals.append(leaf.goal)
         else:
@@ -1126,6 +946,7 @@ def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
     from fastworkflow import planning_commands, run_listing
 
     check = ""
+    missing: list[str] = []
     inputs: list[SubTaskInput] = []
     drafted = (draft_inputs(workflow, item, sub_task, earlier, planner_lm=planner_lm)
                if item.means.kind != MEANS_FROM_SCRATCH else None)
@@ -1135,10 +956,12 @@ def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
         command = planning_commands.planning_command(workflow.folderpath, item.means.name)
         if drafted is not None:
             check = drafted.refusal or ""
+            missing = list(drafted.missing)
         elif command is not None:
-            refusal = run_listing.check_planned_arguments(command, {}, sub_task).refusal
-            check = refusal or ""
-    return item.model_copy(update={"check": check, "inputs": inputs,
+            checked = run_listing.check_planned_arguments(command, {}, sub_task)
+            check = checked.refusal or ""
+            missing = list(checked.missing)
+    return item.model_copy(update={"check": check, "check_missing": missing, "inputs": inputs,
                                    "drafted_means": item.means.name if drafted is not None else ""})
 
 
@@ -1163,6 +986,8 @@ class DraftedInputs:
 
     inputs: tuple[SubTaskInput, ...] = ()
     refusal: Optional[str] = None
+    #: The required arguments the refusal says are simply missing (nothing refused), by name.
+    missing: tuple[str, ...] = ()
 
 
 def _input_text(value: Any) -> str:
@@ -1249,15 +1074,16 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
     inputs = [SubTaskInput(name=name, from_subtask=number, drafted=True) for name, number in from_earlier.items()]
     if result.params is None:
         return DraftedInputs(inputs=tuple(inputs))
-    covered = result.missing and set(result.missing) <= set(from_earlier) and result.refusal is not None \
-        and result.refusal.startswith("missing required argument")
+    covered = bool(result.missing) and set(result.missing) <= set(from_earlier) and not result.extraction.invalid
     fields = type(result.params).model_fields
     values = {name: getattr(result.params, name, None) for name in fields}
     if not result.valid and not covered:
         filled = _typed_fallback_values(workflow, item, sub_task, values, result.refusal, planner_lm)
         if filled is None:
-            kept, refusal = _partial_inputs(workflow, item, sub_task, values, fields, from_earlier, result.refusal)
-            return DraftedInputs(inputs=tuple(inputs + kept), refusal=refusal)
+            kept, refusal, missing = _partial_inputs(workflow, item, sub_task, values, fields, from_earlier,
+                                                     result.refusal,
+                                                     result.missing if not result.extraction.invalid else ())
+            return DraftedInputs(inputs=tuple(inputs + kept), refusal=refusal, missing=missing)
         values = filled
     for name, info in fields.items():
         value = values.get(name)
@@ -1268,32 +1094,47 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
 
 
 def _partial_inputs(workflow, item: SubTask, sub_task: str, values: dict, fields, from_earlier: dict,
-                    refusal: Optional[str]) -> tuple[list[SubTaskInput], Optional[str]]:
+                    refusal: Optional[str], missing: Sequence[str] = ()) -> tuple[list[SubTaskInput], Optional[str], tuple]:
     """The inputs of a planning means whose draft is refused, and the refusal: the values the checks stand behind are
     kept (the review shows them, and the run uses them), the missing or refused ones are left out and named in the
     refusal (``planning_commands.argument_gaps``). A refusal that names no argument (a rule of the planning command)
-    keeps no value, as before."""
+    keeps no value, as before. The third result names the required arguments that are simply missing (*missing*: the
+    extractor's, when it found only those), for the review line."""
     from fastworkflow import planning_commands
 
     if item.means.kind != MEANS_PLANNING:
-        return [], refusal
+        return [], refusal, tuple(missing)
     command = planning_commands.planning_command(workflow.folderpath, item.means.name)
     if command is None:
-        return [], refusal
+        return [], refusal, tuple(missing)
     try:
         raw = {p.name: planning_commands._given_or_none(values.get(p.name)) for p in command.params}
         gaps = planning_commands.argument_gaps(command, raw, sub_task)
     except Exception as exc:  # noqa: BLE001 - the draft is advisory
         logger.warning("could not tell which arguments of %s are still missing (%s: %s)", item.means.name,
                        type(exc).__name__, exc)
-        return [], refusal
+        return [], refusal, tuple(missing)
     if not gaps.names:
-        return [], refusal
+        return [], refusal, tuple(missing)
     kept = [SubTaskInput(name=name, value=_input_text(value), drafted=True)
             for name, value in gaps.values.items() if name in fields and name not in from_earlier]
-    if gaps.missing and not gaps.invalid:
+    only_missing = bool(gaps.missing) and not gaps.invalid
+    if only_missing:
         refusal = "missing required argument " + ", ".join(gaps.missing)
-    return kept, refusal
+    return kept, refusal, tuple(gaps.missing) if only_missing else tuple(missing)
+
+
+def _stopped_at(planning_commands, command, raw: dict, sub_task: str, refusal: Optional[str]):
+    """The refusal the typed fill fallback starts from, with the argument the guards stopped at as data (``gap``): the
+    guards run again on *raw* (no model call), so the argument is read from their own record, never from the
+    refusal's text. A refusal the guards do not give (a validator's) carries no argument."""
+    try:
+        planning_commands.check_arguments(command, dict(raw), sub_task)
+    except planning_commands.PlanningCommandInputError as stop:
+        return stop
+    except planning_commands.PlanningCommandCallError:
+        pass
+    return planning_commands.PlanningCommandInputError(refusal or "")
 
 
 def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict, refusal: Optional[str],
@@ -1317,7 +1158,7 @@ def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict,
         with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
             args, notes = planning_commands.typed_fallback_arguments(
                 command, sub_task, typed_planner_commands_text(workflow), raw,
-                planning_commands.PlanningCommandInputError(refusal or ""), workflow)
+                _stopped_at(planning_commands, command, raw, sub_task, refusal), workflow)
     except planning_commands.PlanningCommandCallError:
         return None                                   # still refused (or the hook raised): the refusal stands
     except Exception as exc:  # noqa: BLE001 - the draft is advisory: the extractor's refusal stands
@@ -1347,47 +1188,6 @@ def accepted_subtask_proposal(workflow) -> Optional[SubTaskProposal]:
     return None
 
 
-# ----------------------------------------------------------------------
-# Per-turn candidates (fix-3rsq.plan-review.2.9 note b): the Jev match is asked once per turn and text
-# ----------------------------------------------------------------------
-
-
-def planning_match(workflow, text: str, exclude: Optional[set[str]] = None
-                    ) -> tuple[str, Any, dict[str, float]]:
-    """``(template, command, distribution)`` of the planning-command match for *text*: the same call the turn's planner
-    makes (``workflow_agent.planner_planning_command_for``), memoised for the turn so the fast-path check, the draft and
-    the sub-task's run share one Jev call. The distribution is the match's options (empty without JEV_API_KEY).
-
-    *exclude* is a set of command names left out of the match (included in the turn-cache key; fix-kk46.3 look_up).
-    """
-    from fastworkflow import workflow_agent
-    from fastworkflow.workflow_agent import PLANNING_COMMAND_MATCH_THRESHOLD, load_planning_command_map
-
-    folder = workflow.folderpath
-    excluded = frozenset(exclude or ())
-
-    def compute():
-        distribution: dict[str, float] = {}
-        template, command = workflow_agent.planner_planning_command_for(
-            text, folder, scopes=workflow_agent.planning_scopes(workflow), distribution=distribution)
-        if excluded and command is not None and command.name in excluded:
-            candidates = [(name, score) for name, score in distribution.items()
-                          if name not in excluded and name != "none"]
-            command = None
-            template = ""
-            if candidates:
-                name, score = max(candidates, key=lambda pair: pair[1])
-                if score >= PLANNING_COMMAND_MATCH_THRESHOLD:
-                    command = load_planning_command_map(folder).get(name)
-                    if command is not None:
-                        template = workflow_agent._template_text(command.template)
-        return template, command, distribution
-
-    template, command, distribution = turn_cache.memo(("planning_match", folder, text, excluded), compute)
-    filtered = {name: score for name, score in distribution.items() if name not in excluded}
-    return template, command, filtered
-
-
 def redraft_for_look_up(workflow, item: SubTask, earlier: list[SubTask], *, planner_lm=None) -> SubTask:
     """Goal-preserving re-draft for ``look_up`` (fix-kk46.3): write commands re-match with writes excluded; read-only
     commands keep the means and re-draft inputs from the goal."""
@@ -1395,16 +1195,10 @@ def redraft_for_look_up(workflow, item: SubTask, earlier: list[SubTask], *, plan
 
     writes = write_commands(workflow.folderpath)
     if item.means.kind != MEANS_FROM_SCRATCH and item.means.name in writes:
-        exclude = set(writes)
-        _, command, _ = planning_match(workflow, item.goal, exclude=exclude)
-        if command is not None:
-            item = item.model_copy(update={"means": Means(kind=MEANS_PLANNING, name=command.name), "alternatives": []})
-            return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
-        built = build_round1_proposal(
-            [item.goal], {1: _candidates_for_subtask(workflow, item.goal, exclude=exclude)}).items[0]
+        built = decided_item(workflow, item.goal, exclude=set(writes))
         new_means = built.means
         if new_means.kind == MEANS_FROM_SCRATCH:
-            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": "",
+            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": "", "check_missing": [],
                                            "alternatives": []})
         item = item.model_copy(update={"means": new_means, "alternatives": built.alternatives})
         return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
@@ -1573,7 +1367,7 @@ def _reply_clauses(reply_text: str) -> list[str]:
 
 
 def _extract_step_numbers(segment: str, count: int) -> list[int]:
-    from fastworkflow._workflows.consultation import _item_validation
+    from fastworkflow._workflows.plan_metadata_extraction import _item_validation
 
     return _item_validation.extract_step_numbers(segment, count)
 
@@ -1956,23 +1750,16 @@ def _clause_containing_quote(reply_text: str, quoted_name: str) -> str:
     return reply_text
 
 
-def _infer_kind_from_clause(clause: str) -> Optional[str]:
+def _infer_kind_from_clause(clause: str, item: "SubTask") -> Optional[tuple[str, str]]:
+    """``(input name, value)`` when the clause names exactly one value of one enum input that *item*'s planning command
+    declares (and the item carries); None when the workflow declares no such input or the clause is not decisive."""
+    if item.means.kind != MEANS_PLANNING:
+        return None
+    present = {inp.name for inp in item.inputs}
     lowered = clause.lower()
-    if re.search(r"\b(?:unit|organization|organisation|department)\b", lowered):
-        return "unit"
-    if re.search(r"\bgroup\b", lowered):
-        return "group"
-    if re.search(r"\b(?:right|permission)\b", lowered):
-        return "right"
-    if re.search(r"\bapplication\b", lowered):
-        return "application"
-    if re.search(r"\bfeed\b", lowered):
-        return "feed"
-    if re.search(r"\b(?:person|identity)\b", lowered):
-        return "person"
-    if re.search(r"\b(?:login|account)\b", lowered):
-        return "login"
-    return None
+    found = [(p.name, value) for p in declared_params(item.means.name) if p.type == "enum" and p.name in present
+             for value in p.values if re.search(rf"(?<![a-z0-9_]){re.escape(value.lower())}(?![a-z0-9_])", lowered)]
+    return found[0] if len(found) == 1 else None
 
 
 def _quoted_already_in_edits(edits: list, quoted_name: str) -> bool:
@@ -2009,15 +1796,14 @@ def _target_index_for_quoted(
         if index in dropped_indexes:
             continue
         for inp in item.inputs:
-            if inp.name in _ENTITY_INPUT_KEYS and inp.value and inp.value.lower() in quoted_name.lower():
+            if inp.name in entity_input_names() and inp.value and inp.value.lower() in quoted_name.lower():
                 return index
     return None
 
 
 def _primary_entity_key(item: SubTask) -> Optional[str]:
-    names = [inp.name for inp in item.inputs if inp.name in _ENTITY_INPUT_KEYS]
-    if "name" in names:
-        return "name"
+    entity = entity_input_names()
+    names = [inp.name for inp in item.inputs if inp.name in entity]
     return names[0] if names else None
 
 
@@ -2070,10 +1856,8 @@ def _apply_quoted_names_from_reply(
                 f"whole {primary_key}.{understood} Give the whole {primary_key} in quotes, for example "
                 f"'change {target_index}: inputs={primary_key}=<whole {primary_key}>'.")
         kv = [f"{primary_key}={quoted_name}"]
-        inferred_kind = _infer_kind_from_clause(clause)
-        has_kind = any(inp.name == "kind" for inp in target_item.inputs)
-        if inferred_kind and has_kind:
-            kv.append(f"kind={inferred_kind}")
+        if inferred := _infer_kind_from_clause(clause, target_item):
+            kv.append(f"{inferred[0]}={inferred[1]}")
         repaired.append(Change(index=target_index, field="inputs", value=", ".join(kv)))
     return repaired
 
@@ -2085,8 +1869,8 @@ def _apply_quoted_names_from_reply(
 # holds, goes to that step; a drop the reply does not ask for is not applied.
 # ----------------------------------------------------------------------
 
-#: Generic input names (they hold the entity a step is about): a bare mention of one in a reply does not select it.
-_GENERIC_INPUT_NAMES = frozenset(_ENTITY_INPUT_KEYS | {"scope", "fact"})
+#: A declared entity input (it holds the entity a step is about; ``entity_input_names``): a bare mention of its name in a
+#: reply does not select it.
 _NAME_PREFIXES = ("include_", "with_", "is_", "has_", "show_")
 _REMOVE_VERBS = r"(?:drop|remove|delete|skip|omit|cut|leave\s+out|take\s+out|get\s+rid\s+of|replace)"
 _STEP_WORD = r"(?:steps?|items?|sub-?tasks?)"
@@ -2133,7 +1917,7 @@ def _input_mentioned(clause: str, inp: SubTaskInput) -> bool:
     entity names such as unit or right never count) or its value (4 or more characters, not true/false)."""
     text = _norm_phrase(clause)
     name = (inp.name or "").lower()
-    if name and name not in _GENERIC_INPUT_NAMES:
+    if name and name not in entity_input_names():
         variants = {_norm_phrase(name)}
         for prefix in _NAME_PREFIXES:
             if name.startswith(prefix):

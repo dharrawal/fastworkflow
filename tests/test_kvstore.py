@@ -5,10 +5,9 @@ from __future__ import annotations
 import multiprocessing
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from fastworkflow.kvstore import KVStore, UtteranceCacheStore
+from fastworkflow.kvstore import KVStore
 
 
 def test_kvstore_round_trip_and_keyerror(tmp_path: Path):
@@ -58,88 +57,6 @@ def test_kvstore_values_are_json_not_pickle(tmp_path: Path):
     raw = path.read_bytes()
     assert b"\x80\x05" not in raw
     assert b"DefinitelyNotPickle" in raw  # plain JSON text
-
-
-def test_utterance_cache_float32_blob_round_trip(tmp_path: Path):
-    path = str(tmp_path / "utt.sqlite3")
-    vec = np.arange(8, dtype=np.float32)
-    with UtteranceCacheStore(path) as store:
-        store.upsert(
-            "123",
-            utterance="hello",
-            command_mapping={"cmd": {"frequency": 1, "feedback_date": "t"}},
-            embedding=vec,
-        )
-        entry = store.get("123")
-        assert entry is not None
-        assert entry["utterance"] == "hello"
-        assert entry["command_mapping"]["cmd"]["frequency"] == 1
-        np.testing.assert_array_equal(entry["embedding"], vec)
-
-        entries = list(store.iter_entries())
-        assert len(entries) == 1
-        assert entries[0][0] == "123"
-
-
-def test_utterance_cache_none_embedding_round_trip(tmp_path: Path):
-    path = str(tmp_path / "utt_none.sqlite3")
-    with UtteranceCacheStore(path) as store:
-        store.upsert(
-            "none-emb",
-            utterance="hello-none",
-            command_mapping={"cmd": {"frequency": 1, "feedback_date": "t"}},
-            embedding=None,
-        )
-        entry = store.get("none-emb")
-        assert entry is not None
-        assert entry["utterance"] == "hello-none"
-        assert entry["command_mapping"]["cmd"]["frequency"] == 1
-        assert entry["embedding"] is None
-
-        entries = list(store.iter_entries())
-        assert len(entries) == 1
-        assert entries[0][0] == "none-emb"
-        assert entries[0][1]["embedding"] is None
-
-
-def test_utterance_cache_empty_embedding_round_trip(tmp_path: Path):
-    path = str(tmp_path / "utt_empty.sqlite3")
-    empty_vec = np.array([], dtype=np.float32)
-    with UtteranceCacheStore(path) as store:
-        store.upsert(
-            "empty-emb",
-            utterance="hello-empty",
-            command_mapping={"cmd": {"frequency": 1, "feedback_date": "t"}},
-            embedding=empty_vec,
-        )
-        entry = store.get("empty-emb")
-        assert entry is not None
-        assert entry["utterance"] == "hello-empty"
-        assert entry["command_mapping"]["cmd"]["frequency"] == 1
-        # Empty vectors should round-trip to a None embedding, not an empty ndarray
-        assert entry["embedding"] is None
-
-        entries = list(store.iter_entries())
-        assert len(entries) == 1
-        assert entries[0][0] == "empty-emb"
-        assert entries[0][1]["embedding"] is None
-
-
-def test_kvstore_and_utterance_cache_share_file(tmp_path: Path):
-    path = str(tmp_path / "shared.sqlite3")
-    with KVStore(path) as kv:
-        kv["suggested_commands"] = ["a", "b"]
-    with UtteranceCacheStore(path) as utt:
-        utt.upsert(
-            "h1",
-            utterance="x",
-            command_mapping={"c": {"frequency": 1, "feedback_date": "t"}},
-            embedding=np.ones(4, dtype=np.float32),
-        )
-    with KVStore(path) as kv:
-        assert kv["suggested_commands"] == ["a", "b"]
-    with UtteranceCacheStore(path) as utt:
-        assert utt.get("h1")["utterance"] == "x"
 
 
 def _mp_writer(path: str, worker_id: int, n: int, result_path: str) -> None:

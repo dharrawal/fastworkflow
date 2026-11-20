@@ -20,8 +20,7 @@ are the paths that run none:
   validating models as usual but each command ``Input`` inside with ``fields_validated``.
 - ``validation_class`` is the model with ``validate_assignment`` off. ``validate_input`` (used by ``check_input``)
   builds its instance from it, so an assignment a validator makes to ``self`` does not re-run the validators
-  without their context. ``validate_input`` runs the model validators itself, one by one, so the writes a
-  validator made before it refused are readable from its ``ValidationTrace``.
+  without their context. ``validate_input`` runs the model validators itself, one by one, each called with the context.
 
 This module imports nothing from the framework, so every layer can use it.
 """
@@ -236,32 +235,14 @@ def stored_value(annotation: Any, value: Any) -> Any:
     return value
 
 
-@dataclasses.dataclass
-class ValidationTrace:
-    """What ``validate_input`` did before it stopped: the instance its model validators ran on, and the field
-    values that instance held before they ran. The validators' writes are the difference (``written``)."""
-
-    instance: Any = None
-    before: dict = dataclasses.field(default_factory=dict)
-
-    def written(self) -> dict[str, Any]:
-        """The fields the model validators changed on the instance, ``{name: value}``. Empty before they ran."""
-        if self.instance is None:
-            return {}
-        now = self.instance.__dict__
-        return {name: now[name] for name, value in self.before.items() if name in now and now[name] != value}
-
-
-def validate_input(model_class: Type[BaseModel], data: Any, context: Any,
-                   trace: ValidationTrace | None = None) -> BaseModel:
+def validate_input(model_class: Type[BaseModel], data: Any, context: Any) -> BaseModel:
     """Validate *data* as an ``Input``: its fields as ``field_checked_class`` checks them, then its model
     validators in declaration order, each called with *context* as ``info.context``. Each validator
-    gets the instance the previous one returned, so a write it makes to ``self`` is kept even when it
-    then raises (*trace* records that instance and the values it held before the validators ran).
+    gets the instance the previous one returned.
 
     Raises ``pydantic.ValidationError`` for a field's check, and whatever a model validator raises, unchanged
     (a ``fastworkflow.Refused`` is not wrapped). An Input with a model validator that is not ``mode="after"``
-    is validated by pydantic in one call instead; then *trace* stays empty.
+    is validated by pydantic in one call instead.
     """
     validators = list(model_class.__pydantic_decorators__.model_validators.values())
     if any(dec.info.mode != "after" for dec in validators):
@@ -270,17 +251,12 @@ def validate_input(model_class: Type[BaseModel], data: Any, context: Any,
     instance = validation_class(model_class).model_construct()
     for name in model_class.model_fields:
         set_field_unvalidated(instance, name, getattr(checked, name))
-    if trace is not None:
-        trace.instance = instance
-        trace.before = {name: getattr(instance, name) for name in model_class.model_fields}
     info = SimpleNamespace(context=context, data={}, field_name=None, config=None)
     for dec in validators:
         if len(inspect.signature(dec.func).parameters) >= 2:
             instance = dec.func(instance, info)
         else:
             instance = dec.func(instance)
-        if trace is not None:
-            trace.instance = instance
     return instance
 
 

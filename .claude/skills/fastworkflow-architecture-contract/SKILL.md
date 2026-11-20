@@ -101,11 +101,11 @@ Every deterministic command execution funnels through
 The wildcard `ResponseGenerator` (`_workflows/command_metadata_extraction/_commands/wildcard.py:27-179`)
 runs the whole NLU state machine:
 
-1. **Intent detection** — `CommandNamePrediction.predict` (`intent_detection.py`):
-   exact first-token match → Levenshtein fuzzy match (threshold 0.3) → embedding
-   cache match (0.85 cosine, `cache_matching.py`) → transformer classifier
-   (`intent_detection.py:99-134`). Ambiguity flips the CME context's
-   `NLU_Pipeline_Stage` (enum at `fastworkflow/__init__.py:13-18`).
+1. **Intent detection** — `CommandNamePrediction.predict(command)` (`intent_detection.py`, one `fw.nlu.intent` span) around `intent_loop.resolve` (the one decision both the CME and the plan path make; the pending which-command question is the CME context's `intent_loop` record):
+   exact first-token match → Levenshtein fuzzy match (threshold 0.3) → local model
+   (then the remote decision model, then a question)
+   (`intent_detection.py:99-134`). An open question is the CME
+   context's `intent_loop` record (`intent_loop.waiting_for` reads it; the old `NLU_Pipeline_Stage` enum is gone).
 2. **Parameter extraction** — `ParameterExtraction.extract` (`wildcard.py:150-151`);
    XML-regex first, DSPy LLM fallback (see fastworkflow-nlu-pipeline-reference).
 3. On success it returns artifacts `{"command_name", "cmd_parameters"}`, which
@@ -114,7 +114,7 @@ runs the whole NLU state machine:
 
 So stages 1+2 of the 3-stage pipeline are literally ONE ResponseGenerator on an internal
 workflow. **Why it is a workflow and not plain framework code** (verified mechanics):
-- The NLU state machine persists in `cme_workflow.context["NLU_Pipeline_Stage"]` between
+- The pending question persists in `cme_workflow.context` (`intent_loop` / `parameter_loop` records) between
   turns — workflow context IS the state store; `Workflow.end_command_processing` resets it
   (`workflow.py:291-303`).
 - Core commands every app inherits (`ErrorCorrection/abort`, `ErrorCorrection/you_misunderstood`,
@@ -162,7 +162,7 @@ same trajectory. Full sequence: [references/runtime-walkthrough.md](references/r
 `WEC.serialize_state` (`workflow_execution_context.py:312-356`) exports a JSON blob:
 `schema_version` (=1, `session_state_store.py:20`), `awaiting_user`, the suspended ReAct
 blob (`fastWorkflowReAct.export_suspended`, `react.py:120-131` — includes
-`iteration_counter`), `nlu_stage`, `current_command_context_name` (name only — see
+`iteration_counter`), `current_command_context_name` (name only — see
 weak-point fix-cgs), `action_log`, and conversation turns.
 `apply_serialized_state` (`:358-405`) restores it.
 

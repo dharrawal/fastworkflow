@@ -416,6 +416,8 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
         store.delivery = {"record_id": record.id, "token": token}
     _audit(chat_session, record, before="", after=AWAITING, reason=decision.reason,
            surface=store.surface, mode=mode, outcome="asked")
+    if (put := getattr(review_engine.question_owner(store, chat_session), "_put_approval_record", None)) is not None:
+        put(record)      # the question is the turn's waiting record, pointing at this one (``waiting``)
     if suspendable:
         from fastworkflow.utils.react import AskUserSuspend
 
@@ -651,23 +653,21 @@ def cancel_conversation_approvals(chat_session: Any, workflow: Any, *, reason: s
     return cancelled
 
 
-def park_reviews(workflow: Any) -> list[dict]:
-    """Remove the active reviews from the session's store and return them, to be parked with their conversation."""
+def take_record(workflow: Any, record_id: Any) -> Optional[dict]:
+    """Remove the record *record_id* from the session's store and return it, to be parked with the turn's waiting record
+    that points at it (None when the store holds none such)."""
     store = store_for(workflow)
-    if store is None:
-        return []
-    parked = active_reviews(workflow)
-    parked_ids = {id(r) for r in parked}
-    store.records = [r for r in store.records if id(r) not in parked_ids]
-    return [r.to_dict() for r in parked]
+    record = None if store is None else store.get(record_id)
+    if record is None:
+        return None
+    store.records = [r for r in store.records if r is not record]
+    return record.to_dict()
 
 
-def unpark_reviews(workflow: Any, records: list[dict]) -> None:
-    """Put parked reviews back on the session's store (the conversation they belong to is active again)."""
+def restore_record(workflow: Any, data: Optional[dict]) -> None:
+    """Put a parked record back on the session's store (the conversation it belongs to is active again)."""
     store = store_for(workflow)
-    if store is None:
-        return
-    for data in records:
+    if store is not None and data:
         store.records.append(PendingAction.from_dict(data))
 
 

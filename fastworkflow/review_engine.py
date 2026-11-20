@@ -40,7 +40,7 @@ from typing import Any, Callable, ClassVar, Optional, Sequence, Union
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow import intent_loop, parameter_clarification, tracing
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +79,7 @@ DECLINED = "declined"
 EXPIRED = "expired"
 INVALIDATED = "invalidated"
 EXECUTED = "executed"
-STATES = (AWAITING, REVISED, CONFIRMED, DECLINED, EXPIRED, INVALIDATED, EXECUTED)
 ACTIVE_STATES = frozenset({AWAITING, REVISED})
-TERMINAL_STATES = frozenset({DECLINED, EXPIRED, INVALIDATED, EXECUTED})
-
 #: The only legal transitions. A terminal state never returns to an active one.
 _LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
     AWAITING: frozenset({REVISED, CONFIRMED, DECLINED, EXPIRED, INVALIDATED}),
@@ -282,8 +279,11 @@ class ReviewStore:
     #: Set by the sub-task gate for the turn that opens the review; never serialised (a restored review has none
     #: until the gate of its turn sets it again).
     edit_reader: Optional[Callable[[str, "Proposal"], list]] = None
-    consultation_cme: Any = None
-    consultation_workflow: Any = None
+    plan_cme: Any = None
+    plan_workflow: Any = None
+    #: A weak reference to the turn object whose waiting record points at this store's records (set when the context binds
+    #: its app workflow; ``question_owner``). Never serialised.
+    owner_ref: Any = field(default=None, repr=False, compare=False)
 
     def active(self) -> Optional[ReviewRecord]:
         for record in self.records:
@@ -330,6 +330,13 @@ def _prompt_workflow(host: Any, store: ReviewStore) -> Any:
     return (getattr(host, "_app_workflow", None)
             or (host if hasattr(host, "folderpath") else None)
             or getattr(store, "_workflow", None))
+
+
+def question_owner(store: ReviewStore, host: Any) -> Any:
+    """The turn object whose waiting record points at *store*'s records: the one the store is bound to, else *host* (a store
+    no context bound, as in a unit test of the engine)."""
+    ref = store.owner_ref
+    return (ref() if ref is not None else None) or host
 
 
 def active_record(workflow: Any) -> Optional[ReviewRecord]:
@@ -429,6 +436,8 @@ def transition(host: Any, store: ReviewStore, record: ReviewRecord, to: str, *, 
         record.outcome = outcome
     audit(host, record, before=before, after=to, reason=reason, surface=surface, mode=switch_mode(),
           outcome=outcome)
+    if to not in ACTIVE_STATES and (ended := getattr(question_owner(store, host), "_store_record_ended", None)):
+        ended(record)    # the turn's waiting record that points at it ends with it: the one place (``waiting``)
 
 
 def expire_if_due(host: Any, store: ReviewStore, record: ReviewRecord, *, surface: Surface,
@@ -701,14 +710,6 @@ def _plan_alternatives_of(proposal: Proposal) -> dict[str, list[str]]:
             for number, item in enumerate(getattr(proposal, "items", None) or (), 1) if getattr(item, "alternatives", None)}
 
 
-_KNOWN_SUBTASK_INPUT_KEYS = frozenset({
-    "name", "kind", "fact", "tag", "action", "right", "person", "person_a", "person_b",
-    "unit", "control", "family", "scope", "explain", "include_risk", "with_login_only",
-    "open_first", "open_first_person", "whole_list", "people", "application", "feed",
-    "group", "login", "query", "title", "author", "member", "book", "branch",
-})
-
-
 def _step_count_message(count: int) -> str:
     label = "step" if count == 1 else "steps"
     return f"There are only {count} {label}."
@@ -751,7 +752,7 @@ def _input_signature(inputs: Any) -> list[tuple]:
 
 def _normalize_parsed_subtask_edits(proposal: Proposal, edits: list[Edit]) -> list[Edit]:
     from fastworkflow.review_proposals import (
-        SubTaskProposal, merge_subtask_input_edit, unreadable_input_value)
+        SubTaskProposal, declared_input_names, merge_subtask_input_edit, unreadable_input_value)
 
     if not isinstance(proposal, SubTaskProposal):
         return edits
@@ -763,7 +764,7 @@ def _normalize_parsed_subtask_edits(proposal: Proposal, edits: list[Edit]) -> li
                 1 <= edit.index <= len(proposal.items)
                 and any(inp.name == edit.field for inp in proposal.items[edit.index - 1].inputs)
             )
-            if on_item or edit.field in _KNOWN_SUBTASK_INPUT_KEYS:
+            if on_item or edit.field in declared_input_names():
                 normalized.append(
                     Change(index=edit.index, field="inputs", value=f"{edit.field}={edit.value}"))
             else:
@@ -1218,7 +1219,7 @@ class ActionReplyPolicy:
 READ_REASON = "edits read from the reply"
 
 
-def _consultation_planning_names(app_workflow: Any) -> tuple[str, ...]:
+def _review_planning_names(app_workflow: Any) -> tuple[str, ...]:
     if app_workflow is None:
         return ()
     folder = getattr(app_workflow, "folderpath", None)
@@ -1243,29 +1244,28 @@ def _slot_question(proposal: Proposal) -> str:
     return f"Which of the {len(proposal.items)} steps do you mean?"
 
 
-def _clear_consultation_cme_continuation(cme: Any) -> None:
+def _clear_plan_cme_continuation(cme: Any) -> None:
     cme.end_command_processing()
     context = cme.context
-    context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
-    for key in ("command", "command_name", "stored_parameters", "missing_value_question"):
+    for key in ("command", "command_name"):
         context.pop(key, None)
     cme.context = context
 
 
-def _prepare_consultation_workflow(policy: "ProposalReplyPolicy", proposal: Proposal) -> None:
-    from fastworkflow._workflows.consultation._commands.ProposalReview._ProposalReview import ProposalReview
+def _prepare_plan_workflow(policy: "ProposalReplyPolicy", proposal: Proposal) -> None:
+    from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview._ProposalReview import ProposalReview
 
-    workflow = policy._consultation_workflow
+    workflow = policy._plan_workflow
     if workflow._current_command_context_name != "ProposalReview":
         workflow.record = ProposalReview()
-    workflow.context["consultation_proposal"] = proposal
-    workflow.context["consultation_model_rendering"] = proposal.model_rendering()
-    workflow.context["consultation_planning_names"] = _consultation_planning_names(policy._app_workflow)
+    workflow.context["plan_proposal"] = proposal
+    workflow.context["plan_model_rendering"] = proposal.model_rendering()
+    workflow.context["review_planning_names"] = _review_planning_names(policy._app_workflow)
     reader = policy._interpreter or _model_interpreter
     if reader is not None:
-        workflow.context["consultation_edit_reader"] = reader
+        workflow.context["plan_edit_reader"] = reader
     else:
-        workflow.context.pop("consultation_edit_reader", None)
+        workflow.context.pop("plan_edit_reader", None)
 
 
 def _validate_edits_decision(
@@ -1366,6 +1366,8 @@ def _affirmative_accept_cue(text: str) -> bool:
     scrubbed = _scrub_benign_confirm_phrases(text)
     if _has_edit_clause(scrubbed):
         return False
+    if _accept_then_request(text):
+        return False
     if _AFFIRMATIVE_PARAPHRASE.search(scrubbed):
         return True
     if _WHOLE_ACCEPT.match(_lexical(text)) and not _NO_COMMA_CHANGE.match(text or ""):
@@ -1417,6 +1419,61 @@ _WHOLE_ACCEPT = re.compile(
     rf"^(?:please\s+)?(?:{_alternation(_ACCEPT_PHRASES)})(?:\s+(?:{_alternation(_ACCEPT_TAIL)}))*$")
 #: ``no, change the second one`` reads as the words ``no change ...``; the comma is the difference, and it is an edit.
 _NO_COMMA_CHANGE = re.compile(r"^\W*no\s*[,;:\-–—]\s*change", re.I)
+
+
+# ---- an accept that goes on to ask for something more (bd fix-yu3l.6) ------------------------------------------
+# ``yes, and show me the overdue books``, ``Yes. Then list the members``, ``sure, afterwards count the books``: the
+# reply opens as an accept and a connecting word then starts a further request. That is not a plain accept: it takes
+# the path a reply with a corrective word takes (the edit reader), so the request is read or asked about, never
+# dropped. What follows the connecting word must be more than accept words (``yes and go ahead``, ``ok then, run
+# it`` stay accepts), and ``go ahead and <verb>`` is the idiom for restating the plan, not a second request.
+_ACCEPT_LEADS = _ACCEPT_PHRASES + (
+    "yes", "yep", "yeah", "yup", "sure", "ok", "okay", "accept", "approve", "approved", "go ahead", "sounds good",
+    "looks good", "great", "perfect", "agreed", "confirm", "confirmed", "run it as shown", "keep it as is",
+    "keep it as shown", "that is right", "thats right", "that matches what i want",
+)
+_ACCEPT_LEAD = re.compile(rf"(?:{_alternation(_ACCEPT_LEADS)})\b")
+_ACCEPT_LEAD_OR_TAIL = re.compile(rf"(?:{_alternation(_ACCEPT_LEADS + _ACCEPT_TAIL)})\b")
+_ACCEPT_ONLY = re.compile(rf"^(?:(?:{_alternation(_ACCEPT_LEADS + _ACCEPT_TAIL)})(?:\s+|$))+$")
+_REQUEST_CONNECTOR = re.compile(
+    r"(?:and\s+then|and\s+also|and\s+afterwards?|and\s+after\s+that|and\s+next|then|afterwards?|after\s+that|"
+    r"after\s+this|plus|additionally|and|but|however|except|although|though)\b")
+#: What may follow a contrasting connector without being a request: ``yes, but nothing else``, ``yes, just that``.
+_NO_REQUEST_AFTER_CONTRAST = re.compile(r"^(?:nothing\s+(?:else|more)|that\s+is\s+all|thats\s+all|that\s+only|as\s+is)$")
+_SEPARATORS = re.compile(r"[^a-z0-9]*")
+
+
+def _accept_then_request(text: str) -> bool:
+    """Whether *text* opens as an accept and then, after a connecting word (``and``, ``then``, ``afterwards``,
+    ``after that``, ``plus``) or a contrasting one (``but``, ``however``, ``except``, ``although``, ``though``)
+    asks for something more or says something that contradicts the plan. Read on the reply with the no-effect qualifiers removed, so
+    ``yes, run that, and apply no corrections`` is not one."""
+    value = _APOSTROPHES.sub("", _THUMBS_UP.sub(" thumbsup ", _scrub_benign_confirm_phrases(text).lower()))
+    position = _SEPARATORS.match(value).end()
+    if value.startswith("please ", position):
+        position += len("please ")
+    lead = _ACCEPT_LEAD.match(value, position)
+    if lead is None:
+        return False
+    last = lead.group(0)
+    position = lead.end()
+    while True:
+        gap = _SEPARATORS.match(value, position)
+        more = _ACCEPT_LEAD_OR_TAIL.match(value, gap.end())
+        if more is None:
+            break
+        last, position = more.group(0), more.end()
+    gap = _SEPARATORS.match(value, position)
+    connector = _REQUEST_CONNECTOR.match(value, gap.end())
+    if connector is None:
+        return False
+    if connector.group(0) == "and" and last == "go ahead" and gap.group(0).isspace():
+        return False                                  # ``go ahead and remove the tag``: one request, restated
+    rest = " ".join(re.sub(r"[^a-z0-9]+", " ", value[connector.end():]).split())
+    if _NO_REQUEST_AFTER_CONTRAST.match(rest):
+        return False
+    return bool(rest) and not _ACCEPT_ONLY.match(rest)
+
 
 _DECLINE_PHRASES = (
     "no", "nope", "nah", "nay", "no thanks", "no thank you", "cancel", "stop", "abort", "dont", "do not", "ill pass",
@@ -1498,7 +1555,8 @@ def _polarity_conflict(text: str, routed: str) -> str:
 
 def _affirmative_unrouted_confirm(text: str) -> bool:
     scrubbed = _scrub_benign_confirm_phrases(text)
-    return bool(_AFFIRMATIVE_UNROUTED_PREFIX.match(scrubbed)) and not _CONFIRM_CORRECTIVE.search(scrubbed)
+    return (bool(_AFFIRMATIVE_UNROUTED_PREFIX.match(scrubbed)) and not _CONFIRM_CORRECTIVE.search(scrubbed)
+            and not _accept_then_request(text))
 
 
 def _slot_whole_plan_confirm(text: str) -> bool:
@@ -1506,7 +1564,7 @@ def _slot_whole_plan_confirm(text: str) -> bool:
     return bool(_SLOT_WHOLE_PLAN_CONFIRM.search(scrubbed)) or _affirmative_accept_cue(text)
 
 
-def _unrouted_consultation_confirm(text: str) -> bool:
+def _unrouted_plan_confirm(text: str) -> bool:
     """Accept on an unrouted turn when the reply opens with yes and has no corrective clause.
 
     Covers the case where the ProposalReview head ranks ``confirm`` first but does not route
@@ -1649,26 +1707,32 @@ class ProposalReplyPolicy:
         self,
         interpreter: Optional[EditInterpreter] = None,
         *,
-        consultation_cme: Any = None,
-        consultation_workflow: Any = None,
+        plan_cme: Any = None,
+        plan_workflow: Any = None,
         app_workflow: Any = None,
         structured_fallback: bool = False,
     ):
         self._interpreter = interpreter
-        self._consultation_cme = consultation_cme
-        self._consultation_workflow = consultation_workflow
+        self._plan_cme = plan_cme
+        self._plan_workflow = plan_workflow
         self._app_workflow = app_workflow
         self._structured_fallback = structured_fallback
 
     def decide(self, proposal: Proposal, message: str) -> ReplyDecision:
+        from fastworkflow.review_proposals import workflow_scope
+
+        with workflow_scope(getattr(self._app_workflow, "folderpath", None)):
+            return self._decide(proposal, message)
+
+    def _decide(self, proposal: Proposal, message: str) -> ReplyDecision:
         from fastworkflow.review_proposals import SubTaskProposal
 
         text = (message or "").strip()
         word = text.lower()
         sub_task_review = isinstance(proposal, SubTaskProposal)
-        if (self._consultation_cme is not None and self._consultation_workflow is not None
+        if (self._plan_cme is not None and self._plan_workflow is not None
                 and sub_task_review):
-            return self._decide_with_consultation(proposal, text, word)
+            return self._decide_with_plan(proposal, text, word)
         if word in ("accept", "yes"):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if _affirmative_accept_cue(text):
@@ -1715,16 +1779,13 @@ class ProposalReplyPolicy:
             return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(exc))
         return ReplyDecision(Verdict.EDIT, "typed edits", edits=tuple(edits))
 
-    def _in_consultation_slot(self) -> bool:
-        cme = self._consultation_cme
-        stage = cme.context.get("NLU_Pipeline_Stage")
-        return (stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
-                or cme.context.get("stored_parameters") is not None)
+    def _in_plan_slot(self) -> bool:
+        return intent_loop.waiting_for(self._plan_cme.context) == intent_loop.WAITING_PARAMETERS
 
-    def _decide_with_consultation(self, proposal: Proposal, text: str, word: str) -> ReplyDecision:
-        if self._structured_fallback and self._consultation_cme is not None:
-            _clear_consultation_cme_continuation(self._consultation_cme)
-        was_in_slot = self._in_consultation_slot()
+    def _decide_with_plan(self, proposal: Proposal, text: str, word: str) -> ReplyDecision:
+        if self._structured_fallback and self._plan_cme is not None:
+            _clear_plan_cme_continuation(self._plan_cme)
+        was_in_slot = self._in_plan_slot()
         if not was_in_slot:
             if word in ("accept", "yes"):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
@@ -1736,7 +1797,7 @@ class ProposalReplyPolicy:
                 return ReplyDecision(Verdict.DECLINE, "declined")
             if (clauses := _switch_clauses_decision(
                     proposal, text, self._app_workflow,
-                    lambda rest: self._decide_with_consultation(proposal, rest, rest.lower()))) is not None:
+                    lambda rest: self._decide_with_plan(proposal, rest, rest.lower()))) is not None:
                 return clauses                        # an explicit switch clause is decided here, never by the head or reader
             if (switched := _plan_switch_decision(proposal, text)) is not None:
                 return switched
@@ -1754,11 +1815,11 @@ class ProposalReplyPolicy:
                     return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
                 return ReplyDecision(Verdict.EDIT, "typed edits", edits=tuple(edits))
 
-        decision = self._consultation_turn(proposal, text, was_in_slot=was_in_slot, initial_word=word)
+        decision = self._plan_turn(proposal, text, was_in_slot=was_in_slot, initial_word=word)
         if (self._structured_fallback
                 and decision.reason in ("item slot", "slot wait", "slot retry")):
-            if self._consultation_cme is not None:
-                _clear_consultation_cme_continuation(self._consultation_cme)
+            if self._plan_cme is not None:
+                _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(
                 Verdict.REPROMPT, "not read as edits", message=SUB_TASK_STRUCTURED_UNREADABLE_REPLY)
         return decision
@@ -1767,7 +1828,7 @@ class ProposalReplyPolicy:
         """The CME wildcard's routing ``Signature.Output`` (fix-3rsq.12.3 framing).
 
         ``_wildcard_command_output`` copies routing fields into ``artifacts`` and sets
-        ``CommandResponse.output`` to the nested command output only (handled paths). Consultation
+        ``CommandResponse.output`` to the nested command output only (handled paths). Plan
         policy needs the routing record itself.
         """
         from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import (
@@ -1791,7 +1852,7 @@ class ProposalReplyPolicy:
             output=out if out is not None and not hasattr(out, "routed") else None,
         )
 
-    def _consultation_turn(
+    def _plan_turn(
         self,
         proposal: Proposal,
         text: str,
@@ -1800,13 +1861,13 @@ class ProposalReplyPolicy:
         initial_word: str,
     ) -> ReplyDecision:
         from fastworkflow.command_executor import CommandExecutor
-        from fastworkflow._workflows.consultation._item_validation import explicit_out_of_range_step
+        from fastworkflow._workflows.plan_metadata_extraction._item_validation import explicit_out_of_range_step
         from fastworkflow.review_proposals import certain_removals
 
-        _prepare_consultation_workflow(self, proposal)
+        _prepare_plan_workflow(self, proposal)
         slot_question = _slot_question(proposal)
         cme_out = CommandExecutor.perform_action(
-            self._consultation_cme,
+            self._plan_cme,
             fastworkflow.Action(command_name="wildcard", command=text),
         )
         w_out = self._wildcard_route_from_cme(cme_out)
@@ -1820,15 +1881,14 @@ class ProposalReplyPolicy:
             was_in_slot = False
 
         if _routed_to_command(w_out):
-            return self._handle_routed_consultation(proposal, text, w_out, slot_question)
+            return self._handle_routed_plan(proposal, text, w_out, slot_question)
 
-        pending_name = self._consultation_cme.context.get("command_name")
-        pending_stage = self._consultation_cme.context.get("NLU_Pipeline_Stage")
-        if (pending_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+        pending_name = self._plan_cme.context.get("command_name")
+        if (intent_loop.waiting_for(self._plan_cme.context) == intent_loop.WAITING_PARAMETERS
                 and pending_name in ("ProposalReview/drop", "ProposalReview/look_up")):
             count = len(proposal.items)
             if explicit_out_of_range_step(text, count):
-                _clear_consultation_cme_continuation(self._consultation_cme)
+                _clear_plan_cme_continuation(self._plan_cme)
                 return ReplyDecision(Verdict.REFUSE, "edits refused", message=_step_count_message(count))
             if pending_name.endswith("/look_up") and not _LOOK_UP_CUE.search(text):
                 return self._edit_fallback(proposal, text, slot_question)
@@ -1837,22 +1897,22 @@ class ProposalReplyPolicy:
             ):
                 return self._edit_fallback(proposal, text, slot_question)
             if count == 1:
-                _clear_consultation_cme_continuation(self._consultation_cme)
+                _clear_plan_cme_continuation(self._plan_cme)
                 edit = Drop(index=1) if pending_name.endswith("/drop") else LookUp(index=1)
                 return _validate_edits_decision(proposal, (edit,), reason="typed edits")
             if pending_name.endswith("/drop") and (named := certain_removals(proposal, text)):
                 # The reply names the steps to remove by number: no need to ask which.
-                _clear_consultation_cme_continuation(self._consultation_cme)
+                _clear_plan_cme_continuation(self._plan_cme)
                 return self._drop_decision(proposal, text, named)
-            self._consultation_cme.context["missing_value_question"] = slot_question
+            parameter_clarification.requestion(self._plan_cme.context, slot_question)
             return ReplyDecision(Verdict.REPROMPT, "item slot", message=slot_question)
 
         if (
             not was_in_slot
             and not _routed_to_command(w_out)
-            and _unrouted_consultation_confirm(text)
+            and _unrouted_plan_confirm(text)
         ):
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(Verdict.CONFIRM, "accepted")
 
         return self._edit_fallback(proposal, text, slot_question)
@@ -1866,28 +1926,28 @@ class ProposalReplyPolicy:
         initial_word: str,
     ) -> Optional[ReplyDecision]:
         if _slot_whole_plan_confirm(text):
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         intent = getattr(w_out, "reply_intent", None)
         if intent == "wait":
-            self._consultation_cme.context["missing_value_question"] = slot_question
+            parameter_clarification.requestion(self._plan_cme.context, slot_question)
             return ReplyDecision(Verdict.REPROMPT, "slot wait", message=slot_question)
         if intent == "abort":
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(
                 Verdict.REPROMPT,
                 "slot aborted",
                 message=f"OK, nothing changed.\n{prompt_for(proposal, self._app_workflow)}",
             )
         if intent == "misunderstood":
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return self._edit_fallback(proposal, text, slot_question)
         if intent == "answer" and not _routed_to_command(w_out):
-            self._consultation_cme.context["missing_value_question"] = slot_question
+            parameter_clarification.requestion(self._plan_cme.context, slot_question)
             return ReplyDecision(Verdict.REPROMPT, "slot retry", message=slot_question)
         if intent == "different_command":
             if _routed_to_command(w_out):
-                return self._handle_routed_consultation(proposal, text, w_out, slot_question)
+                return self._handle_routed_plan(proposal, text, w_out, slot_question)
             if initial_word in ("accept", "yes"):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
             if initial_word in ("no", "decline"):
@@ -1895,7 +1955,7 @@ class ProposalReplyPolicy:
             return None
         return None
 
-    def _consultation_action_parameters(self, cmd_parameters: Any) -> dict:
+    def _plan_action_parameters(self, cmd_parameters: Any) -> dict:
         if cmd_parameters is None:
             return {}
         if hasattr(cmd_parameters, "model_dump"):
@@ -1906,19 +1966,18 @@ class ProposalReplyPolicy:
 
     def _park_edit_item_slot(self, text: str, slot_question: str, pending_proposed: list) -> None:
         from fastworkflow.utils.signatures import NOT_FOUND
-        from fastworkflow._workflows.consultation._commands.ProposalReview.edit import Signature as EditSignature
+        from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import park
+        from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview.edit import Signature as EditSignature
 
         pending = EditSignature.SlotInput.model_construct(
             item=NOT_FOUND,
             edits=list(pending_proposed),
         )
-        ctx = self._consultation_cme.context
-        ctx["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+        ctx = self._plan_cme.context
         ctx["command"] = text
         ctx["command_name"] = "ProposalReview/edit"
-        ctx["stored_parameters"] = pending
-        ctx["missing_value_question"] = slot_question
-        self._consultation_cme.context = ctx
+        self._plan_cme.context = ctx
+        park(self._plan_cme, "ProposalReview/edit", pending, question=slot_question, request_text=text)
 
     def _reply_from_edit_output(
         self,
@@ -1928,7 +1987,7 @@ class ProposalReplyPolicy:
         slot_question: str,
     ) -> ReplyDecision:
         if getattr(routed, "refusal", None):
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(Verdict.REFUSE, "edits refused", message=routed.refusal)
         pending = list(getattr(routed, "pending_proposed", None) or [])
         if pending:
@@ -1936,29 +1995,29 @@ class ProposalReplyPolicy:
             return ReplyDecision(Verdict.REPROMPT, "item slot", message=slot_question)
         edits = tuple(getattr(routed, "edits", None) or [])
         if not edits:
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
-        _clear_consultation_cme_continuation(self._consultation_cme)
+        _clear_plan_cme_continuation(self._plan_cme)
         return _validate_edits_decision(
             proposal, edits, reason=READ_REASON, text=text, workflow=self._app_workflow)
 
-    def _perform_consultation_command(self, command_name: str, command: str, input_obj: Any) -> Any:
+    def _perform_plan_command(self, command_name: str, command: str, input_obj: Any) -> Any:
         from fastworkflow.command_executor import call_response_generator
         from fastworkflow.command_routing import ModuleType
 
-        definition = fastworkflow.RoutingRegistry.get_definition(self._consultation_workflow.folderpath)
+        definition = fastworkflow.RoutingRegistry.get_definition(self._plan_workflow.folderpath)
         response_class = definition.get_command_class(command_name, ModuleType.RESPONSE_GENERATION_INFERENCE)
         if not response_class:
             raise ValueError(f"Response generation class not found for command name {command_name!r}")
         return call_response_generator(
             response_class(),
-            self._consultation_workflow,
+            self._plan_workflow,
             command,
             input_obj,
             command_name=command_name,
         )
 
-    def _handle_routed_consultation(
+    def _handle_routed_plan(
         self,
         proposal: Proposal,
         text: str,
@@ -1970,32 +2029,32 @@ class ProposalReplyPolicy:
         name = w_out.command_name or ""
         cmd_parameters = w_out.cmd_parameters
         if isinstance(cmd_parameters, BaseModel):
-            cmd_out = self._perform_consultation_command(name, text, cmd_parameters)
+            cmd_out = self._perform_plan_command(name, text, cmd_parameters)
         else:
             cmd_out = CommandExecutor.perform_action(
-                self._consultation_workflow,
+                self._plan_workflow,
                 fastworkflow.Action(
                     command_name=name,
                     command=text,
-                    parameters=self._consultation_action_parameters(cmd_parameters),
+                    parameters=self._plan_action_parameters(cmd_parameters),
                 ),
             )
         routed = getattr(cmd_out.command_response, "output", None)
         if routed is None:
             return self._edit_fallback(proposal, text, slot_question)
         if name.endswith("/confirm"):
-            if _CONFIRM_CORRECTIVE.search(_scrub_benign_confirm_phrases(text)):
+            if _CONFIRM_CORRECTIVE.search(_scrub_benign_confirm_phrases(text)) or _accept_then_request(text):
                 return self._edit_fallback(proposal, text, slot_question)
             if conflict := _polarity_conflict(text, "confirm"):
                 return self._ask_again_on_conflict(proposal, text, slot_question, conflict)
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if name.endswith("/decline"):
             if _DECLINE_CORRECTIVE.search(text) or _DROP_CUE.search(text):
                 return self._edit_fallback(proposal, text, slot_question)
             if conflict := _polarity_conflict(text, "decline"):
                 return self._ask_again_on_conflict(proposal, text, slot_question, conflict)
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return ReplyDecision(Verdict.DECLINE, "declined")
         if name.endswith("/drop"):
             drop_items = list(getattr(routed, "items", None) or [])
@@ -2003,20 +2062,20 @@ class ProposalReplyPolicy:
                 return self._edit_fallback(
                     proposal, text, slot_question, preserve_drop_items=drop_items or None
                 )
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return self._drop_decision(proposal, text, drop_items)
         if name.endswith("/add"):
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             after = len(proposal.items) if routed.after is None else int(routed.after)
             edit = Add(after=after, values={"goal": routed.goal})
             return _validate_edits_decision(proposal, (edit,), reason="typed edits")
         if name.endswith("/look_up"):
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             edit = LookUp(index=int(routed.item))
             return _validate_edits_decision(proposal, (edit,), reason="typed edits")
         if name.endswith("/edit"):
             return self._reply_from_edit_output(proposal, text, routed, slot_question)
-        _clear_consultation_cme_continuation(self._consultation_cme)
+        _clear_plan_cme_continuation(self._plan_cme)
         return self._edit_fallback(proposal, text, slot_question)
 
     def _drop_decision(self, proposal: Proposal, text: str, items: list) -> ReplyDecision:
@@ -2050,16 +2109,16 @@ class ProposalReplyPolicy:
     ) -> ReplyDecision:
         from fastworkflow.command_executor import CommandExecutor
 
-        _clear_consultation_cme_continuation(self._consultation_cme)
-        _prepare_consultation_workflow(self, proposal)
+        _clear_plan_cme_continuation(self._plan_cme)
+        _prepare_plan_workflow(self, proposal)
         cmd_out = CommandExecutor.perform_action(
-            self._consultation_workflow,
+            self._plan_workflow,
             fastworkflow.Action(command_name="ProposalReview/edit", command=text),
         )
         routed = getattr(cmd_out.command_response, "output", None)
         if routed is None:
             if preserve_drop_items:
-                _clear_consultation_cme_continuation(self._consultation_cme)
+                _clear_plan_cme_continuation(self._plan_cme)
                 return self._drop_decision(proposal, text, preserve_drop_items)
             return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
         decision = self._reply_from_edit_output(proposal, text, routed, slot_question)
@@ -2067,7 +2126,7 @@ class ProposalReplyPolicy:
             decision.reason == "item slot"
             or (decision.verdict == Verdict.REPROMPT and decision.reason == "not read as edits")
         ):
-            _clear_consultation_cme_continuation(self._consultation_cme)
+            _clear_plan_cme_continuation(self._plan_cme)
             return self._drop_decision(proposal, text, preserve_drop_items)
         return decision
 
@@ -2076,8 +2135,8 @@ def reply_policy(
     kind: str,
     interpreter: Optional[EditInterpreter] = None,
     *,
-    consultation_cme: Any = None,
-    consultation_workflow: Any = None,
+    plan_cme: Any = None,
+    plan_workflow: Any = None,
     app_workflow: Any = None,
     structured_fallback: bool = False,
 ):
@@ -2087,8 +2146,8 @@ def reply_policy(
     if kind in (KIND_SUB_TASKS, KIND_PLAN):
         return ProposalReplyPolicy(
             interpreter,
-            consultation_cme=consultation_cme,
-            consultation_workflow=consultation_workflow,
+            plan_cme=plan_cme,
+            plan_workflow=plan_workflow,
             app_workflow=app_workflow,
             structured_fallback=structured_fallback,
         )
@@ -2141,6 +2200,8 @@ def open_review(host: Any, store: ReviewStore, proposal: Proposal, *, surface: S
     store.add(record)
     audit(host, record, before="", after=AWAITING, reason="opened", surface=surface, mode=switch_mode(),
           outcome="asked")
+    if (put := getattr(question_owner(store, host), "_put_review_record", None)) is not None:
+        put(record)      # the review is the turn's waiting record, pointing at this one (``waiting``)
     if suspend:
         from fastworkflow.utils.react import AskUserSuspend
 
@@ -2164,8 +2225,8 @@ def reply_to_proposal(
     decision = reply_policy(
         record.kind,
         store.edit_reader,
-        consultation_cme=getattr(store, "consultation_cme", None),
-        consultation_workflow=getattr(store, "consultation_workflow", None),
+        plan_cme=getattr(store, "plan_cme", None),
+        plan_workflow=getattr(store, "plan_workflow", None),
         app_workflow=_prompt_workflow(host, store),
         structured_fallback=answering_q3_or_later,
     ).decide(proposal, message)
@@ -2189,8 +2250,8 @@ def reply_to_proposal(
         propagate(host, store, record, surface=surface)
         return ReviewReply(True, f"Declined. The {record.command} review was not accepted.")
     if decision.verdict is Verdict.EDIT:
-        if producing_q3_or_later and getattr(store, "consultation_cme", None) is not None:
-            _clear_consultation_cme_continuation(store.consultation_cme)
+        if producing_q3_or_later and getattr(store, "plan_cme", None) is not None:
+            _clear_plan_cme_continuation(store.plan_cme)
         edited = apply_edits(proposal, list(decision.edits)).revised(host, proposal)
         record.binding = {**record.binding, "items": edited.binding()["items"]}
         record.fingerprint = fingerprint(record.binding)   # the record's fingerprint covers its channel and task too
@@ -2208,8 +2269,8 @@ def reply_to_proposal(
         return ReviewReply(False, record.rendering)
     # REFUSE or REPROMPT: nothing changes, and the user is asked again.
     if producing_q3_or_later:
-        if getattr(store, "consultation_cme", None) is not None:
-            _clear_consultation_cme_continuation(store.consultation_cme)
+        if getattr(store, "plan_cme", None) is not None:
+            _clear_plan_cme_continuation(store.plan_cme)
         from fastworkflow.review_proposals import SubTaskProposal
 
         if isinstance(proposal, SubTaskProposal):

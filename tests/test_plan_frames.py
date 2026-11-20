@@ -260,10 +260,11 @@ def test_a_blob_without_the_new_keys_restores_one_frame_and_the_old_keys_as_befo
     assert restored._next_step == 4
 
 
-def test_the_session_schema_version_is_still_four():
-    # Phase 4 deliberately did not bump SCHEMA_VERSION (design 3.5, Serialisation): the new keys
-    # are optional and an absent key means "no nested frames". Bump it only with that decision revisited.
-    assert SCHEMA_VERSION == 4
+def test_nested_frames_did_not_bump_the_session_schema_version():
+    # Nested frames deliberately did not bump SCHEMA_VERSION (design 3.5, Serialisation): their keys are optional and
+    # an absent key means "no nested frames". The version is 7 since the pending question became one saved record
+    # (docs/pending_state_design.md, steps 4, 8 and 9), which did change the format; frames are still not a reason to bump it.
+    assert SCHEMA_VERSION == 7
 
 
 def test_the_current_frame_alias_is_the_top_frames_and_pops_back_to_the_turn(
@@ -350,10 +351,9 @@ def library_sessions(monkeypatch, initialized_fastworkflow):
             "fastworkflow.workflow_agent.build_query_with_next_steps",
             lambda user_query, session, **kwargs: user_query,
         )
-        monkeypatch.setattr(
-            "fastworkflow.workflow_agent.planner_planning_command_for",
-            lambda text, folder_path, **_: ("", None),
-        )
+        from tests.conftest import script_plan
+
+        script_plan(monkeypatch, lambda text: None)
         monkeypatch.setattr(
             "fastworkflow.workflow_agent.split_into_subtasks",
             lambda query, **_: list(subtasks or [query]),

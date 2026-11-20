@@ -94,7 +94,9 @@ def _plan(monkeypatch, env, matches: dict | None = None, ad_hoc_plan: str = ""):
         return user_query
 
     import fastworkflow.workflow_agent as workflow_agent
-    monkeypatch.setattr(workflow_agent, "planner_planning_command_for", command_for)
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: command_for(text, None)[1], decided_by="matcher")
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps", plan)
 
 

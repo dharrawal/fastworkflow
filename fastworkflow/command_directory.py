@@ -254,6 +254,9 @@ class CommandDirectory(BaseModel):
         Commands in context subdirectories are registered with qualified names 
         in the format 'ContextName/command_name'.
         """
+        # Command file paths are recorded in `command_directory.json` and in the training signature, so they
+        # must not take their spelling (and the current directory) from a relative workflow path.
+        workflow_folderpath = os.path.abspath(workflow_folderpath)
         command_directory = cls(workflow_folderpath=workflow_folderpath)
         
         # Step 1: Load workflow inheritance model
@@ -315,7 +318,7 @@ class CommandDirectory(BaseModel):
         import fastworkflow  # inline: the module is imported before the package is ready
         if os.path.abspath(command_directory.workflow_folderpath) in {
                 os.path.abspath(fastworkflow.get_internal_workflow_path("command_metadata_extraction")),
-                os.path.abspath(fastworkflow.get_internal_workflow_path("consultation")),
+                os.path.abspath(fastworkflow.get_internal_workflow_path("plan_metadata_extraction")),
         }:
             return
         for item_path in sorted(root.glob("*.py")):
@@ -522,7 +525,7 @@ class CommandDirectory(BaseModel):
         import fastworkflow  # inline: matches other internal-workflow guards in this module
 
         if os.path.abspath(command_directory.workflow_folderpath) == os.path.abspath(
-                fastworkflow.get_internal_workflow_path("consultation")):
+                fastworkflow.get_internal_workflow_path("plan_metadata_extraction")):
             command_directory.core_command_names.clear()
             return
 

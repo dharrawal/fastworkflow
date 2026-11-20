@@ -259,6 +259,39 @@ class NotHereHead(BaseModel):
     reason: Optional[str] = None
 
 
+class ConfusedPair(BaseModel):
+    """Two commands whose rows the embedding head gives to each other in its cross-fit, both directions."""
+
+    a: str
+    b: str
+    a_as_b: int
+    a_rows: int
+    a_share: float
+    b_as_a: int
+    b_rows: int
+    b_share: float
+    total: int
+    max_share: float
+
+
+class IntentModelReport(BaseModel):
+    """What the workflow's embedding head says about its own training rows: cross-fit accuracy and the most
+    confused command pairs. Read from the head's ``scopes.json`` (`train.embedding_head`). The cross-fit is
+    for this report only: it sets no threshold, and real requests are harder than training rows."""
+
+    layout: str
+    encoder: str
+    commit_threshold: float
+    rows: int
+    accuracy: Optional[float] = None
+    folds: int = 0
+    confused_pairs: int = 0
+    #: Pairs where more than `pair_share_limit` of either command's rows go to the other.
+    pairs_over_limit: int = 0
+    pair_share_limit: float = 0.10
+    pairs: list[ConfusedPair] = Field(default_factory=list)
+
+
 class TrainingReport(BaseModel):
     """The whole report: rows, the floors they were judged against, and what broke."""
 
@@ -277,6 +310,8 @@ class TrainingReport(BaseModel):
     problems: list[str] = Field(default_factory=list)
     provenance_path: Optional[str] = None
     heldout_available: bool = False
+    #: The embedding head's cross-fit accuracy and confused pairs; None for another layout or no head.
+    intent_model: Optional[IntentModelReport] = None
 
     def of_kind(self, kind: CommandKind) -> list[CommandRow]:
         return [row for row in self.rows if row.kind == kind]
@@ -701,10 +736,52 @@ def _classify_status(
     return RowStatus.OK
 
 
+def load_intent_model(
+    workflow_folderpath: str, version_id: Optional[str], problems: list[str],
+) -> Optional[IntentModelReport]:
+    """The embedding head's cross-fit numbers from *version_id*'s ``workflow/scopes.json`` (the current
+    version when None). None when the version holds no embedding head; an unreadable file is a problem."""
+    from fastworkflow.train import artifact_versioning, intent_model_layout
+
+    try:
+        version_id = version_id or artifact_versioning.resolve_current_version(workflow_folderpath)
+        if not version_id:
+            return None
+        scopes_path = (artifact_versioning.version_dir(workflow_folderpath, version_id)
+                       / intent_model_layout.WORKFLOW_MODEL_DIRNAME / intent_model_layout.SCOPES_FILENAME)
+    except Exception:  # noqa: BLE001 - a workflow with no readable version has no head to report
+        return None
+    if not scopes_path.is_file():
+        return None
+    payload = _read_json(scopes_path, problems, "the embedding head's scopes.json")
+    if not payload or payload.get("layout") != intent_model_layout.EMBEDDING:
+        return None
+    cross_fit = payload.get("cross_fit")
+    if not isinstance(cross_fit, dict):
+        return None  # a head trained before the cross-fit report: nothing to show
+    try:
+        return IntentModelReport(
+            layout=payload["layout"],
+            encoder=payload["encoder"]["model"],
+            commit_threshold=float(payload["threshold"]),
+            rows=int(cross_fit.get("rows", 0)),
+            accuracy=cross_fit.get("accuracy"),
+            folds=int(cross_fit.get("folds", 0)),
+            confused_pairs=int(cross_fit.get("confused_pairs", 0)),
+            pairs_over_limit=int(cross_fit.get("pairs_over_limit", 0)),
+            pair_share_limit=float(cross_fit.get("pair_share_limit", 0.10)),
+            pairs=[ConfusedPair(**pair) for pair in cross_fit.get("pairs", [])],
+        )
+    except Exception as exc:  # noqa: BLE001 - a malformed section is a problem, not a failed report
+        problems.append(f"the embedding head's cross-fit numbers could not be read ({exc})")
+        return None
+
+
 def build_report(
     workflow_folderpath: str,
     min_rows: Optional[int] = None,
     min_seeds: Optional[int] = None,
+    version_id: Optional[str] = None,
 ) -> TrainingReport:
     """Assemble the report for *workflow_folderpath*. Never raises on bad input.
 
@@ -869,6 +946,7 @@ def build_report(
         problems=problems,
         provenance_path=str(path) if path.is_file() else None,
         heldout_available=bool(heldout),
+        intent_model=load_intent_model(workflow_folderpath, version_id, problems),
     )
 
 
@@ -1188,6 +1266,7 @@ def format_report(report: TrainingReport) -> str:
             "run R1's evaluation"
         )
 
+    lines.extend(_intent_model_lines(report.intent_model))
     lines.extend(_format_problems(report))
 
     lines.append("")
@@ -1203,6 +1282,36 @@ def format_report(report: TrainingReport) -> str:
     lines.append("  Missing or empty training data stops publication; advisory findings do not.")
     lines.append(rule)
     return "\n".join(lines)
+
+
+def _intent_model_lines(model: Optional[IntentModelReport]) -> list[str]:
+    """The embedding head's section: cross-fit accuracy, the most confused pairs, what to do about one."""
+    if model is None:
+        return []
+    accuracy = "not measured" if model.accuracy is None else f"{model.accuracy:.1%}"
+    lines = [
+        "",
+        f"  LOCAL INTENT MODEL — embedding head ({model.encoder}), commit threshold {model.commit_threshold:.2f}",
+        f"    cross-fit accuracy: {accuracy} of {model.rows} distinct command rows "
+        f"({model.folds} folds, grouped by row text; real requests are harder than these rows)",
+    ]
+    if not model.pairs:
+        lines.append("    confused pairs   : none: the head gave no command's rows to another command")
+        return lines
+    shown = len(model.pairs)
+    lines.append(
+        f"    confused pairs   : {model.confused_pairs} in all, {model.pairs_over_limit} with more than "
+        f"{model.pair_share_limit:.0%} of either command's rows given to the other; the top {shown}:")
+    for pair in model.pairs:
+        lines.append(
+            f"      {pair.a} -> {pair.b}: {pair.a_as_b}/{pair.a_rows} ({pair.a_share:.1%}); "
+            f"{pair.b} -> {pair.a}: {pair.b_as_a}/{pair.b_rows} ({pair.b_share:.1%})")
+    lines.append(
+        "    what to do       : for a pair, add seed utterances that tell the two commands apart (seeds "
+        "weigh three times a")
+    lines.append(
+        "                       generated row), or merge the two commands when users cannot tell them apart")
+    return lines
 
 
 def _format_problems(report: TrainingReport) -> list[str]:
@@ -1240,6 +1349,7 @@ def report_training_data(
     workflow_folderpath: str,
     print_report: bool = True,
     write: bool = True,
+    version_id: Optional[str] = None,
 ) -> Optional[TrainingReport]:
     """Build, optionally print, and optionally persist the report. Never raises.
 
@@ -1249,7 +1359,7 @@ def report_training_data(
     models. On failure it logs and returns None.
     """
     try:
-        report = build_report(workflow_folderpath)
+        report = build_report(workflow_folderpath, version_id=version_id)
         if print_report:
             print(format_report(report), flush=True)
         if write:

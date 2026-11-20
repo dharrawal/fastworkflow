@@ -15,7 +15,7 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import planning_commands, command_preview, workflow_agent
+from fastworkflow import planning_commands, command_preview, turn_cache, workflow_agent
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
 from fastworkflow.build.command_file_template import create_command_file
 from fastworkflow.command_directory import CommandDirectory
@@ -351,13 +351,11 @@ def jev_env():
         pytest.skip("JEV_API_KEY not set in passwords/.env: matching needs a real Jev call")
     fastworkflow.init(env_vars=env_vars)
     workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
     try:
         yield
     finally:
         fastworkflow.init(env_vars=previous)
         workflow_agent._jev_lm.cache_clear()
-        workflow_agent._planning_command_matcher.cache_clear()
 
 
 def test_planning_command_scopes_along_library_contexts_and_without_library(tmp_path):
@@ -404,14 +402,15 @@ def test_jev_library_and_root_planning_commands_match_only_where_visible(tmp_pat
     # and when a Book inside the Library is active; the root skill matches in each of them too.
     for active in (library, lib_mod.Branch(library, "Central"), library.books["b1"]):
         wf.record = active
+        turn_cache.begin_turn()
         scopes = workflow_agent.planning_scopes(wf)
-        matched_lib = workflow_agent.match_planning_command(dune_query, folder, scopes=scopes)
-        assert matched_lib is not None and matched_lib[0] == "Library/dune_search"
-        template, _ = workflow_agent.planner_planning_command_for(dune_query, folder, scopes=scopes)
-        assert "find_book query=Dune" in template
+        assert workflow_agent.plan_label(wf, dune_query) == "Library/dune_search"
+        steps = workflow_agent.load_planning_command_map(folder)["Library/dune_search"].template
+        assert "find_book query=Dune" in workflow_agent._template_text(steps)
 
-        matched_root = workflow_agent.match_planning_command(hours_query, folder, scopes=scopes)
-        assert matched_root is not None and matched_root[0] == "hours_overview"
+        # The intent loop decides over the commands too: a request the library's own command also answers may be
+        # an ambiguity (no plan) instead of the root plan, but it is never a plan of another scope.
+        assert workflow_agent.plan_label(wf, hours_query) in (None, "hours_overview")
 
     # 2. Where Library is NOT on the path (bare root before startup, or detached Book),
     # the Library skill does not match, while the root skill still matches everywhere.
@@ -421,10 +420,9 @@ def test_jev_library_and_root_planning_commands_match_only_where_visible(tmp_pat
     for non_lib_wf in (bare_wf, detached_wf):
         scopes = workflow_agent.planning_scopes(non_lib_wf)
         assert "Library" not in scopes
-        assert workflow_agent.match_planning_command(dune_query, folder, scopes=scopes) is None
-        assert workflow_agent.planner_planning_command_for(dune_query, folder, scopes=scopes) == ("", None)
-        matched_root = workflow_agent.match_planning_command(hours_query, folder, scopes=scopes)
-        assert matched_root is not None and matched_root[0] == "hours_overview"
+        turn_cache.begin_turn()      # each is a turn of its own: the part memo is per turn, not per workflow object
+        assert workflow_agent.plan_label(non_lib_wf, dune_query) is None
+        assert workflow_agent.plan_label(non_lib_wf, hours_query) in (None, "hours_overview")
 
 
 def test_jev_library_scope_wins_before_root_scope_when_both_fit(tmp_path, caplog, jev_env):
@@ -443,13 +441,7 @@ class PlanGenerator:
     assert scopes == ("Library", "")
 
     dune_query = "Look up Dune in the library and tell me how many books match."
-    caplog.clear()
-    with caplog.at_level(logging.INFO):
-        matched = workflow_agent.match_planning_command(dune_query, folder, scopes=scopes)
-    assert matched is not None
-    assert matched[0] == "Library/dune_search"
-    assert "planning command match in scope 'Library'" in caplog.text
-    assert "planning command match in scope 'root'" not in caplog.text
+    assert workflow_agent.plan_label(wf, dune_query) == "Library/dune_search"
 
 
 # ------------------------------------------------------------------
@@ -554,13 +546,11 @@ def test_write_previews_removes_orphan_context_preview_and_empty_folder_but_keep
 def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, caplog, no_planner_key):
     folder = _library_workflow(tmp_path)
     workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         workflow_agent.warm_planning_commands(folder)
         workflow_agent.warm_planning_commands(folder)
-        assert workflow_agent.match_planning_command("anything", folder) is None
 
     # 3.9's INFO line; this library's planning commands have no verify field, so none is named.
     expected = (
@@ -580,12 +570,10 @@ def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplo
 
     for folder in (empty_planning_commands_folder, no_planning_commands_folder):
         workflow_agent._jev_lm.cache_clear()
-        workflow_agent._planning_command_matcher.cache_clear()
         caplog.clear()
         with caplog.at_level(logging.INFO):
             workflow_agent.warm_planning_commands(folder)
             workflow_agent.warm_planning_commands(folder)
-            assert workflow_agent.match_planning_command("anything", folder) is None
         assert not any("JEV_API_KEY" in r.getMessage() for r in caplog.records)
 
 
@@ -593,7 +581,6 @@ def test_command_preview_does_not_warn_when_jev_key_is_unset(tmp_path, caplog, n
     folder = _library_workflow(tmp_path / "wf")
     out = str(tmp_path / "previews")
     workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):

@@ -228,7 +228,10 @@ def _suspend(runtime: ChannelRuntime) -> None:
     """
     ctx = runtime.execution_context
     state = ctx.serialize_state(channel_id=runtime.channel_id)
-    ctx.apply_serialized_state({**state, "awaiting_user": True})
+    from fastworkflow import waiting as waiting_module
+
+    asked = waiting_module.Waiting(waiting_module.KIND_AGENT, question="which one?")
+    ctx.apply_serialized_state({**state, "waiting": asked.to_state()})
     assert ctx.awaiting_user
 
 
@@ -707,7 +710,7 @@ def test_a_normal_turn_is_refused_while_a_streaming_turn_owns_the_channel(app_mo
         async with asgi_client(app_module) as client:
             headers = await _auth_headers(client, channel_id)
             response = await app_module.invoke_agent_stream(
-                app_module.InvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
+                app_module.AgentInvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
                 _session_data(app_module, channel_id),
             )
             seen["stream_owns"] = app_module.turn_registry.has_active(channel_id)
@@ -848,7 +851,7 @@ def test_an_abandoned_response_body_does_not_end_the_streaming_turn(app_module):
         async with asgi_client(app_module) as client:
             await _auth_headers(client, channel_id)
             response = await app_module.invoke_agent_stream(
-                app_module.InvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
+                app_module.AgentInvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
                 _session_data(app_module, channel_id),
             )
             turn_key = app_module.turn_registry.active_turn_key(channel_id)

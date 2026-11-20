@@ -2,6 +2,7 @@ import os
 from uuid import uuid4
 
 import fastworkflow
+from fastworkflow import intent_loop
 
 from fastworkflow._workflows.command_metadata_extraction._commands.ErrorCorrection.abort import (
     ResponseGenerator as AbortResponseGenerator,
@@ -49,18 +50,13 @@ def _assert_neutral_misunderstanding_response(cme_workflow):
 
 def _assert_abort_resets_for_the_next_rephrased_turn(cme_workflow):
     workflow_context = cme_workflow.context
-    workflow_context["NLU_Pipeline_Stage"] = (
-        fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-    )
+    intent_loop.store(workflow_context, {"request": "x", "misunderstood": True})
     cme_workflow.context = workflow_context
 
     abort_output = AbortResponseGenerator()(cme_workflow, "abort", None)
 
     assert abort_output.response == "command aborted\n"
-    assert (
-        cme_workflow.context["NLU_Pipeline_Stage"]
-        == fastworkflow.NLUPipelineStage.INTENT_DETECTION
-    )
+    assert intent_loop.waiting_for(cme_workflow.context) is None
 
 
 def test_misunderstanding_response_does_not_presuppose_a_listed_command_is_correct():

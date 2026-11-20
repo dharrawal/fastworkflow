@@ -14,6 +14,9 @@ from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.workflow_agent import (
     build_query_with_next_steps, initialize_workflow_tool_agent, run_progress_check)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.test_approval_binding import annotated_library, todo  # noqa: F401 - fixtures of ``gated``
+from tests.test_round1_gate import gated  # noqa: F401
+from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 TODO_WORKFLOW = str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
 COMMANDS_TITLE = "Available execute_workflow_query tool commands"
@@ -881,13 +884,15 @@ def _write_planning_commands(tmp_path, planning_commands):
     return str(tmp_path)
 
 
-def test_the_planner_template_gets_the_planning_commands_steps(tmp_path, monkeypatch):
+def test_the_planner_template_gets_the_planning_commands_steps(tmp_path):
     from fastworkflow import workflow_agent
 
+    # (was: match_planning_command picks the command; the pick is now the intent loop's, see
+    # tests/test_split_and_planner_use_intent_loop.py. What stays here: the command's steps are the template.)
     folder = _write_planning_commands(tmp_path, {"leaver": "Someone is leaving.\nfind them\nclose it\n"})
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
-    assert workflow_agent.match_planning_command("Pat is leaving", folder) == ("leaver", ("find them", "close it"))
-    assert "- find them\n- close it\n" in workflow_agent.plan_template_for("Pat is leaving", folder)
+    steps = workflow_agent.load_planning_command_map(folder)["leaver"].template
+    assert steps == ("find them", "close it")
+    assert "- find them\n- close it\n" in workflow_agent._template_text(steps)
 
 
 def test_the_split_files_signature_docstring_replaces_the_default_instructions(tmp_path):
@@ -948,45 +953,40 @@ def _fake_matcher(value, probability):
     return predict, DummyLM([])
 
 
-def test_a_plan_template_is_the_matched_planning_command_steps_in_a_fixed_format(monkeypatch):
+def test_a_plan_template_is_the_matched_planning_command_steps_in_a_fixed_format():
     from fastworkflow import workflow_agent
 
-    monkeypatch.setattr(workflow_agent, "match_planning_command", lambda text, folder, **_: ("leaver", ("find them", "open them")))
-    assert workflow_agent.plan_template_for("Two people are leaving", "unused") == (
+    assert workflow_agent._template_text(("find them", "open them")) == (
         "A job like this is usually done as:\n- find them\n- open them\n"
         "Adapt this to the request: drop steps it does not need and add steps it asks for.")
-    monkeypatch.setattr(workflow_agent, "match_planning_command", lambda text, folder, **_: None)
-    assert workflow_agent.plan_template_for("What is the weather in Paris?", "unused") == ""
 
 
-def test_match_planning_command_only_returns_a_confident_planning_command_pick(tmp_path, monkeypatch):
-    from fastworkflow import workflow_agent
+def test_match_planning_command_only_returns_a_confident_planning_command_pick(gated, monkeypatch):
+    """(was ``match_planning_command``; the pick is the intent loop's: the remote model's answer decides at its accept
+    bar, "none" and a doubtful score are no plan, and a failed call leaves the local model's answer.)"""
+    from fastworkflow import turn_cache, workflow_agent
+    from tests.conftest import no_local_model, script_matcher
 
-    folder = _planning_command_folder(tmp_path)
-    match = lambda: workflow_agent.match_planning_command("Two people are leaving", folder)  # noqa: E731
-
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("leaver", 0.9)})
-    assert match() == ("leaver", ("find them", "open them"))
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("none", 0.9)})
-    assert match() is None
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", lambda f: {"": _fake_matcher("leaver", 0.49)})
-    assert match() is None
-
-    def broken(folder):
-        raise RuntimeError("provider down")
-
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher", broken)
-    assert match() is None
+    no_local_model(monkeypatch)
+    plan = "Library/book_by_title"
+    script_matcher(monkeypatch, {"sure of it": {plan: 0.97, "none": 0.03}, "decline this one": {"none": 0.97, plan: 0.03},
+                                 "doubtful request": {plan: 0.6, "none": 0.4}})
+    turn_cache.begin_turn()
+    label = lambda text: workflow_agent.plan_label(gated.wf, text)  # noqa: E731
+    assert label("sure of it") == plan
+    assert label("decline this one") is None
+    assert label("doubtful request") is None
+    assert label("not scripted: the remote call fails") is None
 
 
 @pytest.mark.usefixtures("no_planner_key")
-def test_no_jev_key_means_no_matcher_and_no_template(tmp_path, workflow_env):
-    from fastworkflow import workflow_agent
+def test_no_jev_key_means_no_matcher_and_no_template(gated, monkeypatch):
+    from fastworkflow import turn_cache, workflow_agent
+    from tests.conftest import no_local_model
 
-    workflow_env()
-    folder = _planning_command_folder(tmp_path)
-    assert workflow_agent._planning_command_matcher(folder) is None
-    assert workflow_agent.plan_template_for("Two people are leaving", folder) == ""
+    no_local_model(monkeypatch)
+    turn_cache.begin_turn()
+    assert workflow_agent.plan_label(gated.wf, "Two people are leaving") is None
 
 
 def test_the_plan_template_reaches_the_planner_but_not_the_returned_query(workflow_env):

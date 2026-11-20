@@ -42,6 +42,14 @@ def initialized_fastworkflow(tmp_path, monkeypatch):
     RoutingRegistry.clear_registry()
 
 
+def _agent_question(question, message=None) -> dict:
+    """The saved form of the agent's own question (the turn's ``agent`` waiting record)."""
+    from fastworkflow import waiting as waiting_module
+
+    return waiting_module.Waiting(
+        waiting_module.KIND_AGENT, question=question, payload={} if message is None else {"message": message}).to_state()
+
+
 def _suspended_react_blob() -> dict:
     """The shape WorkflowToolAgent.export_suspended() actually returns.
 
@@ -192,9 +200,7 @@ def test_unreadable_schema_version_applies_nothing(
     # Every field here is one apply_serialized_state would have written.
     hostile = {
         "schema_version": found,
-        "awaiting_user": True,
-        "suspended_user_message": "restored from the future",
-        "pending_clarification_request": "which one?",
+        "waiting": _agent_question("which one?", "restored from the future"),
         "action_log": [{"command_name": "should_not_appear"}],
     }
 
@@ -205,8 +211,7 @@ def test_unreadable_schema_version_applies_nothing(
     assert excinfo.value.expected == SCHEMA_VERSION
 
     assert not ctx.awaiting_user
-    assert ctx._suspended_user_message is None
-    assert ctx._pending_clarification_request is None
+    assert ctx.waiting is None
     assert ctx._action_log == []
     ctx.close()
 
@@ -221,7 +226,7 @@ def test_legacy_turn_plan_keys_in_a_blob_do_not_fail_restore(
     )
     ctx.apply_serialized_state({
         "schema_version": SCHEMA_VERSION,
-        "awaiting_user": True,
+        "waiting": _agent_question("which one?"),
         "react": _suspended_react_blob(),
         "turn_plan": {"steps": "not a list of steps"},
         "turn_plan_status": "planned",
@@ -250,13 +255,12 @@ def test_readable_schema_version_still_applies(
     ctx.apply_serialized_state(
         {
             "schema_version": SCHEMA_VERSION,
-            "awaiting_user": True,
-            "suspended_user_message": "the urgent one",
+            "waiting": _agent_question("which one?", "the urgent one"),
             "action_log": [{"command_name": "list_tasks"}],
         }
     )
 
     assert ctx.awaiting_user
-    assert ctx._suspended_user_message == "the urgent one"
+    assert ctx.waiting.question == "which one?" and ctx._suspended_message() == "the urgent one"
     assert len(ctx._action_log) == 1
     ctx.close()

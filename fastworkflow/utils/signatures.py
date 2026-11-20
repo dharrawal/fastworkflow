@@ -34,6 +34,7 @@ from fastworkflow.utils.input_validation import bound_fields, is_pydantic_model,
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import planning_commands
+from fastworkflow.parameters import ask
 from fastworkflow.utils.workflow_vocabulary import (
     KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 
@@ -42,8 +43,8 @@ from fastworkflow.utils.workflow_vocabulary import (
 # until the user supplies it. ``INVALID`` is the marker for a value that failed a check.
 NOT_FOUND = "NOT_FOUND"
 INVALID = "INVALID"
-MISSING_INFORMATION_ERRMSG = "Missing parameter values: "
-INVALID_INFORMATION_ERRMSG = "Invalid parameter values: "
+MISSING_INFORMATION_ERRMSG = ask.MISSING_INFORMATION
+INVALID_INFORMATION_ERRMSG = ask.INVALID_INFORMATION
 PARAMETER_EXTRACTION_ERROR_MSG = "Error in parameter extraction: {error}"
 
 LLM_PARAM_EXTRACTION = None
@@ -1236,6 +1237,8 @@ Today's date is {today}.
     input_for_param_extraction: Optional[Any] = None
     # Set by extract_parameters: the fields Jev judged not given, {name: probability} (fields_not_given).
     fields_reset_not_given: Dict[str, float] = Field(default_factory=dict, exclude=True)
+    #: True when every extraction attempt failed to parse into the fields' types (a value outside a Literal or enum).
+    unparsed: bool = Field(default=False, exclude=True)
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
@@ -1383,6 +1386,7 @@ Today's date is {today}.
         global LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
 
         self.fields_reset_not_given = {}
+        self.unparsed = False
         if not LLM_PARAM_EXTRACTION:
             LLM_PARAM_EXTRACTION = fastworkflow.get_env_var("LLM_PARAM_EXTRACTION")
             LITELLM_API_KEY_PARAM_EXTRACTION = fastworkflow.get_env_var("LITELLM_API_KEY_PARAM_EXTRACTION")
@@ -1434,9 +1438,9 @@ Today's date is {today}.
             # Up to 3 attempts: the first at temperature 0, the retries (reward 0)
             # at temperature 1.0 with distinct rollout ids.
             best_of_3 = FirstAttemptGreedy(
-                module=compiled_model, 
-                N=3, 
-                reward_fn=basic_checks, 
+                module=compiled_model,
+                N=3,
+                reward_fn=basic_checks,
                 threshold=1.0)
 
             try:
@@ -1447,6 +1451,8 @@ Today's date is {today}.
                     param_dict[field_name] = drop_unknown_markers(value, default)
             except Exception as exc:
                 logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+            finally:
+                self.unparsed = bool(getattr(best_of_3, "unparsed", False))
 
         # A filled field the statement does not give (Jev, fields_not_given) is not a value: reset it
         # to its not-given value, so an optional field takes its default and a required one is asked for.
@@ -1478,13 +1484,14 @@ Today's date is {today}.
 
     def _check_option_arguments(self, command, cmd_parameters: BaseModel,
                                 diagnostics: Optional[Dict[str, Any]],
-                                verdicts=None) -> Optional[str]:
+                                verdicts=None) -> "Optional[planning_commands.PlanningCommandCallError]":
         """The arguments of the command *command*'s check options, checked against the request (self.command),
         for a command of either kind (2.46, 3.4).
 
         ``check_verdicts`` (one classifier call per ``verify`` field, when a Jev LM is set) and then
         ``check_arguments``' guards; the guarded values are written back onto *cmd_parameters*.
-        Returns the refusal's text, or None when every guard passes.
+        Returns the refusal (an exception: its ``gap`` names the argument the guard refused), or None when every
+        guard passes.
 
         *verdicts* (a dict, or a Future of one) are the verdicts a caller started early for this request
         (``extract_arguments``); None runs ``check_verdicts`` here.
@@ -1502,48 +1509,77 @@ Today's date is {today}.
         except planning_commands.PlanningCommandCallError as refusal:
             if diagnostics is not None:
                 diagnostics["argument_refusal"] = str(refusal)
-            return str(refusal)
+            return refusal
         if diagnostics is not None and notes:
             diagnostics["argument_notes"] = list(notes)
         for name, value in args.items():
             set_field_unvalidated(cmd_parameters, name, value)
         return None
 
-    def _check_input_rules(self, command, cmd_parameters: BaseModel, app_workflow) -> "_InputRules":
+    @staticmethod
+    def _name_refused_argument(refusal, cmd_parameters: BaseModel, missing_fields: list, invalid_fields: list,
+                               refusal_messages: list) -> bool:
+        """Put the argument a guard's refusal names (its ``gap``) among the missing or invalid fields, with the
+        refusal's text, so it is asked for like any other; False when the refusal names no argument (then it is not
+        a question)."""
+        gap = getattr(refusal, "gap", None)
+        if gap is None or gap.name not in type(cmd_parameters).model_fields:
+            return False
+        if gap.state == "missing":
+            missing_fields.append(gap.name)
+        else:
+            invalid_fields.append(f"{gap.name} '{getattr(cmd_parameters, gap.name, None)}'")
+            refusal_messages.append(str(refusal))
+        return True
+
+    def _check_input_rules(self, command, cmd_parameters: BaseModel, app_workflow,
+                           command_text: Optional[str] = None) -> "_InputRules":
         """The outcome of the ``Input``'s own model validators, for a command of either kind (spec 3.1-3.4).
 
         The validators read the command text (self.command), the workflow and the command's name from the
         validation context (``planning_commands.check_input``). A value a validator changes is written back
         onto the command's parameters. ``message`` is None when they accept.
         """
+        from fastworkflow.parameters import validate as one_driver
+
         ran = _declares_input_validators(type(cmd_parameters))
         args = {name: getattr(cmd_parameters, name, None) for name in type(cmd_parameters).model_fields}
+        # The one driver (parameters.validate); its outcome is worded here as the hook's words on this path.
+        # `command_text` is the request with the user's replies after it (``ParameterLoop.text``), the same text the
+        # typed planning call's validators get; the caller passes it, and a first round has only the request.
         try:
-            written = planning_commands.check_input(command, args, self.command, app_workflow)
-        except planning_commands.PlanningCommandCallError as failure:
-            # The hook's wording on this path (HEAD's signature hook): a validator's refusal is its bare
-            # message, a validator that raised is "Exception in X's validate_extracted_parameters function: e".
-            # The writes it made before it stopped are kept on the parameters, as the hook kept them.
-            changed = tuple(getattr(failure, "written", {}))
-            for name, value in getattr(failure, "written", {}).items():
-                set_field_unvalidated(cmd_parameters, name, value)
-            if getattr(failure, "refusal", None) is not None:
-                return _InputRules(ran, failure.refusal, tuple(failure.fields), None, changed)
-            raised = getattr(failure, "raised", None)
-            if raised:
-                message = f"Exception in {command.name}'s validate_extracted_parameters function: {failure.detail}"
-                return _InputRules(ran, message, (), raised, changed)
-            return _InputRules(ran, str(failure), tuple(getattr(failure, "fields", ())), None, changed)
-        for name, value in written.items():
+            outcome = one_driver.validate(command.input_model, planning_commands._absent_as_none(command, args),
+                                          command_text=self.command if command_text is None else command_text,
+                                          workflow=app_workflow,
+                                          command_name=command.name)
+        except one_driver.ValidatorReturnError as failure:
+            return _InputRules(ran, str(failure), (), None, ())
+        # The writes the validators made are kept when they pass; a refusal drops them (``validate``: one rule).
+        changed = tuple(outcome.written)
+        for name, value in outcome.written.items():
             set_field_unvalidated(cmd_parameters, name, value)
-        return _InputRules(ran, None, (), None, tuple(written))
+        refusal = outcome.refusal
+        if refusal is None:
+            return _InputRules(ran, None, (), None, changed)
+        # The hook's wording on this path (HEAD's signature hook): a validator's Refused is its bare message,
+        # a plain ValueError the hook-prefixed one, a validator that raised is "Exception in X's
+        # validate_extracted_parameters function: e".
+        if refusal.kind == one_driver.REFUSED:
+            return _InputRules(ran, refusal.message, tuple(refusal.fields), None, changed)
+        if refusal.kind == one_driver.PLAIN:
+            return _InputRules(ran, f"validate_extracted_parameters: {refusal.message}", (), None, changed)
+        if refusal.kind == one_driver.RAISED:
+            message = f"Exception in {command.name}'s validate_extracted_parameters function: {refusal.message}"
+            return _InputRules(ran, message, (), refusal.raised, changed)
+        return _InputRules(ran, refusal.message, (), None, changed)
 
     def validate_parameters(self,
                             app_workflow: fastworkflow.Workflow,
                             subject_command_name: str,
                             cmd_parameters: BaseModel,
                             diagnostics: Optional[Dict[str, Any]] = None,
-                            verdicts=None
+                            verdicts=None,
+                            command_text: Optional[str] = None
                             ) -> Tuple[bool, str, Dict[str, List[str]], List[str]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
@@ -1555,6 +1591,9 @@ Today's date is {today}.
         field lists. The observability layer attaches it to the
         fw.nlu.param_extraction span so debugging agents read fields instead
         of parsing the prose error message. Passing None changes nothing.
+
+        ``command_text``: what the ``Input``'s model validators see as ``info.context["command_text"]``: the request
+        with the user's replies after it. None means this round's text alone (``self.command``).
         """
         is_valid = True
         missing_fields = []
@@ -1930,7 +1969,10 @@ Today's date is {today}.
         if is_valid and command.params:
             guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics, verdicts)
             if guard_refusal is not None:
-                return (False, guard_refusal, {}, [])
+                if not self._name_refused_argument(guard_refusal, cmd_parameters, missing_fields, invalid_fields,
+                                                   refusal_messages):
+                    return (False, str(guard_refusal), {}, [])   # names no input: not a question (``argument_refusal``)
+                is_valid = False
         # The roles of two required str inputs given one value (3.4), as the typed planning call checks them.
         # HEAD's order on this path: the option checks, the roles, then the hook (now the Input's validators).
         if is_valid and planning is not None:
@@ -1938,11 +1980,16 @@ Today's date is {today}.
             try:
                 planning_commands._check_roles(planning, values, self.command)
             except planning_commands.PlanningCommandInputError as refusal:
-                return (False, str(refusal), {}, [])
+                if diagnostics is not None:
+                    diagnostics["argument_refusal"] = str(refusal)
+                if not self._name_refused_argument(refusal, cmd_parameters, missing_fields, invalid_fields,
+                                                   refusal_messages):
+                    return (False, str(refusal), {}, [])
+                is_valid = False
         # The Input's validators (the former hook: after the option checks and the roles). A refusal with a
         # field asks for that field again with its message; one without, or a call error, answers the call.
         if is_valid:
-            rules = self._check_input_rules(command, cmd_parameters, app_workflow)
+            rules = self._check_input_rules(command, cmd_parameters, app_workflow, command_text)
             if diagnostics is not None:
                 # `ran` says whether the Input declares a validator (False is the honest fact for a command with none).
                 # `changed_fields`: the fields the validators wrote back (the slot-binding record reads it as the
@@ -1979,62 +2026,26 @@ Today's date is {today}.
                 field.split(" '")[0].strip() for field in invalid_fields
             ]
 
-        message = ''
-        if missing_fields:
-            message += f"{MISSING_INFORMATION_ERRMSG}" + ", ".join(missing_fields) + "\n"
+        available_from = {}
+        for missing_field in missing_fields:
+            is_available_from = None
+            if hasattr(type(cmd_parameters).model_fields.get(missing_field), "json_schema_extra") and type(cmd_parameters).model_fields.get(missing_field).json_schema_extra:
+                is_available_from = type(cmd_parameters).model_fields.get(missing_field).json_schema_extra.get("available_from")
+            if is_available_from:
+                available_from[missing_field] = is_available_from
 
-            for missing_field in missing_fields:
-                is_available_from = None
-                if hasattr(type(cmd_parameters).model_fields.get(missing_field), "json_schema_extra") and type(cmd_parameters).model_fields.get(missing_field).json_schema_extra:
-                    is_available_from = type(cmd_parameters).model_fields.get(missing_field).json_schema_extra.get("available_from")
-                if is_available_from:
-                    msg_prefix = "abort and "
-                    if "run_as_agent" in app_workflow.context:
-                        msg_prefix = ""
-                    bare_commands = [
-                        str(entry).split("/")[-1].split(".", 1)[0]
-                        for entry in is_available_from
-                    ]
-                    message += f"{msg_prefix}use the {' or '.join(bare_commands)} command(s) to get {missing_field} information. OR...\n"
-
-        if invalid_fields:
-            message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
-
-        for field, value in placeholder_fields.items():
-            message += placeholder_value_message(field, value) + "\n"
-
-        for _, wording in command_name_fields.values():
-            message += wording + "\n"
-
-        for _, wording in word_fields.values():
-            message += wording + "\n"
-
-        for refusal_message in refusal_messages:
-            message += refusal_message + "\n"
-
-        for field, value in out_of_range_fields.items():
-            message += out_of_range_value_message(field, value, out_of_range_problems[field]) + "\n"
-
-        for field, suggestions in all_suggestions.items():
-            if suggestions:
-                is_format_instruction = any(("format" in str(s).lower() or "pattern" in str(s).lower()) for s in suggestions)
-
-                if is_format_instruction:
-                    message += f"\n{field}: {', '.join(suggestions)}"
-                else:
-                    message += f"Did you mean one of these {field}s? {', '.join(suggestions)}\n"
-
-        combined_fields = []
-        if missing_fields:
-            combined_fields.extend(missing_fields)
-        if invalid_fields:
-            invalid_field_names = [field.split(" '")[0].strip() for field in invalid_fields]
-            combined_fields.extend(invalid_field_names)
-
-        if combined_fields:
-            combined_fields_str = ", ".join(combined_fields)
-            message += f"\nProvide corrected parameter values in the exact order specified below, separated by commas:\n{combined_fields_str}"
-            if "run_as_agent" not in app_workflow.context:
-                message += "\nFor parameter values that include a comma, provide separately from other values, and one at a time."
-
+        message = ask.word(
+            form=ask.FORM_VALIDATION, command_name=subject_command_name,
+            audience=ask.audience_of(getattr(app_workflow, "context", None)),
+            parts=ask.Parts(
+                missing=missing_fields, invalid=invalid_fields, available_from=available_from,
+                notes=[
+                    *(placeholder_value_message(field, value) for field, value in placeholder_fields.items()),
+                    *(wording for _, wording in command_name_fields.values()),
+                    *(wording for _, wording in word_fields.values())],
+                refusals=refusal_messages,
+                range_notes=[out_of_range_value_message(field, value, out_of_range_problems[field])
+                             for field, value in out_of_range_fields.items()],
+                suggestions=all_suggestions)).text
+        combined_fields = ask.open_names(missing_fields, invalid_fields)
         return (False, message, all_suggestions, combined_fields)

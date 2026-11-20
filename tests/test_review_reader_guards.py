@@ -16,6 +16,8 @@ from fastworkflow.review_engine import EditRefused, Verdict, apply_edits
 from fastworkflow.review_proposals import (
     Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, _proposed_edits_to_engine, merge_subtask_input_edit)
 
+pytestmark = pytest.mark.usefixtures("review_nouns_workflow")
+
 RECORDED = {'r4_5_08_pass9': {'id': 99,
                    'steps': [('Quarterly packet for Henderson Ramirez and Lewis',
                               'unit=Henderson Ramirez and Lewis Ltd 1, with_login_only=true',

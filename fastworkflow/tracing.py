@@ -414,7 +414,68 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # plans that fit). Names only, never user text or scores. Recorded whether or not the review was opened (an unattended
 # turn runs the winner and carries the record). Null when none was ambiguous. A span recorded before this carries no
 # such key.
-SPAN_CONTRACT_VERSION = 46
+#
+# v47: fw.nlu.intent v5 (fix-yu3l.2) -- `engine` (which detector engine answered when the classifier layer decided:
+# "classifier" today) and `engine_fallback` (that engine answered because the preferred one was not available; False
+# today). Both are absent when a layer above the engine decided (an exact name, the fuzzy pre-match, the cache). A span
+# recorded before this carries neither key.
+#
+# v48: fw.nlu.intent v6 (fix-yu3l.3) -- `matcher`: the model matcher's facts when it decided the scope
+# (`matcher_layer` "matcher", `engine` "matcher"): {confident, top_label, confidence, topk_labels, topk_scores,
+# none_score, threshold, unsure_threshold, scope_path, model, latency_ms, calls, and error for a failed call}.
+# `engine_fallback` is then True when the matcher stood in for a head that does not exist. Absent when the
+# classifier or a layer above decided. A span recorded before this carries no such key.
+#
+# v49: fw.nlu.intent v7 (hybrid intent detection) -- `engine_mode`: the INTENT_DETECTION_ENGINE mode in force
+# when an engine decided ("auto" | "classifier" | "matcher" | "hybrid"; "hybrid" without the planner key is "auto").
+# In hybrid, a span whose `engine` is "matcher" and which also carries `classifier` is a scope whose trained head
+# was not confident: the head's facts are kept beside the matcher's. Absent when a layer above the engine decided.
+#
+# v50: fw.nlu.intent v8 (one detection chain, fix-o5wi.2) -- the engine setting is gone, so `engine_mode` is no
+# longer written, and neither is `jev_tiebreak` (the tie-break among an ambiguous intent's candidates was removed;
+# `matcher_layer` is never "jev_tiebreak"). `engine` says who decided: "classifier" (the scope's trained local
+# model), "matcher" (the remote decision model) or "question" (no link was confident: the candidates were put to
+# the user or the agent). `engine_chain` lists the links that were asked, in order (["classifier"],
+# ["classifier", "matcher"] or ["matcher"]); with `engine` "question" the candidates are the last link's. A span
+# with `classifier` and `matcher` is a scope whose local model was not confident; when the matcher's call failed
+# (`matcher.error`) the local model's answer stood and `engine` is not "matcher". `classifier.model_tier` may be
+# "embedding" (the embedding head). A span recorded before this may carry `engine_mode` and `jev_tiebreak`.
+#
+# v51: fw.nlu.intent v9 (fix-o5wi.8) -- the similarity cache was removed from intent detection: the ladder is
+# exact name, fuzzy name, local model, remote model, question. `cache_similarity` and `cache_similarity_threshold`
+# are no longer written and `matcher_layer` is never "embedding_cache". A span recorded before this may carry
+# them; a reader must show an unknown layer as recorded.
+#
+# v52: fw.nlu.intent v10 (fix-o5wi.9) -- the local model never passes a request up on its own, so it no longer answers a
+# lone "not here" because a command of another scope is ahead (`escalation_outcome` is then not "escalate" for that
+# reason). It hands the request on with the best reachable commands of other scopes among the candidates:
+# `classifier.outside_labels` / `outside_scores` (the commands outside the scope it ranks ahead of its own, best first),
+# `classifier.handed_on` (the ones added to the candidates), and `classifier.escalation_margin` is no longer written
+# for a head trained under the new rule. `chosen_command_elsewhere`: in the ambiguity stage, the reply named a command of
+# another scope on the path; this scope declined it so the walk reaches the scope that has it (the qualified name).
+# A span recorded before this has none of these.
+#
+# v53: fw.nlu.intent v11 (remote outage visibility) -- `remote_failed` ({error_class, status_code}, never the message):
+# the remote decision model was asked for this scope and its call failed, so the local answer or the question stood in
+# (the fallback is unchanged). `matcher.error` carries the failure text as before, and `matcher.threshold` is now the
+# accept threshold (INTENT_REMOTE_ACCEPT_THRESHOLD, default 0.9; it was a fixed 0.5) with `matcher.decline_threshold`
+# beside it (INTENT_REMOTE_DECLINE_THRESHOLD, default 0.9); `matcher.error_class` and `matcher.status_code` join
+# `matcher.error`. A span recorded before this has no `remote_failed`, and its `matcher.threshold` is 0.5.
+#
+# v54: fw.nlu.intent v12 (one intent loop, fix-o1lg S7) -- the span is one DECISION, not one prediction per scope of the
+# parent walk: `intent_loop.resolve` decides the whole walk (exact name, foreign-name guard, fuzzy name, the local model over
+# every scope first, then the chain), so there is one span per request and `context` is the scope the decision settled in
+# (the current context when nothing was decided). `stage` is `INTENT_DETECTION` for it. A reply to the which-command
+# question is read by the same loop and recorded as its own span with `stage` `INTENT_AMBIGUITY_CLARIFICATION` or
+# `INTENT_MISUNDERSTANDING_CLARIFICATION`, `matcher_layer` `question_reply` (replacing `exact_prefix`,
+# `fuzzy_prematch` and `clarification_default` for a reply), `engine` `user`, and `chosen_command_elsewhere` when the picked
+# command lives in another scope than the current one. `fuzzy_prematch_tie` now also reaches the plan path's decision. A
+# remote model that answered for the local model's scope can no longer be asked once per scope: `engine_chain` is the links
+# asked for the whole decision. A span recorded before this is per scope and its `clarification_default` layer is gone.
+#
+# v55: fw.nlu.param_extraction v12 -- `argument_refusal`: a refusal of the call as a whole that names no input. A span recorded
+# before this does not have it.
+SPAN_CONTRACT_VERSION = 55
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -896,8 +957,20 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v4 (fix-jd9o.1): `jev_tiebreak` records Jev's choice among an ambiguous
     # intent's candidates ({choice, probability, threshold, candidates when it
     # routed}); `matcher_layer` is then "jev_tiebreak". Absent on earlier versions.
+    # v5 (fix-yu3l.2): `engine` and `engine_fallback` name the detector engine behind
+    # the classifier layer's answer. Absent when another layer decided, and on earlier versions.
+    # v6 (fix-yu3l.3): `matcher` carries the model matcher's probabilities when it decided
+    # (`matcher_layer` "matcher"). Absent otherwise, and on earlier versions.
+    # v7: `engine_mode` names the INTENT_DETECTION_ENGINE mode in force. Absent on earlier versions.
+    # v8 (fix-o5wi.2): one detection chain. `engine_mode` and `jev_tiebreak` are no longer written;
+    # `engine` is "classifier", "matcher" or "question"; `engine_chain` lists the links asked.
+    # v9 (fix-o5wi.8): the similarity cache is gone, so `cache_similarity` and `cache_similarity_threshold` are
+    # no longer written and `matcher_layer` is never "embedding_cache". A span recorded before this may carry them.
+    # v10 (fix-o5wi.9): `chosen_command_elsewhere`; the local model's facts carry `outside_labels`, `outside_scores`
+    # and `handed_on` (see the v52 note above).
+    # v11 (SPAN_CONTRACT_VERSION v53): `remote_failed`, the remote model's failed call (see the v53 note above).
     SPAN_NLU_INTENT: SpanContract(
-        version=4,
+        version=12,
         attributes=frozenset(
             {
                 "context",
@@ -907,18 +980,21 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "known_name_foreign_context",
                 "known_name_owner_contexts",
                 "known_name_foreign_context_hint",
+                "chosen_command_elsewhere",
                 "escalation_outcome",
                 "fuzzy_distance",
                 "fuzzy_threshold",
                 "fuzzy_prematch_tie",
                 "candidate_count",
-                "cache_similarity",
-                "cache_similarity_threshold",
                 "classifier",
                 "classifier_signal_version",
+                "engine",
+                "engine_fallback",
+                "engine_chain",
+                "matcher",
+                "remote_failed",
                 "candidates",
                 "escalation_labels_discarded",
-                "jev_tiebreak",
                 "reducible",
                 "decision_uncertainty",
                 "command_name",
@@ -975,7 +1051,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # why"), the one retry with the refusal appended, what was still refused after it (treated as
         # not given), and {field: value} for a value that took the request's or the declared spelling.
         # Absent on earlier versions.
-        version=11,
+        # v12 (SPAN_CONTRACT_VERSION v55): `argument_refusal` (a refusal of the call as a whole that names no input;
+        # written by an earlier step of fix-qoyz, declared here). Absent on earlier versions.
+        version=12,
         attributes=frozenset(
             {
                 "command_name",
@@ -1001,6 +1079,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "argument_check_retry",
                 "argument_check_refusals_final",
                 "argument_check_respelled",
+                "argument_refusal",
             }
         ),
     ),

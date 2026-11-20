@@ -143,7 +143,7 @@ def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_c
 
     gated.ctx.bind_observability_identity(conversation_id=CONV_B)
     assert ab.active_reviews(gated.wf) == []                    # parked off the live store
-    assert not gated.ctx._turn_frame().subtask_review_open
+    assert gated.ctx._waiting is None
 
     _split_into(monkeypatch, [JOKE])                            # B's own request opens B's own review, if anything
     gated.script.steps = [("finish", {})]
@@ -152,7 +152,7 @@ def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_c
     assert review_id not in {r.id for r in ab.active_reviews(gated.wf)}
 
     gated.ctx.bind_observability_identity(conversation_id=CONV_A)
-    assert gated.ctx._turn_frame().subtask_review_open is True
+    assert gated.ctx._waiting is not None and gated.ctx._waiting.kind == "review"
     assert review_id in {r.id for r in ab.active_reviews(gated.wf)}
     assert ab.active_record(gated.wf).state == AWAITING
 

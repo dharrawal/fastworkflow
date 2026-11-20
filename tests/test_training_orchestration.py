@@ -89,12 +89,12 @@ def cme_copy(tmp_path: Path, setup_test_environment):
     with _FASTWORKFLOW_GLOBAL_STATE_LOCK:
         package_root = Path(fastworkflow.__file__).parent
         source = package_root / "_workflows" / "command_metadata_extraction"
-        consultation_source = package_root / "_workflows" / "consultation"
+        plan_source = package_root / "_workflows" / "plan_metadata_extraction"
         copied_package_root = tmp_path / "fastworkflow"
         destination = (
             copied_package_root / "_workflows" / "command_metadata_extraction"
         )
-        consultation_destination = copied_package_root / "_workflows" / "consultation"
+        plan_destination = copied_package_root / "_workflows" / "plan_metadata_extraction"
         destination.parent.mkdir(parents=True)
         shutil.copytree(
             source,
@@ -106,10 +106,10 @@ def cme_copy(tmp_path: Path, setup_test_environment):
                 "__pycache__",
             ),
         )
-        if consultation_source.is_dir():
+        if plan_source.is_dir():
             shutil.copytree(
-                consultation_source,
-                consultation_destination,
+                plan_source,
+                plan_destination,
                 ignore=shutil.ignore_patterns(
                     "___command_info",
                     "___workflow_contexts",
@@ -117,8 +117,8 @@ def cme_copy(tmp_path: Path, setup_test_environment):
                     "__pycache__",
                 ),
             )
-            RoutingDefinition.build(str(consultation_destination))
-            CommandDirectory.load(str(consultation_destination)).save()
+            RoutingDefinition.build(str(plan_destination))
+            CommandDirectory.load(str(plan_destination)).save()
         RoutingRegistry.clear_registry()
         RoutingDefinition.build(str(destination))
         CommandDirectory.load(str(destination)).save()
@@ -260,9 +260,9 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
     )
     av.write_manifest(str(cme_workflow), version_id, **record_fields)
 
-    consultation_workflow = package_root / "_workflows" / "consultation"
-    if consultation_workflow.is_dir():
-        _stamp_internal_workflow_trained(consultation_workflow)
+    plan_workflow = package_root / "_workflows" / "plan_metadata_extraction"
+    if plan_workflow.is_dir():
+        _stamp_internal_workflow_trained(plan_workflow)
 
     assert train_orchestration.is_fast_workflow_trained(str(package_root))
     assert not (command_info / "ErrorCorrection").exists()
@@ -379,7 +379,7 @@ def test_trains_the_fastworkflow_package_is_a_path_test_not_a_substring_test(tmp
         fastworkflow.get_internal_workflow_path("command_metadata_extraction")
     )
     assert train_orchestration._trains_the_fastworkflow_package(
-        fastworkflow.get_internal_workflow_path("consultation")
+        fastworkflow.get_internal_workflow_path("plan_metadata_extraction")
     )
 
 

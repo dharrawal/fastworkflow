@@ -8,7 +8,7 @@ EXPERIMENT TOOL. Four arms, one set of requests (``planning_test_set``), one sco
 * ``heads_not_here`` (b): the baseline layout. Planning commands only in the sparse "not here"
   class: a trained copy built under ``experiment_planning_heads("not_here")`` inside the sparse arm.
   This is the BASELINE every report compares against.
-* ``jev`` (c): Jev, through the real match path (``workflow_agent.match_planning_command``). LIVE.
+* ``jev`` (c): Jev, through the old match path (``workflow_agent.match_planning_command``, removed by bd fix-zvme: the live arm raises). LIVE.
 * ``agent_plan`` (d): the agent choosing as it plans, with no matcher. LIVE. Measured as follows
   (decision, Phase 10 step 1c; evidence checked in the code, file:line as of this change):
 
@@ -963,13 +963,8 @@ def run_live(arm: str, cases: Sequence[Mapping[str, Any]], workflow_folderpath: 
     """Call the provider for each case and return results in the offline schema. LIVE: only after --allow-live."""
     rows = [dict(c) for c in cases]
     if arm == ARM_JEV:
-        from fastworkflow.workflow_agent import match_planning_command
-
-        for row in rows:
-            matched = match_planning_command(row["utterance"], workflow_folderpath,
-                                             scopes=tuple(dict.fromkeys((row["head"], ""))))
-            row["top_label"] = matched[0] if matched else ""
-            row["topk"] = []
+        raise RuntimeError("the Jev arm scored workflow_agent.match_planning_command, which bd fix-zvme removed: "
+                           "planning commands are matched by the intent loop (resolution.part_intent)")
     elif arm == ARM_AGENT_PLAN:
         plans = _agent_plans(rows, workflow_folderpath)
         for row, plan in zip(rows, plans):
