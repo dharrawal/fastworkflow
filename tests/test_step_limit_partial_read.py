@@ -108,3 +108,27 @@ def test_a_planning_command_phase_out_of_steps_states_the_rows_read_of_the_total
     assert total > 2
     assert f"3 rows read of {total} the command reported" in result.answer
     assert no_agent_mode.partial_read_sentence("step limit") in result.answer
+
+
+# ---------------------------------------------------------------- an unsplit single part with no plan
+
+def test_an_unsplit_single_part_out_of_steps_states_the_rows_read_of_the_total(paged, monkeypatch):
+    """The turn's one part runs through ``_run_turn_subtasks``' own branch; its answer carries the same note once."""
+    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+
+    seen = []
+    original = WorkflowExecutionContext._run_turn_subtasks
+
+    def watch(self, subtasks, *args, **kwargs):
+        seen.append((list(subtasks), self._turn_subtask_plan))
+        return original(self, subtasks, *args, **kwargs)
+
+    monkeypatch.setattr(WorkflowExecutionContext, "_run_turn_subtasks", watch)
+    paged.ctx._workflow_tool_agent.max_iters = 1
+    paged.script.steps = _pages(paged, 3)
+    result = paged.ctx.process_turn("find every book with an a in it")
+
+    assert len(seen) == 1 and len(seen[0][0]) == 1 and seen[0][1] is None
+    total = len(paged.library.find_books("a"))
+    assert f"3 rows read of {total} the command reported" in result.answer
+    assert result.answer.count("rows read of") == 1
