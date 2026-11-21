@@ -475,7 +475,18 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 #
 # v55: fw.nlu.param_extraction v12 -- `argument_refusal`: a refusal of the call as a whole that names no input. A span recorded
 # before this does not have it.
-SPAN_CONTRACT_VERSION = 55
+#
+# v56: fw.turn v6 (fix-hfqv, recording only) -- `subtask_split`: for a turn whose request the model was asked to split
+# (a turn run with `use_plan` is never split), one record {request, raw, merged, changed_by, attempts}: `request` is the
+# text the splitter saw, `raw` the model's sub-tasks of the attempt that was used (a list of strings, before any code
+# rule), `merged` the list the turn runs with after the code rules (one entry, the request itself, when it was left whole;
+# also when the model's call failed, then `raw` is empty), `changed_by` the code steps that changed the list, in order
+# (merge rules `stutter`, `invented_or_meta`, `contained`, `attach_context`, `restore_cut_subjects`, `group`,
+# `comparison`, `restore_dropped`, `one_per_record`, `carry_limits`, and `reduced_to_cap`, `whole_if_placeholder`; absent
+# when none changed it) and `attempts` the model calls made (1 or 2). Each text is capped at `MAX_ATTR_BYTES` like
+# `user_message`. User content: stored, redacted and erased with the turn like `user_message` and the `fw.llm.call` that
+# holds the same request. Null when the turn was not split. A span recorded before this carries no such key.
+SPAN_CONTRACT_VERSION = 56
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -616,8 +627,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v3: `subtask_review` (SPAN_CONTRACT_VERSION v35): the sub-task review gate's outcome for the turn.
     # v4: `subtask_bindings` (SPAN_CONTRACT_VERSION v37): shown == run per bound sub-task (fix-48np.1).
     # v5: `subtask_plan_ambiguity` (SPAN_CONTRACT_VERSION v46): the sub-tasks whose planning-command match was ambiguous.
+    # v6: `subtask_split` (SPAN_CONTRACT_VERSION v56): the model's split, the merged list and the rules that changed it.
     SPAN_TURN: SpanContract(
-        version=5,
+        version=6,
         attributes=frozenset(
             {
                 "turn_key",
@@ -633,6 +645,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "subtask_review",
                 "subtask_bindings",
                 "subtask_plan_ambiguity",
+                "subtask_split",
             }
         ),
     ),
@@ -1313,6 +1326,22 @@ def cap_attr_value(value: Any) -> Any:
         "sha256": hashlib.sha256(raw).hexdigest(),
         "value": raw[:limit].decode("utf-8", errors="ignore"),
     }
+
+
+def split_record_attribute(record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The turn span's ``subtask_split`` (SPAN_CONTRACT_VERSION v56) from the split recorder's dict, or None when the
+    turn was not split. Every text is capped like any attribute string (``cap_attr_value``)."""
+    if not record:
+        return None
+    out: dict[str, Any] = {
+        "request": cap_attr_value(record["request"]),
+        "raw": [cap_attr_value(text) for text in record["raw"]],
+        "merged": [cap_attr_value(text) for text in record["merged"]],
+        "attempts": record["attempts"],
+    }
+    if record.get("changed_by"):
+        out["changed_by"] = list(record["changed_by"])
+    return out
 
 
 def _capped(attributes: Optional[dict[str, Any]]) -> dict[str, Any]:

@@ -196,6 +196,8 @@ def _dict_keys(node: ast.AST, home: str, seen: set) -> set[str]:
             keys |= _returned_keys(name, home, seen)
         else:
             raise _Unresolved(f"call at line {node.lineno} of {home}")
+    elif isinstance(node, ast.IfExp):  # `**({} if c else {...})`: the keys of either branch
+        keys |= _dict_keys(node.body, home, seen) | _dict_keys(node.orelse, home, seen)
     else:
         raise _Unresolved(f"{type(node).__name__} at line {node.lineno} of {home}")
     return keys
@@ -643,7 +645,7 @@ def test_the_aggregate_number_moves_only_on_purpose():
     itself, so a bump -- or an accidental revert -- passes them all. Pinning the
     literal makes a change to the aggregate a deliberate edit to this test, next
     to the history comment in `tracing.py` that says what moved."""
-    assert tracing.SPAN_CONTRACT_VERSION == 55
+    assert tracing.SPAN_CONTRACT_VERSION == 56
 
 
 def test_a_provenance_record_written_before_the_map_still_validates():

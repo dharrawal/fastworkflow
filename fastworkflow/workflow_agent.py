@@ -2213,11 +2213,13 @@ def _visibly_broken(subtasks: list[str], user_query: str = "") -> bool:
             or any(_UNRESOLVED_REFERENCE.search(t) or _invented_placeholders(t, user_query) for t in subtasks))
 
 
-def _whole_if_placeholder(user_query: str, subtasks: list[str]) -> list[str]:
+def _whole_if_placeholder(user_query: str, subtasks: list[str], rules: list[str] | None = None) -> list[str]:
     """The request whole when a chosen sub-task still holds a placeholder the request does not (it would be
     shown, approved, and then fail downstream as a name)."""
     if any(_invented_placeholders(t, user_query) for t in subtasks):
         logger.warning("a sub-task still holds an unresolved placeholder; leaving the request whole")
+        if rules is not None:
+            rules.append("whole_if_placeholder")
         return [user_query]
     return subtasks
 
@@ -2249,9 +2251,44 @@ SPLIT_CONVERSATION_DESC = ("earlier turns of the conversation, for resolving wor
                            "sub-task, and a sub-task takes from it only the name such a word refers to")
 
 
+#: The turn's recorder of its split (bd fix-hfqv, recording only): ``recording_split`` sets it, ``split_into_subtasks``
+#: fills it. A caller that did not set one records nothing, and a replaced ``split_into_subtasks`` fills nothing.
+_split_recorder: contextvars.ContextVar[dict | None] = contextvars.ContextVar("fw_split_recorder", default=None)
+
+
+@contextlib.contextmanager
+def recording_split():
+    """A dict that ``split_into_subtasks`` fills when the model was asked to split the request inside the block, with
+    ``request``, ``raw`` (the model's sub-tasks of the attempt used, before any code rule), ``merged`` (the list the
+    turn runs with), ``changed_by`` (the code steps that changed it, in order; absent when none) and ``attempts``
+    (model calls made). It stays empty when no split was asked for."""
+    record: dict = {}
+    token = _split_recorder.set(record)
+    try:
+        yield record
+    finally:
+        _split_recorder.reset(token)
+
+
 def split_into_subtasks(user_query: str, planner_lm=None,
                         workflow_folderpath: str | None = None, conversation: str = "", workflow=None) -> list[str]:
+    """The request as independent sub-tasks, in order (``_split``); the split is also recorded for the turn's span when a
+    ``recording_split`` block is open."""
+    state: dict = {}
+    result = _split(user_query, planner_lm, workflow_folderpath, conversation, workflow, state)
+    record = _split_recorder.get()
+    if record is not None and state.get("attempts"):
+        record.update(request=user_query, raw=list(state.get("raw", [])), merged=[str(t) for t in result],
+                      attempts=state["attempts"])
+        if state.get("rules"):
+            record["changed_by"] = list(state["rules"])
+    return result
+
+
+def _split(user_query: str, planner_lm, workflow_folderpath: str | None, conversation: str, workflow,
+           state: dict) -> list[str]:
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
+    ``state`` is filled for the recording: ``attempts``, ``raw`` and ``rules``.
 
     ``user_query`` is the user's new request only: it is what the merge treats as the request (its ground truth,
     and the text it returns when everything merges back into one job). ``conversation`` (optional) is the
@@ -2287,7 +2324,10 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     # A model that refuses a temperature (Bedrock Claude Haiku 5.5 takes only 1) is called again
     # without it (``dspy_utils.call_dropping_rejected_params``); its retry skips the cache (``_split_lm``).
     usable: list[list[str]] = []
+    raws: dict[tuple, list[str]] = {}
+    rules: list[str] = state.setdefault("rules", [])
     for attempt, temperature in enumerate((0.0, 0.7)):
+        state["attempts"] = attempt + 1
         replies: list = []
 
         def split(lm) -> str:
@@ -2315,6 +2355,7 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
             continue
         subtasks = [without_repeated_clauses(item.translate(_HYPHENS)) for item in _split_items(text)]
+        state["raw"] = list(subtasks)
         # Disabled after benchmark pass 4 (fix-kdag never fired in 840 runs):
         # if not subtasks and text.strip():
         #     # A non-empty sub-tasks field with no numbered item ("it") is a visibly broken reply: retried once.
@@ -2326,23 +2367,26 @@ def split_into_subtasks(user_query: str, planner_lm=None,
             reduction = _reduced_to_cap(user_query, subtasks, workflow_folderpath, conversation, workflow)
             if reduction is None:
                 return [user_query]
+            rules.append("reduced_to_cap")
             if reduction.merged:
                 return _whole_if_placeholder(
-                    user_query, _with_referents(user_query, reduction.items, workflow_folderpath))
+                    user_query, _with_referents(user_query, reduction.items, workflow_folderpath), rules)
             subtasks = reduction.items
         if not subtasks:
             return [user_query]
         if not _visibly_broken(subtasks, user_query):
             return _whole_if_placeholder(
-                user_query, _merged(user_query, subtasks, workflow_folderpath, conversation))
+                user_query, _merged(user_query, subtasks, workflow_folderpath, conversation, rules), rules)
         # A sub-task the model listed twice is one job: the list without its copies is a candidate too.
         unique = list(dict.fromkeys(subtasks))
         if len(unique) >= 2:
             usable.append(unique)
+            raws[tuple(unique)] = list(state["raw"])
     if not usable:
         return [user_query]
     best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
-    return _whole_if_placeholder(user_query, _merged(user_query, best, workflow_folderpath, conversation))
+    state["raw"] = raws[tuple(best)]
+    return _whole_if_placeholder(user_query, _merged(user_query, best, workflow_folderpath, conversation, rules), rules)
 
 
 def _with_referents(user_query: str, items: list[str], workflow_folderpath: str | None) -> list[str]:
@@ -2393,7 +2437,7 @@ def _reduced_to_cap(user_query: str, subtasks: list[str], workflow_folderpath: s
 
 
 def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None,
-            conversation: str = "") -> list[str]:
+            conversation: str = "", rules: list[str] | None = None) -> list[str]:
     """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails.
 
     With a Jev key, rule 3's joins (a sub-task naming no subject, or the same subjects as the one before it)
@@ -2403,13 +2447,16 @@ def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | Non
     """
     if sum(1 for item in subtasks if item and item.strip()) < 2:
         return [user_query]
+    applied: list[str] = []
     try:
         identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
         merged = merge_subtasks(user_query, subtasks, identifiers, same_job=_same_request_check(user_query),
-                                context=conversation)
+                                context=conversation, applied=applied)
     except Exception:  # noqa: BLE001 - the merge is a clean-up; never fail the turn
         logger.warning("could not merge the split; keeping it as the model gave it", exc_info=True)
         return subtasks
+    if rules is not None:
+        rules.extend(applied)
     return resolve_referents(user_query, merged, workflow_folderpath) if len(merged) > 1 else merged
 
 

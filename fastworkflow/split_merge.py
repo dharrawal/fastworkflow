@@ -1118,7 +1118,8 @@ SameJob = Callable[[str, str], Optional[bool]]
 
 def merge_subtasks(user_query: str, subtasks: list[str],
                    identifiers: tuple[re.Pattern, ...] = (),
-                   same_job: SameJob | None = None, context: str = "") -> list[str]:
+                   same_job: SameJob | None = None, context: str = "",
+                   applied: list[str] | None = None) -> list[str]:
     """``subtasks`` with the parts that are not independent jobs joined; ``[user_query]`` when one job is left.
 
     Pure: no model and no I/O of its own. Fewer than two sub-tasks are returned unchanged. ``identifiers``
@@ -1129,7 +1130,15 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     ``context`` (optional) is the earlier turns the splitter was shown: a name or value a sub-task takes from
     it ("Who has Dune out?" for "Who has it out?" after a turn about Dune) is not an invention (rule 1). It is
     never the request: ``user_query`` alone is what is returned when one job is left.
+    ``applied`` (optional, recording only) receives, in order, the name of each rule whose step changed the list:
+    ``stutter``, ``invented_or_meta`` (rule 1), ``contained``, ``attach_context`` (3a), ``restore_cut_subjects`` (3b),
+    ``group`` (3), ``comparison`` (4), ``restore_dropped`` (6), ``one_per_record`` (7), ``carry_limits`` (5). It never
+    changes what is returned.
     """
+
+    def mark(rule: str, before: list, after: list) -> None:
+        if applied is not None and list(before) != list(after):
+            applied.append(rule)
 
     def joins(texts: list[str], text: str) -> bool:
         # A limit ("Apply none of them.") is never a job of its own: it is joined as before, without asking
@@ -1143,19 +1152,29 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     if len(items) < 2:
         return list(subtasks)
     known = request_subjects(user_query, identifiers)
+    before = items
     items = [_collapse_stutter(t, user_query, known) for t in items]
+    mark("stutter", before, items)
     # rule 1 reads the request and the earlier turns: what the splitter took from either is not invented
     source = f"{user_query}\n{context}" if context else user_query
     given = request_subjects(source, identifiers) if context else known
+    before = items
     items = [t for t in items if not _is_meta(t) and not _invents_value(t, source, given)
              and not _invents_record(t, source, given, identifiers)]
+    mark("invented_or_meta", before, items)
+    before = items
     items = _drop_contained(items, known, identifiers)
+    mark("contained", before, items)
     if len(items) < 2:
         return [user_query]
     # rule 3a: a statement is context for the jobs, not a job
+    before = items
     items = _attach_context(user_query, items, known, identifiers)
+    mark("attach_context", before, items)
     # rule 3b: a sub-task that put another sentence's record into a sentence's job is not a job
+    before = items
     items = _restore_cut_subjects(user_query, items, known, identifiers, wrong_records_only=True)
+    mark("restore_cut_subjects", before, items)
 
     # rule 3: no new subject, no new sub-task (a name extending one of the group's names, with a
     # back-reference, is no new subject either; nor is part of the group's subjects checking a change)
@@ -1175,6 +1194,7 @@ def merge_subtasks(user_query: str, subtasks: list[str],
         else:
             groups.append(([text], subj))
     merged = [(_join(texts), subj) for texts, subj in groups]
+    mark("group", items, [t for t, _ in merged])
     if len(merged) < 2:
         return [user_query]
 
@@ -1200,14 +1220,22 @@ def merge_subtasks(user_query: str, subtasks: list[str],
         else:
             out.append(merged[i])
             i += 1
+    mark("comparison", [t for t, _ in merged], [t for t, _ in out])
     if len(out) < 2:
         return [user_query]
     # rule 6: a job sentence of the request whose record no sub-task names is put back
-    texts = _restore_dropped(user_query, [t for t, _ in out], known, identifiers)
+    before = [t for t, _ in out]
+    texts = _restore_dropped(user_query, before, known, identifiers)
+    mark("restore_dropped", before, texts)
     # rule 7: the same thing asked of each record of a list is one sub-task per record
+    before = texts
     texts = _one_per_record(texts, known)
+    mark("one_per_record", before, texts)
     # rule 5: limits on the whole request travel with every sub-task they apply to
-    return _carry_limits(user_query, texts, known, identifiers)
+    before = texts
+    texts = _carry_limits(user_query, texts, known, identifiers)
+    mark("carry_limits", before, texts)
+    return texts
 
 
 # ------------------------------------------------------------------ referents (the caller resolves)

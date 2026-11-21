@@ -491,6 +491,9 @@ class WorkflowExecutionContext:
         # fix-1ma8.1: the draft's sub-tasks whose planning-command match was ambiguous (names only); the turn span
         # carries them as ``subtask_plan_ambiguity`` whether or not the review was opened.
         self._turn_plan_ambiguity: list = []
+        # fix-hfqv: the split the model was asked for this turn (request, raw, merged, changed_by, attempts); the turn
+        # span carries it as ``subtask_split``. Recording only.
+        self._turn_split: dict = {}
         self._turn_agent_result: Any = None
         self._turn_history_baseline: int = 0
         # turn_key of the newest turn that both completed and contributed a
@@ -930,6 +933,7 @@ class WorkflowExecutionContext:
         self._turn_subtask_plan = None
         self._turn_subtask_bindings = []
         self._turn_plan_ambiguity = []
+        self._turn_split = {}
         turn_cache.begin_turn()
         self._turn_refined_message = None
         self._turn_suspended_ms = 0
@@ -2572,6 +2576,7 @@ class WorkflowExecutionContext:
                 "subtask_review": self._subtask_review_mark(),
                 "subtask_bindings": list(getattr(self, "_turn_subtask_bindings", None) or []) or None,
                 "subtask_plan_ambiguity": list(getattr(self, "_turn_plan_ambiguity", None) or []) or None,
+                "subtask_split": tracing.split_record_attribute(getattr(self, "_turn_split", None)),
             },
         )
         if not awaiting:
@@ -2926,7 +2931,7 @@ class WorkflowExecutionContext:
             return dspy.Prediction(final_answer=capable[0], exhausted=False, capabilities=capable[1])
 
         from fastworkflow import turn_progress
-        from fastworkflow.workflow_agent import split_into_subtasks
+        from fastworkflow import workflow_agent
 
         turn_progress.emit(turn_progress.STAGE_SPLIT)
         # The split's request is the user's new message; the earlier turns go in as the splitter's separate
@@ -2934,13 +2939,18 @@ class WorkflowExecutionContext:
         # so a prepended summary became the sub-task's goal, and its names changed how the request merged
         # (fix-bydz). An unsplit request still runs on refined_user_query (_run_turn_subtasks).
         # A message sent with ``use_plan`` is one part: the client named the part and its plan, so it is not split.
-        subtasks = [message] if self._turn_use_plan else split_into_subtasks(
-            message,
-            conversation=self._conversation_context(self.conversation_history),
-            planner_lm=getattr(self, "_current_planner_lm", None),
-            workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
-            workflow=self._app_workflow,
-        )
+        if self._turn_use_plan:
+            subtasks = [message]
+        else:
+            with workflow_agent.recording_split() as split_record:
+                subtasks = workflow_agent.split_into_subtasks(
+                    message,
+                    conversation=self._conversation_context(self.conversation_history),
+                    planner_lm=getattr(self, "_current_planner_lm", None),
+                    workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
+                    workflow=self._app_workflow,
+                )
+            self._turn_split = dict(split_record)
         if self._app_workflow is not None:
             # The review gate (fix-3rsq.plan-review.2.6; bd fix-o1lg S4/S5): None when the sub-tasks run now (the fast
             # path), else a suspended question or review, or the turn's result.
