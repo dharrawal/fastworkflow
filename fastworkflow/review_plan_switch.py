@@ -1,37 +1,25 @@
 """Switching a sub-task's plan from the review, by naming it (bd fix-1ma8.1).
 
-When a sub-task's planning-command match was ambiguous (``resolution.draft_choice``), the review names the
-other plans that fit and says ``step N: use NAME`` switches to one. This module reads that reply, deterministically
-and with no model: it turns ``use B``, ``step N: use B``, ``use B for step N``, ``switch step N to B``, ``switch to B``
-and ``B instead`` into the existing means edit (``change N: means=planning:B``), which re-drafts the step's inputs
-(``SubTaskProposal.revised``). It is the reply policy's step between the accept and decline cues and the edit reader
-(``review_engine.ProposalReplyPolicy``): an accept or a decline is read first and never reaches it.
+A reply clause in the explicit form ``step N: use NAME`` (also ``use NAME for step N`` and ``switch step N to NAME``) is
+read here, deterministically and with no model, and becomes the existing means edit (``change N: means=planning:NAME``,
+or ``plain:NAME`` for an execution command), which re-drafts the step's inputs (``SubTaskProposal.revised``). The reply
+policy (``review_engine.ProposalReplyPolicy``) reads it after the accept and decline cues, so an accept or a decline
+never reaches it, and before the edit reader, so a switch clause never reaches the model.
 
 What it handles and what it leaves alone:
 
-- Only a review with at least one step that has alternatives. Any other review is read as before (it returns None
-  without looking at the reply).
-- A reply is one or more pieces separated by ``;`` or a new line; every piece must be a plan switch, or the reply is not
-  handled here (all or nothing, like the typed edits).
-- A name is matched against the alternatives of that step only: first by exact name (case, spaces, ``_`` and the
-  context prefix ignored), then by the same fuzzy rule the intent clarification reads a command name with
-  (``utils.fuzzy_match.find_best_matches`` and intent detection's own threshold, on the names without their
-  context prefix, a name of at least ``MIN_FUZZY_CHARS`` characters). A name that is not among the step's alternatives is not handled here (None: the
-  existing reader reads the reply, which may mean something else by "use").
-- ``read_plan_switch`` is the all-switch reader of the alternatives (kept for the accept-with-switch path). A reply that
-  holds an explicit switch clause is first read clause by clause by ``split_switch_clauses`` (bd fix-1ma8.1 follow-up,
-  below), which the reply policy calls before this reader.
-- A piece with no step number is for the one ambiguous step; with two or more ambiguous steps it is asked again, naming
-  them. A name that fits several alternatives of the step is asked again too.
+- ``split_switch_clauses`` reads a reply clause by clause (``;`` or a new line). A numbered clause whose name is exactly
+  a command of the workflow (case, spaces, ``_`` and the context prefix ignored: ``known_plan_names``) switches; a name
+  that resolves to nothing or to several, or a step that does not exist, asks again and applies nothing. The other clauses
+  are handed back as the remainder for the reader the policy uses for any reply. A form with no step number is not read
+  here.
+- ``explicit_switch_clauses``, ``goal_copies_switch_clause`` and the review engine's ``_refuse_switch_clause_in_goal``
+  keep a switch clause from being copied into a step's goal as text.
 """
 from __future__ import annotations
 
 import re
 from typing import Optional
-
-#: A fuzzy name shorter than this (after dropping spaces and ``_``) is matched exactly only: the fuzzy rule compares the
-#: leading characters of a name, so a word of a few letters would match any name that starts with it.
-MIN_FUZZY_CHARS = 4
 
 _STEP = r"(?:step|item|sub-?task)\s+#?(\d+)"
 _PIECES: tuple[tuple[re.Pattern, tuple[Optional[int], int]], ...] = tuple(
@@ -55,72 +43,18 @@ def _clean_phrase(text: str) -> str:
     return text
 
 
-def _read_piece(piece: str, bare: bool = False) -> Optional[tuple[Optional[int], str, bool]]:
-    """``(step or None, the name as written)`` of one plan-switch piece, or None when the piece is something else.
-    With *bare* (the rest of a reply that opened with an accept word: ``yes, B``) a piece that is only a name is one, read
-    by exact name only (the third item is True): ``yes, please`` must not fuzzy-match a plan."""
-    piece = piece.strip().rstrip(".!?").strip()
-    piece = re.sub(r"^(?:please|ok(?:ay)?|no|actually)\s*[,:]?\s+", "", piece, flags=re.IGNORECASE)
-    for pattern, (step_group, name_group) in _PIECES:
-        if match := pattern.match(piece):
-            phrase = match.group(name_group).strip().rstrip(".!?, ").strip(_QUOTES + " ")
-            if phrase:
-                return (int(match.group(step_group)) if step_group else None), phrase, False
-    if bare and piece and not re.search(r"\bstep\b", piece, re.IGNORECASE):
-        return None, piece.strip(_QUOTES + " "), True
-    return None
+def _resolve(phrase: str, pool: list) -> list[str]:
+    """The names of *pool* that *phrase* names exactly (case, spaces, ``_`` and the context prefix ignored): one name, several
+    (a tie) or none. The phrase as written is tried first, then without a leading "the" or a trailing "plan"."""
+    from fastworkflow.utils.fuzzy_match import normalize_text
 
-
-def _names_of(alternative_name: str) -> list[str]:
-    """The ways an alternative may be named: its full name and, for ``Context/name``, the name without the context."""
-    leaf = alternative_name.rsplit("/", 1)[-1]
-    return [alternative_name] if leaf == alternative_name else [alternative_name, leaf]
-
-
-def _resolve(phrase: str, alternatives: list, exact_only: bool = False) -> tuple[list[str], bool]:
-    """``(the alternatives' names *phrase* names, whether it was a fuzzy match)``: one name, several (a tie), or none.
-    The phrase as written is tried first, then without a leading "the" or a trailing "plan"."""
-    cleaned = _clean_phrase(phrase)
-    names, fuzzy = _resolve_one(phrase, alternatives, exact_only)
-    if not names and cleaned and cleaned != phrase:
-        return _resolve_one(cleaned, alternatives, exact_only)
-    return names, fuzzy
-
-
-def _resolve_one(phrase: str, alternatives: list, exact_only: bool = False) -> tuple[list[str], bool]:
-    from fastworkflow.utils.fuzzy_match import find_best_matches, normalize_text
-
-    wanted = normalize_text(phrase)
-    if not wanted:
-        return [], False
-    by_written: dict[str, str] = {}
-    for each in alternatives:
-        for written in _names_of(each.name):
-            by_written.setdefault(written, each.name)
-    exact = list(dict.fromkeys(by_written[w] for w in by_written if normalize_text(w) == wanted))
-    if exact:
-        return exact, False
-    if exact_only or len(wanted) < MIN_FUZZY_CHARS or len(_clean_phrase(phrase).split()) > 1:
-        # A sentence is never fuzzy-matched to a name: "the plan that shows ..." must not land on a plan by its first letters.
-        return [], False
-    from fastworkflow.intent_clarification import FUZZY_MAX_DISTANCE
-
-    # Fuzzy on the names without their context prefix: the rule compares the leading characters of a name, and every name
-    # of a context starts with the context's.
-    by_leaf: dict[str, list[str]] = {}
-    for each in alternatives:
-        by_leaf.setdefault(each.name.rsplit("/", 1)[-1], []).append(each.name)
-    matched, _ = find_best_matches(phrase.replace(" ", "_"), list(by_leaf), threshold=FUZZY_MAX_DISTANCE)
-    return list(dict.fromkeys(name for leaf in matched for name in by_leaf[leaf])), True
-
-
-def alternatives_by_step(proposal) -> dict[int, list]:
-    """``{1-based step: its alternatives}`` of the steps of a sub-task review that have any."""
-    from fastworkflow.review_proposals import SubTaskProposal
-
-    if not isinstance(proposal, SubTaskProposal):
-        return {}
-    return {number: list(item.alternatives) for number, item in enumerate(proposal.items, 1) if item.alternatives}
+    for text in dict.fromkeys((phrase, _clean_phrase(phrase))):
+        wanted = normalize_text(text)
+        if wanted and (found := list(dict.fromkeys(
+                each.name for each in pool
+                if wanted in (normalize_text(each.name), normalize_text(each.name.rsplit("/", 1)[-1]))))):
+            return found
+    return []
 
 
 def _ask_again(message: str):
@@ -129,77 +63,13 @@ def _ask_again(message: str):
     return ReplyDecision(Verdict.REPROMPT, "plan switch unclear", message=message)
 
 
-def _steps_listing(ambiguous: dict[int, list]) -> str:
-    return " ".join(f"Step {number}: {', '.join(each.name for each in alts)}." for number, alts in ambiguous.items())
-
-
-def read_plan_switch(proposal, text: str, *, bare: bool = False):
-    """The reply policy's decision for *text* when it switches a step's plan, else None (not handled here).
-
-    An EDIT decision carries ``Change(index, "means", "planning:NAME")`` per switched step. A REPROMPT decision asks
-    again (which step, or which of several names), with its message. Never calls a model."""
-    ambiguous = alternatives_by_step(proposal)
-    if not ambiguous:
-        return None
-    pieces = [piece for piece in re.split(r"[;\n]", text or "") if piece.strip()]
-    read = [_read_piece(piece, bare) for piece in pieces]
-    if not read or any(each is None for each in read):
-        return None
-    from fastworkflow.review_engine import Change, ReplyDecision, Verdict
-
-    chosen: dict[int, str] = {}
-    for step, phrase, exact_only in read:
-        if step is None:
-            if len(ambiguous) == 1:
-                step = next(iter(ambiguous))
-            else:
-                # The reply does not say which step. A name that fits none of the ambiguous steps is not ours.
-                fitting = [number for number, alts in ambiguous.items() if _resolve(phrase, alts, exact_only)[0]]
-                if not fitting:
-                    return None
-                return _ask_again(
-                    f"Which step do you mean? These steps have other plans that fit: "
-                    f"{_steps_listing(ambiguous)} Reply \"step N: use NAME\".")
-        if step not in ambiguous:
-            return None
-        names, _ = _resolve(phrase, ambiguous[step], exact_only)
-        if not names:
-            return None
-        if len(names) > 1:
-            return _ask_again(f"Which plan for step {step}? {', '.join(names)}. Reply \"step {step}: use NAME\".")
-        if chosen.get(step, names[0]) != names[0]:
-            return _ask_again(f"Step {step} was given two different plans. Reply with one: "
-                              f"{', '.join(each.name for each in ambiguous[step])}.")
-        chosen[step] = names[0]
-    return ReplyDecision(Verdict.EDIT, "plan switch",
-                         edits=tuple(Change(index=step, field="means", value=f"planning:{name}")
-                                     for step, name in sorted(chosen.items())))
-
-
-_ACCEPT_OPENING = re.compile(
-    r"^\s*(?:yes|yep|yeah|sure|ok|okay|accept|approve|go\s+ahead|sounds\s+good|looks\s+good)\b[\s,;:.!\-\u2013\u2014]*"
-    r"(?:but\s+|except\s+|only\s+)?", re.IGNORECASE)
-
-
-def read_accept_with_switch(proposal, text: str):
-    """The decision for a reply that opens with an accept word and then names another plan (``yes use B``, ``yes, but use
-    B for step 2``, ``sure, switch to B``, ``ok, B``), or None: an accept stays an accept. Only a review with an ambiguous
-    step is ever read (the caller checks), only the text after the accept word is read (a bare ``yes`` has none), and
-    only when it names one of that step's alternatives (or is one of the ask-again cases of ``read_plan_switch``)."""
-    match = _ACCEPT_OPENING.match(text or "")
-    rest = (text or "")[match.end():] if match else ""
-    if not rest.strip():
-        return None
-    return read_plan_switch(proposal, rest, bare=True)
-
-
 # ----------------------------------------------------------------------
 # Clause-level reading (bd fix-1ma8.1 follow-up)
 #
 # A reply clause in an explicit switch form is decided here and never reaches the free-text reader, whatever the name
-# says: a name among the step's alternatives switches; a name of any other planning or execution command of the workflow
-# switches too (the same ``change N: means=...`` edit, which the structured edit accepts for any step); a name that
-# resolves to nothing, or to several, asks again; a step that does not exist asks again. A reply of several clauses is
+# says: a name of a planning or execution command of the workflow switches (the ``change N: means=...`` edit, which the
+# structured edit accepts for any step); a name that resolves to nothing, or to several, asks again; a step that does not
+# exist asks again. A reply of several clauses is
 # read clause by clause: the switch clauses here, the rest as the reply policy reads any reply. No model is called.
 # ----------------------------------------------------------------------
 
@@ -299,20 +169,11 @@ class _Named:
         self.name = name
 
 
-def _resolve_name(phrase: str, alternatives: list, universe: dict[str, str], fuzzy: bool = True) -> tuple[str, list[str]]:
-    """``("one", [name])``, ``("many", names)`` or ``("none", [])``: exact on the alternatives, exact on every command of
-    the workflow, then (a one-word phrase only) fuzzy on the alternatives, each only when it names exactly one. No fuzzy
-    match over every command of the workflow: "use the library" would land on ``library_hours`` by its leading characters."""
-    everything = [_Named(name) for name in universe]
-    for pool, exact_only in ((alternatives, True), (everything, True), (alternatives, False)):
-        if not pool or (not fuzzy and not exact_only):
-            continue
-        names, _ = _resolve(phrase, pool, exact_only)
-        if len(names) == 1:
-            return "one", names
-        if len(names) > 1:
-            return "many", names
-    return "none", []
+def _resolve_name(phrase: str, universe: dict[str, str]) -> tuple[str, list[str]]:
+    """``("one", [name])``, ``("many", names)`` or ``("none", [])``: the phrase named exactly against every command of the
+    workflow. No fuzzy match: "use the library" would land on ``library_hours`` by its leading characters."""
+    names = _resolve(phrase, [_Named(name) for name in universe])
+    return ("one" if len(names) == 1 else "many", names) if names else ("none", [])
 
 
 _TAIL_SEP = r"(?:[.!,]|:(?=\s)|\s-\s|\s(?:because|so|since)\b)"
@@ -344,13 +205,10 @@ def _unnamed(piece: str) -> bool:
     return any(pattern.search(piece) for pattern in _UNNAMED_SWITCH)
 
 
-def _ask_unresolved(step: int, phrase: Optional[str], alternatives: list, many: Optional[list[str]] = None):
+def _ask_unresolved(step: int, phrase: Optional[str], many: Optional[list[str]] = None):
     if many:
         return _ask_again(f"Which plan for step {step}? {', '.join(many)}. Reply \"step {step}: use NAME\".")
     shown = f"I could not find a plan named {phrase!r} for step {step}. " if phrase else f"Which plan should step {step} use? "
-    if alternatives:
-        return _ask_again(f"{shown}Plans that fit step {step}: {', '.join(each.name for each in alternatives)}. "
-                          f"Reply \"step {step}: use <one of these>\", or say what step {step} should do.")
     return _ask_again(f"{shown}Reply \"step {step}: use <plan name>\", or say what step {step} should do. The plan is unchanged.")
 
 
@@ -376,13 +234,9 @@ def split_switch_clauses(proposal, text: str, workflow=None) -> Optional[SwitchS
         return None
     pieces = [piece for piece in re.split(r"[;\n]", text or "") if piece.strip()]
     count = len(proposal.items)
-    ambiguous = alternatives_by_step(proposal)
     universe: Optional[dict[str, str]] = None
     chosen: dict[int, str] = {}
     rest: list[str] = []
-
-    def alternatives_of(step: int) -> list:
-        return list(proposal.items[step - 1].alternatives)
 
     def pool() -> dict[str, str]:
         nonlocal universe
@@ -390,9 +244,8 @@ def split_switch_clauses(proposal, text: str, workflow=None) -> Optional[SwitchS
             universe = known_plan_names(workflow)
         return universe
 
-    def kind_of(name: str, step: int) -> str:
-        # an alternative is a planning command; any other name has the kind the workflow lists it with
-        return "planning" if name in {each.name for each in alternatives_of(step)} else pool().get(name, "planning")
+    def kind_of(name: str) -> str:
+        return pool().get(name, "planning")
 
     for piece in pieces:
         if _TYPED_CLAUSE.match(piece):
@@ -403,9 +256,7 @@ def split_switch_clauses(proposal, text: str, workflow=None) -> Optional[SwitchS
             # it is an explanation (ignored) or a clause of its own (read like any other remainder clause).
             clause, tail = peeled
             lead = _explicit_piece(clause)
-            lead_step = lead[0] if lead and lead[0] is not None else (next(iter(ambiguous)) if len(ambiguous) == 1 else None)
-            if lead and lead_step is not None and 1 <= lead_step <= count and _resolve_name(
-                    lead[1], alternatives_of(lead_step), pool(), fuzzy=False)[0] == "one":
+            if lead and lead[0] is not None and 1 <= lead[0] <= count and _resolve_name(lead[1], pool())[0] == "one":
                 piece = clause
                 if _EDIT_TAIL.search(tail):
                     rest.append(tail)
@@ -415,47 +266,30 @@ def split_switch_clauses(proposal, text: str, workflow=None) -> Optional[SwitchS
                 step = int(ref.group(1))
                 if not 1 <= step <= count:
                     return SwitchSplit(ask=_no_such_step(step, count))
-                return SwitchSplit(ask=_ask_unresolved(step, None, alternatives_of(step)))
+                return SwitchSplit(ask=_ask_unresolved(step, None))
             rest.append(piece)
             continue
         step, phrase, always = read
         if step is None:
-            # A form with no step number: only for the one ambiguous step, and only when the name resolves.
-            if len(ambiguous) == 1:
-                step = next(iter(ambiguous))
-                state, names = _resolve_name(phrase, alternatives_of(step), pool())
-            elif len(ambiguous) > 1:
-                fitting = [number for number, alts in ambiguous.items() if _resolve(phrase, alts)[0]]
-                if not fitting:
-                    rest.append(piece)
-                    continue
-                return SwitchSplit(ask=_ask_again(
-                    f"Which step do you mean? These steps have other plans that fit: "
-                    f"{_steps_listing(ambiguous)} Reply \"step N: use NAME\"."))
-            else:
-                rest.append(piece)
+            rest.append(piece)                       # a form with no step number is not read here
+            continue
+        if not 1 <= step <= count:
+            return SwitchSplit(ask=_no_such_step(step, count))
+        state, names = _resolve_name(phrase, pool())
+        if state == "none":
+            if not (always or _NAME_LIKE.match(_clean_phrase(phrase)) or _unnamed(piece)):
+                rest.append(piece)                   # "use the 2024 data for step 3": a goal edit, the reader's
                 continue
-            if state == "none":
-                rest.append(piece)
-                continue
-        else:
-            if not 1 <= step <= count:
-                return SwitchSplit(ask=_no_such_step(step, count))
-            state, names = _resolve_name(phrase, alternatives_of(step), pool())
-            if state == "none":
-                if not (always or _NAME_LIKE.match(_clean_phrase(phrase)) or _unnamed(piece)):
-                    rest.append(piece)               # "use the 2024 data for step 3": a goal edit, the reader's
-                    continue
-                return SwitchSplit(ask=_ask_unresolved(step, None if _unnamed(piece) else phrase, alternatives_of(step)))
+            return SwitchSplit(ask=_ask_unresolved(step, None if _unnamed(piece) else phrase))
         if state == "many":
-            return SwitchSplit(ask=_ask_unresolved(step, phrase, alternatives_of(step), names))
+            return SwitchSplit(ask=_ask_unresolved(step, phrase, names))
         if chosen.get(step, names[0]) != names[0]:
             return SwitchSplit(ask=_ask_again(f"Step {step} was given two different plans. Reply with one."))
         chosen[step] = names[0]
     if not chosen:
         return None
     return SwitchSplit(
-        edits=tuple(Change(index=step, field="means", value=f"{kind_of(name, step)}:{name}")
+        edits=tuple(Change(index=step, field="means", value=f"{kind_of(name)}:{name}")
                     for step, name in sorted(chosen.items())),
         remainder="; ".join(piece.strip() for piece in rest))
 

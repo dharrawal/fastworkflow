@@ -23,11 +23,6 @@
    none/null (they clear a value; the server refuses a quoted "none" too) and a
    value that needs quotes but holds both kinds. Dropping every step is refused
    by the form itself (the last unskipped step cannot be skipped).
-   A step whose planning-command match was ambiguous (bd fix-1ma8.1) arrives with
-   "alternatives": [{name, description}], the other plans that fit; the form shows
-   a select on that step (kept as shown unless the person picks one) and composes
-   "change N: means=planning:NAME", the same edit "step N: use NAME" reads, which
-   re-drafts that step's inputs on the server.
    Since fix-2vyv the server reads three things the form used to refuse (they
    are now ordinary cases of the shared fixture): wording that looked like
    "accept" ("run it as shown") inside an edit's value, because a reply that
@@ -105,7 +100,6 @@ function tmComposeReviewEdits(edits) {
     if (edit.skip) { clauses.push("drop " + edit.step); return; }
     var goal = edit.goal === undefined ? "" : tmReviewSanitize(edit.goal);
     if (goal) { clauses.push(lead + "goal=" + goal); }
-    if (typeof edit.plan === "string" && edit.plan) { clauses.push(lead + "means=planning:" + edit.plan); }
     var inputs = tmIsPlainObject(edit.inputs) ? edit.inputs : {};
     Object.keys(inputs).forEach(function (name) {
       var value = tmReviewSanitize(inputs[name]);
@@ -128,14 +122,6 @@ function tmReviewMeansText(means) {
     return "runs " + means.name;
   }
   return means.kind === "from_scratch" ? "built from scratch" : "";
-}
-
-/* The other plans that fit a step ([{name, description}], bd fix-1ma8.1), the well-formed ones; [] when none. */
-function tmReviewAlternatives(item) {
-  if (!tmIsPlainObject(item) || !Array.isArray(item.alternatives)) { return []; }
-  return item.alternatives.filter(function (alt) {
-    return tmIsPlainObject(alt) && typeof alt.name === "string" && alt.name !== "";
-  });
 }
 
 /* The items when review has the shape of a sub_tasks or plan proposal; else
@@ -280,27 +266,6 @@ function tmBuildReviewForm(review, items, text) {
       });
       var means = tmReviewMeansText(item.means);
       if (means) { row.appendChild(el("div", "reviewMeans", means)); }
-      var alternatives = tmReviewAlternatives(item);
-      if (alternatives.length) {
-        var planField = el("div", "reviewField reviewPlanField");
-        planField.setAttribute("data-field", "plan");
-        var planLabel = el("label", "reviewLabel", "Other plans that fit:");
-        planLabel.setAttribute("for", uid + "-p" + number);
-        planField.appendChild(planLabel);
-        var planSelect = el("select", "reviewInput reviewPlanSelect");
-        planSelect.id = uid + "-p" + number;
-        var keep = el("option", null, "Keep " + (tmIsPlainObject(item.means) && item.means.name ? item.means.name : "the plan shown"));
-        keep.value = "";
-        planSelect.appendChild(keep);
-        alternatives.forEach(function (alt) {
-          var option = el("option", null, alt.name + (typeof alt.description === "string" && alt.description ? " — " + alt.description : ""));
-          option.value = alt.name;
-          planSelect.appendChild(option);
-        });
-        planField.appendChild(planSelect);
-        row.appendChild(planField);
-        step.planSelect = planSelect;
-      }
       if (typeof item.outcome === "string" && item.outcome.trim()) {
         row.appendChild(el("div", "reviewOutcome", item.outcome));
       }
@@ -342,7 +307,6 @@ function tmBuildReviewForm(review, items, text) {
       var any = false;
       var goal = s.goalInput.value.trim();
       if (goal !== "" && goal !== s.origGoal.trim()) { edit.goal = goal; any = true; }
-      if (s.planSelect && s.planSelect.value) { edit.plan = s.planSelect.value; any = true; }
       s.inputs.forEach(function (inp) {
         var value = inp.input.value.trim();
         if (value !== "" && value !== inp.orig.trim()) {
@@ -372,7 +336,6 @@ function tmBuildReviewForm(review, items, text) {
       var last = !skipped && live.length === 1;
       s.row.classList.toggle("skipped", skipped);
       s.skipBox.disabled = disabled || last;
-      if (s.planSelect) { s.planSelect.disabled = disabled || skipped; }
       if (last) { s.skipBox.title = TM_REVIEW_GUARD; } else { s.skipBox.removeAttribute("title"); }
       var fieldOf = function (field, input, orig, note) {
         input.disabled = disabled || skipped;
@@ -407,7 +370,6 @@ function tmBuildReviewForm(review, items, text) {
     s.goalInput.addEventListener("input", refresh);
     restoreIfEmpty(s.goalInput, s.origGoal);
     s.skipBox.addEventListener("change", refresh);
-    if (s.planSelect) { s.planSelect.addEventListener("change", refresh); }
     s.inputs.forEach(function (inp) {
       inp.input.addEventListener("input", refresh);
       restoreIfEmpty(inp.input, inp.orig);

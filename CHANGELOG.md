@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A stop with steps already run now leads with what ran (bd fix-dwlb; no-agent mode answer text; nothing retrains).** `no_agent_mode.explanation` prepends `ran_statement` (what ran, each step's result text, the facts) for every stop whose `done` is not empty, not only for an answer or page-cap stop; the existing notice that follows still says where and why it stopped. A stop with nothing done is unchanged.
+
+- **The page cap of a paged read is a setting (bd fix-cwah; nothing retrains).** `FW_CODE_MAX_PAGES` (default 20, a value that is not a positive integer warns and means 20) sets how many pages code reads of a full-list step; `planning_phases.code_max_pages` is the one reader, used by the run and by `command preview`.
+
+- **A phase that ran out of steps while paging a read says it is partial (bd fix-cwah; additive answer text; nothing retrains).** The partial-read note was added only when a run was exhausted; a planning command's phase that ran out of steps reports `phase_exhausted`, so its answer now ends with the same note.
+
+- **Review: a quoted name in a reply that is already a value of the step is no longer written into another input; a model edit with an empty field no longer discards the edit of the same value that names its field.**
+
+- **Removed the dead plan-alternatives code from the turn's review (the alternatives payload key, the switch_plan reply form and the chat page's plan select were never populated).**
+
 - **A plan step that opens the one row of the listing right before it runs by code even when it names no lookup value (bd fix-gyzq; behaviour change; no model call; nothing retrains, no `_commands/` file edited).** `planning_phases.pick_listing` and `pick_step` used to leave `open_x with the id of the match` to the agent, and in no-agent mode to the stop, because the step named no value of the lookup. Now such a step runs when the listing is the call's immediately preceding run, shows no further page and its uid column has exactly one row, and the step has exactly one unwritten required field, a uid or a field that declares its producer (`from_command_output`; its column is the one that producer names, from a run of that command); every other case keeps the stop.
 
 - **Docs no longer present plan alternatives in the review as current (docs only; no code, nothing retrains).** The README, the FastAPI architecture doc, the chat-agent skill reference and the run/chatbot parity table said a review item lists "other plans that fit" with `alternatives` and a `switch_plan` form; since bd fix-o1lg.2 an ambiguous part is asked the `plan_choice` question before the review, so those fields are not populated. `step N: use NAME` still switches a step.

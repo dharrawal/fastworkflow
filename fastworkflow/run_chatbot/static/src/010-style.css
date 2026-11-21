@@ -1289,7 +1289,6 @@ textarea.fitText:not(.reviewGoal) { font-size: 13px; }
 .reviewFieldNote { color: var(--bar-human); font-size: 11.5px; font-weight: 600; }
 .reviewFieldNote[hidden], .reviewGuard[hidden] { display: none; }
 .reviewFixed { color: var(--muted); }
-.reviewPlanSelect { width: 100%; }
 .reviewMeans, .reviewOutcome, .reviewGuard { color: var(--muted); font-size: 12px; }
 .reviewPlanSteps { margin: 0; padding-left: 20px; color: var(--muted); font-size: 12px; }
 .reviewSkip { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }

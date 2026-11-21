@@ -1363,13 +1363,13 @@ def pages_line(steps: list[str], names: Optional[dict]) -> list[str]:
     page 1 is all it reads. A step that writes a paging value reads that page and is not
     listed. Else nothing."""
     from fastworkflow.planning_commands import number
-    from fastworkflow.planning_phases import CODE_MAX_PAGES, code_step_pages
+    from fastworkflow.planning_phases import code_max_pages, code_step_pages
 
     if not names or not steps or names.get("parameters") is None:
         return []
     every_page, page_one = code_step_pages(number(steps), names.get("commands", ()),
                                            names.get("core_commands", ()), names["parameters"])
-    up_to = f"up to {CODE_MAX_PAGES} pages, then the agent reads on"
+    up_to = f"up to {code_max_pages()} pages, then the agent reads on"
     parts = [f"{_step_numbers(numbers)} {verb}" for numbers, verb in sorted((
         (every_page, f"reads {up_to}" if len(every_page) == 1 else f"read {up_to}"),
         (page_one, "reads page 1 only" if len(page_one) == 1 else "read page 1 only")))

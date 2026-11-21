@@ -2,7 +2,7 @@
 
 Real components, no mocks; the seams scripted are the neighbouring tests' (Jev's match, the planner LM, the plan
 head's recorded answers). Before this change the clause ``step N: use NAME`` was decided only when NAME was one of the
-step's listed alternatives; any other reply fell to the free-text reader, which folded "use NAME" into the goal of a
+step's listed alternatives (the review no longer lists any: bd fix-gwr7); any other reply fell to the free-text reader, which folded "use NAME" into the goal of a
 neighbouring step (a switch lost and another step damaged), or guessed a plan for "switch step 7 to the plan that shows
 ...". Part 1 is the policy (no workflow, then the library workflow's real command names), part 2 the guard on the
 reader's output, part 3 the whole review in both reader wirings.
@@ -20,7 +20,7 @@ from tests.test_approval_binding import annotated_library, no_live_model, todo  
 from tests.test_plan_reply_policy import (  # noqa: F401
     _wire_plan, planner, script_param_extraction)
 from tests.test_plan_match_ambiguity import (  # noqa: F401
-    AUTHOR, BY_TITLE, LOANS, _ambiguous_review, _items, _proposal, _single, _two, no_heads)
+    AUTHOR, BY_TITLE, LOANS, _ambiguous_review, _items, _proposal, _single, no_heads)
 from tests.test_round1_gate import EMMA, JOKE, gated, no_draft_extraction  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 from fastworkflow.turn import TurnStatus
@@ -36,10 +36,12 @@ def _never_read(seen: list):
 
 
 def _mixed() -> SubTaskProposal:
-    """Step 1 has alternatives, step 2 has none (a plain goal), step 3 has none."""
-    plan = _proposal(["Who wrote Emma", "tell a joke", "count the books"], {1: (BY_TITLE, [AUTHOR, LOANS])})
-    assert [bool(item.alternatives) for item in plan.items] == [True, False, False]
-    return plan
+    """Step 1 is bound to a plan, steps 2 and 3 are plain goals."""
+    return _proposal(["Who wrote Emma", "tell a joke", "count the books"], {1: BY_TITLE})
+
+
+def _two() -> SubTaskProposal:
+    return _proposal(["Goal one", "Goal two"], {1: "A", 2: "D"})
 
 
 # ----------------------------------------------------------------------
@@ -50,20 +52,19 @@ def _mixed() -> SubTaskProposal:
 @pytest.mark.parametrize(
     "reply",
     ["step 1: use something_else", "use something_else for step 1", "switch step 1 to something_else",
-     "Step 1 - use No Such Plan", "step 1: use Library/count_books"],     # no workflow here: only the alternatives resolve
+     "Step 1 - use No Such Plan", "step 1: use Library/count_books"],     # no workflow here: no name resolves
 )
-def test_a_name_that_resolves_to_nothing_asks_again_names_the_step_and_lists_its_alternatives(reply):
+def test_a_name_that_resolves_to_nothing_asks_again_and_names_the_step(reply):
     seen: list = []
     plan = _single()
     decision = ProposalReplyPolicy(_never_read(seen)).decide(plan, reply)
     assert decision.verdict is Verdict.REPROMPT and seen == []
     assert "step 1" in decision.message.lower()
-    assert AUTHOR in decision.message and LOANS in decision.message
-    assert 'step 1: use <one of these>' in decision.message and "say what step 1 should do" in decision.message
+    assert 'step 1: use <plan name>' in decision.message and "say what step 1 should do" in decision.message
     assert plan.items[0].means.name == BY_TITLE                                    # the plan is unchanged
 
 
-def test_a_step_with_no_alternatives_is_asked_about_without_a_list():
+def test_a_name_that_resolves_to_nothing_is_asked_about_without_a_list():
     seen: list = []
     decision = ProposalReplyPolicy(_never_read(seen)).decide(_mixed(), "step 2: use something_else")
     assert decision.verdict is Verdict.REPROMPT and seen == []
@@ -89,11 +90,11 @@ def test_a_request_to_change_the_plan_without_naming_one_is_not_guessed(reply):
     plan = _single()
     decision = ProposalReplyPolicy(_never_read(seen)).decide(plan, reply)
     assert decision.verdict is Verdict.REPROMPT and seen == []                 # the reader never guessed a plan
-    assert AUTHOR in decision.message and LOANS in decision.message
+    assert "say what step 1 should do" in decision.message
     assert plan.items[0].means.name == BY_TITLE
 
 
-def test_an_unnamed_request_for_a_step_with_no_alternatives_lists_nothing_and_asks_what_it_should_do():
+def test_an_unnamed_request_lists_nothing_and_asks_what_it_should_do():
     seen: list = []
     decision = ProposalReplyPolicy(_never_read(seen)).decide(_mixed(), "use a different plan for step 2")
     assert decision.verdict is Verdict.REPROMPT and seen == []
@@ -114,10 +115,10 @@ def test_an_ordinary_goal_edit_still_reaches_the_reader(reply):
         assert seen == [reply]
 
 
-def test_a_mixed_reply_applies_each_clause_by_its_own_reader():
+def test_a_mixed_reply_applies_each_clause_by_its_own_reader(gated):
     seen: list = []
     reply = "change 2: goal=tell a short joke; step 1: use Library/author_books; drop 3"
-    decision = ProposalReplyPolicy(_never_read(seen)).decide(_mixed(), reply)
+    decision = _policy(gated, _never_read(seen)).decide(_mixed(), reply)
     assert decision.verdict is Verdict.EDIT and seen == []
     by_field = {(type(each).__name__, getattr(each, "index", None), getattr(each, "field", None)): each for each in decision.edits}
     assert by_field[("Change", 1, "means")].value == f"planning:{AUTHOR}"
@@ -133,20 +134,20 @@ def test_a_switch_clause_is_never_merged_into_the_goal_of_a_neighbouring_step():
     assert "step 3" in decision.message
 
 
-def test_a_free_text_clause_with_a_switch_clause_passes_only_the_remainder_to_the_reader():
+def test_a_free_text_clause_with_a_switch_clause_passes_only_the_remainder_to_the_reader(gated):
     seen: list = []
     reader = lambda text, proposal: (seen.append(text) or [Change(index=2, field="goal", value="tell a short joke")])   # noqa: E731
     reply = "make step 2 shorter; step 1: use Library/author_books"
-    decision = ProposalReplyPolicy(reader).decide(_mixed(), reply)
+    decision = _policy(gated, reader).decide(_mixed(), reply)
     assert seen == ["make step 2 shorter"]
     assert decision.verdict is Verdict.EDIT
     assert [(each.index, each.field, each.value) for each in decision.edits] == [
         (1, "means", f"planning:{AUTHOR}"), (2, "goal", "tell a short joke")]
 
 
-def test_when_the_other_clauses_are_not_read_the_switch_is_not_applied_either():
+def test_when_the_other_clauses_are_not_read_the_switch_is_not_applied_either(gated):
     seen: list = []
-    decision = ProposalReplyPolicy(_never_read(seen)).decide(_mixed(), "make step 2 shorter; step 1: use Library/author_books")
+    decision = _policy(gated, _never_read(seen)).decide(_mixed(), "make step 2 shorter; step 1: use Library/author_books")
     assert decision.verdict is Verdict.REPROMPT and seen == ["make step 2 shorter"]
 
 
@@ -186,16 +187,16 @@ def _policy(gated, reader=None):
 @pytest.mark.parametrize(
     "reply",
     ["step 1: use Library/count_books", "step 1: use count_books", "Step 1: use COUNT BOOKS", "use count_books for step 1",
-     "switch step 1 to count_books", "use Library/count_books"],
+     "switch step 1 to count_books"],
 )
-def test_a_planning_command_that_is_not_an_alternative_switches_the_ambiguous_step(reply, gated):
+def test_each_numbered_switch_form_switches_the_step_to_a_planning_command_of_the_workflow(reply, gated):
     seen: list = []
     decision = _policy(gated, _never_read(seen)).decide(_single(), reply)
     assert decision.verdict is Verdict.EDIT and seen == []
     assert decision.edits == (Change(index=1, field="means", value="planning:Library/count_books"),)
 
 
-def test_a_planning_command_switches_a_step_that_has_no_alternatives(gated):
+def test_a_planning_command_switches_a_step_that_is_a_plain_goal(gated):
     seen: list = []
     decision = _policy(gated, _never_read(seen)).decide(_mixed(), "step 2: use Library/count_books")
     assert decision.verdict is Verdict.EDIT and seen == []
@@ -220,15 +221,11 @@ def test_a_word_is_not_fuzzy_matched_to_a_command_of_the_workflow(gated):
     assert decision.verdict is Verdict.REPROMPT
 
 
-def test_a_bare_name_with_one_ambiguous_step_switches_it(gated):
-    assert _policy(gated).decide(_single(), "count_books instead").edits == (
-        Change(index=1, field="means", value="planning:Library/count_books"),)
-
-
-def test_a_bare_name_that_names_nothing_is_left_to_the_reader(gated):
+@pytest.mark.parametrize("reply", ["use the library", "use count_books", "count_books instead", "switch to count_books"])
+def test_a_form_with_no_step_number_is_left_to_the_reader(reply, gated):
     seen: list = []
-    _policy(gated, _never_read(seen)).decide(_single(), "use the library")
-    assert seen == ["use the library"]
+    _policy(gated, _never_read(seen)).decide(_single(), reply)
+    assert seen == [reply]
 
 
 def test_a_name_that_fits_several_commands_asks_which(gated):
@@ -285,7 +282,7 @@ def wiring(request, gated):
 
 
 @pytest.mark.usefixtures("recorded_review_router")
-def test_failure_a_a_valid_plan_that_is_not_an_alternative_in_a_mixed_reply_switches_and_damages_no_step(
+def test_failure_a_a_valid_plan_in_a_mixed_reply_switches_and_damages_no_step(
         wiring, gated, no_heads, planner, monkeypatch):
     """Observed: ``change N: goal=...; step M: use NAME`` with a valid NAME the step did not list. The goal of step N is
     what the typed edit says, step M switches, and the planner is never asked."""
@@ -299,7 +296,7 @@ def test_failure_a_a_valid_plan_that_is_not_an_alternative_in_a_mixed_reply_swit
 
 
 @pytest.mark.usefixtures("recorded_review_router")
-def test_a_valid_plan_on_a_step_with_no_alternatives_switches_it(wiring, gated, no_heads, planner, monkeypatch):
+def test_a_valid_plan_on_a_plain_goal_step_switches_it(wiring, gated, no_heads, planner, monkeypatch):
     _, record = _ambiguous_review(gated, monkeypatch)
     lm = planner(gated, {"edits": []})
     gated.ctx.process_turn("step 2: use Library/count_books")
@@ -382,9 +379,9 @@ PROSE = "I want its members and what it is nested under."
      f"Step 1: use author_books - {PROSE}", f"step 1: use author_books because {PROSE}", f"step 1: use author_books! {PROSE}",
      f"use author_books for step 1. {PROSE}", f"switch step 1 to author_books. {PROSE}", f"step 1: use author_books so {PROSE}"],
 )
-def test_an_explanation_after_the_plan_name_is_ignored_and_the_switch_applies(reply):
+def test_an_explanation_after_the_plan_name_is_ignored_and_the_switch_applies(reply, gated):
     seen: list = []
-    decision = ProposalReplyPolicy(_never_read(seen)).decide(_single(), reply)
+    decision = _policy(gated, _never_read(seen)).decide(_single(), reply)
     assert decision.verdict is Verdict.EDIT and seen == []
     assert decision.edits == (Change(index=1, field="means", value=f"planning:{AUTHOR}"),)
 
@@ -396,9 +393,9 @@ def test_the_name_must_resolve_for_the_tail_to_be_peeled_off():
     assert "something_else" in decision.message
 
 
-def test_a_leading_word_is_not_fuzzy_matched_when_a_sentence_follows():
+def test_a_leading_word_is_not_fuzzy_matched_when_a_sentence_follows(gated):
     seen: list = []
-    decision = ProposalReplyPolicy(_never_read(seen)).decide(_single(), f"step 1: use author_book. {PROSE}")
+    decision = _policy(gated, _never_read(seen)).decide(_single(), f"step 1: use author_book. {PROSE}")
     assert decision.verdict is Verdict.REPROMPT and seen == []
 
 
@@ -424,7 +421,7 @@ def test_a_trailing_edit_that_is_not_read_asks_and_applies_nothing_and_folds_no_
     assert decision.verdict is Verdict.REPROMPT and seen == ["Also drop step 3"]
 
 
-def test_an_explanation_after_a_name_of_the_workflow_switches_a_step_with_no_alternatives(gated):
+def test_an_explanation_after_a_name_of_the_workflow_switches_a_plain_goal_step(gated):
     seen: list = []
     decision = _policy(gated, _never_read(seen)).decide(_mixed(), f"step 3: use Library/count_books. {PROSE}")
     assert decision.edits == (Change(index=3, field="means", value="planning:Library/count_books"),) and seen == []

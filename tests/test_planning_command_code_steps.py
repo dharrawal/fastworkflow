@@ -11,6 +11,7 @@ import logging
 from typing import Optional
 
 import dspy
+import fastworkflow
 import pytest
 from pydantic import BaseModel, Field
 
@@ -866,6 +867,37 @@ def test_code_reads_at_most_code_max_pages_then_stops_on_the_step(paged, monkeyp
     assert "Step 1 is not done: it is a full list, and code read 2 pages of it and stopped there" in query
     assert "Run its next page, `list_items start=20`" in query
     assert "Do not run it from page 1 again." in query
+
+
+def test_fw_code_max_pages_sets_how_many_pages_code_reads(paged, monkeypatch):
+    monkeypatch.setitem(fastworkflow._env_vars, planning_phases.CODE_MAX_PAGES_ENV, "2")
+    paged.plan = _plan(Phase("report", lambda: [
+        "list_items (full list: next page with start=<n> until complete)", "list_todo_lists"]))
+    paged.model.run("list_items start=20")
+    paged.model.run("list_todo_lists")
+    paged.model.finish()
+    paged.turn()
+
+    assert paged.workflow.sent == ["list_items", "list_items start=10", "list_items start=20",
+                                   "list_todo_lists"]
+    assert _phases(paged.sink)[0].attributes["steps_by_code"] == 2
+
+
+def test_the_page_cap_is_20_when_unset_and_a_bad_value_warns_and_means_20(monkeypatch, caplog):
+    monkeypatch.delenv(planning_phases.CODE_MAX_PAGES_ENV, raising=False)
+    monkeypatch.delitem(fastworkflow._env_vars, planning_phases.CODE_MAX_PAGES_ENV, raising=False)
+    monkeypatch.setattr(planning_phases, "_warned_code_max_pages", set())
+    assert planning_phases.CODE_MAX_PAGES == 20 and planning_phases.code_max_pages() == 20
+    log = logging.getLogger("fastWorkflow")
+    log.addHandler(caplog.handler)
+    try:
+        for raw in ("0", "-3", "abc"):
+            monkeypatch.setitem(fastworkflow._env_vars, planning_phases.CODE_MAX_PAGES_ENV, raw)
+            assert planning_phases.code_max_pages() == 20
+    finally:
+        log.removeHandler(caplog.handler)
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert sum("FW_CODE_MAX_PAGES" in m and "using the default 20" in m for m in messages) == 3
 
 
 def _two_pages(command):

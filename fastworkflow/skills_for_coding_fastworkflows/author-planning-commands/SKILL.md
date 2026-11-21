@@ -294,6 +294,9 @@ drafting run were this command):
   value an earlier phase finds reaches the answer only as a fact: type that phase with the command's
   `Output` and write the value into the answer step, or build the answer in `__result__`. Read each
   description sentence against the answer path and check that every noun it promises arrives there.
+- **A step must not carry a placeholder for a value derived from an earlier step's output in the same phase.** Code
+  cannot fill it and the command stops there; put that step's source in its own earlier phase and compute the value
+  in the phase method from its fact.
 
 ## Phases and facts (typed by commands)
 

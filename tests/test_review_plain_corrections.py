@@ -263,6 +263,36 @@ def test_a_quoted_name_with_and_is_one_value():
     assert {each.name: each.value for each in applied.items[0].inputs}["name"] == "Kline and Sons Ltd"
 
 
+def test_a_quoted_name_that_is_already_the_value_of_another_input_is_not_set_as_the_name():
+    plan = _plan(("Retrieve the risk of Payroll for Mara Lind", "name=Payroll, person=Mara Lind, kind=unit"))
+    reply = "Make the kind application for 'Mara Lind' in step 1."
+    applied = _read(plan, reply, [{"op": "change", "index": 1, "field": "inputs", "value": "kind=application"}])
+    values = {each.name: each.value for each in applied.items[0].inputs}
+    assert values["name"] == "Payroll"
+    assert values["kind"] == "application"
+
+
+def test_a_field_less_change_that_repeats_a_change_naming_its_field_is_dropped_not_an_error():
+    plan = _four_step_plan()
+    returned = [
+        {"op": "change", "index": 2, "field": "kind", "value": "application"},
+        {"op": "change", "index": 2, "field": "", "value": "application"},
+    ]
+    applied = _read(plan, "Make step 2 an application.", returned)
+    assert {each.name: each.value for each in applied.items[1].inputs}["kind"] == "application"
+
+
+def test_a_field_less_change_with_no_twin_still_raises():
+    from fastworkflow.review_engine import EditParseError
+    plan = _four_step_plan()
+    with pytest.raises(EditParseError, match="names no field"):
+        _read(plan, "Make step 2 an application.", [{"op": "change", "index": 2, "field": "", "value": "application"}])
+    with pytest.raises(EditParseError, match="names no field"):
+        _read(plan, "Make step 2 an application.", [
+            {"op": "change", "index": 2, "field": "kind", "value": "application"},
+            {"op": "change", "index": 2, "field": "", "value": "other"}])
+
+
 # ----------------------------------------------------------------------
 # Class 6: a removal verb that is not a removal of the step (review round 1)
 # ----------------------------------------------------------------------

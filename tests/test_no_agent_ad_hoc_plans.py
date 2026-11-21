@@ -185,6 +185,7 @@ def test_a_stopped_planning_command_and_a_bound_command_that_could_not_start_kee
         done=["find: 1. find_book"], facts={}, remaining=[], suggested_plan="1. x", means="planning")
     assert "available_plans" not in stopped
     assert no_agent_mode.explanation(stopped) == (
+        "**What ran**\n- find: 1. find_book\n\n"
         "Library/book_lookup ran as far as code can run it without an agent model: 1 step ran, in phase 'book', then it "
         "stopped at step 1 (a conditional step). The remaining steps are listed in the data (fw_not_run); the wording of "
         "the final answer is left to the client.")

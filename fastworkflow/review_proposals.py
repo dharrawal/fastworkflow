@@ -114,17 +114,8 @@ class SubTaskInput(BaseModel):
         return cls(value=_strip_outer_quotes(text))
 
 
-#: The most other plans a review item names (``resolution.MAX_ALTERNATIVES``).
+#: The most other plans the which-command question names (``resolution.MAX_ALTERNATIVES``; no-agent mode lists with it).
 MAX_PLAN_ALTERNATIVES = 3
-
-
-class PlanAlternative(BaseModel):
-    """Another planning command that fits a sub-task about as well as its means: its name and one-line description.
-
-    No score: the review shows names, the user does not weigh probabilities (bd fix-1ma8.1)."""
-
-    name: str
-    description: str = ""
 
 
 class SubTask(BaseModel):
@@ -162,12 +153,6 @@ class SubTask(BaseModel):
     #: inputs or means makes it differ, and the item then runs as the one job it reads. Not shown.
     parts: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     parts_fingerprint: str = Field(default="", json_schema_extra={"review_hidden": True})
-    #: The other planning commands that fit this sub-task about as well as its means (bd fix-1ma8.1): the other planning
-    #: candidates of an ambiguous detection (``resolution.draft_choice``), at most ``MAX_PLAN_ALTERNATIVES``, best first,
-    #: each with its one-line description. Empty (and then absent from the serialized item, so an unambiguous review is
-    #: byte-identical to before) unless the match was ambiguous. The review text names them, the payload carries them, and ``step N: use NAME`` switches the
-    #: means to one of them (the ``change N: means=planning:NAME`` edit). Not user-editable.
-    alternatives: list[PlanAlternative] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     #: The item this one came from before this reply (set by ``apply_edits``; not serialized).
     _before_item: Optional["SubTask"] = PrivateAttr(default=None)
     #: This reply asked for look_up on this item (set by ``apply_edits``; not serialized).
@@ -187,10 +172,8 @@ class SubTask(BaseModel):
         return Means.from_text(value) if isinstance(value, str) else value
 
     @model_serializer(mode="wrap")
-    def _omit_empty_alternatives(self, handler):
+    def _omit_empty_check_missing(self, handler):
         data = handler(self)
-        if isinstance(data, dict) and not data.get("alternatives"):
-            data.pop("alternatives", None)
         if isinstance(data, dict) and not data.get("check_missing"):
             data.pop("check_missing", None)
         return data
@@ -442,13 +425,6 @@ def _input_user_line(inp: SubTaskInput) -> str:
 
 
 #: Appended to an ad hoc item's line in the rendered review text in no-agent mode (only then).
-def other_plans_line(number: int, item: "SubTask") -> str:
-    """The review's extra line under a sub-task whose planning-command match was ambiguous (bd fix-1ma8.1): the other plans
-    that fit, and the reply that switches to one. Names only; no scores."""
-    names = [each.name for each in item.alternatives]
-    return f'   other plans that fit: {", ".join(names)}; reply "step {number}: use {names[0]}" to switch'
-
-
 NOT_RUN_HERE_SUFFIX = " - not run here (no agent model); a suggested plan is returned"
 
 
@@ -478,8 +454,6 @@ class SubTaskProposal(Proposal):
             lines.append(f"{index}. {item.goal}{suffix}{write_badge}")
             if item.check and item.means.kind == MEANS_PLANNING and (note := _check_line(index, item)):
                 lines.append(f"   {note}")
-            if item.alternatives:
-                lines.append(other_plans_line(index, item))
         return "\n".join(lines)
 
     def model_rendering(self) -> str:
@@ -504,10 +478,6 @@ class SubTaskProposal(Proposal):
         Inputs the user set in the same reply are kept: re-draft, then overlay those inputs.
         """
         workflow = getattr(host, "_app_workflow", None)
-        # The plans that fit a sub-task follow its means, whether or not its inputs are re-drafted (fix-1ma8.1).
-        moved = [_switched_alternatives(workflow, getattr(item, "_before_item", None), item) for item in self.items]
-        if any(new is not old for new, old in zip(moved, self.items)):
-            self = self.model_copy(update={"items": moved})
         if workflow is None or not drafting_on():
             return self
         before_items = list(before.items) if isinstance(before, SubTaskProposal) else []
@@ -535,7 +505,7 @@ class SubTaskProposal(Proposal):
             elif before_item is None and item.means.kind == MEANS_FROM_SCRATCH:
                 built = decided_item(workflow, item.goal)
                 picked = built.means
-                item = item.model_copy(update={"means": picked, "alternatives": built.alternatives})
+                item = item.model_copy(update={"means": picked})
                 if item.means.kind != MEANS_FROM_SCRATCH:
                     item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
                     item = _overlay_inputs(item, kept)
@@ -544,7 +514,7 @@ class SubTaskProposal(Proposal):
                 built = decided_item(workflow, item.goal)
                 picked = built.means
                 if picked.kind != MEANS_FROM_SCRATCH:
-                    item = item.model_copy(update={"means": picked, "alternatives": built.alternatives})
+                    item = item.model_copy(update={"means": picked})
                 item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
                 overlay_fallback = (
                     before_item.inputs
@@ -776,22 +746,6 @@ def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None, *,
          for number, (item, sub_task) in enumerate(zip(proposal.items, subtasks), 1)],
         before=lambda index: turn_progress.emit(turn_progress.STAGE_DRAFT, index + 1, total))
     return SubTaskProposal(items=items)
-
-
-def _switched_alternatives(workflow, before: Optional[SubTask], item: SubTask) -> SubTask:
-    """*item* (whose means the user changed from *before*'s) with the plans that fit it brought up to date: when the new
-    means is one of *before*'s alternatives, the means it replaced takes its place among them, so the user can switch
-    back; otherwise the user chose a means of their own and the item has no alternatives. Nothing changes when the
-    means did not change."""
-    if before is None or item.means == before.means or not before.alternatives:
-        return item
-    if item.means.kind != MEANS_PLANNING or item.means.name not in {each.name for each in before.alternatives}:
-        return item.model_copy(update={"alternatives": []})
-    described = _planning_descriptions(workflow.folderpath) if workflow is not None else {}
-    replaced = ([PlanAlternative(name=before.means.name, description=described.get(before.means.name, ""))]
-                if before.means.kind == MEANS_PLANNING else [])
-    kept = [each for each in before.alternatives if each.name != item.means.name]
-    return item.model_copy(update={"alternatives": (replaced + kept)[:MAX_PLAN_ALTERNATIVES]})
 
 
 def _fingerprint(item: SubTask) -> str:
@@ -1168,9 +1122,8 @@ def redraft_for_look_up(workflow, item: SubTask, earlier: list[SubTask], *, plan
         built = decided_item(workflow, item.goal, exclude=set(writes))
         new_means = built.means
         if new_means.kind == MEANS_FROM_SCRATCH:
-            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": "", "check_missing": [],
-                                           "alternatives": []})
-        item = item.model_copy(update={"means": new_means, "alternatives": built.alternatives})
+            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": "", "check_missing": []})
+        item = item.model_copy(update={"means": new_means})
         return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
     return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
 
@@ -1812,6 +1765,8 @@ def _apply_quoted_names_from_reply(
             continue
         target_item = proposal.items[target_index - 1]
         primary_key = _primary_entity_key(target_item)
+        if any(quoted_name.lower() in (inp.value or "").lower() for inp in target_item.inputs):
+            continue  # the quoted text is already the value of an input of the step (maybe another one): not the name
         if not primary_key or _reader_touches_input(reader_edits, target_index, primary_key):
             continue
         clause = _clause_containing_quote(reply_text, quoted_name)
@@ -2279,6 +2234,9 @@ def _proposed_edits_to_engine(
     proposed = _infer_missing_indexes_from_reply(proposal, proposed, reply_text)
     proposed = _dedupe_proposed_edits(proposed)
     proposed = _guard_reader_edits(proposal, proposed, reply_text)
+    proposed = [edit for edit in proposed if not (edit.op == "change" and not edit.field and any(
+        other.op == "change" and other.field and other.index == edit.index and other.value == edit.value
+        for other in proposed))]  # a field-less change that repeats one naming its field is that change, said twice
     count = len(proposal.items)
     if count > 1 and any(
         edit.op in ("change", "drop", "split") and edit.index is None for edit in proposed

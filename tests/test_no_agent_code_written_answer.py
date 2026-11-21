@@ -35,11 +35,21 @@ def test_an_all_code_command_with_no_result_text_states_what_ran(library_env, mo
     assert library_env.model.asked == []
 
 
-def test_a_stop_with_an_open_step_keeps_its_short_text():
+def test_a_stop_at_an_open_step_states_what_ran_before_its_notice():
     entry = no_agent_mode.stop_entry(
         command="X/y", phase="p", open_step={"number": 2, "text": "t", "kind": "prose", "reason": "why"},
         done=["p: 1. a"], facts={"p": {"n": 1}}, remaining=[], suggested_plan="", means="planning")
-    assert "What ran" not in no_agent_mode.explanation(entry)
+    text = no_agent_mode.explanation(entry)
+    assert "What ran" in text and "p: 1. a" in text and "n: 1" in text
+    assert text.index("What ran") < text.index("then it stopped at step 2 (why)")
+
+
+def test_a_stop_with_nothing_done_keeps_its_short_text():
+    entry = no_agent_mode.stop_entry(
+        command="X/y", phase="p", open_step={"number": 1, "text": "t", "kind": "prose", "reason": "why"},
+        done=[], facts={}, remaining=[], suggested_plan="", means="planning")
+    text = no_agent_mode.explanation(entry)
+    assert "What ran" not in text and text.startswith("X/y ran as far as code can run it")
 
 
 def test_a_page_cap_stop_says_the_read_is_partial():

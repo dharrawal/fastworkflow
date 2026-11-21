@@ -271,7 +271,7 @@ def explanation(entry: dict[str, Any], listed_in: Optional[int] = None) -> str:
     text = (f"{command} ran as far as code can run it without an agent model: {ran}{phase}, then {where}. "
             "The remaining steps are listed in the data (fw_not_run); the wording of the final answer is left "
             "to the client.")
-    if open_step.get("kind") in (STEP_ANSWER, STEP_PAGE_CAP):
+    if done or open_step.get("kind") in (STEP_ANSWER, STEP_PAGE_CAP):
         text = f"{ran_statement(entry)}\n\n{text}"
     return text
 

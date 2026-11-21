@@ -696,17 +696,7 @@ def reply_forms(rendering: str, proposal: Proposal, *, structured: bool = False)
                 if isinstance(proposal, SubTaskProposal) else PROMPT_HINT)
         chosen = next(forms for text, forms in REPLY_FORMS_OF_HINT if text == hint)
     forms = [{**form, **({"separator": REPLY_EDIT_SEPARATOR} if "pattern" in form else {})} for form in chosen]
-    if alternatives := _plan_alternatives_of(proposal):
-        # bd fix-1ma8.1: a step whose planning-command match was ambiguous can be switched to another plan by name.
-        forms.append({"kind": "switch_plan", "pattern": "step N: use NAME", "per_item": True,
-                      "separator": REPLY_EDIT_SEPARATOR, "alternatives": alternatives})
     return forms
-
-
-def _plan_alternatives_of(proposal: Proposal) -> dict[str, list[str]]:
-    """``{step number as text: the names of the other plans that fit it}`` for the steps of a sub-task review that have any."""
-    return {str(number): [each.name for each in getattr(item, "alternatives", ())]
-            for number, item in enumerate(getattr(proposal, "items", None) or (), 1) if getattr(item, "alternatives", None)}
 
 
 def _step_count_message(count: int) -> str:
@@ -1608,25 +1598,6 @@ def _compound_drop_edit(text: str, routed_items: Optional[Sequence[Any]] = None)
     return False
 
 
-def _accept_with_switch_decision(proposal: Proposal, text: str) -> Optional["ReplyDecision"]:
-    """An accept cue followed by a plan name (``yes use B``) on a review with an ambiguous step is that switch, not an
-    accept (bd fix-1ma8.1). Returns None, and reads nothing, for a review with no step that has alternatives: its accept
-    path is exactly what it was. A bare accept cue never gets here (``word in ("accept", "yes")`` returns first, and a
-    cue with no text after it has nothing to read)."""
-    if not any(getattr(item, "alternatives", None) for item in getattr(proposal, "items", ())):
-        return None
-    from fastworkflow.review_plan_switch import read_accept_with_switch
-
-    decision = read_accept_with_switch(proposal, text)
-    if decision is None or decision.verdict is not Verdict.EDIT:
-        return decision
-    try:
-        apply_edits(proposal, list(decision.edits))
-    except EditRefused as refused:
-        return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
-    return decision
-
-
 def switch_clause_in_goal_message(clause: str) -> str:
     return (f'I read "{clause}" as part of a step\'s goal, but it asks to switch a plan. Reply "step N: use <plan name>" '
             "on its own, or say what the step should do.")
@@ -1675,26 +1646,6 @@ def _switch_clauses_decision(proposal: Proposal, text: str, workflow: Any, read_
     return ReplyDecision(Verdict.EDIT, reason, edits=tuple(edits))
 
 
-def _plan_switch_decision(proposal: Proposal, text: str) -> Optional["ReplyDecision"]:
-    """The decision for a reply that switches an ambiguous step's plan (``use B``, ``step N: use B``, ...), or None when the
-    reply is not one (bd fix-1ma8.1; ``review_plan_switch``). Read after the accept and decline cues and before the
-    typed-edit reader; a review with no ambiguous step never gets here past its first line. The switch is validated as
-    any typed edit is: a refusal leaves the record as it was."""
-    from fastworkflow.review_plan_switch import read_accept_with_switch, read_plan_switch
-
-    decision = read_plan_switch(proposal, text)
-    if decision is None:
-        # ``yes, but use B for step 2``: an accept word the accept cue did not take as an accept (a "but"), then a switch.
-        decision = read_accept_with_switch(proposal, text)
-    if decision is None or decision.verdict is not Verdict.EDIT:
-        return decision
-    try:
-        apply_edits(proposal, list(decision.edits))
-    except EditRefused as refused:
-        return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
-    return decision
-
-
 class ProposalReplyPolicy:
     """The sub_tasks and plan kinds: accept, no, or typed edits (deterministic first, then the reader).
 
@@ -1735,16 +1686,12 @@ class ProposalReplyPolicy:
         if word in ("accept", "yes"):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if _affirmative_accept_cue(text):
-            if sub_task_review and (switched := _accept_with_switch_decision(proposal, text)) is not None:
-                return switched
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if word in ("no", "decline") or _plain_decline_cue(text):
             return ReplyDecision(Verdict.DECLINE, "declined")
         if sub_task_review and (clauses := _switch_clauses_decision(
                 proposal, text, self._app_workflow, lambda rest: self.decide(proposal, rest))) is not None:
             return clauses                            # an explicit switch clause is decided here, never by the reader
-        if sub_task_review and (switched := _plan_switch_decision(proposal, text)) is not None:
-            return switched
         try:
             edits = parse_edits(text)
             edits = _normalize_parsed_subtask_edits(proposal, edits)
@@ -1789,8 +1736,6 @@ class ProposalReplyPolicy:
             if word in ("accept", "yes"):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
             if _affirmative_accept_cue(text):
-                if (switched := _accept_with_switch_decision(proposal, text)) is not None:
-                    return switched
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
             if word in ("no", "decline") or _plain_decline_cue(text):
                 return ReplyDecision(Verdict.DECLINE, "declined")
@@ -1798,8 +1743,6 @@ class ProposalReplyPolicy:
                     proposal, text, self._app_workflow,
                     lambda rest: self._decide_with_plan(proposal, rest, rest.lower()))) is not None:
                 return clauses                        # an explicit switch clause is decided here, never by the head or reader
-            if (switched := _plan_switch_decision(proposal, text)) is not None:
-                return switched
             try:
                 edits = parse_edits(text)
                 edits = _normalize_parsed_subtask_edits(proposal, edits)

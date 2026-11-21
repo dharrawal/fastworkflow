@@ -321,17 +321,16 @@ def test_the_wrapper_adds_no_second_pass_over_a_stream():
     assert mcp_specific.turn_failure(turn) is None
 
 
-# -- a review turn with plan alternatives (bd fix-1ma8.1) validates against the output schema ---------------------
+# -- a review turn validates against the output schema ---------------------------------------------------------
 
-def test_a_review_turn_with_plan_alternatives_validates_against_the_output_schema():
-    """The review artifact of an ambiguous sub-task review, built by the real review code (items with
-    ``alternatives``, the ``switch_plan`` reply form) and carried in a real TurnOutput, is a valid turn result."""
+def test_a_review_turn_validates_against_the_output_schema():
+    """The review artifact of a sub-task review, built by the real review code (items, the reply forms) and carried in a
+    real TurnOutput, is a valid turn result."""
     from fastworkflow import review_engine
-    from fastworkflow.review_proposals import Means, PlanAlternative, SubTask, SubTaskProposal
+    from fastworkflow.review_proposals import Means, SubTask, SubTaskProposal
 
     proposal = SubTaskProposal(items=[
-        SubTask(goal="Find the books", means=Means(kind="planning", name="Library/book_by_title"),
-                alternatives=[PlanAlternative(name="Library/author_books", description="Name each book by an author.")]),
+        SubTask(goal="Find the books", means=Means(kind="planning", name="Library/book_by_title")),
         SubTask(goal="Tell a joke"),
     ])
     shown = review_engine.prompt_for(proposal)
@@ -341,9 +340,8 @@ def test_a_review_turn_with_plan_alternatives_validates_against_the_output_schem
         "changes_data": [True, False],
         "reply_forms": review_engine.reply_forms(shown, proposal),
     }
-    assert review["items"][0]["alternatives"][0]["name"] == "Library/author_books"
-    assert "alternatives" not in review["items"][1]
-    assert review["reply_forms"][-1]["kind"] == "switch_plan"
+    assert all("alternatives" not in item for item in review["items"])
+    assert "switch_plan" not in {form["kind"] for form in review["reply_forms"]}
     output = fastworkflow.TurnOutput(turn_key="logical-turn-1", status=TurnStatus.AWAITING_USER, answer=shown,
                                      command_outputs=[])
     turn = {**output.model_dump(mode="json"), "turn_key": "exec-1", "exec_state": "done",

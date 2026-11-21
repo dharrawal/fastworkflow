@@ -9,7 +9,8 @@ import pytest
 from fastworkflow import no_agent_mode
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
-from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests.test_step_helpers import library_env  # noqa: F401
+from tests.test_turn_result_capture import initialized_fastworkflow, no_review_gate  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -56,3 +57,54 @@ def test_the_page_cap_and_the_step_limit_share_one_sentence():
         done=["p: 1. list things"], facts={}, remaining=[], suggested_plan="", means="planning")
     assert no_agent_mode.partial_read_sentence("page cap") in no_agent_mode.ran_statement(entry)
     assert "step limit" in no_agent_mode.partial_read_sentence("step limit")
+
+
+
+# ---------------------------------------------------------------- a phase of a planning command out of steps
+
+def test_a_planning_command_phase_out_of_steps_states_the_rows_read_of_the_total(library_env, monkeypatch):
+    """A phase whose agent ran out of steps while it paged a read ends the answer with the same partial-read note."""
+    from fastworkflow import planning_phases
+    from fastworkflow.planning import run
+    from tests.test_no_agent_mode import _plan
+    from tests.test_step_helpers import _build_planning_command
+
+    lib = library_env.wf.root
+    monkeypatch.setattr(sys.modules[type(lib).__module__], "PAGE_SIZE", 1)
+    monkeypatch.setattr(planning_phases, "PHASE_MAX_STEPS", 2)
+    monkeypatch.setattr(planning_phases, "CODE_MAX_PAGES", 1)
+    library_env.runner.name_find_book_next_pages = True
+
+    class ReadByHand:
+        def find(self, input):
+            return [run("find_book", query="a", all_pages=True)]
+
+        def report(self, input):
+            return ["say what was found"]
+
+    ctx = library_env.ctx
+    build_agent = ctx._build_react_agent
+
+    def small_agent():
+        agent = build_agent()
+        agent.max_iters = 2     # the phase's executor runs out of steps (its own cap), not the phase's budget
+        return agent
+
+    monkeypatch.setattr(ctx, "_build_react_agent", small_agent)
+    model = library_env.model
+    model.run("find_book query=a start=1")
+    model.run("find_book query=a start=2")
+    # Two parts, so the turn runs through its sub-task loop; the second part is a different command-free request.
+    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+                        lambda *args, **kwargs: ["look up the book Dune", "look up the book Emma"])
+    for _ in range(2):
+        model.run("find_book query=a start=1")
+        model.run("find_book query=a start=2")
+    library_env.planning_command = _build_planning_command(ReadByHand)
+    _plan(monkeypatch, library_env)
+    result = library_env.ctx.process_turn("look up the book Dune")
+
+    total = len(lib.find_books("a"))
+    assert total > 2
+    assert f"3 rows read of {total} the command reported" in result.answer
+    assert no_agent_mode.partial_read_sentence("step limit") in result.answer

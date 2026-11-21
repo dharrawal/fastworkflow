@@ -5159,7 +5159,9 @@ class WorkflowExecutionContext:
             if getattr(result, "suspended", None) is True:
                 return result
             self._record_subtask_answer(result, self._typed_output_since(outputs_before))
-            if getattr(result, "exhausted", None) is True and not self._hand_off(k):
+            # A phased planning command is never handed off: a phase that ran out of steps ends its part as it is.
+            if getattr(result, "phase_exhausted", False) or (
+                    getattr(result, "exhausted", None) is True and not self._hand_off(k)):
                 self._note_partial_read(origin)
             k += 1
 

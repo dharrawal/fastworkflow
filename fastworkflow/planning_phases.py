@@ -2290,6 +2290,29 @@ def code_step_pages(plan_text: str, commands: Iterable[str], core_commands: Iter
 #: read kept, and the agent reads on from the next page (``CodeSteps.ran``).
 CODE_MAX_PAGES = 20
 
+#: The workflow env setting that replaces ``CODE_MAX_PAGES`` (the default).
+CODE_MAX_PAGES_ENV = "FW_CODE_MAX_PAGES"
+_warned_code_max_pages: set[str] = set()
+
+
+def code_max_pages() -> int:
+    """The most pages code reads of one full-list step: ``FW_CODE_MAX_PAGES``, default ``CODE_MAX_PAGES``. A value that
+    is not a positive integer logs a warning (once per distinct raw value) and the default applies."""
+    import fastworkflow
+    raw = str(fastworkflow.get_env_var(CODE_MAX_PAGES_ENV, str, default=""))
+    if raw == "":
+        return CODE_MAX_PAGES
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value > 0:
+        return value
+    if raw not in _warned_code_max_pages:
+        _warned_code_max_pages.add(raw)
+        logger.warning(f"{CODE_MAX_PAGES_ENV}={raw!r} is not a positive integer; using the default {CODE_MAX_PAGES}")
+    return CODE_MAX_PAGES
+
 
 def _command_paging(classes: Iterable[Any]) -> tuple[str, ...]:
     """The paging parameters of a command across its parameter classes (``facts.paging_parameters``),
@@ -2514,7 +2537,7 @@ class CodeSteps:
             # cap with rows left, code stops on this step (_page_cap).
             command, start, pages = self._paged
             later = _next_page(observation, paging, start, run=self._run_of(step_index))
-            if later is not None and pages < CODE_MAX_PAGES:
+            if later is not None and pages < code_max_pages():
                 self._next = later
             elif later is not None:
                 self._page_cap(step, command, pages, later)
