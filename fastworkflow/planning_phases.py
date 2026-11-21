@@ -143,7 +143,10 @@ How the runner (``WorkflowExecutionContext``) runs a phased planning command cal
    phase's leading mechanical steps (``code_step``) through the agent's own command tool
    before the executor's model takes a step, each a normal trajectory step marked "run
    by code". An open step that opens the one row of the previous step's Output that
-   names its lookup value exactly (or its only row) runs too (``pick_step``).
+   names its lookup value exactly (or its only row) runs too (``pick_step``). A step that
+   names no lookup value runs too when the listing is the immediately preceding run of the
+   call, has no further pages and holds exactly one row. The one unwritten required field is
+   a uid or a field that declares its producer (``from_command_output``).
    It stops at the first open step or a failed step, and the agent does the rest. A
    step whose note asks for the full list (``FULL_LIST_PHRASES``) is paged by code: it
    runs each later page the output names, up to ``CODE_MAX_PAGES`` pages; past that,
@@ -1966,7 +1969,8 @@ def _uid_parameter(step: Any,
     # if any, it writes concretely).
     fields = [name for name in required.pop() if name not in step.arguments] \
         if len(required) == 1 else []
-    if len(fields) != 1 or not _is_uid_field(fields[0]):
+    if len(fields) != 1 or not (_is_uid_field(fields[0])
+                                or _producer_sources(parameters_classes, fields[0])):
         return None, "", "not one required uid"
     # Any placeholder but the uid's leaves the step to the agent. The step's other values
     # stay as written; only the uid's placeholder is filled.
@@ -2006,11 +2010,18 @@ def _producer_sources(parameters_classes: Sequence[Any],
 
 def _fitting_uid_column(uid_param: str, parameters_classes: Sequence[Any],
                         run_command: str, output: Any) -> Optional[str]:
-    """The one uid list column of *output* that fits *uid_param*, or None."""
+    """The one list column of *output* that fits *uid_param*, or None. For a uid field, the
+    one uid list column. For any other field, only the column its declared producer names,
+    and only when *run_command* is that producer's command: never a match by name."""
     from fastworkflow.observation_offloading.facts import _command_matches
 
     if not isinstance(output, Mapping):
         return None
+    if not _is_uid_field(uid_param):
+        cols = {field for cmd, field in _producer_sources(parameters_classes, uid_param)
+                if run_command and _command_matches(cmd, run_command)
+                and isinstance(output.get(field), (list, tuple))}
+        return cols.pop() if len(cols) == 1 else None
     uids = [str(key) for key, value in output.items()
             if _is_uid_field(str(key)) and isinstance(value, (list, tuple))]
     if len(uids) != 1:
@@ -2048,6 +2059,11 @@ def _lookup_values_for_step(step: Any, lookup_or_run: Any, paging: Iterable[str]
             and re.search(rf"(?<![a-z0-9_]){re.escape(_folded(value))}(?![a-z0-9_])", text)]
 
 
+def _names_no_lookup(step: Any) -> bool:
+    """True when *step* does not say which lookup it means (no ``with the id of the X match``)."""
+    return _PICK_NAMED_RE.search(step.text) is None
+
+
 def pick_listing(
     step: Any,
     runs: Sequence[Mapping[str, Any]],
@@ -2056,15 +2072,23 @@ def pick_listing(
     """The latest run in *runs* (the call's own runs, in run order) whose arguments hold
     the value *step* names and whose ``Output`` has one uid list that fits *step*'s uid
     parameter, with the pages of that listing joined (``facts._join_list``); None when
-    none fits. Never after a page that shows more pages."""
+    none fits. Never after a page that shows more pages. A step that names no lookup
+    value of any run (``_names_no_lookup``) considers only the call's last run, and
+    ``pick_step`` then needs that listing to hold exactly one row."""
     from fastworkflow.observation_offloading.facts import _join_list, _page_key, _scalar_of_pages
 
     uid_param, _, _ = _uid_parameter(step, parameters_classes)
     if uid_param is None:
         return None
     paging = _command_paging(parameters_classes)
-    for run in reversed(runs):
-        if not run.get("success") or not _lookup_values_for_step(step, run, paging):
+    # A step that names a value of some run of the call keeps the search over every run.
+    # Only a step that names no lookup value of any successful run (and has no
+    # ``_PICK_NAMED_RE`` wording) may open the only row of the IMMEDIATELY PRECEDING run.
+    unnamed = _names_no_lookup(step) and not any(
+        run.get("success") and _lookup_values_for_step(step, run, paging) for run in runs)
+    for run in reversed(runs[-1:] if unnamed else runs):
+        if not run.get("success") or (
+                not unnamed and not _lookup_values_for_step(step, run, paging)):
             continue
         if _fitting_uid_column(uid_param, parameters_classes,
                                str(run.get("command") or ""), run.get("output")) is None:
@@ -2099,13 +2123,17 @@ def pick_step(step: Any, lookup: Any, output: Any,
 
     - *step* is a command step whose first word is its command, and its command has the
       same required fields under every parameters class, of which the step leaves exactly
-      one, P, unwritten: a uid (``_is_uid_field``). The step writes no value of its own,
+      one, P, unwritten: a uid (``_is_uid_field``) or a field that declares its producer
+      (``from_command_output`` / ``available_from``). The step writes no value of its own,
       or its only placeholder is P's (``open_book book_uid=<the Dune uid> format=pdf``):
       its other values, all concrete, are sent as written;
     - *step* names a concrete value of *lookup* (``open_book_by_uid with the uid of the
-      Dune match`` after ``find_book query=Dune``), paging values aside;
+      Dune match`` after ``find_book query=Dune``), paging values aside, or names no
+      lookup value at all and *lookup* is the call's immediately preceding run (checked
+      by ``pick_listing``) whose uid column holds exactly one row;
     - *output* has exactly one uid list that fits P (``<x>_uids`` for ``<x>_uid``, or the
-      list a producer ``from_`` on P names), and
+      list a producer ``from_`` on P names; for a P that is not a uid, only the list its
+      producer names, and only when *lookup* is that producer's command), and
       exactly one row holds the named values whole (``Dune``, not ``Dune 1``; spacing,
       quotes and case ignored), or the output has exactly one row at all.
 
@@ -2120,14 +2148,16 @@ def pick_step(step: Any, lookup: Any, output: Any,
     if uid_param is None:
         return None, reason
     values = _lookup_values_for_step(step, lookup, _command_paging(parameters_classes))
-    if not values:
-        return None, "names no lookup value"
     run_command = str(lookup.get("command") if isinstance(lookup, Mapping)
                       else getattr(lookup, "command", "") or "")
     uid_col = _fitting_uid_column(uid_param, parameters_classes, run_command, output)
+    if not values and not (_names_no_lookup(step) and uid_col is not None
+                           and len(output[uid_col]) == 1):
+        return None, "names no lookup value"
     if uid_col is None or not output[uid_col]:
         return None, "no uid column"
-    rows = (narrowed_output(output, values) or output)[uid_col]
+    rows = (narrowed_output(output, values) if values else None) or output
+    rows = rows[uid_col]
     if len(rows) != 1 or rows[0] is None or isinstance(rows[0], (Mapping, list, tuple, bool)):
         return None, "no single match"
     command = (f"{step.command} {uid_param}={finish_check.quote_step_value(rows[0])}"

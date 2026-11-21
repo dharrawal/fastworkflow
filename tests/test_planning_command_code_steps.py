@@ -1051,7 +1051,12 @@ def test_a_pick_quotes_a_uid_containing_a_parenthesis_or_semicolon():
 
 def test_a_pick_names_the_lookup_value_and_has_one_required_uid():
     output = {"labels": ["Dune"], "book_uids": ["b1"]}
-    assert _pick("open_book_by_uid with the uid of the match", output)[1] == \
+    # A step naming no lookup value opens the only row (the call's previous run is the
+    # listing: ``pick_listing``, below); with several rows it stays open (fix-gyzq).
+    assert _pick("open_book_by_uid with the uid of the match", output) == (
+        "open_book_by_uid book_uid=b1", "only row")
+    assert _pick("open_book_by_uid with the uid of the match",
+                 {"labels": ["Dune", "Emma"], "book_uids": ["b1", "b2"]})[1] == \
         "names no lookup value"
     assert _pick("open_book_by_uid with the uid of the Emma match", output)[0] is None
     assert _pick("set_due for the Dune loan", output, (DueParams,))[1] == "not one required uid"
@@ -1117,6 +1122,164 @@ def test_the_agent_picks_when_no_one_row_matches(picks, labels, ids, text):
     assert len(picks.model.asked) == 2
     assert _phases(picks.sink)[0].attributes["code_stop"] == "open step 2"
     assert picks.workflow.sent == ["find_list query=errands", "get_todo_list id=8"]
+
+
+# A step that names no lookup value (fix-gyzq)
+
+UNNAMED = "get_todo_list with the id of the match"
+
+
+def _unnamed_plan(picks, *steps):
+    picks.plan = _plan(Phase("open", lambda: list(steps)))
+
+
+def test_code_runs_an_unnamed_pick_of_the_only_row_of_the_previous_step(picks):
+    _unnamed_plan(picks, "find_list query=errands", UNNAMED)
+    _found(picks, ["errands"], [8])
+    result = picks.turn()
+
+    assert result.status == TurnStatus.COMPLETED
+    assert picks.model.asked == []
+    assert picks.workflow.sent == ["find_list query=errands", "get_todo_list id=8"]
+    assert _phases(picks.sink)[0].attributes["code_stop"] == "done"
+
+
+@pytest.mark.parametrize("labels, ids, text", [
+    (["errands", "weekly"], [7, 8], "matches."),                   # two rows
+    (["errands"], [8], "1-10 of 12. Next page: start=10."),        # more pages
+])
+def test_an_unnamed_pick_stays_open_without_exactly_one_row(picks, labels, ids, text):
+    _unnamed_plan(picks, "find_list query=errands", UNNAMED)
+    _found(picks, labels, ids, text)
+    picks.model.run("get_todo_list id=8")
+    picks.model.finish()
+    picks.turn()
+
+    assert len(picks.model.asked) == 2
+    assert _phases(picks.sink)[0].attributes["code_stop"] == "open step 2"
+
+
+def test_an_unnamed_pick_stays_open_after_a_step_that_is_not_the_listing(picks):
+    # The one-row listing is two steps back: only the previous step counts.
+    _unnamed_plan(picks, "find_list query=errands", "list_todo_lists", UNNAMED)
+    _found(picks, ["errands"], [8])
+    picks.model.run("get_todo_list id=8")
+    picks.model.finish()
+    picks.turn()
+
+    assert _phases(picks.sink)[0].attributes["code_stop"] == "open step 3"
+
+
+def test_an_unnamed_pick_with_a_second_unwritten_field_is_not_a_pick():
+    output = {"labels": ["Dune"], "book_uids": ["b1"]}
+    assert _pick("set_due for the loan", output, (DueParams,))[0] is None
+
+
+def test_an_unnamed_pick_never_binds_a_listing_for_another_value():
+    runs = [{"command": "find_book", "input": {"query": "Emma"}, "success": True,
+             "output": {"labels": ["Emma"], "book_uids": ["b9"]}}]
+    named = _step("open_book_by_uid with the uid of the Dune match")
+    assert planning_phases.pick_listing(named, runs, [OpenParams]) is None
+    unnamed = _step("open_book_by_uid with the uid of the match")
+    assert planning_phases.pick_listing(unnamed, runs, [OpenParams]) is not None
+    # Only the last run counts; an earlier listing never does.
+    older = [runs[0], {"command": "get_properties", "input": {}, "success": True,
+                       "output": {"x": 1}}]
+    assert planning_phases.pick_listing(unnamed, older, [OpenParams]) is None
+
+
+def _two_lookups(first_output, last_output=None):
+    def run(query, output):
+        return {"command": "find_book", "input": {"query": query}, "success": True,
+                "output": output}
+    return [run("Dune", first_output),
+            run("Emma", last_output or {"labels": ["Emma"], "book_uids": ["b9"]})]
+
+
+@pytest.mark.parametrize("text", ["open_book_by_uid book_uid=<the Dune uid>",
+                                  "open_book_by_uid for the Dune book"])
+def test_a_step_naming_an_older_lookups_value_opens_that_lookups_row(text):
+    runs = _two_lookups({"labels": ["Dune"], "book_uids": ["b1"]})
+    found = planning_phases.pick_listing(_step(text), runs, [OpenParams])
+    assert found is not None and found[0] is runs[0]
+    assert planning_phases.pick_step(_step(text), *found, [OpenParams])[0] == \
+        "open_book_by_uid book_uid=b1"
+
+
+def test_a_step_naming_an_earlier_run_that_does_not_fit_never_uses_the_last_run():
+    runs = _two_lookups({"labels": ["Dune 1", "Dune 2"], "book_uids": ["b1", "b2"]})
+    step = _step("open_book_by_uid book_uid=<the Dune uid>")
+    found = planning_phases.pick_listing(step, runs, [OpenParams])
+    assert found is None or planning_phases.pick_step(
+        step, *found, [OpenParams])[0] is None
+
+
+# A field that declares its producer (fix-gyzq, option 2)
+
+class ThingParams(BaseModel):
+    thing_code: str = Field(
+        description="code", pattern=r"^[A-Z]{2}\d+$",
+        json_schema_extra={"from_command_output": "Shelf/list_things.thing_codes"})
+
+
+class UndeclaredParams(BaseModel):
+    thing_code: str = Field(description="code")
+
+
+class TwoFieldParams(BaseModel):
+    thing_code: str = Field(
+        description="code",
+        json_schema_extra={"from_command_output": "Shelf/list_things.thing_codes"})
+    note: str = Field(description="note")
+
+
+_THING_COMMANDS = ["Shelf/list_things", "Shelf/other_things", "Shelf/show_thing"]
+_THING_STEP = "show_thing thing_code=<that thing_code>"
+
+
+def _thing_step(text=_THING_STEP):
+    return finish_check.parse_plan(f"1. {text}", _THING_COMMANDS, CORE)[0]
+
+
+def _thing_run(codes, command="Shelf/list_things", column="thing_codes", more=False):
+    return {"command": command, "input": {}, "success": True, "more_pages": more,
+            "output": {column: codes, "labels": [f"t{i}" for i in range(len(codes))]}}
+
+
+def _thing_pick(runs, classes=(ThingParams,), text=_THING_STEP):
+    step = _thing_step(text)
+    found = planning_phases.pick_listing(step, runs, list(classes))
+    if found is None:
+        return None, "no listing"
+    return planning_phases.pick_step(step, *found, list(classes))
+
+
+def test_a_field_that_declares_its_producer_opens_the_only_row():
+    assert _thing_pick([_thing_run(["AB12"])]) == ("show_thing thing_code=AB12", "only row")
+
+
+@pytest.mark.parametrize("runs, classes", [
+    ([_thing_run(["AB12", "CD34"])], (ThingParams,)),                       # two rows
+    ([_thing_run(["AB12"], more=True)], (ThingParams,)),                    # more pages
+    ([_thing_run(["AB12"], command="Shelf/other_things")], (ThingParams,)),  # not the producer
+    ([_thing_run(["AB12"])], (UndeclaredParams,)),                          # no producer declared
+    ([_thing_run(["AB12"])], (TwoFieldParams,)),                            # a second field
+    ([_thing_run(["AB12"], column="codes")], (ThingParams,)),               # column missing
+    ([_thing_run(["AB12"]), _thing_run(["XY9"], command="Shelf/other_things")],
+     (ThingParams,)),                                                       # not the previous run
+])
+def test_a_producer_field_pick_keeps_the_stop_otherwise(runs, classes):
+    assert _thing_pick(runs, classes)[0] is None
+
+
+def test_an_undeclared_non_uid_field_is_not_one_required_uid():
+    assert planning_phases._uid_parameter(
+        _thing_step(), [UndeclaredParams])[2] == "not one required uid"
+
+
+def test_a_picked_producer_value_still_passes_the_command_validation():
+    # The pattern of the field refuses a value the producer's output gave.
+    assert _thing_pick([_thing_run(["bad value"])])[0] is None
 
 
 # ----------------------------------------------------------------------

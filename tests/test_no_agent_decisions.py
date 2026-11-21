@@ -78,6 +78,16 @@ class NamedThenDecision:
         return f"{book.title} handled"
 
 
+class UnnamedPick:
+    """The phase finds a book, then opens it with a step that names no lookup value (fix-gyzq)."""
+
+    def book(self, input) -> OpenedBook:
+        return [run("find_book", query="Persuasion"), run("open_book", book_uid="<the uid of the match>")]
+
+    def __result__(self, input, book):
+        return f"{book.title} handled"
+
+
 class MissingValue:
     """A command step that gives no value for the one required field of add_note."""
 
@@ -115,6 +125,16 @@ def _pending(result):
 
 def _find_runs(env):
     return [command for command in _sent(env) if command.startswith("find_book")]
+
+
+def test_a_step_that_names_no_lookup_value_opens_the_only_row_by_code(library_env, monkeypatch):
+    library_env.planning_command = _build_planning_command(UnnamedPick)
+    _plan(monkeypatch, library_env)
+    result = library_env.ctx.process_turn("look up the book Dune")
+
+    assert result.status == TurnStatus.COMPLETED
+    assert not _stops(result)
+    assert [c.split()[0] for c in _sent(library_env)] == ["find_book", "open_book"]
 
 
 # ---------------------------------------------------------------- suspend

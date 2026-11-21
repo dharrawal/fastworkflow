@@ -573,7 +573,12 @@ match` after `find_book query=Dune`. Code reads the step's run from the archive 
   (`list_access resource_type=app resource_uid=<the Dune uid> filter=Ann`): code then
   sends those values as written, with the uid filled in
   (`list_access resource_uid=<uid> resource_type=app filter=Ann`);
-- the step names a concrete value of the step before it (`Dune`), paging values aside;
+- the step names a concrete value of the step before it (`Dune`), paging values aside; a
+  step that names no lookup value (`open_book_by_uid with the uid of the match`) runs only
+  when the step right before it in this call is the listing, it names no further page and
+  its uid list has exactly one row; the one unwritten field is a uid, or a field that
+  declares its producer (`from_command_output`), whose column is then the one that
+  producer names, read from a run of that producer's command;
 - that run is the step's one successful run, its observation names no later page, and
   its Output has exactly one uid list; rows are read as `narrowed_output` reads them
   (list fields of one length are the columns of one table); and

@@ -455,7 +455,8 @@ The owner's answers to the design's open questions (fix-6llp.9):
   convention, which the design avoids. Built after the comparison run (fix-6llp.5) without it:
   `planning_phases.pick_step` sends the opener's one required uid field the value of the
   Output's one uid list, at the one row that holds the value the step names exactly
-  (or the only row); see "Picks" in `docs/planning_command_phases.md`. On the stored plans
+  (or the only row; a step naming no value opens only the one row of the immediately
+  preceding listing; the field is a uid, or one that declares its producer); see "Picks" in `docs/planning_command_phases.md`. On the stored plans
   code ran every pick hand-over it was given; it opened the uid the agent opened in all but
   one case, where it opened the exact-name record and the agent had opened a numbered one.
 - **Flat planning command calls** (planning commands without `plan()`): the same code-run treatment for their
