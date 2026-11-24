@@ -47,13 +47,17 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
+                           examples=["Dune", "Dune Messiah", "Persuasion"],
                            json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         found: bool = Field(description="whether a book was opened for the title")
-        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened")
-        title: Optional[str] = Field(default=None, description="its title, as the library has it")
-        author: Optional[str] = Field(default=None, description="its author")
+        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened, such as b1",
+                                        examples=["b1", "b3"])
+        title: Optional[str] = Field(default=None, description="its title, as the library has it",
+                                     examples=["Dune", "Emma"])
+        author: Optional[str] = Field(default=None, description="its author",
+                                      examples=["Frank Herbert", "Jane Austen"])
         copies: int = Field(default=0, description="how many copies the library owns")
 
 
@@ -99,8 +103,8 @@ class PlanGenerator:
   names of four of this command's, so `__result__` passes them through.
 - **It returns an `Output` on every path.** When no book matched, the `Output` says so,
   `found=False`, because `book_loans` (page 12) reads it: a command that declares an
-  `Output` and returns none gets the warning `book_by_title declares an Output but returned
-  none; phases and from_command_output references cannot read it`, and its callers get no facts.
+  `Output` and returns text from `__result__` fails the call: `book_by_title declares an Output
+  but its __result__ returned str; return the Output, or CommandResponse(response=..., output=<Output>)`.
 - **The `Output` may span phases or be computed.** `__result__` is ordinary code: it can take
   one field from each of several phases, or compare two of them.
 
@@ -108,12 +112,13 @@ The load checks `__result__`'s shape without running it: a `Signature.Output` wi
 `__result__` to build it, and a parameter (other than `input`) that names no phase, each fail
 the load.
 
-**One rule differs from an execution command.** An execution command whose `__call__` fails
-fails the call. A planning command's runs took many steps and still answer the request, so a
-`__result__` that raises, or returns something other than its three forms (an `Output` of
-another class included), keeps the call: a model writes the answer from the phases' runs,
-`output` is `None`, and the warning names the command and the exception. A `None` return is not
-a failure: the answer is the agent's, as with no `__result__`, with no warning.
+**The same rule as an execution command.** A `__result__` that raises, returns an empty string or
+returns something other than its forms (an `Output` of another class or a subclass of yours
+included) fails the call, as a failing `__call__` does: a failed output naming the command and the
+error, and no model writes the answer in its place. `raise fastworkflow.Refused(message)` is a
+refusal with that message. When the command declares an `Output`, `__result__` must return exactly
+that `Output`, alone or in a `CommandResponse`; text is an error. Return `None` to let a model write
+the answer from the phases' runs (as with no `__result__`, with no warning).
 
 ## What the agent plans from
 

@@ -26,7 +26,10 @@ from tests.test_approval_binding import _annotate
 # The FastAPI routes exercised here (perform_action, and invoke_agent answering a pending approval) do
 # not route by intent, so this file keeps the todo copy: its approval path needs no trained model.
 TODO = _Path(__file__).resolve().parent / "todo_list_workflow"
-_COPY_IGNORE = shutil.ignore_patterns("___command_info", "___workflow_contexts", "___convo_info", "__pycache__")
+# These tests build the channel's root themselves, so the copy carries no startup_action.json (a server given a
+# workflow folder with one now runs it as every session's first turn, bd fix-qjne.10, and the root would be set twice).
+_COPY_IGNORE = shutil.ignore_patterns("___command_info", "___workflow_contexts", "___convo_info", "__pycache__",
+                                      "startup_action.json")
 from tests.todo_list_workflow.application.todo_list import TodoList
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 

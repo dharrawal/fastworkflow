@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remember the object · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="c-state">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group context">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="c-state">
+      <div class="prose">
+        <p class="num">04</p>
+        <h3>Remember the object</h3>
+        <p>Your workflow stands on a live Python object, such as a <code>Library</code>, in the server's memory, and the server sometimes puts a conversation away and brings it back later. Class methods on the root's context class tell the framework how to save your object as plain JSON and build it again, because it cannot know what is inside it. Write <code>get_state</code> and <code>from_state</code> for every workflow you serve over HTTP or MCP; add <code>get_locator</code> and <code>find_by_locator</code> when a command moves the workflow onto a record inside the root.</p>
+        <p>Some words first. A <em>record</em> is a live object of your application; its <em>context class</em> is the class <code>Context</code> in <code>_commands/&lt;ClassName&gt;/_&lt;ClassName&gt;.py</code> (see <a href="c-folder.html">a folder for one kind of object</a>). The <em>root</em> is the record your startup command builds (see <a href="e-root.html">the root object</a>). The <em>current record</em> is the one the workflow stands on now. A <em>session</em> is one user's conversation.</p>
+        <p><strong>When a session is saved and restored.</strong> The server (<code>fastworkflow run_fastapi_mcp</code>) keeps at most <code>MAX_LIVE_SESSIONS</code> sessions in memory (50 unless you set it). When one more is opened, it <em>evicts</em> the oldest idle session: it writes a snapshot, a <em>checkpoint</em>, to disk and drops the session from memory. A clean shutdown checkpoints every idle session too. The session's next message, perhaps after a restart, rebuilds it from the checkpoint, with any question still out (say "Which member did you mean?"), so the user's answer still lands. A checkpoint is read back only by the same command files: its folder is keyed on the paths, sizes and modification times of every file under <code>_commands/</code> (the framework's own included). Any edit there, a fresh checkout, a moved folder or a reinstall of fastworkflow starts every saved conversation over, with no message. The command line (<code>fastworkflow run</code>) keeps its one session in memory and never calls them.</p>
+        <h4>Save and rebuild the root</h4>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/_Library.py</figcaption>
+        <pre><code>class Context:
+    state_version = 1                        <span class="c"># the shape of the dict below; saved with it</span>
+
+    @classmethod
+    def get_state(cls, record: Library) -&gt; dict[str, Any]:
+        return record.to_state_dict()        <span class="c"># plain JSON: str, int, float, bool, None, list, dict</span>
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,
+                   *, state_version: int) -&gt; Library:
+        if state_version != cls.state_version:
+            raise fastworkflow.UnsupportedStateVersion(state_version)
+        return Library.from_state_dict(state)  <span class="c"># a new Library, built from the dict</span></code></pre>
+      </figure>
+      <div class="prose">
+        <p>What each part does:</p>
+        <ul>
+          <li><code>get_state(cls, record)</code> is called when the session is checkpointed. It gets your live object and returns a dict of plain JSON values. The library's <code>to_state_dict</code> writes its branches, books, members and loans as lists of small dicts.</li>
+          <li><code>from_state(cls, state, workflow, *, state_version)</code> is called when the session comes back. It gets that dict and returns a new object of the same class. <code>workflow</code> is for things you compute rather than save, such as a path under <code>workflow.folderpath</code>.</li>
+          <li><code>state_version</code> is a number you choose (1 when you leave it out). It is saved next to the dict and handed back to <code>from_state</code>, which reads an older shape or refuses it by raising <code>fastworkflow.UnsupportedStateVersion</code>. Bumping it is an edit under <code>_commands/</code>, which already puts older checkpoints out of reach (above), so the check can fire only when the number itself is read from your application code (for example <code>state_version = Library.SCHEMA_VERSION</code>, imported from your application) and that code changes it with no edit under <code>_commands/</code>. A number written in the context file and left unchanged never refuses: <code>from_state</code> then gets an older-shaped dict with the same number.</li>
+        </ul>
+        <p>The framework saves one object: the root, or the current record when the workflow has no root. It calls the hooks of that object's class only. Save the root whole and once: <code>to_state_dict</code> leaves out each book's back-reference to its library, and <code>from_state_dict</code> builds each book against the new library. The shipped <code>Book</code> and <code>Member</code> classes also carry <code>get_state</code> and <code>from_state</code>; they run only in a workflow with no root, so the example app never calls them.</p>
+        <p><strong>What goes wrong when a session cannot be saved.</strong> A session whose object cannot be saved is <em>pinned</em>: it is never evicted. The conversation itself works, but:</p>
+        <ul>
+          <li>The server goes over its session limit and memory grows. Past four times the limit (<code>MAX_LIVE_SESSIONS_HARD</code>), a new conversation gets HTTP 503 unless a pinned session idle for 30 minutes (<code>PINNED_SESSION_IDLE_TTL_SECONDS</code>; 24 hours, <code>PROTECTED_SESSION_IDLE_TTL_SECONDS</code>, when a question waits for its user) can be dropped, losing its object and any open question. The server's periodic reaper also drops such idle pinned sessions whenever the live count is above the limit, not only at four times.</li>
+          <li>A shutdown writes no checkpoint for it, so after a restart the conversation starts over from the startup command.</li>
+        </ul>
+        <p>At startup the server lists every context class with no <code>get_state</code>, except one declared <code>occupiable = False</code>: no object is ever of that class, so it is never the saved object and needs no hook (the library's <code>Record</code> needs only that one line; the shipped file also keeps a <code>get_state</code> returning <code>fastworkflow.EPHEMERAL</code>, which is not needed). The first time a session is pinned the server logs a warning naming the class and the reason. For an object not worth saving, return <code>fastworkflow.EPHEMERAL</code> from <code>get_state</code>: the session is still pinned, on purpose, and nothing warns about it. The hooks come in pairs. A class with <code>from_state</code> but no <code>get_state</code>, or with one of <code>get_locator</code> and <code>find_by_locator</code> without the other, fails the load ("Member: has get_locator but no find_by_locator; the two hooks come as a pair: write both, or neither"), which <code>fastworkflow run</code>, <code>fastworkflow train</code> and the server report at startup. A class whose <code>get_state</code> returns a dict but that has no <code>from_state</code> is never saved, since it could not be rebuilt: the session is pinned, and the warning says "has get_state but no from_state hook, so its saved state could not be restored".</p>
+        <p>Beginner mistakes, and what you would see:</p>
+        <ul>
+          <li><strong>Forgetting the <code>return</code>.</strong> <code>None</code> is treated as a bug, not as "do not save": the session is pinned and the warning says to return a dict or <code>fastworkflow.EPHEMERAL</code>.</li>
+          <li><strong>A value that is not plain JSON.</strong> A <code>date</code>, a <code>set</code>, one of your own objects, a key that is not a string, or <code>NaN</code> is refused, never turned into a string. So is one list placed under two keys, which would come back as two lists. No checkpoint is written, the session stays in memory, and the log says "Not evicting ... checkpoint write failed" with the bad value's path (such as <code>$.payload.command_contexts.state.when: date is not JSON-native</code>, the path starting at the saved section's envelope). A tuple is refused too: return a list. Convert it in <code>get_state</code>, say a date to an ISO string. A <code>StrEnum</code> or <code>IntEnum</code> value passes and comes back as a plain <code>str</code> or <code>int</code>.</li>
+          <li><strong>A <code>from_state</code> that fails.</strong> If it raises or returns another class, the snapshot is set aside, an error is logged, and the conversation starts fresh from the startup command. Its signature is not checked at load, so a <code>from_state</code> without the keyword <code>state_version</code> fails this way at the first restore.</li>
+        </ul>
+        <h4 id="c-node">Find the current record again</h4>
+        <p>A command can move the workflow onto a record inside the root, say one member, with <code>workflow.record = child</code> (see <a href="e-object.html#e-move">move onto a record</a>). Only the root is saved, so the framework must note where that record sits and find it in the rebuilt root. A <em>locator</em> is a short string you choose that points at one record inside the root; two more class methods write and read it.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/_Library.py</figcaption>
+        <pre><code>class Context:
+    <span class="c"># get_parent, get_displayname, get_state and from_state as above</span>
+
+    @classmethod
+    def get_locator(cls, record: Union[Book, Member]) -&gt; str:
+        kind = "book" if type(record).__name__ == "Book" else "member"
+        return f"{kind}:{record.uid}"            <span class="c"># "member:m2"</span>
+
+    @classmethod
+    def find_by_locator(cls, anchor: Library, locator: str) -&gt; Optional[Union[Book, Member]]:
+        kind, _, uid = locator.partition(":")
+        return (anchor.books if kind == "book" else anchor.members).get(uid)</code></pre>
+      </figure>
+      <div class="prose">
+        <ul>
+          <li>The pair goes on the context class of the <strong>root</strong> (here <code>Library</code>), next to its <code>get_state</code>, because the locator points into what was saved.</li>
+          <li><code>get_locator(cls, record)</code> is called when the session is saved and the current record is not the root itself. It must cover every kind of record a command can move onto: the library's <code>open_book</code> and <code>open_member</code> reach books and members, so the string names the kind and the uid.</li>
+          <li><code>find_by_locator(cls, anchor, locator)</code> gets the rebuilt root as <code>anchor</code> and returns the record the string names <em>in that root</em>. It looks the record up; it never builds one.</li>
+        </ul>
+        <p><strong>What happens at run time.</strong> At save time the framework checks the pair: it calls <code>find_by_locator(root, get_locator(record))</code> on the live root and requires the very same object back (Python's <code>is</code>, not <code>==</code>). On restore it rebuilds the root with <code>from_state</code> and calls <code>find_by_locator</code> to put the workflow back on member m2. The user carries on there, and climbing to the library (see <a href="c-parent.html">the enclosing record</a>) reaches the restored root.</p>
+        <p><strong>When you do not need the pair.</strong> When no command assigns <code>workflow.record</code>, the framework saves "on the root" by itself. With no root, the current record is the object saved, through its own <code>get_state</code> and <code>from_state</code>.</p>
+        <p><strong>What the user sees without it.</strong> If the root has <code>get_state</code> but no locator pair, a session standing on a member is pinned (see above); one standing on the root is saved normally, as long as the record the last command ran on (the response slot, a second saved position) is also the root or can be located; a session whose last command ran on another record, for example one found by climbing, needs the locator pair too, and the log message then says "the response context is not the anchor". When the pinned session is dropped or the server restarts, the user starts over from the startup command, on the root, and any open question is lost. The log warns once per class that "Library has no get_locator/find_by_locator pair to point into it".</p>
+        <p>Beginner mistakes:</p>
+        <ul>
+          <li><strong>Building a record instead of finding it.</strong> A <code>find_by_locator</code> that returns <code>Member(...)</code>, a copy, or the wrong record fails the save-time check: the session is pinned and the log says "Library.find_by_locator did not round-trip the current context locator 'member:m2'". So does a method that raises, or a <code>get_locator</code> that meets a kind of record it does not handle.</li>
+          <li><strong>Putting the pair on the child's class.</strong> The framework reads it only from the root's class, so the session is pinned with the "no get_locator/find_by_locator pair" warning.</li>
+        </ul>
+        <h4 id="c-share">Write the hooks once for many classes</h4>
+        <p>When several context classes need the same hooks, do not copy them into each file. Write them once on a plain class in a helper file under <code>_commands/</code> whose name starts with an underscore, such as <code>_checkpoint.py</code>. The command scanner skips such a file, so it is neither a command nor a context. Each context class then inherits from it, and a class that needs something different writes that one method itself.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/_checkpoint.py, and _commands/Book/_Book.py beside it</figcaption>
+        <pre><code><span class="c"># _commands/_checkpoint.py</span>
+class CheckpointHooks:
+    state_version = 1
+
+    @classmethod
+    def get_state(cls, record): ...
+    <span class="c"># from_state, get_locator and find_by_locator are written here too</span>
+
+<span class="c"># _commands/Book/_Book.py</span>
+from .._checkpoint import CheckpointHooks
+
+class Context(CheckpointHooks):          <span class="c"># Book has all four hooks now</span>
+    @classmethod
+    def get_displayname(cls, record) -&gt; str:
+        return f"Book: {record.title}"</code></pre>
+      </figure>
+      <div class="prose">
+        <ul>
+          <li><strong>The import.</strong> From a callback file, write <code>from .._checkpoint import CheckpointHooks</code>: two dots go from <code>_commands/Book/</code> up to <code>_commands/</code>, the same way a callback file reaches your application code with <code>from ...application.library import Book</code>.</li>
+          <li><strong>What may be inherited.</strong> The framework reads each member from the class itself, so <code>get_state</code>, <code>from_state</code>, <code>state_version</code>, <code>get_locator</code>, <code>find_by_locator</code>, <code>get_parent</code>, <code>get_displayname</code>, <code>instance_label_attr</code> and <code>occupiable</code> may all come from a base class.</li>
+          <li><strong>Overriding.</strong> A method written in the <code>Context</code> class wins over the inherited one. It can call the inherited one with <code>super().get_state(record)</code> and add to the result.</li>
+          <li><strong>The startup list.</strong> A class that inherits <code>get_state</code> is not listed as lacking one; a class that neither writes nor inherits it still is.</li>
+        </ul>
+        <p class="see">See also <a href="e-root.html">the root object</a>, <a href="e-object.html#e-move">move onto a record</a>, <a href="c-identifiers.html">identifier formats</a>.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="c-parent.html"><span>Previous</span>The enclosing record</a>
+    <a class="next" href="c-identifiers.html"><span>Next</span>Identifier formats</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

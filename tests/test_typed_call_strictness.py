@@ -182,8 +182,10 @@ def test_the_corpus_holds_refusals_of_every_kind(folder):
     refused = {case[0] for case in CORPUS if _before(_command(folder, case[1]), case[3], case[2])[0] == "refused"}
     assert {"braces", "angle", "name-number", "unspecified", "invented-example", "that-one", "it", "own-name",
             "field-name", "command-word", "declared-choice", "kind-word", "invented-subject", "not-in-request",
-            "identifier-fragment", "role-conflict", "role-conflict-unwritten", "not-an-enum-value",
-            "not-given-text", "unknown-marker", "missing-required"} <= refused
+            "identifier-fragment", "not-an-enum-value", "not-given-text", "unknown-marker", "missing-required"} <= refused
+    # two UNMARKED inputs given one value the request writes twice are not refused: the one duplicate rule reads
+    # marked fields only (bd fix-qjne.20)
+    assert not {"role-conflict", "role-conflict-unwritten"} & refused
 
 
 # ---------------------------------------------------------------- the typed-fill fallback (fix-48np)

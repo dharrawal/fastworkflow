@@ -1256,6 +1256,40 @@ class TestHarness:
         # policy is visible in its own evidence rather than silently different.
         assert "dspy_memory_policy" in posture
 
+    def test_the_harness_forces_learning_from_use_off_and_records_the_head_version(
+        self, initialized_fastworkflow, todo_workflow_path, deterministic_commands,
+        restore_env_vars,
+    ):
+        """A round that leaves learning on changes the model under test mid-round."""
+        import json
+
+        from fastworkflow import intent_learning
+        from fastworkflow.train.artifact_versioning import resolve_current_version
+
+        fastworkflow._env_vars["INTENT_LEARNING_REFIT"] = "background"
+        fastworkflow._env_vars["INTENT_LEARNING_RECORD"] = "on"
+        harness = ExperimentHarness(
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0']),
+            description="learning", run_as_agent=False,
+        )
+        harness.run(
+            [ExperimentTask(task_id="t0", messages=["add milk"])],
+            attempts=1,
+            grader=lambda run: ("pass", "g", 1.0, None),
+        )
+        assert intent_learning.refit_mode() == intent_learning.REFIT_OFF
+        assert intent_learning.recording_enabled() is False
+        store = obs.ObservabilityStore(state_paths.observability_db(todo_workflow_path))
+        segments = store.get_experiment(harness.experiment_id)["evidence_runs"]
+        posture = segments[0]["record"]["experiment"]["cache_posture"]
+        assert posture["INTENT_LEARNING_REFIT"] == "off"
+        assert posture["INTENT_LEARNING_RECORD"] == "off"
+        row = store.experiment_attempt_rows(harness.experiment_id)[0]
+        detail = row.get("detail")
+        if detail is None:
+            detail = json.loads(row["detail_json"])
+        assert detail["intent_head_version"] == resolve_current_version(todo_workflow_path)
+
     def test_the_memory_policy_is_opt_in_because_it_cannot_be_uninstalled(
         self, todo_workflow_path
     ):

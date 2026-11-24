@@ -1,4 +1,5 @@
 import uuid
+from types import SimpleNamespace
 
 import fastworkflow
 import pytest
@@ -12,12 +13,18 @@ from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 # ---------------------------------------------------------------------------
 
 
+#: What the stand-in registries answer for the command directory: no command, so no approval mark. The approval gate
+#: reads it before a command runs, and a call it cannot check is not run (it fails closed, bd fix-ftdl.8.17).
+NO_COMMAND_DIRECTORY = SimpleNamespace(map_command_2_metadata={})
+
+
 class FaultyRG:  # noqa: D401
     def __call__(self, *args, **kwargs):  # noqa: D401
         raise RuntimeError("boom")
 
 
 class DummyCRD:  # minimal stand-in for RoutingDefinition
+    command_directory = NO_COMMAND_DIRECTORY
     def get_command_class(self, name, module_type):  # noqa: D401
         # Only the response generator is faulty. Returning FaultyRG for
         # COMMAND_PARAMETERS_CLASS would make perform_action treat it as a
@@ -25,6 +32,14 @@ class DummyCRD:  # minimal stand-in for RoutingDefinition
         if name == "fail" and module_type == ModuleType.RESPONSE_GENERATION_INFERENCE:
             return FaultyRG
         return None
+
+    # perform_action finds the scope that owns the command (intent_loop.choose), which reads the
+    # command names; the stand-in registry answers for every workflow, the CME's included.
+    def get_command_names(self, context):  # noqa: D401
+        return ["fail"]
+
+    def get_planning_command_names(self, context):  # noqa: D401
+        return []
 
 
 def _monkey_registry(monkeypatch):
@@ -160,6 +175,7 @@ def _raising_registry(monkeypatch, exc_factory):
             raise exc_factory()
 
     class RaisingCRD:
+        command_directory = NO_COMMAND_DIRECTORY
         contexts = {"*": ["fail"]}
 
         def get_command_class(self, name, module_type):
@@ -381,6 +397,7 @@ def _perform_action_registry(monkeypatch, *, with_parameters_class):
     """
 
     class CRD:
+        command_directory = NO_COMMAND_DIRECTORY
         contexts = {"*": ["fail"]}
 
         def get_command_class(self, name, module_type):
@@ -391,6 +408,13 @@ def _perform_action_registry(monkeypatch, *, with_parameters_class):
             if module_type == ModuleType.COMMAND_PARAMETERS_CLASS:
                 return _NoParams if with_parameters_class else None
             return None
+
+        # read by perform_action's search for the scope that owns the command (intent_loop.choose)
+        def get_command_names(self, context):
+            return ["fail"]
+
+        def get_planning_command_names(self, context):
+            return []
 
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: CRD()
@@ -471,6 +495,7 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     fastworkflow.init({})
 
     class CRD:
+        command_directory = NO_COMMAND_DIRECTORY
         contexts = {"*": ["anything"]}
 
         def get_command_class(self, name, module_type):
@@ -489,6 +514,13 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
 
         def get_planning_command_names(self, context):
             return []
+
+        # read with the names (context_navigation.scope_command_names): a command with no Signature runs only as an
+        # action and is in no scope's names
+        class command_directory:
+            @staticmethod
+            def runs_only_as_action(name):
+                return False
 
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: CRD()

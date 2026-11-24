@@ -529,6 +529,15 @@ async function main() {
   assert.equal(msgX.querySelectorAll('.answerRest').length, 0);
   assert.ok(text(msgX.querySelector('details.paramDetails')).indexOf('long follow-up paragraph.') !== -1);
 
+  /* ---- the "/" parameter question carries question_kind "planning_parameter" ----------- */
+  const tagged = paint(failedTurn({question_kind: 'planning_parameter', parameter_request: request('Plain/record_values',
+    ['ratio', 'ids'], [], {name: 'Bob', count: 3})}));
+  assert.equal(tagged.querySelectorAll('.paramForm').length, 1, 'a completed "/" turn with the tag still gets the form');
+  const waitingTagged = failedTurn({question_kind: 'planning_parameter', parameter_request: request('Plain/record_values',
+    ['ratio', 'ids'], [], {name: 'Bob', count: 3})}, null, {status: 'awaiting_user'});
+  assert.equal(w.tmRenderParameterForm(w.tmBubble('agent', '...'), waitingTagged), null,
+    'a waiting turn with the tag is an agent turn question, not this form');
+
   /* ---- artifacts link skips prompt keys only ------------------------------------------- */
   const only = paint(failedTurn({question_kind: 'agent', approval: {a: 1}, review: {}, parameter_request: null,
     plan_choice: null}));

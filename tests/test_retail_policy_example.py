@@ -11,6 +11,7 @@ address change).
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ from fastworkflow.policy_decision import (
     CommandRecord,
     RequestedOperation,
 )
+from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 _PATH = (
     Path(__file__).resolve().parents[1]
@@ -30,19 +32,32 @@ _PATH = (
 _spec = importlib.util.spec_from_file_location("retail_example_table", _PATH)
 example = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(example)
-TABLE, FACTS = example.TABLE, example.FACTS
+#: The retail commands that carry @fastworkflow.writes. The table lists no writing commands: the loader
+#: reads the marks (policy_loader.with_workflow_writes), and the loader test pins this set against them.
+WRITES = frozenset({
+    "cancel_pending_order",
+    "modify_pending_order_address",
+    "modify_pending_order_items",
+    "modify_pending_order_payment",
+    "modify_user_address",
+    "return_delivered_order_items",
+    "exchange_delivered_order_items",
+})
+TABLE = example.TABLE
+FACTS = dataclasses.replace(example.FACTS, write_commands=WRITES)
 
 
-def test_the_example_loads_through_the_policy_loader():
+def test_the_example_loads_through_the_policy_loader(initialized_fastworkflow):
     from fastworkflow.policy_loader import load_policy
 
+    assert not example.FACTS.write_commands
     point, facts = load_policy(str(_PATH.parents[1]))
     assert point.enabled
     assert point.table.version == example.TABLE_VERSION == "retail-demo/0.4.1"
     assert [r.row_id.split("-")[0] for r in point.table.rows] == [
         "S3", "S2", "S6", "S4", "S8", "S7", "S5", "S1",
         "C2", "C5", "D1", "C4", "C6", "C8"]
-    assert facts.is_write("cancel_pending_order")
+    assert facts.write_commands == WRITES
     assert facts.reports_failure("User ID: Error: User not found")
 
 
@@ -146,6 +161,20 @@ def s_write(command, history=S_READ, **args):
         command_name=command,
         command_args=args,
     )
+
+
+def test_a_workflow_whose_commands_cannot_be_read_fails_the_policy_load_and_says_why(monkeypatch):
+    """Was: ``command_writes.write_commands`` caught the failure to read the routing and returned no commands, so the
+    table loaded with no writing commands and its write rules silently never fired. Now the load fails, naming why."""
+    import pytest
+
+    import fastworkflow
+    from fastworkflow.policy_decision import PolicyError
+    from fastworkflow.policy_loader import load_policy
+
+    monkeypatch.setattr(fastworkflow, "RoutingRegistry", None)       # as before fastworkflow.init
+    with pytest.raises(PolicyError, match="could not be read .* the table's write rules would never fire"):
+        load_policy(str(_PATH.parents[1]))
 
 
 def test_the_intent_vocabulary_declares_the_refund_total():

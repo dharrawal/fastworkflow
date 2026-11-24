@@ -87,6 +87,7 @@ PUBLIC = (
     ("os", "module", "os"),
     ("pop_active_workflow", "function", "fastworkflow.active_workflow"),
     ("push_active_workflow", "function", "fastworkflow.active_workflow"),
+    ("resolve_startup_action", "function", "fastworkflow"),
     ("session_state_store", "module", "fastworkflow.session_state_store"),
     ("state_paths", "module", "fastworkflow.state_paths"),
     ("state_serialization", "module", "fastworkflow.state_serialization"),
@@ -97,6 +98,7 @@ PUBLIC = (
     ("user_approval_for_execution", "function", "fastworkflow.command_declarations"),
     ("utils", "module", "fastworkflow.utils"),
     ("workflow", "module", "fastworkflow.workflow"),
+    ("workflow_startup_action", "function", "fastworkflow"),
     ("workflow_execution_context", "module", "fastworkflow.workflow_execution_context"),
     ("writes", "function", "fastworkflow.command_declarations"),
 )

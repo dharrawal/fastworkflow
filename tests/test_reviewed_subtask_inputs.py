@@ -334,7 +334,9 @@ def test_a_draft_refusal_accepted_as_shown_falls_back_to_the_agent_with_no_new_e
     gated.ctx.process_turn("no")                                 # the second in a row: the agent takes over
     record = _open_review(gated)
     assert _subtask(record, 1).inputs == []
-    assert "Persuasion" in _subtask(record, 1).check
+    # the refused title is not among the inputs, so the line says it is missing, not a refusal of a value the item does
+    # not hold (the draft is worked out again from its inputs, ``review_proposals.rechecked``)
+    assert _subtask(record, 1).check == "missing required argument title"
     reviewed = (len(lm.prompts), len(planner.prompts))           # the two replies were each read by the extractor
 
     gated.script.steps = list(STEPS)

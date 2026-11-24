@@ -29,8 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from fastworkflow import subtask_pool, turn_cache, turn_progress
 from fastworkflow.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
 from fastworkflow.review_engine import (
-    KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, Proposal,
-    Split, _SafeValues, register_proposal)
+    KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, NoEditsRead, Proposal,
+    Split, _reader_notes, _SafeValues, note_reader_drop, register_proposal)
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,22 @@ class SubTask(BaseModel):
     #: reads them back from ``check``'s text). Empty when ``check`` is a refusal of something else. Not shown; absent
     #: from the serialized item when empty.
     check_missing: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
+    #: For a name in ``check_missing`` whose extracted value was refused as not given (a pronoun, a word of the workflow's
+    #: vocabulary): the value with the reason (``Extraction.screened``), so the question that asks for it says why. Not
+    #: shown; absent from the serialized item when empty.
+    check_screened: dict[str, str] = Field(default_factory=dict, json_schema_extra={"review_hidden": True})
+    #: The arguments ``check`` says are refused (not missing), by name: the review line says how to change each one with a
+    #: structured edit, also one the item does not show. Not shown; absent from the serialized item when empty.
+    check_refused: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
+    #: The refusal when the draft's values were refused and the refusal names no argument (a validator's
+    #: ``Refused(message)`` with no field, a rule of the ``Input``; the same text as ``check`` for a planning means): nothing
+    #: is missing to ask for, so the part is not asked about (``resolution.step``). Not shown; absent from the serialized
+    #: item when empty.
+    refused_without_field: str = Field(default="", json_schema_extra={"review_hidden": True})
+    #: The optional fields the duplicate rule left not given in the draft (``ask.left_empty_line``): field -> the note, one
+    #: plain line the review shows under the item (not a refusal: the item runs without them). Kept while the item does
+    #: not hold the field. Absent from the serialized item when empty.
+    check_notes: dict[str, str] = Field(default_factory=dict, json_schema_extra={"review_hidden": True})
     #: The means the draft drafted this sub-task's inputs for (``draft_inputs`` ran on its goal), or "" when it did not
     #: (drafting off, the draft failed, or the user added the sub-task; a split or merged one keeps its first item's).
     #: fix-48np.1: a sub-task whose means is still the drafted one is not drafted again at run time
@@ -153,6 +169,11 @@ class SubTask(BaseModel):
     #: inputs or means makes it differ, and the item then runs as the one job it reads. Not shown.
     parts: list[str] = Field(default_factory=list, json_schema_extra={"review_hidden": True})
     parts_fingerprint: str = Field(default="", json_schema_extra={"review_hidden": True})
+    #: The user answered the review with "look it up" for this part (``ProposalReview/look_up``, bd fix-ftdl.4.3): while
+    #: it runs, a command that writes (``command_writes.write_commands``) is refused unrun at the one dispatch of every
+    #: command (``CommandExecutor._invoke_command_impl``), whatever means the re-pick ended on. Kept by every later edit
+    #: of the item. Not shown; absent from the serialized item when False.
+    read_only: bool = Field(default=False, json_schema_extra={"review_hidden": True})
     #: The item this one came from before this reply (set by ``apply_edits``; not serialized).
     _before_item: Optional["SubTask"] = PrivateAttr(default=None)
     #: This reply asked for look_up on this item (set by ``apply_edits``; not serialized).
@@ -176,6 +197,16 @@ class SubTask(BaseModel):
         data = handler(self)
         if isinstance(data, dict) and not data.get("check_missing"):
             data.pop("check_missing", None)
+        if isinstance(data, dict) and not data.get("check_screened"):
+            data.pop("check_screened", None)
+        if isinstance(data, dict) and not data.get("check_refused"):
+            data.pop("check_refused", None)
+        if isinstance(data, dict) and not data.get("refused_without_field"):
+            data.pop("refused_without_field", None)
+        if isinstance(data, dict) and not data.get("check_notes"):
+            data.pop("check_notes", None)
+        if isinstance(data, dict) and not data.get("read_only"):
+            data.pop("read_only", None)
         return data
 
 
@@ -298,17 +329,25 @@ def dropped_input_part(existing: list[SubTaskInput], text: str) -> Optional[str]
     return next((part for part in parts if _input_edit_part_key(part) in _META_INPUT_KEYS), None)
 
 
-#: An input's value that clears the input: ``kind=none`` removes ``kind``.
+#: An input's value that clears the input: ``kind=none`` removes ``kind``, and so does an empty value (``kind=``).
 _CLEARING_VALUES = frozenset({"none", "null"})
 
 
+def _clears(value: Optional[str]) -> bool:
+    """Whether an input's new *value* removes the input: ``none``, ``null`` or nothing at all (``name=``)."""
+    text = (value or "").strip().lower()
+    return not text or text in _CLEARING_VALUES
+
+
 def _is_clearing_change(edit: Change) -> bool:
-    """A one-input clearing change (``name=none``): it is applied on its own, never merged with other input edits."""
+    """A one-input clearing change (``name=none``, ``name=``): it is applied on its own, never merged with other input
+    edits."""
     if edit.field != "inputs":
         return False
     parts = _input_edit_parts((edit.value or "").strip())
     return (len(parts) == 1 and _input_edit_part_key(parts[0]) is not None
-            and (SubTaskInput.from_text(parts[0]).value or "").strip().lower() in _CLEARING_VALUES)
+            and SubTaskInput.from_text(parts[0]).from_subtask is None
+            and _clears(SubTaskInput.from_text(parts[0]).value))
 
 
 def _raw_input_value(part: str) -> Optional[str]:
@@ -353,8 +392,9 @@ def _merge_one_subtask_input(existing: list[SubTaskInput], text: str) -> list[Su
     new_input = SubTaskInput.from_text(text)
     result = list(existing)
     if new_input.name:
-        if (new_input.value or "").strip().lower() in _CLEARING_VALUES:
-            # ``name=none`` clears that one input (``inputs=none`` clears them all).
+        if new_input.from_subtask is None and _clears(new_input.value):
+            # ``name=none`` or ``name=`` clears that one input (``inputs=none`` clears them all): the review shows it
+            # removed, as the step runs.
             return [each for each in result if each.name != new_input.name]
         for position, each in enumerate(result):
             if each.name == new_input.name:
@@ -424,6 +464,16 @@ def _input_user_line(inp: SubTaskInput) -> str:
     return f"{inp.name}: {text}" if inp.name else text
 
 
+#: The review's badge of a part whose command changes data (" - changes data" on its line, ``badges`` in the payload).
+CHANGES_DATA_BADGE = "changes data"
+#: The review's badge of an ad hoc part (no command matched it, ``MEANS_FROM_SCRATCH``) when the agent that will plan
+#: it can reach a command that changes data: the workflow has one and an agent model is set. Code cannot tell which
+#: commands the agent will call (it can move between records), so every such part may change data.
+MAY_CHANGE_DATA_BADGE = "may change data"
+#: The review's badge of a part the user asked only to look up (``SubTask.read_only``, bd fix-ftdl.4.3): it changes no
+#: data, whatever its command, since every write is refused while it runs.
+LOOK_UP_ONLY_BADGE = "look up only"
+
 #: Appended to an ad hoc item's line in the rendered review text in no-agent mode (only then).
 NOT_RUN_HERE_SUFFIX = " - not run here (no agent model); a suggested plan is returned"
 
@@ -437,23 +487,40 @@ class SubTaskProposal(Proposal):
     min_items = 1
     items: list[SubTask] = Field(default_factory=list)
 
-    def user_rendering(self, workflow_folderpath: Optional[str] = None, *, no_agent: bool = False) -> str:
+    def badges(self, workflow_folderpath: Optional[str] = None) -> list[str]:
+        """Each part's badge, the one definition of what the review says a part does to the data: ``LOOK_UP_ONLY_BADGE``
+        for a part the user asked only to look up, ``CHANGES_DATA_BADGE`` for any other part that names a command that
+        writes (``command_writes.write_commands``), ``MAY_CHANGE_DATA_BADGE`` for an ad hoc part when the workflow has a
+        command that writes and an agent model is set (``no_agent_mode.agent_model_specified``: with none, an ad hoc
+        part is not run here), else "". The text, the payload and ``changes_data`` read it."""
         from fastworkflow.command_writes import write_commands
+        from fastworkflow.no_agent_mode import agent_model_specified
 
         writes = write_commands(workflow_folderpath) if workflow_folderpath else frozenset()
+        ad_hoc_may_write = bool(writes) and agent_model_specified()
+        return [LOOK_UP_ONLY_BADGE if item.read_only
+                else (MAY_CHANGE_DATA_BADGE if ad_hoc_may_write else "") if item.means.kind == MEANS_FROM_SCRATCH
+                else CHANGES_DATA_BADGE if item.means.name in writes
+                else "" for item in self.items]
+
+    def changes_data(self, workflow_folderpath: Optional[str] = None) -> bool:
+        """Whether a part changes or may change data (badge ``CHANGES_DATA_BADGE`` or ``MAY_CHANGE_DATA_BADGE``): the
+        turn then needs an explicit yes."""
+        return bool({CHANGES_DATA_BADGE, MAY_CHANGE_DATA_BADGE} & set(self.badges(workflow_folderpath)))
+
+    def user_rendering(self, workflow_folderpath: Optional[str] = None, *, no_agent: bool = False) -> str:
         lines = [f"{self.title}:"]
-        for index, item in enumerate(self.items, 1):
+        for index, (item, badge) in enumerate(zip(self.items, self.badges(workflow_folderpath)), 1):
             input_bits = [_input_user_line(each) for each in item.inputs]
             suffix = f" ({', '.join(input_bits)})" if input_bits else ""
-            write_badge = ""
-            if item.means.kind != MEANS_FROM_SCRATCH and item.means.name in writes:
-                write_badge = " - changes data"
+            write_badge = f" - {badge}" if badge else ""
             if no_agent and item.means.kind == MEANS_FROM_SCRATCH:
                 # No agent model: this item will not be run here (its review entry is ``not_run_here``).
                 write_badge = NOT_RUN_HERE_SUFFIX
             lines.append(f"{index}. {item.goal}{suffix}{write_badge}")
             if item.check and item.means.kind == MEANS_PLANNING and (note := _check_line(index, item)):
                 lines.append(f"   {note}")
+            lines.extend(f"   {line}" for line in item.check_notes.values())
         return "\n".join(lines)
 
     def model_rendering(self) -> str:
@@ -478,9 +545,13 @@ class SubTaskProposal(Proposal):
         Inputs the user set in the same reply are kept: re-draft, then overlay those inputs.
         """
         workflow = getattr(host, "_app_workflow", None)
-        if workflow is None or not drafting_on():
+        if workflow is None:
             return self
         before_items = list(before.items) if isinstance(before, SubTaskProposal) else []
+        if not drafting_on():
+            return self.model_copy(update={"items": [
+                _rechecked_if_changed(workflow, item, before_items[position] if position < len(before_items) else None)
+                for position, item in enumerate(self.items)]})
         planner_lm = getattr(host, "_current_planner_lm", None)
         items: list[SubTask] = []
         for position, item in enumerate(self.items):
@@ -526,7 +597,7 @@ class SubTaskProposal(Proposal):
                   and (item.means != before_item.means or item.drafted_means != item.means.name)):
                 item = drafted_item(workflow, item, item.goal, items, planner_lm=planner_lm)
                 item = _overlay_inputs(item, kept)
-            items.append(item)
+            items.append(_rechecked_if_changed(workflow, item, before_item))
         return self.model_copy(update={"items": items})
 
     def item_values(self, item: Any) -> dict[str, Any]:
@@ -557,19 +628,95 @@ class SubTaskProposal(Proposal):
 
 
 def _check_line(index: int, item: "SubTask") -> str:
-    """The review line for a planning means whose drafted arguments the framework refuses: what is missing and how to
-    give it (the reply grammar the review reads), else the refusal in its own words."""
+    """The review line for a planning means whose arguments the framework refuses (``check``, worked out again whenever
+    the item's inputs change: ``rechecked``): what is missing and how to give it (the reply grammar the review reads),
+    then a refused value in the check's own words and how to change it (also one the item does not show), else the
+    refusal in its own words."""
+    lines: list[str] = []
     if item.check_missing:
         given = {each.name for each in item.inputs if each.value or each.from_subtask}
         names = [name for name in item.check_missing if name not in given]
-        if not names:
-            return ""             # the user has given them since the draft: the draft's note is stale
-        quoted = " and ".join(repr(name) for name in names)
-        replies = "; ".join(f"change {index}: {name}=..." for name in names)
-        return (f"Cannot run yet: the required value{'s' if len(names) > 1 else ''} {quoted} "
-                f"{'are' if len(names) > 1 else 'is'} missing. "
-                f'Reply "{replies}" to give {"them" if len(names) > 1 else "it"}.')
-    return f"Cannot run as shown: {item.check}."
+        if names:
+            quoted = " and ".join(repr(name) for name in names)
+            replies = "; ".join(f"change {index}: {name}=..." for name in names)
+            lines.append(f"Cannot run yet: the required value{'s' if len(names) > 1 else ''} {quoted} "
+                         f"{'are' if len(names) > 1 else 'is'} missing. "
+                         f'Reply "{replies}" to give {"them" if len(names) > 1 else "it"}.')
+    if item.check_refused:
+        replies = "; ".join(f"change {index}: {name}=..." for name in item.check_refused)
+        lines.append(f"Cannot run as shown: {item.check}. "
+                     f'Reply "{replies}" to change {"them" if len(item.check_refused) > 1 else "it"}.')
+    elif not item.check_missing:
+        lines.append(f"Cannot run as shown: {item.check}.")
+    return " ".join(lines)
+
+
+def _input_signature(inputs) -> list[tuple]:
+    """What an input list says, for telling whether it changed: each input's name, value and source sub-task."""
+    return [(each.name, each.value, each.from_subtask) for each in inputs]
+
+
+def _rechecked_if_changed(workflow, item: "SubTask", before: Optional["SubTask"]) -> "SubTask":
+    """*item* rechecked (``rechecked``) when its inputs or its means differ from *before* (the item before this reply), or
+    when its check refuses a value the item does not hold (the draft's refusal of a value it left out: the item as
+    shown runs without it, so any reply that revises the review shows what the inputs now earn)."""
+    held = {each.name for each in item.inputs if each.value or each.from_subtask is not None}
+    if before is not None and item.means == before.means and \
+            _input_signature(item.inputs) == _input_signature(before.inputs) and \
+            all(name in held for name in item.check_refused):
+        return item
+    return rechecked(workflow, item)
+
+
+def rechecked(workflow, item: "SubTask") -> "SubTask":
+    """*item* with its check worked out again from its inputs as they stand (no model call), so a refusal the inputs no
+    longer earn is gone and one they now earn is shown: the guards on every argument (``planning_commands.argument_gaps``,
+    the values an earlier part produces are nobody's to give), and when they pass and no value waits on an earlier part,
+    the ``Input``'s validators (``checked_arguments``, the checks the run makes on these values). Only a planning means
+    has a check; anything else, or a check that cannot be made, leaves *item* as it is."""
+    from fastworkflow import intent_loop, planning_commands
+    from fastworkflow.parameters import ask as one_ask
+
+    if item.means.kind != MEANS_PLANNING or workflow is None:
+        return item
+    try:
+        command = planning_commands.planning_command(workflow.folderpath, item.means.name)
+        if command is None:
+            return item
+        earlier = {each.name for each in item.inputs if each.from_subtask is not None and each.name}
+        raw = {p.name: next((each.value for each in item.inputs if each.name == p.name and each.value), None)
+               for p in command.params}
+        check, refused_without_field = "", ""
+        with intent_loop.on_owner_record(workflow, command.name):
+            gaps = planning_commands.argument_gaps(command, raw, item.goal).from_earlier(earlier)
+            if gaps.invalid:
+                name, why = gaps.invalid[0]
+                check = f"{name}={raw.get(name)!r} {why}"
+            elif gaps.missing:
+                check = "missing required argument " + ", ".join(gaps.missing)
+            elif not earlier:
+                try:
+                    planning_commands.checked_arguments(command, raw, item.goal, workflow)
+                except planning_commands.PlanningCommandCallError as refusal:
+                    check = str(refusal)
+                    if not planning_commands.refusal_names_an_input(command, refusal):
+                        refused_without_field = check
+    except Exception as exc:  # noqa: BLE001 - the check is advisory: the run makes its own
+        logger.warning("could not check the inputs of %s again (%s: %s)", item.means.name, type(exc).__name__, exc)
+        return item
+    # The duplicate rule leaves an optional field empty when the step runs (``checked_arguments`` applies it to the
+    # reviewed values): the review shows that field removed beside its note, never a value that will not run.
+    left_empty = one_ask.left_empty_lines(gaps.left_empty)
+    inputs = [each for each in item.inputs if each.from_subtask is not None or each.name not in left_empty]
+    held = {each.name for each in inputs if each.value or each.from_subtask is not None}
+    return item.model_copy(update={
+        "inputs": inputs,
+        "check": check, "check_missing": list(gaps.missing),
+        "check_refused": [name for name, _ in gaps.invalid],
+        "check_screened": {name: text for name, text in item.check_screened.items() if name in gaps.missing},
+        "check_notes": {**{name: line for name, line in item.check_notes.items() if name not in held},
+                        **left_empty},
+        "refused_without_field": refused_without_field})
 
 
 # ----------------------------------------------------------------------
@@ -577,13 +724,13 @@ def _check_line(index: int, item: "SubTask") -> str:
 # ----------------------------------------------------------------------
 
 
-def decided_item(workflow, goal: str, *, exclude=()) -> "SubTask":
+def decided_item(workflow, goal: str, *, exclude=(), part: Optional[int] = None) -> "SubTask":
     """A sub-task for *goal* whose means is what ``resolution.part_intent`` decides (``draft_choice``: a match is
     bound, anything else is ``from_scratch``; an ambiguity is asked about before the review). No inputs are drafted
     here."""
     from fastworkflow._workflows.plan_metadata_extraction import resolution
 
-    name, kind = resolution.draft_choice(resolution.part_intent(workflow, goal, exclude=exclude))
+    name, kind = resolution.draft_choice(resolution.part_intent(workflow, goal, exclude=exclude, part=part))
     if name is None:
         return SubTask(goal=goal, means=Means())
     return SubTask(goal=goal, means=Means(kind=MEANS_PLANNING if kind == resolution.KIND_PLANNING else MEANS_PLAIN,
@@ -691,9 +838,11 @@ def _prefetch_intents(workflow, subtasks: list[str]) -> bool:
             or not intent_detector.matcher_available()):
         return False
 
+    numbers = {text: number for number, text in reversed(list(enumerate(subtasks, 1)))}    # a text's first part
+
     def decide(text: str) -> None:
         try:
-            resolution.part_intent(workflow, text)
+            resolution.part_intent(workflow, text, part=numbers[text])
         except Exception as exc:  # noqa: BLE001 - the sequential loop decides again
             logger.info(f"the prefetched intent failed ({type(exc).__name__}: {exc}); it is decided again in order")
 
@@ -728,14 +877,15 @@ def draft_round1_proposal(workflow, subtasks: list[str], planner_lm=None, *,
         for number, sub_task in enumerate(subtasks, 1):
             if not prefetched:
                 turn_progress.emit(turn_progress.STAGE_MATCH, number, total)
-            items.append(decided_item(workflow, sub_task))
+            items.append(decided_item(workflow, sub_task, part=number))
         proposal = SubTaskProposal(items=items)
 
     # A draft reads the sub-tasks before it only through their MEANS (``_producers``), which the proposal already
     # holds, never their drafted inputs: so the drafts are independent and wait on the model together. Each draft is
     # one sub-task's own text, and the items come back in sub-task order.
     def draft(number: int, item: SubTask, sub_task: str) -> SubTask:
-        drafted = drafted_item(workflow, item, sub_task, list(proposal.items[:number - 1]), planner_lm=planner_lm)
+        drafted = drafted_item(workflow, item, sub_task, list(proposal.items[:number - 1]), planner_lm=planner_lm,
+                               part=number)
         if parts := list(getattr(sub_task, "parts", ()) or ()):
             drafted = drafted.model_copy(update={"parts": parts})
             drafted = drafted.model_copy(update={"parts_fingerprint": _fingerprint(drafted)})
@@ -863,30 +1013,46 @@ def _is_container(annotation: Any) -> bool:
     return any(_is_container(argument) for argument in get_args(annotation)) and get_origin(annotation) is not Literal
 
 
-def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask], planner_lm=None) -> SubTask:
+def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask], planner_lm=None,
+                 part: Optional[int] = None) -> SubTask:
     """*item* with its inputs drafted from *sub_task* for its means (``draft_inputs``), its planning check, and the means
     it was drafted for (``drafted_means``). With no draft (drafting off, from scratch, a failed draft) the inputs are
     empty and a planning pick's check is ``check_planned_arguments`` of no arguments."""
-    from fastworkflow import planning_commands, run_listing
+    from fastworkflow import intent_loop, planning_commands, run_listing
 
     check = ""
     missing: list[str] = []
+    refused: list[str] = []
+    screened: dict[str, str] = {}
     inputs: list[SubTaskInput] = []
-    drafted = (draft_inputs(workflow, item, sub_task, earlier, planner_lm=planner_lm)
-               if item.means.kind != MEANS_FROM_SCRATCH else None)
-    if drafted is not None:
-        inputs = list(drafted.inputs)
-    if item.means.kind == MEANS_PLANNING:
-        command = planning_commands.planning_command(workflow.folderpath, item.means.name)
+    if item.means.kind == MEANS_FROM_SCRATCH:
+        return item.model_copy(update={"check": check, "check_missing": missing, "check_screened": screened,
+                                       "check_refused": refused, "check_notes": {},
+                                       "inputs": inputs, "refused_without_field": "", "drafted_means": ""})
+    # The draft's checks run the command's validators on the record it will run on, as the "/" path's do.
+    with intent_loop.on_owner_record(workflow, item.means.name):
+        drafted = draft_inputs(workflow, item, sub_task, earlier, planner_lm=planner_lm, part=part)
         if drafted is not None:
-            check = drafted.refusal or ""
-            missing = list(drafted.missing)
-        elif command is not None:
-            checked = run_listing.check_planned_arguments(command, {}, sub_task)
-            check = checked.refusal or ""
-            missing = list(checked.missing)
-    return item.model_copy(update={"check": check, "check_missing": missing, "inputs": inputs,
-                                   "drafted_means": item.means.name if drafted is not None else ""})
+            inputs = list(drafted.inputs)
+        if item.means.kind == MEANS_PLANNING:
+            command = planning_commands.planning_command(workflow.folderpath, item.means.name)
+            if drafted is not None:
+                check = drafted.refusal or ""
+                missing = list(drafted.missing)
+                refused = list(drafted.refused)
+                screened = {name: text for name, text in drafted.screened if name in missing}
+            elif command is not None:
+                checked = run_listing.check_planned_arguments(command, {}, sub_task)
+                check = checked.refusal or ""
+                missing = list(checked.missing)
+    drafted_item_ = item.model_copy(update={
+        "check": check, "check_missing": missing, "check_screened": screened, "check_refused": refused,
+        "inputs": inputs, "check_notes": dict(drafted.left_empty) if drafted is not None else {},
+        "refused_without_field": drafted.refused_without_field if drafted is not None else "",
+        "drafted_means": item.means.name if drafted is not None else ""})
+    # A refusal of a value the draft left out of the inputs (the item as shown runs without it) is worked out again from
+    # the inputs as they stand, so the review never says "Cannot run as shown" about a value the item does not hold.
+    return _rechecked_if_changed(workflow, drafted_item_, drafted_item_)
 
 
 #: ``FW_DRAFT_ARGUMENTS`` (on by default since fix-48np.1): the draft fills each sub-task's inputs from the shared
@@ -912,6 +1078,14 @@ class DraftedInputs:
     refusal: Optional[str] = None
     #: The required arguments the refusal says are simply missing (nothing refused), by name.
     missing: tuple[str, ...] = ()
+    #: ``(name, "'it' is a pronoun, not a value")`` of the missing ones whose extracted value the screens refused.
+    screened: tuple[tuple[str, str], ...] = ()
+    #: The refusal when it names no argument (``SubTask.refused_without_field``).
+    refused_without_field: str = ""
+    #: The arguments the refusal says are refused (not missing), by name (``SubTask.check_refused``).
+    refused: tuple[str, ...] = ()
+    #: The duplicate rule's notes of the optional fields it left not given (field -> line, ``SubTask.check_notes``).
+    left_empty: tuple[tuple[str, str], ...] = ()
 
 
 def _input_text(value: Any) -> str:
@@ -970,7 +1144,7 @@ def _given(info: Any, value: Any) -> bool:
 
 
 def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
-                 planner_lm=None) -> Optional[DraftedInputs]:
+                 planner_lm=None, part: Optional[int] = None) -> Optional[DraftedInputs]:
     """The inputs of *item*'s means drafted from *sub_task* (fix-48np, stage 1), or None when no draft was made.
 
     A field whose declared producer (``from_command_output``) an earlier sub-task runs is ``from sub-task N``, not extracted. The
@@ -983,13 +1157,16 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
     that is still missing, give the refusal and no values. None when the switch is off (``FW_DRAFT_ARGUMENTS=off``; on
     by default) or the extraction fails: the draft is advisory and never fails the turn.
     """
-    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
+    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
+        extract_arguments, traced_extraction)
 
     if not drafting_on():
         return None
     try:
         from_earlier = _producers(workflow, item.means, earlier)
-        result = extract_arguments(workflow, item.means.name, sub_task)
+        # In ONE ``fw.nlu.param_extraction`` span, by the writer the CME's parameter stage uses, with the part's number.
+        result = traced_extraction(item.means.name, lambda bag: extract_arguments(workflow, item.means.name, sub_task, bag),
+                                   valid=lambda found: found.valid, part=part)
     except Exception as exc:  # noqa: BLE001 - the draft is advisory: no inputs, as before
         # A warning, not a silent pass: a failure here (a provider error, a test's no-model guard) stays visible.
         logger.warning("could not draft the inputs of %s (%s: %s); the draft shows none",
@@ -1000,21 +1177,29 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
         return DraftedInputs(inputs=tuple(inputs))
     covered = bool(result.missing) and set(result.missing) <= set(from_earlier) and not result.extraction.invalid
     fields = type(result.params).model_fields
-    values = {name: getattr(result.params, name, None) for name in fields}
+    # a marked value a validator rewrote is drafted as the checks accepted it: the later checks read it (the values
+    # question's, the run's), and the run's validators rewrite it again
+    values = {name: result.unvalidated.get(name, getattr(result.params, name, None)) for name in fields}
+    left_empty = dict(result.left_empty)
     if not result.valid and not covered:
-        filled = _typed_fallback_values(workflow, item, sub_task, values, result.refusal, planner_lm)
+        filled = _typed_fallback_values(workflow, item, sub_task, values, result.refusal, planner_lm, left_empty)
         if filled is None:
             kept, refusal, missing = _partial_inputs(workflow, item, sub_task, values, fields, from_earlier,
                                                      result.refusal,
                                                      result.missing if not result.extraction.invalid else ())
-            return DraftedInputs(inputs=tuple(inputs + kept), refusal=refusal, missing=missing)
+            return DraftedInputs(inputs=tuple(inputs + kept), refusal=refusal, missing=missing,
+                                 screened=tuple(result.extraction.screened),
+                                 left_empty=tuple(result.left_empty.items()),
+                                 refused=tuple(name for name, _ in result.extraction.invalid)
+                                 if refusal and not missing else (),
+                                 refused_without_field=(refusal or "") if not result.extraction.names else "")
         values = filled
     for name, info in fields.items():
         value = values.get(name)
         if name in from_earlier or not _given(info, value):
             continue
         inputs.append(SubTaskInput(name=name, value=_input_text(value), drafted=True))
-    return DraftedInputs(inputs=tuple(inputs))
+    return DraftedInputs(inputs=tuple(inputs), left_empty=tuple(left_empty.items()))
 
 
 def _partial_inputs(workflow, item: SubTask, sub_task: str, values: dict, fields, from_earlier: dict,
@@ -1040,8 +1225,10 @@ def _partial_inputs(workflow, item: SubTask, sub_task: str, values: dict, fields
         return [], refusal, tuple(missing)
     if not gaps.names:
         return [], refusal, tuple(missing)
+    # the values the checks stand behind, as the valid draft keeps them: a default is not a drafted value (``_given``)
     kept = [SubTaskInput(name=name, value=_input_text(value), drafted=True)
-            for name, value in gaps.values.items() if name in fields and name not in from_earlier]
+            for name, value in gaps.values.items()
+            if name in fields and name not in from_earlier and _given(fields[name], value)]
     only_missing = bool(gaps.missing) and not gaps.invalid
     if only_missing:
         refusal = "missing required argument " + ", ".join(gaps.missing)
@@ -1062,10 +1249,11 @@ def _stopped_at(planning_commands, command, raw: dict, sub_task: str, refusal: O
 
 
 def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict, refusal: Optional[str],
-                           planner_lm=None) -> Optional[dict]:
+                           planner_lm=None, left_empty: Optional[dict] = None) -> Optional[dict]:
     """The checked arguments of a planning means after the typed fill fallback (``typed_fallback_arguments``, the
     fallback ``typed_planning_call`` runs), or None when the means is not a planning command, the fallback fills
-    nothing, or the checks still refuse: the extractor's refusal then stands. Never raises: the draft is advisory."""
+    nothing, or the checks still refuse: the extractor's refusal then stands. Never raises: the draft is advisory.
+    *left_empty* (when given) takes the duplicate rule's notes of the fallback's checks."""
     from fastworkflow import planning_commands
 
     if item.means.kind != MEANS_PLANNING:
@@ -1090,6 +1278,11 @@ def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict,
                        item.means.name, type(exc).__name__, exc)
         return None
     logger.info("drafted %s with the typed fill fallback (%s)", item.means.name, "; ".join(notes))
+    if left_empty is not None:
+        from fastworkflow.parameters import ask as one_ask
+
+        left_empty.clear()
+        left_empty.update(one_ask.left_empty_lines(notes))
     return args
 
 
@@ -1122,7 +1315,9 @@ def redraft_for_look_up(workflow, item: SubTask, earlier: list[SubTask], *, plan
         built = decided_item(workflow, item.goal, exclude=set(writes))
         new_means = built.means
         if new_means.kind == MEANS_FROM_SCRATCH:
-            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": "", "check_missing": []})
+            return item.model_copy(update={"means": new_means, "inputs": [], "drafted_means": "", "check": "", "check_missing": [],
+                                                         "check_screened": {}, "check_refused": [], "check_notes": {},
+                                                         "refused_without_field": ""})
         item = item.model_copy(update={"means": new_means})
         return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
     return drafted_item(workflow, item, item.goal, earlier, planner_lm=planner_lm)
@@ -1164,6 +1359,17 @@ class ProposedEdit(BaseModel):
         return self
 
 
+class InvalidReadEdit(EditParseError):
+    """An edit the reader read that names no field, an input its step does not have, or no goal or parts: a reading that
+    cannot be applied as written, which the reader is asked to read again once (``model_edit_reader``)."""
+
+
+class UnknownMeansEdit(EditRefused):
+    """An edit the reader read whose means names no command a step can be bound to (``_known_means``): read again once
+    like an ``InvalidReadEdit`` (``model_edit_reader``), and when still wrong the user is told which name is not a
+    command and what the commands are, as a step number out of range is (bd fix-ftdl.11)."""
+
+
 class PendingItemSlot(EditRefused):
     """Edits parsed from free text that need an item index on a multi-item proposal."""
 
@@ -1193,6 +1399,13 @@ class ReadSubTaskEdits(dspy.Signature):
     planning_commands: str = dspy.InputField(desc="the planning commands a means can name, one per line")
     reply: str = dspy.InputField(desc="the user's reply, in their own words")
     edits: list[ProposedEdit] = dspy.OutputField(desc="the edits the reply asks for, in order; empty when it asks for none")
+
+
+#: The reader once more, when the edits it read cannot be applied (``model_edit_reader``): the same instructions and
+#: inputs, and the edits it gave with why they cannot be applied.
+RepairSubTaskEdits = ReadSubTaskEdits.append(
+    "refused", dspy.InputField(desc="the edits you read from this reply before, and why they cannot be applied; read "
+                                    "the reply again and give edits that can be"), type_=str)
 
 
 def _resolve_proposed_item(proposal: Proposal, index: Optional[int]) -> int:
@@ -1266,6 +1479,8 @@ def _clean_proposed_edit(edit: ProposedEdit) -> ProposedEdit:
     field = (edit.field or "").strip().lower()
     if edit.op == "change" and field == "goal" and edit.value.strip():
         return edit.model_copy(update={"value": _clean_goal_value(edit.value)[0]})
+    if edit.op == "add" and edit.value.strip() and (means := _clean_goal_value(edit.value)[2]):
+        _known_means(means)     # an added step whose means names no command is a failed edit, never an ad hoc step
     if edit.op in ("add", "merge") and edit.value.strip():
         return edit.model_copy(update={"value": _clean_goal_value(edit.value)[0]})
     if edit.op == "split" and edit.parts:
@@ -2231,6 +2446,7 @@ def _proposed_edits_to_engine(
     reply_text: Optional[str] = None,
 ) -> list:
     proposed = _normalize_reader_edits(proposal, proposed, reply_text=reply_text)
+    proposed = _explicit_step_of_reply(proposal, proposed, reply_text)
     proposed = _infer_missing_indexes_from_reply(proposal, proposed, reply_text)
     proposed = _dedupe_proposed_edits(proposed)
     proposed = _guard_reader_edits(proposal, proposed, reply_text)
@@ -2246,7 +2462,7 @@ def _proposed_edits_to_engine(
     for edit in proposed:
         if edit.op == "change":
             if not edit.field:
-                raise EditParseError("An edit names no field to change.")
+                raise InvalidReadEdit("An edit names no field to change.")
             resolved.append(_engine_edit(edit, _resolve_proposed_item(proposal, edit.index), proposal))
         elif edit.op == "drop":
             resolved.append(_engine_edit(edit, _resolve_proposed_item(proposal, edit.index), proposal))
@@ -2260,7 +2476,196 @@ def _proposed_edits_to_engine(
         if quoted:
             resolved = _apply_quoted_names_from_reply(proposal, resolved, reply_text, quoted)
             resolved = _dedupe_engine_edits(resolved, reply_text=reply_text, proposal=proposal)
+        resolved = _drop_moved_values(proposal, resolved, reply_text)
     return resolved
+
+
+#: A step the reply says it is about: ``step 3 should``, ``step 3's``, ``step 3:``, ``in step 3``, ``change 3:``.
+_TARGET_STEP = re.compile(
+    r"\b(?:in|for|on|change|fix|edit|update|make)\s+(?:step|item)\s+#?(\d+)\b"
+    r"|\b(?:step|item)\s+#?(\d+)(?:'s|\s*:|\s+(?:should|must|needs?|wants?)\b)"
+    r"|^\s*change\s+(\d+)\s*:",
+    re.I | re.M)
+#: A step named as where a value comes from, not as the step to change: ``the output of step 1's search``.
+_SOURCE_BEFORE = re.compile(r"\b(?:of|from|after|before|than|like|to|as)\s+$", re.I)
+
+
+def _explicit_step_of_reply(
+    proposal: Proposal, proposed: list[ProposedEdit], reply_text: Optional[str]) -> list[ProposedEdit]:
+    """The reader's ``change`` edits held to the one step the reply says it is about (``Step 3's name is too long``,
+    ``change 3: ...``): when the reply names exactly one such step and the model numbered a change edit otherwise, the
+    reply's number stands. A reply about several steps, or none, keeps the model's numbers."""
+    count = len(proposal.items)
+    if not reply_text or count < 2:
+        return proposed
+    named = {int(next(group for group in match.groups() if group)) for match in _TARGET_STEP.finditer(reply_text)
+             if not _SOURCE_BEFORE.search(reply_text[:match.start()])}
+    if len(named) != 1:
+        return proposed
+    step = next(iter(named))
+    if not 1 <= step <= count:
+        return proposed
+    return [edit.model_copy(update={"index": step, "indexes": []})
+            if edit.op == "change" and edit.index is not None and edit.index != step else edit
+            for edit in proposed]
+
+
+def _names_input(reply_text: str, name: str) -> bool:
+    """Whether the reply names input *name* (``name``, ``connected name`` or ``connected_name``) as a word."""
+    spoken = re.escape(name).replace("_", "[ _]")
+    return re.search(rf"(?<![A-Za-z0-9]){spoken}(?![A-Za-z0-9])", reply_text, re.I) is not None
+
+
+def _drop_moved_values(proposal: "SubTaskProposal", edits: list, reply_text: str) -> list:
+    """The reader's input edits without one that copies a value another input of the same step holds (and keeps) into
+    an input the reply never names (``GitLab is an application, not a feed`` read as ``name=<the person's value>``): the
+    edit is left out and the read-back says so (``note_reader_drop``). An edit of an input the reply names stands,
+    so ``the name is X and the person is Y`` is read as written."""
+    items = proposal.items
+    kept: list = []
+    dropped: list[str] = []
+    for edit in edits:
+        if not (isinstance(edit, Change) and edit.field == "inputs" and 1 <= edit.index <= len(items)):
+            kept.append(edit)
+            continue
+        item = items[edit.index - 1]
+        try:
+            after = {each.name: each for each in merge_subtask_input_edit(item.inputs, edit.value) if each.name}
+        except Exception:  # noqa: BLE001 - an edit that cannot be read is left to apply_edits, which says why
+            kept.append(edit)
+            continue
+        held = {each.name: each.value for each in item.inputs if each.name and each.from_subtask is None and each.value}
+        parts = _input_edit_parts((edit.value or "").strip())
+        left: list[str] = []
+        for part in parts:
+            new = SubTaskInput.from_text(part)
+            value = (new.value or "").strip()
+            source = next((name for name, held_value in held.items()
+                           if name != new.name and held_value.strip().casefold() == value.casefold()
+                           and after.get(name) is not None and (after[name].value or "") == held_value), None)
+            if (new.name and new.from_subtask is None and value and source is not None
+                    and held.get(new.name, "").strip().casefold() != value.casefold()
+                    and not _names_input(reply_text, new.name)):
+                dropped.append(f"I left {new.name} of step {edit.index} as it was: your reply does not name it, and "
+                               f"{value!r} is the {source}.")
+                note_reader_drop(dropped[-1])
+                continue
+            left.append(part)
+        if len(left) == len(parts):
+            kept.append(edit)
+        elif left:
+            kept.append(Change(index=edit.index, field="inputs", value=", ".join(left)))
+    if dropped and not kept:
+        raise EditRefused(" ".join(dropped) + " Say which input should change and to what, or reply yes to run it as "
+                                              "shown.")
+    return kept
+
+
+_PATH_PIECES = re.compile(r"[.\[\]\s]+")
+
+
+def _input_names_of(item: "SubTask") -> Optional[frozenset[str]]:
+    """The input names *item* can take: the ones it holds and its command's ``Input`` fields (a planning command's
+    declared parameters, an execution command's ``Input`` fields); None when nothing bounds the names: the workflow is
+    not known here, the part is ad hoc, or its command declares no inputs the workflow can read."""
+    names = {each.name for each in item.inputs if each.name}
+    folder = _folder_var.get()
+    if not folder:
+        return None
+    if item.means.kind == MEANS_PLANNING:
+        declared = declared_params(item.means.name)
+        if not declared:
+            return None     # a command the workflow does not declare (or one with no inputs): nothing bounds the names
+        names |= {p.name for p in declared}
+    elif item.means.kind == MEANS_PLAIN:
+        from fastworkflow import ModuleType, RoutingRegistry
+
+        try:
+            params_class = RoutingRegistry.get_definition(folder).get_command_class(
+                item.means.name, ModuleType.COMMAND_PARAMETERS_CLASS)
+        except Exception:  # noqa: BLE001 - no readable Input: nothing bounds the names
+            params_class = None
+        fields = getattr(params_class, "model_fields", None)
+        if not fields:
+            return None
+        names |= set(fields)
+    else:
+        return None     # an ad hoc part has no command whose inputs bound the names
+    return frozenset(names)
+
+
+def _edited_input_name(proposal: "SubTaskProposal", number: Optional[int], field: str) -> str:
+    """The input an edit's *field* names on item *number*: the field itself, or the last piece of a path the reader
+    wrote (``sub_tasks[1].inputs.kind`` is ``kind``), whose item number, when the path writes one, must be *number*.
+    A field that names no input the item can take raises ``EditParseError`` with the valid names (asked again), never
+    an input with no name."""
+    pieces = [piece for piece in _PATH_PIECES.split(field.strip()) if piece]
+    name = pieces[-1] if pieces else field.strip()
+    numbers = [int(piece) for piece in pieces[:-1] if piece.isdigit()]
+    item = proposal.items[number - 1] if isinstance(number, int) and 1 <= number <= len(proposal.items) else None
+    valid = _input_names_of(item) if item is not None else None
+    if numbers and number is not None and any(n != number for n in numbers):
+        raise InvalidReadEdit(f"The edit of {field!r} names another step than step {number}.")
+    if not re.fullmatch(r"[A-Za-z_]\w*", name) or (valid is not None and name not in valid):
+        names = ", ".join(sorted(valid)) if valid else "none"
+        raise InvalidReadEdit(f"Step {number} has no input {field!r}. Its inputs are: {names}.")
+    return name
+
+
+def _check_input_names(proposal: "SubTaskProposal", number: Optional[int], value: str) -> None:
+    """A whole-input edit (``field="inputs"``) is held to the step's real input names, as an edit of one named input is
+    (``_edited_input_name``): each ``name=value`` piece must name an input the step can take, and a bare value with no
+    name is refused when the step's inputs are known (it would land in no input, or in the wrong one). ``none`` (clear
+    them all) and ``from sub-task N`` stand."""
+    text = (value or "").strip()
+    if not text or text.lower() == "none":
+        return
+    item = proposal.items[number - 1] if isinstance(number, int) and 1 <= number <= len(proposal.items) else None
+    valid = _input_names_of(item) if item is not None else None
+    for part in _input_edit_parts(text):
+        piece = SubTaskInput.from_text(part)
+        if piece.name:
+            if piece.name.lower() not in _META_INPUT_KEYS:
+                _edited_input_name(proposal, number, piece.name)
+        elif piece.from_subtask is None and valid is not None:
+            raise InvalidReadEdit(f"Step {number}: {part.strip()!r} names no input. Its inputs are: "
+                                 f"{', '.join(sorted(valid)) or 'none'}.")
+
+
+def edited_means(proposal: "SubTaskProposal", value: str) -> str:
+    """The value of a means edit, read or typed, as it applies (``_known_means``); a means a step of *proposal* already
+    holds (a swap moves it) is not checked again. Raises ``UnknownMeansEdit`` for a name that is no command."""
+    if value.strip() in {item.means.render() for item in proposal.items}:
+        return value
+    return _known_means(value)
+
+
+def _known_means(text: str) -> str:
+    """The text form of a means the reader read (``planning:NAME``, ``plain:NAME``, a bare NAME or ``from_scratch``) with
+    its name resolved against the commands a step can be bound to (``review_plan_switch.known_plan_names`` and its
+    resolver: case, spaces, ``_`` and the context prefix ignored), as ``<kind>:<qualified name>``. A name that resolves
+    to no command, or to several, raises ``UnknownMeansEdit`` with the names (bd fix-ftdl.11): the step is never turned
+    into an ad hoc one. Unchecked when no workflow is in scope or its commands cannot be read."""
+    from fastworkflow import no_agent_mode, review_plan_switch
+
+    stripped = (text or "").strip()
+    if stripped == MEANS_FROM_SCRATCH:
+        return stripped
+    folder = _folder_var.get()
+    universe = review_plan_switch.known_plan_names(_FolderOnly(folder)) if folder else {}
+    if not universe:
+        return stripped
+    kind, colon, rest = stripped.partition(":")
+    name = rest.strip() if colon and kind.strip() in (MEANS_PLANNING, MEANS_PLAIN) else stripped
+    state, names = review_plan_switch._resolve_name(name, universe)
+    if state == "one":
+        return f"{universe[names[0]]}:{names[0]}"
+    if state == "many":
+        raise UnknownMeansEdit(f"{name!r} names several commands: {', '.join(names)}. Name one of them.")
+    every = sorted(universe)
+    cap = no_agent_mode.AD_HOC_LIST_CAP
+    listed = ", ".join(every[:cap]) + (f", and {len(every) - cap} more" if len(every) > cap else "")
+    raise UnknownMeansEdit(f"{name!r} is not a command available here. The commands are: {listed}.")
 
 
 def _engine_edit(edit: ProposedEdit, index: Optional[int] = None, proposal: Optional[Proposal] = None):
@@ -2268,7 +2673,7 @@ def _engine_edit(edit: ProposedEdit, index: Optional[int] = None, proposal: Opti
     number = edit.index if index is None else index
     if edit.op == "change":
         if not edit.field:
-            raise EditParseError("An edit names no field to change.")
+            raise InvalidReadEdit("An edit names no field to change.")
         field = edit.field.strip()
         field_key = field.lower().replace("_", " ")
         if field_key in ("desired outcome", "desired_outcome"):
@@ -2277,22 +2682,28 @@ def _engine_edit(edit: ProposedEdit, index: Optional[int] = None, proposal: Opti
             field = "goal"
         value = edit.value
         if isinstance(proposal, SubTaskProposal) and field not in ("goal", "outcome", "inputs", "means", "check"):
-            if not value.strip().startswith(f"{field}="):
-                value = f"{field}={edit.value}"
+            name = _edited_input_name(proposal, number, field)
+            if value.strip().startswith(f"{field}="):
+                value = value.strip()[len(field) + 1:]
+            value = f"{name}={value}"
             field = "inputs"
+        elif isinstance(proposal, SubTaskProposal) and field == "inputs":
+            _check_input_names(proposal, number, value)
+        elif isinstance(proposal, SubTaskProposal) and field == "means":
+            value = edited_means(proposal, value)
         return Change(index=number, field=field, value=value)
     if edit.op == "drop":
         return Drop(index=number)
     if edit.op == "add":
         if not edit.value.strip():
-            raise EditParseError("An added sub-task needs its goal.")
+            raise InvalidReadEdit("An added sub-task needs its goal.")
         after = 0 if edit.after is None else edit.after
         return Add(after=after, values={"goal": edit.value})
     if edit.op == "merge":
         return Merge(indexes=list(edit.indexes), values={"goal": edit.value} if edit.value.strip() else {})
     parts = [part for part in edit.parts if part.strip()]
     if not parts:
-        raise EditParseError("A split needs at least one part.")
+        raise InvalidReadEdit("A split needs at least one part.")
     return Split(index=number, parts=[{"goal": part} for part in parts])
 
 
@@ -2312,22 +2723,77 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
         lm = planner_lm() if callable(planner_lm) and not isinstance(planner_lm, dspy.BaseLM) else planner_lm
         if lm is None:
             lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-        shown = proposal.model_rendering() if isinstance(proposal, SubTaskProposal) else proposal.rendering()
-        try:
-            with dspy.context(lm=lm):
-                prediction = dspy.Predict(ReadSubTaskEdits)(
-                    proposal=shown,
-                    planning_commands="\n".join(f"planning:{name}" for name in planning_names) or "none",
-                    reply=text)
-            proposed = list(prediction.edits or [])
-        except Exception as exc:  # noqa: BLE001 - an unreadable reply asks again; it never fails the turn
-            logger.info("the reply could not be read as edits (%s)", type(exc).__name__)
-            raise EditParseError("I could not read that as an edit.") from exc
+        inputs = {"proposal": proposal.model_rendering() if isinstance(proposal, SubTaskProposal) else proposal.rendering(),
+                  "planning_commands": "\n".join(f"planning:{name}" for name in planning_names) or "none",
+                  "reply": text}
+        proposed = _predicted_edits(lm, ReadSubTaskEdits, inputs)
         if not proposed:
-            raise EditParseError("I could not read that as an edit.")
-        return _proposed_edits_to_engine(proposal, proposed, reply_text=text)
+            raise NoEditsRead("I could not read that as an edit.")
+        notes = _reader_notes.get()
+        said = len(notes) if notes is not None else 0
+        try:
+            return _validated_reader_edits(proposal, proposed, text)
+        except _Unappliable as failed:
+            if notes is not None:
+                del notes[said:]              # what the first reading left out is not said of the second
+            # One more read with the reason the edits cannot be applied, before the user is asked (bd fix-ftdl.8.28):
+            # a model call of its own, whose span's input carries ``refused``.
+            logger.info("the edits read from the reply cannot be applied (%s); reading it once more", failed.error)
+            given = json.dumps([edit.model_dump(exclude_defaults=True) for edit in proposed], ensure_ascii=False)
+            repaired = _predicted_edits(lm, RepairSubTaskEdits, {
+                **inputs, "refused": f"Your edits: {given}\nThey cannot be applied: {failed.error}"})
+            if not repaired:
+                raise failed.error from None
+            return _proposed_edits_to_engine(proposal, repaired, reply_text=text)
 
     return read
+
+
+def _predicted_edits(lm, signature, inputs: dict) -> list:
+    """The edit model's edits for *inputs* (one call); a model failure is an unreadable reply (``EditParseError``)."""
+    try:
+        with dspy.context(lm=lm):
+            prediction = dspy.Predict(signature)(**inputs)
+        return list(prediction.edits or [])
+    except Exception as exc:  # noqa: BLE001 - an unreadable reply asks again; it never fails the turn
+        logger.info("the reply could not be read as edits (%s)", type(exc).__name__)
+        raise EditParseError("I could not read that as an edit.") from exc
+
+
+def _validated_reader_edits(proposal: Proposal, proposed: list, text: str) -> list:
+    """The reader's edits as the engine's typed edits, checked as the review will check them before they are shown: the
+    fields, the inputs and the means each edit names (``_engine_edit``: ``InvalidReadEdit``, ``UnknownMeansEdit``), the
+    edited proposal's schema and item numbers (``apply_edits``) and the choices its inputs declare (``refused_choice_message``). A failure of these
+    checks raises ``_Unappliable`` (the reader is asked once more); the guards' questions to the user raise as they are."""
+    from fastworkflow.review_engine import apply_edits
+
+    try:
+        edits = _proposed_edits_to_engine(proposal, proposed, reply_text=text)
+    except (InvalidReadEdit, UnknownMeansEdit) as invalid:
+        raise _Unappliable(invalid) from invalid
+    try:
+        edited = apply_edits(proposal, edits)
+    except EditRefused as refused:
+        raise _Unappliable(refused) from refused
+    folder = _folder_var.get()
+    if folder and (message := refused_choice_message(_FolderOnly(folder), edited)) is not None:
+        raise _Unappliable(EditRefused(message))
+    return edits
+
+
+class _Unappliable(Exception):
+    """The reader's edits fail a check the review makes before it shows them (``error``: what the user would be told)."""
+
+    def __init__(self, error: Exception):
+        super().__init__(str(error))
+        self.error = error
+
+
+@dataclass(frozen=True)
+class _FolderOnly:
+    """A workflow as ``refused_choice_message`` reads it: its folder."""
+
+    folderpath: str
 
 
 # ----------------------------------------------------------------------
@@ -2409,7 +2875,13 @@ def reviewed_values(workflow, item: SubTask, resolved: ResolvedInputs, required:
     fill fallback), so the draft and the run follow the same rules. A sub-task the draft did draft is not drafted again.
     """
     shown = dict(resolved.named)
-    shown.update(_produced_fields(workflow, item, answers))
+    for name, value in _produced_fields(workflow, item, answers).items():
+        if value is None:
+            # Sub-task N's typed output does not hold this input: N cannot produce it, so it has no value (its whole
+            # output is not the value), and the run's checks refuse it as missing.
+            shown.pop(name, None)
+        else:
+            shown[name] = value
     found: dict[str, str] = {}
     if item.drafted_means != item.means.name and any(name not in shown for name in required):
         drafted = draft_inputs(workflow, item, item.goal, earlier, planner_lm=planner_lm)
@@ -2420,10 +2892,11 @@ def reviewed_values(workflow, item: SubTask, resolved: ResolvedInputs, required:
                           unbound=tuple(name for name in required if name not in values))
 
 
-def _produced_fields(workflow, item: SubTask, answers: Mapping[int, str]) -> dict[str, str]:
-    """``{field: value}`` for the ``from sub-task N`` inputs of *item* whose field declares the producer field it takes
-    (``from_command_output="find_book.book_uids"``) and whose sub-task N's output is JSON holding it: that field's value, the one
-    element of a one-element list. Other ``from sub-task N`` inputs keep N's whole output (``resolve_inputs``)."""
+def _produced_fields(workflow, item: SubTask, answers: Mapping[int, str]) -> dict[str, Optional[str]]:
+    """``{field: value}`` for the ``from sub-task N`` inputs of *item* whose sub-task N's output is a JSON object (a typed
+    ``Output``): the value of the producer field the input's field declares (``from_command_output="find_book.book_uids"``),
+    the one element of a one-element list, or None when that output holds none (N cannot produce the input, a field that
+    declares no producer included). An input whose N answered in text keeps N's whole output (``resolve_inputs``)."""
     from fastworkflow import ModuleType, RoutingRegistry
 
     try:
@@ -2445,6 +2918,7 @@ def _produced_fields(workflow, item: SubTask, answers: Mapping[int, str]) -> dic
             continue
         if not isinstance(output, dict):
             continue
+        out[each.name] = None
         for ref in refs:
             key = str(ref).rpartition(".")[2]
             if key in output:
@@ -2461,10 +2935,11 @@ def reviewed_arguments(workflow, command, item: SubTask, resolved: ResolvedInput
                        planner_lm=None):
     """``(ReviewedValues, run_listing.ArgumentCheck)`` for a sub-task bound to planning command *command* (fix-48np.1).
 
-    The values (``reviewed_values``) go through the checks a typed planning call runs (``checked_arguments``:
-    ``check_arguments``, the ``Input``'s model validators) against *request* with the turn's
-    earlier outputs after it. A refusal is returned: the caller hands the sub-task to the agent with it (F2) and records
-    the deviation.
+    The values (``reviewed_values``) go through the checks a typed planning call runs (``checked_arguments``):
+    the guards (``check_arguments``) against *request* with the turn's earlier outputs after it, so a value an earlier
+    part found counts as written, and the ``Input``'s model validators against *request* alone: their ``command_text``
+    is what the user said, never the answer text of an earlier part (bd fix-ftdl.10). A refusal is returned: the
+    caller hands the sub-task to the agent with it (F2) and records the deviation.
     """
     from fastworkflow import planning_commands
     from fastworkflow.run_listing import ArgumentCheck
@@ -2475,7 +2950,7 @@ def reviewed_arguments(workflow, command, item: SubTask, resolved: ResolvedInput
              if reviewed.drafted_at_run else [])
     try:
         args, more = planning_commands.checked_arguments(
-            command, reviewed.values, "\n\n".join([request, *earlier_outputs]), workflow)
+            command, reviewed.values, "\n\n".join([request, *earlier_outputs]), workflow, user_text=request)
     except planning_commands.PlanningCommandCallError as refused:
         return reviewed, ArgumentCheck(refusal=str(refused), notes=tuple(notes))
     return reviewed, ArgumentCheck(args=args, notes=tuple(notes + more))

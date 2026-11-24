@@ -34,6 +34,19 @@ HELLO = Path(__file__).parent / "hello_world_workflow"
 ADD = "/add_two_numbers first_num={a} second_num={b}"
 _COPY_IGNORE = shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__", "versions")
 
+
+@pytest.fixture(autouse=True)
+def _ctrl_c_raises_keyboard_interrupt():
+    """A process started detached (``nohup ... &`` from a shell without job control) inherits SIGINT ignored, and
+    Python then installs no handler: ``_thread.interrupt_main`` does nothing and every Ctrl-C test here would see its
+    turn run to the end. Install Python's own handler for the test, and put back what was there."""
+    import signal
+
+    before = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    signal.signal(signal.SIGINT, before)
+
 _ASK_HOOK = '''
     if os.environ.get("FW_TEST_ADD_ASK"):
         from fastworkflow.workflow_agent import _ask_user_tool
@@ -45,13 +58,12 @@ _ASK_HOOK = '''
 _SLOW_INPUT = """
         from pydantic import model_validator as _mv
 
-        @_mv(mode="before")
-        @classmethod
-        def _slow_before_the_command_runs(cls, value):
+        @_mv(mode="after")
+        def _slow_before_the_command_runs(self):
             # Runs while the parameters are bound, i.e. before any approval prompt or missing-value prompt.
             import os as _os, time as _t
             _t.sleep(float(_os.environ.get("FW_TEST_PRE_SLEEP", "0") or 0))
-            return value
+            return self
 """
 
 

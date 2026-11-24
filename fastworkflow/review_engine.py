@@ -41,6 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import fastworkflow
 from fastworkflow import intent_loop, parameter_clarification, tracing
+from fastworkflow.no_agent_mode import _bare, is_yes
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,6 @@ class ReviewRecord:
     state: str
     origin: str
     suspended_agent: bool = False
-    queued: bool = False
     shadow: bool = False
     resolution: Optional[dict] = None
     outcome: Optional[str] = None
@@ -244,9 +244,8 @@ class ReviewRecord:
         return now >= self.expires_at
 
     def turns_expired(self, *, turn_seq: int) -> bool:
-        """Queued records age by turns; awaiting records by the replies they have received."""
-        if self.queued:
-            return turn_seq - self.created_turn >= self.ttl_turns
+        """An open record ages by the replies it has received (*turn_seq* is accepted for the callers)."""
+        del turn_seq
         return self.turns_seen >= self.ttl_turns
 
     def to_dict(self) -> dict:
@@ -286,7 +285,7 @@ class ReviewStore:
 
     def active(self) -> Optional[ReviewRecord]:
         for record in self.records:
-            if record.state in ACTIVE_STATES and not record.queued:
+            if record.state in ACTIVE_STATES:
                 return record
         return None
 
@@ -714,23 +713,27 @@ def prompt_for(proposal: Proposal, workflow: Any = None, *, structured: bool = F
 
     folder = getattr(workflow, "folderpath", None) if workflow is not None else None
     if isinstance(proposal, SubTaskProposal):
-        hint = SUB_TASK_STRUCTURED_PROMPT_HINT if structured else SUB_TASK_PROMPT_HINT
+        hint = _hint_for(proposal, SUB_TASK_STRUCTURED_PROMPT_HINT if structured else SUB_TASK_PROMPT_HINT, folder)
         return f"{proposal.user_rendering(folder, no_agent=no_agent)}\n{hint}"
     return f"{proposal.rendering()}\n{PROMPT_HINT}"
 
 
 def _structured_error_prompt(proposal: Proposal, workflow: Any = None, message: str = "", *,
                              no_agent: bool = False) -> str:
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review_proposals import SubTaskProposal, _rechecked_if_changed
 
     if isinstance(proposal, SubTaskProposal):
         if not message or message in (SUB_TASK_UNREADABLE_REPLY, SUB_TASK_STRUCTURED_UNREADABLE_REPLY):
             header = "I couldn't tell what to change."
         else:
             header = message
+        # the steps as they stand, rechecked when a check refuses a value an item does not hold (the same recompute a
+        # revised review gets), so a refusal the inputs no longer earn is not shown again
+        proposal = proposal.model_copy(update={"items": [
+            _rechecked_if_changed(workflow, item, item) for item in proposal.items]})
         folder = getattr(workflow, "folderpath", None) if workflow is not None else None
         current_steps = proposal.user_rendering(folder, no_agent=no_agent).replace("Sub-tasks:", "Current steps:", 1)
-        return f"{header}\n{current_steps}\n{SUB_TASK_STRUCTURED_PROMPT_HINT}"
+        return f"{header}\n{current_steps}\n{_hint_for(proposal, SUB_TASK_STRUCTURED_PROMPT_HINT, folder)}"
     return message or PROMPT_HINT
 
 
@@ -790,6 +793,18 @@ def _normalize_parsed_subtask_edits(proposal: Proposal, edits: list[Edit]) -> li
     return [edit for position, edit in enumerate(normalized) if position not in to_remove]
 
 
+def _known_means_edits(proposal: Proposal, edits: list[Edit]) -> list[Edit]:
+    """Typed edits with each means edit resolved as a read one is (``review_proposals.edited_means``, bd fix-ftdl.11): a
+    means naming a command in another spelling takes its name, one naming no command raises ``UnknownMeansEdit`` (an
+    ``EditRefused``: the reply is refused with the names). No model is called."""
+    from fastworkflow.review_proposals import SubTaskProposal, edited_means
+
+    if not isinstance(proposal, SubTaskProposal):
+        return edits
+    return [Change(index=edit.index, field="means", value=edited_means(proposal, edit.value))
+            if isinstance(edit, Change) and edit.field == "means" else edit for edit in edits]
+
+
 def _refuse_dropped_input_parts(proposal: Proposal, edits: list[Edit]) -> None:
     """Typed edits only (fix-j6xa): refuse a packed ``inputs`` edit whose part named like a step field would be dropped.
 
@@ -824,6 +839,23 @@ class EditParseError(ValueError):
 
 class EditRefused(ValueError):
     """Edits that do not validate against the proposal's schema. The message is shown to the user."""
+
+
+class NoEditsRead(EditParseError):
+    """The free-text reader read the reply and found no edit in it (the model answered an empty list): unlike a reply it
+    could not read, this is an answer. A reply that opens with an accept and has no edit is an accept (``_accept_lead``)."""
+
+
+#: What the free-text reader left out of a reply's edits and why (an edit it dropped), one sentence each, for the reply
+#: being read; ``ProposalReplyPolicy.decide`` opens it and the read-back shows it above the steps.
+_reader_notes: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar("fw_review_reader_notes", default=None)
+
+
+def note_reader_drop(sentence: str) -> None:
+    """Say, in the read-back of the reply being read, that the reader left an edit out (*sentence*)."""
+    notes = _reader_notes.get()
+    if notes is not None and sentence not in notes:
+        notes.append(sentence)
 
 
 class Change(BaseModel):
@@ -1106,6 +1138,9 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
         if isinstance(edit, Merge):
             first = min(edit.indexes)
             merged[first] = _built_item(type(changed[first - 1]), edit.values, changed[first - 1])
+            if any(getattr(items[number - 1], "read_only", False) for number in edit.indexes):
+                # A look-up only is never lifted by joining its part with another (bd fix-ftdl.4.3).
+                merged[first].read_only = True
             dropped.update(number for number in edit.indexes if number != first)
     split: dict[int, list] = {}
     for edit in edits:
@@ -1150,6 +1185,10 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
             if isinstance(item, SubTask):
                 item._before_item = before
                 item._look_up = look_up
+                # "Look it up" makes the part read-only for its run (bd fix-ftdl.4.3), drafting on or off and whatever
+                # the re-pick ends on; a later reply's edit of the part (split, merge, change) keeps the mark.
+                if look_up or getattr(before, "read_only", False):
+                    item.read_only = True
     return edited
 
 
@@ -1191,11 +1230,12 @@ def set_model_interpreter(interpreter: Optional[EditInterpreter]) -> None:
 
 
 class ActionReplyPolicy:
-    """The action kind: exact yes, no or always. No model, no edits."""
+    """The action kind: a yes (``no_agent_mode.is_yes``, the one reader of a yes), ``no`` or ``always``, each read as a
+    yes is (the whole reply, case and a trailing ``.`` or ``!`` ignored). No model, no edits."""
 
     def classify(self, message: str) -> Verdict:
-        word = message
-        if word == "yes":
+        word = _bare(message)
+        if is_yes(message):
             return Verdict.CONFIRM
         if word == "no":
             return Verdict.DECLINE
@@ -1252,9 +1292,24 @@ def _prepare_plan_workflow(policy: "ProposalReplyPolicy", proposal: Proposal) ->
     workflow.context["review_planning_names"] = _review_planning_names(policy._app_workflow)
     reader = policy._interpreter or _model_interpreter
     if reader is not None:
-        workflow.context["plan_edit_reader"] = reader
+        workflow.context["plan_edit_reader"] = _noting_reader(policy, reader)
     else:
         workflow.context.pop("plan_edit_reader", None)
+
+
+def _noting_reader(policy: "ProposalReplyPolicy", reader: EditInterpreter) -> EditInterpreter:
+    """*reader*, noting on *policy* whether it read the reply and found no edit in it (``NoEditsRead``, or an empty
+    list), which the review command's output cannot tell apart from a reply the reader could not read."""
+    def read(text: str, proposal: Proposal) -> list:
+        try:
+            edits = list(reader(text, proposal))
+        except NoEditsRead:
+            policy._read_nothing = True
+            raise
+        policy._read_nothing = not edits
+        return edits
+
+    return read
 
 
 def _validate_edits_decision(
@@ -1276,11 +1331,33 @@ def _validate_edits_decision(
 
         if (message := refused_choice_message(workflow, edited)) is not None:
             return ReplyDecision(Verdict.REFUSE, "edits refused", message=message)
-    if reason == READ_REASON and edited.binding() == proposal.binding():
-        if text and _affirmative_accept_cue(text):
+    if reason == READ_REASON and edited.binding() == proposal.binding() and not _clears_a_refusal(proposal, edits):
+        # Edits that change nothing are no edits: never read back. A reply that opens with an accept accepts the plan
+        # as shown, whatever it adds that changes nothing (``yes, but only list them`` on a plan that only lists).
+        if text and (_affirmative_accept_cue(text) or _accept_lead(text)):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
+    if reason == READ_REASON and (notes := _reader_notes.get()):
+        return ReplyDecision(Verdict.EDIT, reason, edits=edits, message=" ".join(notes))
     return ReplyDecision(Verdict.EDIT, reason, edits=edits)
+
+
+def _clears_a_refusal(proposal: Proposal, edits: Sequence[Any]) -> bool:
+    """Whether *edits* clear an input whose value the step's check refuses while the step does not show it (the draft's
+    refused value, left out): the steps read the same, but the refusal goes, so it is a change, never a no-op."""
+    from fastworkflow.review_proposals import SubTaskInput, SubTaskProposal, _clears, _input_edit_parts
+
+    if not isinstance(proposal, SubTaskProposal):
+        return False
+    for edit in edits:
+        if not (isinstance(edit, Change) and edit.field == "inputs" and 1 <= edit.index <= len(proposal.items)):
+            continue
+        refused = set(proposal.items[edit.index - 1].check_refused)
+        for part in _input_edit_parts((edit.value or "").strip()):
+            piece = SubTaskInput.from_text(part)
+            if piece.name in refused and piece.from_subtask is None and _clears(piece.value):
+                return True
+    return False
 
 
 _AFFIRMATIVE_ACCEPT_PREFIX = re.compile(
@@ -1398,7 +1475,7 @@ _ACCEPT_PHRASES = (
     "make it so", "lgtm", "all good", "that works", "works for me", "fine", "its fine", "thats fine", "k", "kk",
     "nothing to change", "nothing needs to change", "no changes", "no change", "no edits", "no objections",
     "no problem", "no problems", "as is", "run as is", "run it as is", "run the plan as is",
-    "dont change anything", "thumbsup",
+    "thumbsup",
 )
 _ACCEPT_TAIL = (
     "please", "thanks", "thank you", "thx", "ty", "now", "thumbsup", "go ahead", "ahead", "proceed", "continue",
@@ -1432,18 +1509,15 @@ _NO_REQUEST_AFTER_CONTRAST = re.compile(r"^(?:nothing\s+(?:else|more)|that\s+is\
 _SEPARATORS = re.compile(r"[^a-z0-9]*")
 
 
-def _accept_then_request(text: str) -> bool:
-    """Whether *text* opens as an accept and then, after a connecting word (``and``, ``then``, ``afterwards``,
-    ``after that``, ``plus``) or a contrasting one (``but``, ``however``, ``except``, ``although``, ``though``)
-    asks for something more or says something that contradicts the plan. Read on the reply with the no-effect qualifiers removed, so
-    ``yes, run that, and apply no corrections`` is not one."""
-    value = _APOSTROPHES.sub("", _THUMBS_UP.sub(" thumbsup ", _scrub_benign_confirm_phrases(text).lower()))
+def _leading_accept(value: str) -> Optional[tuple[str, int]]:
+    """``(last accept word, where the run of accept words ends)`` when the lower-cased *value* opens with an accept
+    word (``yes``, ``ok``, ``looks good``, ``go ahead`` ...) and any accept or courtesy words after it, else None."""
     position = _SEPARATORS.match(value).end()
     if value.startswith("please ", position):
         position += len("please ")
     lead = _ACCEPT_LEAD.match(value, position)
     if lead is None:
-        return False
+        return None
     last = lead.group(0)
     position = lead.end()
     while True:
@@ -1452,6 +1526,38 @@ def _accept_then_request(text: str) -> bool:
         if more is None:
             break
         last, position = more.group(0), more.end()
+    return last, position
+
+
+_LEAD_STOP = re.compile(r"[,.;:!?\u2013\u2014-]")
+
+
+def _accept_lead(text: str) -> bool:
+    """Whether *text* opens with an accept of the plan before anything else it says: accept words (``yes``, ``ok``,
+    ``looks good``, ``go ahead`` ...) that end the reply, end at a punctuation mark (``yes, but ...``, ``Yes. Then
+    ...``) or end at a connecting word (``yes and ...``, ``ok but ...``). ``go back and change step 2`` and ``fine
+    print the overdue ones`` do not: the accept word runs on into a request. Read only for a reply the edit reader found
+    no edit in, or only edits that change nothing: such a reply accepts the plan as shown (bd fix-ftdl.8.28)."""
+    value = _APOSTROPHES.sub("", _THUMBS_UP.sub(" thumbsup ", (text or "").lower()))
+    leading = _leading_accept(value)
+    if leading is None:
+        return False
+    gap = _SEPARATORS.match(value, leading[1])
+    if gap.end() == len(value) or _LEAD_STOP.search(gap.group(0)):
+        return True
+    return _REQUEST_CONNECTOR.match(value, gap.end()) is not None
+
+
+def _accept_then_request(text: str) -> bool:
+    """Whether *text* opens as an accept and then, after a connecting word (``and``, ``then``, ``afterwards``,
+    ``after that``, ``plus``) or a contrasting one (``but``, ``however``, ``except``, ``although``, ``though``)
+    asks for something more or says something that contradicts the plan. Read on the reply with the no-effect qualifiers removed, so
+    ``yes, run that, and apply no corrections`` is not one."""
+    value = _APOSTROPHES.sub("", _THUMBS_UP.sub(" thumbsup ", _scrub_benign_confirm_phrases(text).lower()))
+    leading = _leading_accept(value)
+    if leading is None:
+        return False
+    last, position = leading
     gap = _SEPARATORS.match(value, position)
     connector = _REQUEST_CONNECTOR.match(value, gap.end())
     if connector is None:
@@ -1646,6 +1752,46 @@ def _switch_clauses_decision(proposal: Proposal, text: str, workflow: Any, read_
     return ReplyDecision(Verdict.EDIT, reason, edits=tuple(edits))
 
 
+#: The one sentence that says a yes is needed: after the review's instruction line when a part changes data, and
+#: at the head of the question asked again after an accept that was not a yes.
+CHANGES_DATA_SENTENCE = "This request changes data, so I need an explicit yes to run it."
+#: The same sentence when no part surely changes data but an ad hoc part may (``MAY_CHANGE_DATA_BADGE``).
+MAY_CHANGE_DATA_SENTENCE = "This request may change data, so I need an explicit yes to run it."
+_NEEDS_YES_TAIL = "Reply yes to run it as shown, no to cancel it, or tell me what to change."
+CHANGES_DATA_NEEDS_YES = f"{CHANGES_DATA_SENTENCE} {_NEEDS_YES_TAIL}"
+MAY_CHANGE_DATA_NEEDS_YES = f"{MAY_CHANGE_DATA_SENTENCE} {_NEEDS_YES_TAIL}"
+
+
+def _data_sentence(proposal: Proposal, folder: Optional[str]) -> Optional[str]:
+    """The sentence that a yes is needed, or None when no part changes data: the definite one when a part surely changes
+    data, else the "may change" one for a turn with an ad hoc part that may (``SubTaskProposal.badges``)."""
+    from fastworkflow.review_proposals import CHANGES_DATA_BADGE
+
+    if getattr(proposal, "changes_data", None) is None or not proposal.changes_data(folder):
+        return None
+    return CHANGES_DATA_SENTENCE if CHANGES_DATA_BADGE in proposal.badges(folder) else MAY_CHANGE_DATA_SENTENCE
+
+
+def _hint_for(proposal: Proposal, hint: str, folder: Optional[str]) -> str:
+    """The instruction line of the review question: *hint*, and, for a turn with a part that changes (or may change)
+    data, the sentence that a yes is needed. The one place that words it (the plain text, the structured text and the
+    payload's reply forms, which find the hint inside the text, all come from here)."""
+    sentence = _data_sentence(proposal, folder)
+    return f"{hint} {sentence}" if sentence else hint
+
+
+def _needs_a_yes(proposal: Proposal, message: str, folder: Optional[str]) -> bool:
+    """Whether an accept of *proposal* is refused for want of a plain yes: the turn has a part that changes data and the
+    reply is not a yes (``no_agent_mode.is_yes``: yes, true, ok, agreed, accept, go), which code reads. ``dont change
+    anything`` and ``no changes`` are accepts of the plan's text, and may as well mean "make no change", so they never
+    run a write."""
+    from fastworkflow.review_proposals import SubTaskProposal
+
+    if not isinstance(proposal, SubTaskProposal) or not proposal.changes_data(folder):
+        return False
+    return not is_yes(message)
+
+
 class ProposalReplyPolicy:
     """The sub_tasks and plan kinds: accept, no, or typed edits (deterministic first, then the reader).
 
@@ -1671,8 +1817,19 @@ class ProposalReplyPolicy:
     def decide(self, proposal: Proposal, message: str) -> ReplyDecision:
         from fastworkflow.review_proposals import workflow_scope
 
-        with workflow_scope(getattr(self._app_workflow, "folderpath", None)):
-            return self._decide(proposal, message)
+        folder = getattr(self._app_workflow, "folderpath", None)
+        self._read_nothing = False
+        notes = _reader_notes.set([])
+        try:
+            with workflow_scope(folder):
+                decision = self._decide(proposal, message)
+        finally:
+            _reader_notes.reset(notes)
+        if decision.verdict is Verdict.CONFIRM and _needs_a_yes(proposal, message, folder):
+            again = (CHANGES_DATA_NEEDS_YES if _data_sentence(proposal, folder) == CHANGES_DATA_SENTENCE
+                     else MAY_CHANGE_DATA_NEEDS_YES)
+            return ReplyDecision(Verdict.REPROMPT, "a change of data needs a yes", message=again)
+        return decision
 
     def _decide(self, proposal: Proposal, message: str) -> ReplyDecision:
         from fastworkflow.review_proposals import SubTaskProposal
@@ -1683,7 +1840,7 @@ class ProposalReplyPolicy:
         if (self._plan_cme is not None and self._plan_workflow is not None
                 and sub_task_review):
             return self._decide_with_plan(proposal, text, word)
-        if word in ("accept", "yes"):
+        if is_yes(text):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
         if _affirmative_accept_cue(text):
             return ReplyDecision(Verdict.CONFIRM, "accepted")
@@ -1706,9 +1863,13 @@ class ProposalReplyPolicy:
             except EditRefused as refused:
                 return ReplyDecision(Verdict.REFUSE, "edits refused", message=str(refused))
             except EditParseError as inner:
+                if isinstance(inner, NoEditsRead) and _accept_lead(text):
+                    return ReplyDecision(Verdict.CONFIRM, "accepted")      # an accept whose rest asks for no edit
                 unreadable = SUB_TASK_UNREADABLE_REPLY if sub_task_review else f"{inner} {PROMPT_HINT}"
                 return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=unreadable)
             if not edits:
+                if _accept_lead(text):
+                    return ReplyDecision(Verdict.CONFIRM, "accepted")      # an accept whose rest asks for no edit
                 unreadable = SUB_TASK_UNREADABLE_REPLY if sub_task_review else f"I could not read that as an edit. {PROMPT_HINT}"
                 return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=unreadable)
             try:
@@ -1718,6 +1879,7 @@ class ProposalReplyPolicy:
             return _validate_edits_decision(
                 proposal, tuple(edits), reason=READ_REASON, text=text, workflow=self._app_workflow)
         try:
+            edits = _known_means_edits(proposal, edits)
             _refuse_dropped_input_parts(proposal, edits)
             _refuse_switch_clause_in_goal(edits, text)
             apply_edits(proposal, edits)           # validate only; the caller applies
@@ -1733,7 +1895,7 @@ class ProposalReplyPolicy:
             _clear_plan_cme_continuation(self._plan_cme)
         was_in_slot = self._in_plan_slot()
         if not was_in_slot:
-            if word in ("accept", "yes"):
+            if is_yes(text):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
             if _affirmative_accept_cue(text):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
@@ -1750,6 +1912,7 @@ class ProposalReplyPolicy:
                 pass
             else:
                 try:
+                    edits = _known_means_edits(proposal, edits)
                     _refuse_dropped_input_parts(proposal, edits)
                     _refuse_switch_clause_in_goal(edits, text)
                     apply_edits(proposal, edits)
@@ -1890,7 +2053,7 @@ class ProposalReplyPolicy:
         if intent == "different_command":
             if _routed_to_command(w_out):
                 return self._handle_routed_plan(proposal, text, w_out, slot_question)
-            if initial_word in ("accept", "yes"):
+            if is_yes(initial_word):
                 return ReplyDecision(Verdict.CONFIRM, "accepted")
             if initial_word in ("no", "decline"):
                 return ReplyDecision(Verdict.DECLINE, "declined")
@@ -1938,6 +2101,10 @@ class ProposalReplyPolicy:
         edits = tuple(getattr(routed, "edits", None) or [])
         if not edits:
             _clear_plan_cme_continuation(self._plan_cme)
+            if getattr(self, "_read_nothing", False) and _accept_lead(text):
+                # The reader read the reply and found no edit in it (not a reply it could not read): an accept whose
+                # rest asks for nothing the plan does not already do (``yes, but do not apply any fix``).
+                return ReplyDecision(Verdict.CONFIRM, "accepted")
             return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
         _clear_plan_cme_continuation(self._plan_cme)
         return _validate_edits_decision(
@@ -2205,9 +2372,11 @@ def reply_to_proposal(
                    surface=surface, outcome="revised")
         propagate(host, store, record, surface=surface)
         if decision.reason == READ_REASON:
-            # Shown back as read, for confirmation: nothing is confirmed until the user accepts it.
+            # Shown back as read, for confirmation: nothing is confirmed until the user accepts it. What the reader left
+            # out of the reply's edits is said first (``note_reader_drop``).
+            left_out = f"{decision.message}\n" if decision.message else ""
             return ReviewReply(False, "I read your reply as these edits. Accept to confirm them, or reply with more "
-                                      f"edits.\n{record.rendering}")
+                                      f"edits.\n{left_out}{record.rendering}")
         return ReviewReply(False, record.rendering)
     # REFUSE or REPROMPT: nothing changes, and the user is asked again.
     if producing_q3_or_later:

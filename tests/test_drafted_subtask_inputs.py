@@ -217,7 +217,10 @@ def test_the_draft_shows_a_refusal_and_no_values(library_heads, scripted):
     draft = review_proposals.draft_round1_proposal(library_heads, [EMMA, JOKE], planner_lm=planner)
 
     assert draft.items[0].inputs == []
-    assert draft.items[0].check == "title='Persuasion' is not written in the request"
+    # the refused title is left out of the inputs, so the item as shown lacks it: its line says the title is missing,
+    # not a refusal of a value the item does not hold (the draft is worked out again from its inputs, ``rechecked``)
+    assert draft.items[0].check == "missing required argument title"
+    assert draft.items[0].check_missing == ["title"] and draft.items[0].check_refused == []
     assert EMMA in planner.prompts[0]                    # the typed fill read the sub-task's text
 
 
@@ -316,28 +319,28 @@ def test_a_drafted_input_round_trips_through_the_review_json():
 
 def _signature_text(folder: str, name: str) -> str:
     from fastworkflow import ModuleType, planning_commands
-    from fastworkflow.utils.signatures import InputForParamExtraction, planning_verbatim_sentences
+    from fastworkflow.utils.signatures import InputForParamExtraction
 
     fastworkflow.RoutingRegistry.get_definition(folder, load_cached=False)
     model = fastworkflow.RoutingRegistry.get_definition(folder).get_command_class(
         name, ModuleType.COMMAND_PARAMETERS_CLASS)
-    sentences = planning_verbatim_sentences(model, name, folder, planning_commands.option_sentences(model))
-    signature = InputForParamExtraction.create_signature_from_pydantic_model(model, sentences)
+    signature = InputForParamExtraction.create_signature_from_pydantic_model(model, planning_commands.option_sentences(model))
     return "\n".join(f"{n}: {f.json_schema_extra.get('desc', '')}" for n, f in signature.output_fields.items())
 
 
-def test_a_planning_commands_str_field_is_copied_exactly_as_the_typed_call_was_told(annotated_library):  # noqa: F811
+def test_a_planning_commands_str_field_is_told_to_copy_only_when_it_is_marked(annotated_library):  # noqa: F811
     from fastworkflow.planning_commands import IN_REQUEST_STR_SENTENCE
 
     text = _signature_text(str(annotated_library), "Library/note_member")
-    # text carries no in_request option: the extractor is told to copy it all the same
-    assert text.count(IN_REQUEST_STR_SENTENCE.rstrip(".")) == 2           # member (in_request) and text, once each
+    # member and text both carry copied_from_command_text; a field without it is told nothing about copying, as on
+    # an execution command (bd fix-ftdl.6.5: the sentences come from the field's own declarations, on both kinds)
+    assert text.count(IN_REQUEST_STR_SENTENCE.rstrip(".")) == 2           # member and text, once each
 
 
 def test_an_execution_commands_fields_are_told_nothing_new():
     from fastworkflow.planning_commands import IN_REQUEST_STR_SENTENCE
 
-    assert IN_REQUEST_STR_SENTENCE.rstrip(".") not in _signature_text(TUTORIAL, "find_member")
+    assert IN_REQUEST_STR_SENTENCE.rstrip(".") not in _signature_text(TUTORIAL, "count_overdue")
 
 
 def test_a_failed_draft_extraction_is_logged_and_shows_no_inputs(library, monkeypatch, caplog):
@@ -351,3 +354,239 @@ def test_a_failed_draft_extraction_is_logged_and_shows_no_inputs(library, monkey
         assert draft_inputs(library, item, "who wrote Emma", []) is None
     assert any("could not draft the inputs of Library/book_by_title (AssertionError" in r.getMessage()
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------- the check is worked out again when the inputs change
+
+def _refused_name_plan(**check) -> "review_proposals.SubTaskProposal":
+    item = SubTask(goal="do you have a book called Emma", means=Means(kind="planning", name="find_record"),
+                   inputs=[SubTaskInput(name="kind", value="book", drafted=True)], drafted_means="find_record", **check)
+    return review_proposals.SubTaskProposal(items=[item])
+
+
+def _revised(plan, *changes):
+    import types
+
+    from fastworkflow.review_engine import Change, apply_edits
+
+    host = types.SimpleNamespace(_app_workflow=_workflow(TUTORIAL), _current_planner_lm=None)
+    return apply_edits(plan, [Change(index=1, field="inputs", value=value) for value in changes]).revised(host, plan)
+
+
+def test_a_review_edit_that_fixes_a_refused_value_clears_the_line_and_one_that_does_not_keeps_it():
+    plan = _refused_name_plan(check="name='Emma_X' is not written in the request", check_refused=["name"])
+    # the draft's refusal of a value it left out names the field and how to change it
+    assert 'Reply "change 1: name=..." to change it.' in plan.user_rendering()
+
+    fixed = _revised(plan, "name=Emma")
+    assert fixed.items[0].check == "" and "Cannot run" not in fixed.user_rendering()
+
+    wrong = _revised(plan, "name=Zed")
+    assert wrong.items[0].check == "name='Zed' is not written in the request"
+    assert wrong.items[0].check_refused == ["name"]
+    assert "Cannot run as shown: name='Zed' is not written in the request." in wrong.user_rendering()
+
+
+def test_a_refusal_of_a_value_the_item_does_not_show_is_cleared_by_an_edit_that_names_it():
+    plan = review_proposals.SubTaskProposal(items=[SubTask(
+        goal="do you have a book called Emma", means=Means(kind="planning", name="find_record"),
+        inputs=[SubTaskInput(name="name", value="Emma", drafted=True)], drafted_means="find_record",
+        check="kind='author' is not one of book, member", check_refused=["kind"])])
+    assert 'change 1: kind=...' in plan.user_rendering()
+    cleared = _revised(plan, "kind=none")
+    assert cleared.items[0].check == "" and "Cannot run" not in cleared.user_rendering()
+
+
+def test_a_reply_to_the_values_question_rechecks_the_item():
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+    plan = _refused_name_plan(check="name='Emma_X' is not written in the request", check_refused=["name"])
+    given = resolution._overlay(plan, 0, {"name": "Emma"}, _workflow(TUTORIAL))
+    assert given.items[0].check == "" and "Cannot run" not in given.user_rendering()
+    still = resolution._overlay(plan, 0, {"name": "Zed"}, _workflow(TUTORIAL))
+    assert "name='Zed' is not written in the request" in still.user_rendering()
+
+
+# ---------------------------------------------------------------- a validator's rewrite is not guarded again
+
+_SINGULAR = '''
+"""tag_records: a planning command whose validator rewrites a marked value."""
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class Signature:
+    """Tag the records of one group."""
+
+    plain_utterances = ["tag the contractors group"]
+
+    class Input(BaseModel):
+        name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})
+        kind: Literal["group", "person"] = Field(default="group", description="the kind of record")
+
+        @model_validator(mode="after")
+        def singular(self, info):
+            if self.name.endswith("s"):
+                self.name = self.name[:-1]
+            return self
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"tag the {input.kind} {input.name}"]
+'''
+
+
+@pytest.fixture
+def singular_workflow(tmp_path):
+    import shutil
+
+    folder = tmp_path / "singular_tutorial"
+    shutil.copytree(TUTORIAL, folder, ignore=shutil.ignore_patterns("___command_info", "__pycache__", "versions"))
+    (folder / "_commands" / "tag_records.py").write_text(_SINGULAR, encoding="utf-8")
+    return _workflow(str(folder))
+
+
+def test_a_validators_rewrite_of_a_marked_value_is_not_refused_by_a_later_check(singular_workflow, scripted):
+    """The validator writes the singular, which the request does not write: the draft keeps the value the checks
+    stand behind (the one the request writes), so the later checks (the values question's, the run's) pass, and the run's
+    own validators write the singular again."""
+    from fastworkflow import planning_commands
+
+    scripted({"reasoning": "the group", "name": "contractors", "kind": "group"})
+    goal = "tag the contractors group"
+    item = SubTask(goal=goal, means=Means(kind="planning", name="tag_records"))
+    drafted = review_proposals.drafted_item(singular_workflow, item, goal, [])
+
+    assert drafted.check == "" and {each.name: each.value for each in drafted.inputs}.get("name") == "contractors"
+    command = planning_commands.planning_command(singular_workflow.folderpath, "tag_records")
+    raw = {each.name: each.value for each in drafted.inputs}
+    assert not planning_commands.argument_gaps(command, raw, goal).names
+    args, _ = planning_commands.checked_arguments(command, raw, goal, singular_workflow)
+    assert args["name"] == "contractor"
+
+
+_COUNT_LINE = '''
+"""count_line: a planning command with a marked int that defaults to 0."""
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Write one line for an owner."""
+
+    plain_utterances = ["write a line for Ann Lee"]
+
+    class Input(BaseModel):
+        owner: str = Field(description="the owner", json_schema_extra={"copied_from_command_text": True})
+        count: int = Field(default=0, description="how many, when the request gives a number",
+                           json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"write the line of {input.owner}"]
+'''
+
+
+def test_a_refused_draft_does_not_keep_an_int_at_its_default_for_a_later_check_to_refuse(singular_workflow, scripted):
+    """The request gives no number: the draft's refusal of the owner keeps the values the checks stand behind, and the
+    count's default is not one of them, so the values question asks for the owner alone (not a whole number)."""
+    from fastworkflow import planning_commands
+
+    (Path(singular_workflow.folderpath) / "_commands" / "count_line.py").write_text(_COUNT_LINE, encoding="utf-8")
+    workflow = _workflow(singular_workflow.folderpath)
+    scripted({"reasoning": "r", "owner": "Bob", "count": 0}, {"reasoning": "r", "owner": "Bob", "count": 0})
+    goal = "write a line for Ann Lee"
+    item = SubTask(goal=goal, means=Means(kind="planning", name="count_line"))
+    planner = _PlannerLM([{"reasoning": "r", "owner": "Bob", "count": 0}])
+    drafted = review_proposals.drafted_item(workflow, item, goal, [], planner_lm=planner)
+
+    assert "count" not in {each.name for each in drafted.inputs}
+    command = planning_commands.planning_command(workflow.folderpath, "count_line")
+    raw = {p.name: next((each.value for each in drafted.inputs if each.name == p.name), None) for p in command.params}
+    assert planning_commands.argument_gaps(command, raw, goal).names == ("owner",)
+
+
+# ---------------------------------------------------------------- the duplicate rule's note, and no stale refusal line
+
+_CONNECTED = '''
+"""connected: a planning command with a required and an optional marked name."""
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Show the records connected to one record."""
+
+    plain_utterances = ["show the records connected to Payroll"]
+
+    class Input(BaseModel):
+        name: str = Field(description="the record", json_schema_extra={"copied_from_command_text": True})
+        connected_name: str = Field(default="", description="one connected record to narrow to",
+                                    json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"show the records connected to {input.name}"]
+'''
+
+
+@pytest.fixture
+def connected_workflow(singular_workflow):
+    (Path(singular_workflow.folderpath) / "_commands" / "connected.py").write_text(_CONNECTED, encoding="utf-8")
+    fastworkflow.RoutingRegistry.clear_registry()   # the definition loaded before the command was written
+    return _workflow(singular_workflow.folderpath)
+
+
+def test_a_draft_that_puts_one_written_name_in_two_fields_shows_the_note_and_no_refusal(connected_workflow, scripted):
+    """The optional field is left empty with a note under the item (not "Cannot run as shown"), and the extractor is
+    not asked a second time (nothing was refused)."""
+    lm = scripted({"reasoning": "r", "name": "Payroll", "connected_name": "Payroll"})
+    goal = "show the records connected to Payroll"
+    item = SubTask(goal=goal, means=Means(kind="planning", name="connected"))
+
+    drafted = review_proposals.drafted_item(connected_workflow, item, goal, [])
+
+    line = "connected_name left empty: 'Payroll' is written once in your request and is the name."
+    assert drafted.check == "" and {each.name: each.value for each in drafted.inputs} == {"name": "Payroll"}
+    assert drafted.check_notes == {"connected_name": line} and len(lm.prompts) == 1
+    shown = review_proposals.SubTaskProposal(items=[drafted]).user_rendering()
+    assert f"   {line}" in shown and "Cannot run" not in shown
+    # the note goes with a reply that leaves the field out, and is worked out again when an edit puts it back
+    rechecked = review_proposals.rechecked(connected_workflow, drafted)
+    assert rechecked.check_notes == {"connected_name": line}
+    edited = review_proposals.rechecked(connected_workflow, drafted.model_copy(update={"inputs": [
+        *drafted.inputs, SubTaskInput(name="connected_name", value="Payroll")]}))
+    assert edited.check_notes == {"connected_name": line} and edited.check == ""
+
+
+def test_a_draft_that_leaves_a_refused_value_out_prints_no_refusal_about_it(connected_workflow, scripted):
+    """The draft refuses an optional value the request does not write and leaves it out of the inputs: the item as
+    shown runs without it, so its review line says nothing about it."""
+    scripted({"reasoning": "r", "name": "Payroll", "connected_name": "Billing"},
+             {"reasoning": "r", "name": "Payroll", "connected_name": "Billing"})
+    goal = "show the records connected to Payroll"
+    item = SubTask(goal=goal, means=Means(kind="planning", name="connected"))
+    planner = _PlannerLM([{"reasoning": "r", "name": "Payroll", "connected_name": "Billing"}])
+
+    drafted = review_proposals.drafted_item(connected_workflow, item, goal, [], planner_lm=planner)
+
+    assert {each.name: each.value for each in drafted.inputs} == {"name": "Payroll"}
+    assert drafted.check == "" and drafted.check_refused == []
+    assert "Cannot run" not in review_proposals.SubTaskProposal(items=[drafted]).user_rendering()
+
+
+def test_the_error_reshow_rechecks_a_refusal_of_a_value_the_item_does_not_hold():
+    """An unreadable review reply shows the steps again: a refusal of a value the item does not hold is worked out
+    again first (``review_engine._structured_error_prompt``), as a revised review's is."""
+    from fastworkflow.review_engine import _structured_error_prompt
+
+    plan = _refused_name_plan(check="kind='author' is not one of book, member", check_refused=["kind"])
+    plan = plan.model_copy(update={"items": [plan.items[0].model_copy(update={
+        "inputs": [SubTaskInput(name="name", value="Emma", drafted=True)]})]})
+    assert "Cannot run as shown" in plan.user_rendering()
+
+    shown = _structured_error_prompt(plan, _workflow(TUTORIAL), "")
+
+    assert "Cannot run as shown" not in shown and shown.startswith("I couldn't tell what to change.")

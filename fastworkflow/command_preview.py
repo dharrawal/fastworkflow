@@ -60,7 +60,7 @@ titled by the fewest inputs that tell its combinations from the others
 written the same way, so it names the input that decides a phase, not every combination.
 Past ``MAX_VARIANTS`` renders, only those a pairwise cover of the inputs reaches, and one
 of each other phase layout, are rendered; the phases table still reads them all. A
-combination the planning command's ``validate_extracted_parameters`` refuses or changes is listed,
+combination the planning command's ``Input`` validators refuse or change is listed,
 not rendered (no planning command call ever reaches ``steps()`` with it).
 
 In a phased planning command, a phase's ``steps_fn`` is called with placeholder outputs of the
@@ -699,10 +699,12 @@ class _Render:
     #: The answer ``__result__`` writes, as its text with placeholder facts (``result_answer``);
     #: None when the planning command has no ``__result__`` or the call runs flat.
     answer: Optional[str] = None
+    #: Rendered with the Input validator skipped: why (``VALIDATOR_SKIPPED``); empty when it ran.
+    validator_note: str = ""
 
     def key(self) -> tuple:
         return (tuple(self.steps), self.error, tuple(self.left_out), self.flat,
-                tuple(p.key() for p in self.phases), self.answer)
+                tuple(p.key() for p in self.phases), self.answer, self.validator_note)
 
 
 _PHASE_FIELDS = ("name", "steps_fn", "output", "when", "optional")
@@ -906,7 +908,8 @@ def _render_phases(command, args: dict) -> _Render:
                              _ran_member(phase, lines, model_to_command))
     if command.uses_result and command.plan_cls is not None:
         render.answer = result_answer(command.plan_cls, planning_commands.input_instance(command, args),
-                                      outputs, frozenset(p.name for p in raw if isinstance(p, Phase)))
+                                      outputs, frozenset(p.name for p in raw if isinstance(p, Phase)),
+                                      command_name=command.name, output_model=command.output_model)
     return render
 
 
@@ -914,17 +917,18 @@ def _render_phases(command, args: dict) -> _Render:
 DECIDED_AT_RUN_TIME = "decided at run time"
 
 
-def result_answer(plan_cls: type, input: Any, outputs: Mapping[str, Any], phase_names: frozenset) -> str:
+def result_answer(plan_cls: type, input: Any, outputs: Mapping[str, Any], phase_names: frozenset, *,
+                  command_name: str = "", output_model: Any = None) -> str:
     """The text ``__result__`` returns, run once with the placeholder facts *outputs* (3.7, 3.16).
 
     It runs as the template is built (``planning._template_self``, so its helpers read as
     placeholders). Text, or a ``CommandResponse``'s ``response``, is the answer. A ``__result__``
-    that raises, returns nothing, or builds an ``Output`` from placeholders has no text here: the
-    answer is ``decided at run time``, with the reason (the runtime rule is ``run_call_result``).
+    that raises, returns ``ANSWER_BY_MODEL`` or builds an ``Output`` from placeholders has no text here: the
+    answer is ``decided at run time``, with the reason. A return the runtime refuses is judged by the runtime's own
+    rule (``planning_phases.judge_result``, the declared *output_model* included) and shown as the failure it is.
     """
-    import fastworkflow
-    from fastworkflow.planning import _template_self
-    from fastworkflow.planning_phases import _result_fn_on_class, bound_result_arguments
+    from fastworkflow.planning import ANSWER_BY_MODEL, _template_self
+    from fastworkflow.planning_phases import _result_fn_on_class, bound_result_arguments, judge_result
 
     result_fn = _result_fn_on_class(plan_cls)
     if result_fn is None:
@@ -935,19 +939,18 @@ def result_answer(plan_cls: type, input: Any, outputs: Mapping[str, Any], phase_
     except Exception as error:  # noqa: BLE001 - shown in the preview, as a phase that does not render
         return (f"{DECIDED_AT_RUN_TIME} ({type(error).__name__} while the template was built, "
                 "with every fact unknown).")
-    if isinstance(value, str):
-        text = value
-    elif isinstance(value, fastworkflow.CommandResponse):
-        text = value.response
-    elif isinstance(value, BaseModel):
-        return f"{DECIDED_AT_RUN_TIME} (it returns an Output, which the agent words at run time)."
-    elif value is None:
-        return f"{DECIDED_AT_RUN_TIME} (it returns None, so the agent writes the answer)."
-    else:
-        return f"{DECIDED_AT_RUN_TIME} (it returns {type(value).__name__}, not text)."
-    if not str(text or "").strip():
-        return f"{DECIDED_AT_RUN_TIME} (it returns no text, so a model writes the answer)."
-    return text
+    try:
+        response = judge_result(value, command_name=command_name or plan_cls.__qualname__,
+                                output_model=output_model)
+    except TypeError as error:
+        return f"{DECIDED_AT_RUN_TIME} (it fails the call at run time: {error})."
+    if value is ANSWER_BY_MODEL:
+        return f"{DECIDED_AT_RUN_TIME} (it returns ANSWER_BY_MODEL, so a model writes the answer)."
+    if isinstance(value, BaseModel):
+        return f"{DECIDED_AT_RUN_TIME} (it returns an Output, and the answer is that Output as JSON, written by code)."
+    if not str(response.response or "").strip():
+        return f"{DECIDED_AT_RUN_TIME} (it returns an empty answer text)."
+    return response.response
 
 
 def pass_on_placeholders(phase, outputs: dict, earlier: list, items: Optional[list] = None,
@@ -982,15 +985,26 @@ def _render(command, args: dict) -> _Render:
         return _Render(error=str(error))
 
 
+#: The note of a combination rendered with its Input validator skipped (``_validated``).
+VALIDATOR_SKIPPED = ("The Input validator did not run here: it raised {raised} while the preview renders the plan, "
+                     "where info.context[\"workflow\"] is None and command_text is empty, so these steps do not "
+                     "show what it decides at run time (return self early when the workflow is None).")
+
+
 def _validated(command, args: dict) -> tuple[bool, str]:
     """Whether a planning command call can reach ``steps()`` with *args*, and why not: the Input's
-    validators (``check_input``, on the placeholder context) refuse or change them."""
+    validators (``check_input``) refuse or change them. The preview has no workflow: its validators get
+    ``info.context["workflow"]`` None and an empty ``command_text``. A validator that raises there instead of refusing
+    (it read the workflow) is skipped for *args*, which render with the note ``VALIDATOR_SKIPPED`` as the second
+    value."""
     from fastworkflow import planning_commands
 
     try:
         if planning_commands.check_input(command, args, "", None):
             return False, "a validator on Input changes it"
     except planning_commands.PlanningCommandCallError as error:
+        if raised := getattr(error, "raised", None):
+            return True, VALIDATOR_SKIPPED.format(raised=raised)
         return False, str(error)
     return True, ""
 
@@ -1087,7 +1101,7 @@ def describe_inputs(members: list[tuple], universe: list[tuple], axes: list[_Axi
     return "when " + "; or ".join(yes)
 
 
-#: The title of the combinations ``validate_extracted_parameters`` refuses, when they all
+#: The title of the combinations the ``Input`` validators refuse, when they all
 #: have one reason: every combination not rendered.
 OTHER_COMBINATIONS = "every other combination"
 
@@ -1145,7 +1159,12 @@ def variants(command) -> tuple[list[_Variant], list[str]]:
         if combo not in cache:
             args = {**base, **{a.name: a.values[i] for a, i in zip(axes, combo)}}
             ok, why = _validated(command, args)
-            cache[combo] = (_render(command, args), "") if ok else (None, why)
+            if ok:
+                render = _render(command, args)
+                render.validator_note = why
+                cache[combo] = (render, "")
+            else:
+                cache[combo] = (None, why)
         return cache[combo]
 
     def key_of(combo: tuple):
@@ -1695,6 +1714,8 @@ def _steps_section(found: list[_Variant], changing: list[str], phased: bool,
             lines += _render_lines(variant.render, "####",
                                    first.render if phased and variant is not first else None,
                                    _text(first.title()) if first else "", command_names)
+    if notes := sorted({v.render.validator_note for v in rendered if v.render.validator_note}):
+        lines += [*notes, ""]
     if refused:
         lines += ["Not rendered, as no planning command call reaches `steps()` with them "
                   "(an Input validator changes or refuses them):", ""]
@@ -1812,21 +1833,51 @@ def _load_error(name: str, path: str, folder: str) -> str:
         loaded = workflow_agent._read_planning_command_file(name, path, folder)
     except Exception as error:  # noqa: BLE001 - reported, not raised
         return f"{name}: {type(error).__name__}: {error}"
-    problems = workflow_agent.step_command_problems(loaded.command, folder)
-    # Field-source errors do not prevent loading (unified policy, 3.3); --check reports them.
+    # Every problem found in the file is why the command is not loaded (one rule, bd fix-ftdl.2).
+    problems = (planning_commands.resolve_field_sources(folder).errors_for(name)
+                + workflow_agent.step_command_problems(loaded.command, folder))
     if problems:
         return f"{name}: " + "; ".join(problems)
     return f"{name}: skipped by the loader (see the log)"
 
 
-def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[str]:
-    """The workflow's command files that do not load, each as ``<name>: <error>``: the load problems
-    ``fastworkflow command preview --check`` reports for them (``_load_error``). Empty when every planning
-    command file and every execution command's Signature loads. One function for the three places a developer
-    looks: ``fastworkflow run`` prints them before its first prompt, ``fastworkflow train`` stops on them before
-    training, and the FastAPI server logs them at startup. A retired ``_skills`` folder is one problem, as it is
-    for the preview. An execution command's Signature is checked here too, so a removed
-    ``validate_extracted_parameters`` (spec 3.1) fails the load of its command.
+class LoadProblem(str):
+    """One line of ``load_problems``: the text, and whether it stops the workflow.
+
+    ``workflow_wide`` True: a mistake in something the whole workflow shares (``context_inheritance_model.json``, a
+    context class file, ``startup_action.json``, ``_workflow.py``, a retired ``_skills`` folder, the runtime problem of
+    no agent model and no Jev key): the workflow does not run (``fastworkflow run`` exits 1, the server refuses to
+    start, ``train`` stops). False: one command's own mistake: that command does not load and the rest of the
+    workflow runs (``run`` prints it, the server logs it, ``train`` still stops). A ``str``, so a caller that only
+    prints or compares the lines reads them as before."""
+
+    workflow_wide: bool
+
+    def __new__(cls, text: str, *, workflow_wide: bool) -> "LoadProblem":
+        problem = super().__new__(cls, text)
+        problem.workflow_wide = workflow_wide
+        return problem
+
+
+def _workflow_wide(lines: list[str]) -> list[LoadProblem]:
+    return [LoadProblem(line, workflow_wide=True) for line in lines]
+
+
+def _of_one_command(lines: list[str]) -> list[LoadProblem]:
+    return [LoadProblem(line, workflow_wide=False) for line in lines]
+
+
+def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[LoadProblem]:
+    """The workflow's load problems, one line each. Empty when everything loads. One function for the places a
+    developer looks: ``fastworkflow run`` prints them before its first prompt, ``fastworkflow train`` stops on them
+    before training, the FastAPI server logs them at startup, and ``command preview --check`` fails on them.
+
+    Two classes of mistake, one effect each (bd fix-ftdl.2). A mistake inside ONE command file (it does not parse
+    or import, defines both generator classes, or any check of its classes, fields, phases, steps or declarations
+    fails) is ``<command>: <file>: <message>``: that command does not load and the rest of the workflow does. A
+    mistake in something the workflow shares (``context_inheritance_model.json``, a context class file
+    ``_<Context>.py``, ``startup_action.json``, ``_workflow.py``, a retired ``_skills`` folder) is one line that names
+    the file: the workflow does not load. Each line says which it is (``LoadProblem.workflow_wide``).
 
     ``runtime=True`` (a process that serves turns, called after ``fastworkflow.init`` so the env files are loaded) adds
     the no-agent-mode startup problem (``no_agent_mode.runtime_problems``: neither ``LLM_AGENT`` nor ``JEV_API_KEY``).
@@ -1836,7 +1887,7 @@ def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[str]:
         # The problems only a process that serves turns has (no agent model and no Jev key); training does not.
         from fastworkflow import no_agent_mode
 
-        return load_problems(workflow_folder) + no_agent_mode.runtime_problems()
+        return load_problems(workflow_folder) + _workflow_wide(no_agent_mode.runtime_problems())
     from fastworkflow import workflow_agent
     from fastworkflow.command_directory import check_no_planning_commands_folder
 
@@ -1844,20 +1895,74 @@ def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[str]:
     try:
         check_no_planning_commands_folder(folder)
     except ValueError as error:
-        return [str(error)]
+        return _workflow_wide([str(error)])
     root = os.path.join(folder, "_commands")
     if not os.path.isdir(root):
         return []
     try:
         loaded = {name for name, _, _ in workflow_agent.load_planning_commands(folder)}
     except Exception as error:  # noqa: BLE001 - a file the command directory cannot parse fails the whole load
-        return [f"the workflow's commands do not load: {type(error).__name__}: {error}"]
+        return _workflow_wide([f"the workflow's commands do not load: {type(error).__name__}: {error}"])
     planning = [_load_error(name, path, folder) for name, path in workflow_agent._planning_command_files(root)
                 if name not in loaded]
     definition, definition_lines = _definition_problems(folder, planning)
+    split = _workflow_wide(workflow_agent.split_file_problems(folder))
     if definition is None:
-        return planning + definition_lines
-    return planning + _execution_load_problems(definition) + _context_load_problems(definition)
+        return _of_one_command(planning) + _workflow_wide(definition_lines) + split
+    try:   # the planning commands' steps are checked against these; unread, nothing could be checked
+        if loaded:
+            workflow_agent.command_signatures(folder)
+    except Exception as error:  # noqa: BLE001 - a problem line, never a raise
+        split = split + _workflow_wide([f"the workflow's command signatures cannot be read, so the steps of its "
+                                        f"planning commands cannot be checked: {type(error).__name__}: {error}"])
+    planning_names = {line.split(": ", 1)[0] for line in planning}
+    unread = [f"{name}: {error}" for name, error in sorted(definition.command_directory.load_errors.items())
+              if name not in planning_names]
+    return (_of_one_command(planning + unread + _execution_load_problems(definition))
+            + _workflow_wide(_context_load_problems(definition) + _startup_problems(folder, definition)) + split)
+
+
+def _startup_problems(folder: str, definition: Any) -> list[str]:
+    """The workflow's ``startup_action.json`` when it cannot start the workflow: it does not parse, names no command
+    of the workflow, or names a command that does not load. Nothing when the folder has no such file."""
+    import fastworkflow
+    from fastworkflow.command_directory import command_load_errors
+
+    try:
+        action = fastworkflow.workflow_startup_action(folder)
+    except ValueError as error:
+        return [str(error)]
+    if action is None:
+        return []
+    name = action.command_name
+    directory = definition.command_directory
+    if name in directory.load_errors or (name in directory.map_command_2_metadata
+                                         and command_load_errors(directory, name)):
+        return [f"startup_action.json: its command {name!r} does not load (see its own problem), so the workflow "
+                "has no startup"]
+    if name not in directory.map_command_2_metadata:
+        return [f"startup_action.json: command_name {name!r} is no command of this workflow; name the command "
+                "that starts it, by its file name in _commands/ (such as \"startup\" for _commands/startup.py)"]
+    return []
+
+
+def missing_startup_action_problem(workflow_folder: str) -> Optional[str]:
+    """Why the workflow cannot start, when a process resolved no startup action at all (no ``--startup_action``, no
+    ``--startup_command`` and no ``startup_action.json``) and the workflow has a command with no ``Signature``: such a
+    command runs only as an action (``CommandDirectory.runs_only_as_action``), so nothing would ever run it and the
+    workflow would stand on no record. None when it has no such command. Not a ``load_problems`` line: a server
+    session may still pass its own startup action."""
+    from fastworkflow.command_routing import RoutingRegistry
+
+    directory = RoutingRegistry.get_definition(os.path.abspath(workflow_folder)).command_directory
+    core = set(directory.core_command_names)
+    names = sorted(name for name in directory.get_execution_commands()
+                   if name not in core and directory.runs_only_as_action(name))
+    if not names:
+        return None
+    return (f"{', '.join(names)} has no Signature, so it runs only as the workflow's startup action, and nothing "
+            f"names it: write startup_action.json in the workflow folder holding {{\"command_name\": \"{names[0]}\"}}, "
+            "or pass --startup_action")
 
 
 _PY_FILE = re.compile(r"([^\s'\"]+\.py)")
@@ -1891,21 +1996,35 @@ def _definition_problems(folder: str, planning: list[str]) -> tuple[Any, list[st
 
 def _context_load_problems(definition: Any) -> list[str]:
     """Each context callback class that does not load, as its load error: a removed ``instance_label``
-    classmethod, or a ``command_context_object`` parameter (``command_context_model.context_class_problems``)."""
+    classmethod, or a ``command_context_object`` parameter (``command_context_model.context_class_problems``), and a
+    state hook whose partner is missing (``serialization_hooks.hook_pair_problems``)."""
     import fastworkflow
+    from fastworkflow import serialization_hooks
 
     problems = []
-    for name in sorted(definition.command_directory.map_context_2_metadata):
+    for name, metadata in sorted(definition.command_directory.map_context_2_metadata.items()):
         try:
-            definition.context_model.get_context_class(name, fastworkflow.ModuleType.CONTEXT_CLASS)
+            context_class = definition.context_model.get_context_class(name, fastworkflow.ModuleType.CONTEXT_CLASS)
         except Exception as error:  # noqa: BLE001 - the load error is what the developer needs to see
             problems.append(f"{name}: {error}")
+            continue
+        if context_class is None:
+            # The file exists (a context folder with no callback file is not registered) but its class is not named
+            # Context, so every callback of the context was silently ignored (bd fix-qjne.16).
+            problems.append(
+                f"{name}: {metadata.context_module_path} is the context class file of {name} but defines no class "
+                f"{metadata.context_class}; write the callbacks (get_parent, get_displayname, ...) as methods of a "
+                f"class named exactly {metadata.context_class}")
+            continue
+        # a state hook whose partner is missing could never be used (bd fix-ftdl.7.17)
+        problems += [f"{name}: {problem}" for problem in serialization_hooks.hook_pair_problems(context_class)]
     return problems
 
 
 def _execution_load_problems(definition: Any) -> list[str]:
-    """Each execution command whose Signature does not load, as its load error (the removed
-    ``validate_extracted_parameters``, a retired ``db_lookup``, or a file that does not import)."""
+    """Each execution command that does not load, as its load error: every problem found in its file
+    (``command_directory.command_load_errors``) and the checks of its Signature's Input (the removed
+    ``validate_extracted_parameters``, a retired ``db_lookup``)."""
     import fastworkflow
 
     problems = []
@@ -2174,8 +2293,6 @@ def preview_main(args) -> int:
         except PreviewError as error:   # no _commands folder, or a planning command file that does not load
             print(f"planning command previews in {out_dir} cannot be checked: {error}")
             return 1
-        for info in planning_commands.resolve_field_sources(os.path.abspath(args.workflow_folder)).infos:
-            print(f"info: {info.format()}")
         # Past check_previews, every planning command file loads, so these are the execution, context and
         # routing load problems (a retired declaration, a command file that does not import).
         command_problems = load_problems(args.workflow_folder)

@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
 from fastworkflow.field_options import COMMAND_TEXT_AFTER_COMMAND_NAME
+from fastworkflow.parameters.rules import is_union
 from fastworkflow.utils.input_validation import bound_fields, field_checked_class
 
 
@@ -39,7 +40,7 @@ def unwrap_optional(field_type):
     types are returned unchanged.
     """
     origin = get_origin(field_type)
-    if origin is Union:
+    if is_union(field_type):
         if non_none_types := [
             t for t in get_args(field_type) if t is not type(None)
         ]:
@@ -166,15 +167,6 @@ def from_xml(command: str, command_parameters_class: type[BaseModel]) -> Optiona
 
     # Check if we extracted values for ALL fields (safest criteria for LLM fallback)
     all_fields_extracted = len(extracted_data) == len(field_names)
-
-    # Check if agent used example values
-    if all_fields_extracted:
-        for field_name, extracted_value in extracted_data.items():
-            field_info = command_parameters_class.model_fields[field_name]
-            examples = getattr(field_info, "examples", None)
-            if examples and extracted_value in examples:
-                all_fields_extracted = False
-                break
 
     if all_fields_extracted:
         # Initialize all fields with their default values (if they exist) or None
@@ -319,10 +311,9 @@ def from_key_values(
       validate, and the only errors allowed are fields that were not given
       and are required (validation later reports those as missing).
 
-    With *code_written* (``planning_phases.code_step`` and ``pick_step``), the examples
-    guard is skipped and a quoted value is taken whole, with nothing inside it read
-    as a key, a placeholder or a note (3.13). Without it, any doubt -- a ``word=``
-    that is not a field, an XML tag, a placeholder (``<...>``), an example value, an
+    With *code_written* (``planning_phases.code_step`` and ``pick_step``), a quoted value is taken whole,
+    with nothing inside it read as a key, a placeholder or a note (3.13). Without it, any doubt -- a ``word=``
+    that is not a field, an XML tag, a placeholder (``<...>``), an
     empty value, a validation error -- returns None, and extraction goes on as before.
     """
     from pydantic import TypeAdapter, ValidationError
@@ -374,10 +365,6 @@ def from_key_values(
                 value = value[1:-1].strip()
             if not value or re.search(r"[<>{}]|\.\.\.|\u2026", value):
                 return None
-            if not code_written:
-                examples = getattr(fields[match.group(1)], "examples", None)
-                if examples and value in examples:
-                    return None
         elif not value:
             return None
         # unescape_punctuation (fix-6lt7) disabled after benchmark pass 4, where no escaped value occurred:
@@ -503,10 +490,6 @@ def from_positional(
             return None
     if not multi_word and len(rest.split()) > 1:
         return None
-    examples = getattr(fields[target], "examples", None)
-    if examples and rest in examples:
-        return None
-
     try:
         value = TypeAdapter(fields[target].annotation).validate_python(rest)
     except (ValidationError, TypeError, ValueError):

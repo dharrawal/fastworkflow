@@ -172,6 +172,34 @@ def _outer_checked_class(model_class: Type[BaseModel], input_fields: frozenset) 
                         __validators__=field_validators, **fields)
 
 
+#: The key under which a union phase's saved facts name the member that filled them.
+MEMBER_KEY = "__member__"
+
+
+def member_tag(member: type) -> str:
+    """The text that names a union member in saved facts."""
+    return f"{member.__module__}.{member.__qualname__}"
+
+
+def tagged_facts(annotation: Any, filled: BaseModel) -> dict[str, Any]:
+    """*filled* as the plain values a phase saves; for a union annotation they also name the member that
+    filled them (``MEMBER_KEY``), so reading them back never guesses the member by trying each in order."""
+    facts = filled.model_dump(mode="json")
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        facts[MEMBER_KEY] = member_tag(type(filled))
+    return facts
+
+
+def plain_facts(value: Any) -> Any:
+    """*value* (saved facts, a list of them, or a mapping of phase name to either) without ``MEMBER_KEY``:
+    the tag lives in the saved state only, never in what a person or a client reads."""
+    if isinstance(value, dict):
+        return {k: plain_facts(v) for k, v in value.items() if k != MEMBER_KEY}
+    if isinstance(value, list):
+        return [plain_facts(v) for v in value]
+    return value
+
+
 def stored_value(annotation: Any, value: Any) -> Any:
     """*value*, data already validated where it was produced (a phase's stored output, a nested call's
     Output), rebuilt as *annotation*'s types. Models are validated as usual, except that a command
@@ -216,6 +244,13 @@ def stored_value(annotation: Any, value: Any) -> Any:
         members = [arg for arg in args if arg is not type(None)]
         if any(is_pydantic_model(m) and isinstance(value, m) for m in members):
             return value
+        if isinstance(value, dict) and MEMBER_KEY in value:
+            # Saved by tagged_facts: the member that filled the facts is recorded, never guessed.
+            tag, data = value[MEMBER_KEY], {k: v for k, v in value.items() if k != MEMBER_KEY}
+            for member in members:
+                if is_pydantic_model(member) and member_tag(member) == tag:
+                    return stored_value(member, data)
+            raise ValueError(f"the saved facts name {tag!r}, which is not a member of the phase's output type")
         last_error = None
         for member in members:
             if not _holds_model(member):

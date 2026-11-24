@@ -1,8 +1,10 @@
-"""The roles of two inputs given one value, in the one validation step (fix-3rsq.check-roles-one-step).
+"""Two inputs given one value: the one duplicate rule, part of the strict check (bd fix-qjne.20; earlier
+fix-3rsq.check-roles-one-step).
 
-``validate_parameters`` (the turn-frame path) now runs ``planning_commands._check_roles`` for a planning
-command, on every required ``str`` input, as the typed planning call does: one rule on both paths, with or
-without an ``in_request`` option. An execution command is not affected.
+Marked ``str`` fields (``copied_from_command_text`` / ``record_named_in_command_text``) that hold one value are refused
+only when the request writes that value fewer times than the fields that hold it, by the one guard
+(``parameters.check.check_plan``) on both paths and both kinds of command. Unmarked fields are never compared (the
+earlier ``_check_roles`` refused any two required ``str`` inputs of a planning command with one value; it is gone).
 
 Integration only: a temporary copy of ``planning_tutorial_workflow`` with three commands added (two
 planning commands, one execution command), the real loader, ``check_arguments`` and ``validate_parameters``.
@@ -81,6 +83,8 @@ class ResponseGenerator:
 '''
 
 REQUEST = "Move the loan of member Ann Lee to branch Ann Lee"
+#: The request writes the value once: two marked fields cannot both hold it.
+REQUEST_ONCE = "Move the loan of member Ann Lee to its branch"
 
 
 @pytest.fixture
@@ -114,43 +118,44 @@ def _validate(app_workflow, command_name: str, request: str, **values):
     return extraction.validate_parameters(app_workflow, command_name, model(**values))
 
 
-def test_two_name_inputs_with_one_value_are_refused_on_the_turn_frame_path(workflow):
+def test_two_name_inputs_with_one_value_written_once_are_refused_on_the_turn_frame_path(workflow):
     app_workflow, _ = workflow
 
-    is_valid, message, _, fields = _validate(app_workflow, "name_pair", REQUEST, member="Ann Lee", branch="Ann Lee")
+    is_valid, message, _, fields = _validate(app_workflow, "name_pair", REQUEST_ONCE,
+                                             member="Ann Lee", branch="Ann Lee")
 
     assert not is_valid
-    # the roles refusal names the argument it refused, so it is asked like any refused value
-    assert fields == ["branch"] and "branch='Ann Lee' is also the value of member" in message
+    # the refusal names the argument it refused (the one whose role the request does not write before the value)
+    assert fields == ["branch"] and "'Ann Lee' is the member in your request, not the branch" in message
+    # written twice, the two fields may both hold it
+    is_valid, message, _, _ = _validate(app_workflow, "name_pair", REQUEST, member="Ann Lee", branch="Ann Lee")
+    assert is_valid, message
 
 
 def test_the_turn_frame_refusal_matches_the_typed_call(workflow):
     app_workflow, folder = workflow
     command = workflow_agent.load_planning_command_map(folder)["name_pair"]
-    args, _ = sc.check_arguments(command, {"member": "Ann Lee", "branch": "Ann Lee"}, REQUEST)
 
     with pytest.raises(sc.PlanningCommandInputError) as typed:
-        sc._validate_arguments(command, args, REQUEST, None)
+        sc.check_arguments(command, {"member": "Ann Lee", "branch": "Ann Lee"}, REQUEST_ONCE)
 
-    is_valid, message, _, fields = _validate(app_workflow, "name_pair", REQUEST, member="Ann Lee", branch="Ann Lee")
+    is_valid, message, _, fields = _validate(app_workflow, "name_pair", REQUEST_ONCE,
+                                             member="Ann Lee", branch="Ann Lee")
     assert not is_valid
-    assert fields == ["branch"] and str(typed.value) in message
+    # one refusal, and the person reads the same words on both paths
+    assert fields == ["branch"] and sc.refusal_question(command, typed.value) in message
 
 
-def test_a_plain_str_input_equal_to_a_name_is_refused_as_the_typed_call_refuses_it(workflow):
+def test_a_plain_str_input_equal_to_a_name_is_not_compared_on_either_path(workflow):
     app_workflow, folder = workflow
-    request = "File a note about member Ann Lee titled Ann Lee"
+    request = "File a note about member Ann Lee"
     command = workflow_agent.load_planning_command_map(folder)["name_and_free_text"]
     args, _ = sc.check_arguments(command, {"member": "Ann Lee", "title": "Ann Lee"}, request)
 
-    with pytest.raises(sc.PlanningCommandInputError) as typed:
-        sc._validate_arguments(command, args, request, None)
-
-    is_valid, message, _, fields = _validate(app_workflow, "name_and_free_text", request,
-                                             member="Ann Lee", title="Ann Lee")
-
-    assert not is_valid
-    assert fields == ["title"] and str(typed.value) in message
+    assert sc._validate_arguments(command, args, request, None)["title"] == "Ann Lee"
+    is_valid, message, _, _ = _validate(app_workflow, "name_and_free_text", request,
+                                        member="Ann Lee", title="Ann Lee")
+    assert is_valid, message
 
 
 def test_an_execution_command_with_two_equal_required_strings_is_not_refused(workflow):

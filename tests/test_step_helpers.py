@@ -198,8 +198,9 @@ def test_the_runtime_classifiers_read_full_list_when_and_do_not_run():
 
 
 def test_run_and_full_list_quote_parser_characters_and_keep_plain_names_and_placeholders():
-    # Spaces alone are not quoted; None is left out; placeholders are written unquoted.
-    assert run("find_member", query="Raj Patel") == "find_member query=Raj Patel"
+    # A name of several words is quoted (it could hold a condition word); a single plain word is not; None is
+    # left out; placeholders are written unquoted.
+    assert run("find_member", query="Raj Patel") == 'find_member query="Raj Patel"'
     assert run("find_book", query="Dune", start=None) == "find_book query=Dune"
     assert run("find_book", query=Placeholder("title")) == "find_book query=<title>"
     assert run("find_book", query="<title>") == "find_book query=<title>"
@@ -499,11 +500,11 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
     orig_extract = ParameterExtraction._extract_parameters_from_key_values
     library_env.planning_command = _build_planning_command(WriteNotes)
 
-    # First verify the parser without code_written declines the example value and placeholders,
+    # First verify the parser without code_written takes a value equal to an example like any other
+    # (bd fix-qjne.21 follow-up: no examples guard), declines placeholders,
     # and drops the trailing parenthetical on the unquoted f-string form.
-    assert (
-        orig_extract('add_note text="the cover is torn"', AddNote.Input, "add_note") is None
-    )
+    example_bound = orig_extract('add_note text="the cover is torn"', AddNote.Input, "add_note")
+    assert example_bound is not None and example_bound.text == "the cover is torn"
     assert orig_extract('add_note text="see <link>"', AddNote.Input, "add_note") is None
     assert orig_extract('add_note text="wait..."', AddNote.Input, "add_note") is None
     assert orig_extract('add_note text="a=b"', AddNote.Input, "add_note") is not None
@@ -525,26 +526,21 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
     # None of the ".note('for the record')" text was sent to the command.
     assert all("for the record" not in c for c in library_env.runner.sent)
     # After the turn, by_code is cleared from the workflow context, and a user-typed
-    # command path declines an example value.
+    # command path takes an example value like any other.
     assert "by_code" not in library_env.wf.context
     user_code_written = bool(library_env.wf.context.get("by_code"))
-    assert (
-        orig_extract(
-            'add_note text="the cover is torn"',
-            AddNote.Input,
-            "add_note",
-            code_written=user_code_written,
-        )
-        is None
+    user_bound = orig_extract(
+        'add_note text="the cover is torn"',
+        AddNote.Input,
+        "add_note",
+        code_written=user_code_written,
     )
+    assert user_bound is not None and user_bound.text == "the cover is torn"
 
 
-def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env):
-    """Agent ``execute_workflow_query`` keeps the examples guard (``by_code`` is false).
-
-    A hand-typed plan step is still run by ``code_step`` with ``code_written=True``, so the
-    example value would bind in code; the agent must write the command outside that path.
-    """
+def test_the_cme_takes_an_example_value_in_a_step_the_agent_wrote(library_env):
+    """Agent ``execute_workflow_query`` has no examples guard any more (bd fix-qjne.21 follow-up): a value equal to
+    one of the field's examples binds like any other."""
     lib = library_env.wf.root
     book_cls = type(lib.books["b1"])
     lib.books["b5"] = book_cls(lib, "b5", "Dune", "Frank Herbert", 1, "Riverside")
@@ -568,7 +564,7 @@ def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env
     result = library_env.ctx.process_turn("look up Dune")
 
     assert result.status == TurnStatus.COMPLETED
-    assert lib.books["b1"].notes[len(before_notes):] == ["spine is cracked"]
+    assert lib.books["b1"].notes[len(before_notes):] == ["the cover is torn", "spine is cracked"]
     assert "add_note text=the cover is torn" in library_env.runner.sent
     assert "add_note text=spine is cracked" in library_env.runner.sent
     assert "by_code" not in library_env.wf.context
@@ -1160,8 +1156,8 @@ def test_pick_joins_pages_of_a_full_list_listing(library_env, monkeypatch):
     assert result.status == TurnStatus.COMPLETED
     assert library_env.model.asked == []
     assert library_env.runner.sent == [
-        "find_book query=Frank Herbert",
-        "find_book query=Frank Herbert start=1",
+        'find_book query="Frank Herbert"',
+        'find_book query="Frank Herbert" start=1',
         "open_book book_uid=b2",
     ]
 
@@ -1469,9 +1465,9 @@ def test_library_note_member_pick_without_uid_on_test_copy(tmp_path, initialized
 
         assert result.status == TurnStatus.COMPLETED
         assert state.runner.sent == [
-            "find_member query=Raj Patel",
+            'find_member query="Raj Patel"',
             "open_member member_uid=m2",
-            "add_note text=card renewed",
+            'add_note text="card renewed"',
         ]
         assert state.model.asked == []
         assert lib.members["m2"].notes == before + ["card renewed"]

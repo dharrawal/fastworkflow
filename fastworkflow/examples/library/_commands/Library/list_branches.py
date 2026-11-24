@@ -9,7 +9,8 @@ class Signature:
     """List the library's branches."""
 
     class Output(BaseModel):
-        names: list[str] = Field(description="the branch names")
+        names: list[str] = Field(description="the branch names",
+                                 examples=[["Central", "Riverside"]])
         total: int = Field(description="how many branches there are")
 
     plain_utterances = [

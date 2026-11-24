@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The enclosing record · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="c-parent">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group context">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="c-parent">
+      <div class="prose">
+        <p class="num">03</p>
+        <h3>The enclosing record</h3>
+        <p>In fastWorkflow the workflow always stands on one object of your application, called the current <em>record</em> (<code>workflow.record</code>). Each kind of record has a <em>context</em>: a folder under <code>_commands/</code> named after its class, holding the commands for it (see <a href="c-folder.html">a folder for one kind of object</a>). Most records live inside a bigger one: a user is in a chat room, a todo item is in a todo list. That bigger object is the <em>enclosing record</em>.</p>
+        <p>Reach for this idiom when a user standing on the inner object should still be able to use the outer object's commands. Standing on the user alice, the person should be able to say "list the users" without first stepping back out to the room. You make that possible with one method, <code>get_parent</code>, that answers "which object contains this one?"</p>
+        <p>It lives in the context's own file, <code>_commands/&lt;Context&gt;/_&lt;Context&gt;.py</code>, in a class that must be called <code>Context</code>; a <code>_&lt;Context&gt;.py</code> with no class <code>Context</code> stops the workflow when it loads. The framework calls <code>Context.get_parent(record)</code> with the live object the workflow stands on and expects the enclosing object back. Read it off the object itself, usually an attribute your application already keeps.</p>
+        <p>What the framework does with it at run time:</p>
+        <ul class="walk">
+          <li><strong>A request the current context cannot serve climbs.</strong> The framework looks for the command on the current record's context, then on its enclosing record's context, then that record's enclosing record, up to the root object set by the startup command (see <a href="e-root.html">the root object</a>). The global commands are reachable too (see <a href="c-folder.html#c-global">commands with no object</a>). A command typed by its exact name is found on the nearest record that has it.</li>
+          <li><strong>The command runs on the record it was found on.</strong> If "list the users" is found on the ChatRoom, then inside that command <code>workflow.record</code> is the ChatRoom. The workflow itself stays on alice, so the next request starts from alice again. A direct action from a client (an MCP tool call or a direct HTTP action) climbs the same way: it runs the command on the nearest record of the chain whose context has it. The command's <code>Input</code> validators read that record too, on every path: a "/" message, a direct action, a part of an agent-mode turn (its draft, its missing-value question and reply, the review's re-draft after an edit, and the run's check).</li>
+          <li><strong>"Go up" moves one step out.</strong> The built-in <code>go_up</code> command sets the workflow on the enclosing record that <code>get_parent</code> returns.</li>
+        </ul>
+        <p>The climb follows the live objects, not the class names. A todo list nested inside another todo list climbs to that outer list, and only the top list climbs to the manager, with the same <code>get_parent</code> for both. One reader still compares class names: the one that builds the route plans of navigation names each class once, so from a nested list its plan to the manager has one <code>go_up</code> where two are needed, and after it the agent stands on the outer list. Requests and <code>go_up</code> are not affected. The climb stops at the root object. The root has no enclosing record, and the framework never calls <code>get_parent</code> on it, so the root's <code>Context</code> class needs no <code>get_parent</code> at all: leave it out. Write <code>get_parent</code> only for records that sit inside another record.</p>
+        <p>Three mistakes a beginner makes:</p>
+        <ul class="walk">
+          <li><strong>A <code>get_parent</code> that returns <code>None</code> for an object that is not the root.</strong> The climb jumps from the user straight to the global commands, and the ChatRoom's commands are not offered while the workflow stands on a user. <code>return None</code> is the explicit way to say "go straight to the global commands", so nothing is logged; write it only when that is what you mean.</li>
+          <li><strong>No <code>_User.py</code>, or a <code>Context</code> class without <code>get_parent</code>, for a record that is not the root</strong> (for example a class written only for a display name). In a workflow with a root object both are one error: the first climb from that record raises <code>MissingGetParentError</code>, naming the context, the file to write and the method to add, whatever climbs: the lookup of a request or of a typed name, a direct action, the route plans of navigation, <code>go_up</code>. Nothing catches it. A command that moves the workflow onto such a record fails at once, and the workflow stays where it was. In a workflow with no root, no file and no <code>get_parent</code> mean the same as <code>return None</code>: the climb goes straight to the global commands.</li>
+          <li><strong>Counting on a base to supply it.</strong> A context that gets commands from a base (see <a href="c-base.html">commands shared through a base</a>) does not get the base's <code>get_parent</code>. <code>PremiumUser</code> below needs its own <code>_PremiumUser.py</code>; without it, the first climb from a premium user is the error above.</li>
+        </ul>
+        <p>The framework passes the record positionally; name the parameter <code>record</code>. The old name <code>command_context_object</code> fails the workflow load. Parents are never declared in a JSON file: <code>context_inheritance_model.json</code> holds bases only.</p>
+        <p class="see">See also <a href="e-object.html#e-move">move onto a record</a>, which is how the workflow comes to stand on the inner object, and <a href="c-folder.html#c-name">a record's name and identity</a>, which lives in the same <code>Context</code> class.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/messaging_app_4/_commands/User/_User.py (abridged)</figcaption>
+        <pre><code>from ...application.chatroom import ChatRoom
+from ...application.user import User
+
+
+class Context:                  <span class="c"># always this name</span>
+    @classmethod
+    def get_parent(cls, record: User) -&gt; ChatRoom:
+        return record.chatroom  <span class="c"># the room this user belongs to</span></code></pre>
+      </figure>
+      <figure>
+        <figcaption>fastworkflow/examples/messaging_app_4/_commands/ (some of its files)</figcaption>
+        <pre><code>set_root_context.py     <span class="c"># sets workflow.root = ChatRoom()</span>
+ChatRoom/
+    _ChatRoom.py        <span class="c"># the root: no get_parent needed</span>
+    list_users.py       <span class="c"># offered on a User too, through get_parent</span>
+    add_user.py
+    set_current_user.py <span class="c"># moves the workflow onto a User</span>
+User/
+    _User.py            <span class="c"># get_parent: User -&gt; ChatRoom</span>
+    send_message.py
+PremiumUser/
+    _PremiumUser.py     <span class="c"># its own get_parent: PremiumUser -&gt; ChatRoom</span>
+    send_priority_message.py</code></pre>
+      </figure>
+      <figure>
+        <figcaption>tests/todo_list_workflow/_commands/TodoList/_TodoList.py</figcaption>
+        <pre><code>class Context:
+    @classmethod
+    def get_parent(cls, record: TodoList) -&gt; Optional[TodoListManager]:
+        return record.parent    <span class="c"># an outer TodoList, or the TodoListManager root</span></code></pre>
+      </figure>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="c-base.html"><span>Previous</span>Commands shared through a base</a>
+    <a class="next" href="c-state.html"><span>Next</span>Remember the object</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

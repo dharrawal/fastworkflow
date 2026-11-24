@@ -267,9 +267,9 @@ class CapabilityListing(BaseModel):
     context. ``commands``: one entry per command the text lists, in its order, each ``{name, qualified_name, context,
     planning, approval_marker, description, parameters, outputs, sample_utterances}``: ``name`` without the approval
     marker the text appends to it (that is ``approval_marker``, "" for none), ``planning`` True for a planning
-    command, ``description`` the docstring line the text prints ("" when it prints none, as when it only repeats the
-    name), ``parameters``/``outputs`` lists of ``{name, type, description, examples, available_from}`` (a parameter
-    also ``pattern`` in agent mode, as the text), ``sample_utterances`` the first two."""
+    command, ``description`` the docstring line the text prints ("" when the command has none), ``parameters``/``outputs`` lists of ``{name, type, description, examples, available_from}`` (a parameter
+    also ``pattern`` in agent mode, as the text; an output's ``examples`` are in this data but not in the text, which
+    renders only a parameter's, fix-xj0x), ``sample_utterances`` the first two."""
     workflow: dict = {}
     context: str = ""
     commands: list[dict] = []
@@ -313,12 +313,11 @@ def what_can_i_do_data(workflow, for_agents: bool) -> CapabilityListing:
         qualified = cmd.get("qualified_name", "")
         doc = " ".join(str(cmd.get("doc_string") or "").split())
         marker = _approval_marker(app_workflow.folderpath, qualified)
-        spoken = (cmd["name"] + marker).replace("_", " ").lower()   # the text prints the name with its marker
         commands.append({
             "name": cmd["name"], "qualified_name": qualified, "context": shown(active),
             "planning": qualified in planning,
             "approval_marker": marker,
-            "description": doc if doc and spoken not in doc.lower() else "",
+            "description": doc,
             "parameters": fields(cmd.get("inputs"), with_pattern=for_agents),
             "outputs": fields(cmd.get("outputs")),
             "sample_utterances": list(cmd.get("plain_utterances", []) or [])[:2],

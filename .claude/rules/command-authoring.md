@@ -12,8 +12,12 @@ paths:
 my_workflow/
 ├── application/                     # Your app code (untouched)
 ├── _commands/                       # Command implementations (generated + edited)
-│   ├── context_inheritance_model.json  # Context/command hierarchy
-│   └── <command_name>.py            # Single-file command (preferred)
+│   ├── context_inheritance_model.json  # Context bases ("base" lists)
+│   ├── startup.py                   # Global command that builds the root object
+│   ├── <command_name>.py            # Global command: single file (preferred)
+│   └── <Context>/                   # One folder per kind of object, named after its class
+│       ├── _<Context>.py            # Optional: class Context (get_parent, get_displayname, ...)
+│       └── <command_name>.py        # A command of that context
 ├── ___command_info/                 # Generated at train-time (gitignore)
 ├── ___workflow_contexts/            # Session state at run-time (gitignore)
 └── ___convo_info/                   # Conversation logs (gitignore)
@@ -54,7 +58,7 @@ class ResponseGenerator:
         ...
 ```
 
-A two-argument `__call__` is a load error. `CommandOutput` is not a return value.
+A two-argument `__call__` (or one whose third argument has a default) is refused with "must take three arguments", but the error is raised only when the command's class is first used: `load_problems` does not list it. `CommandOutput` is not a return value.
 
 ## `plain_utterances` — the seed list is the highest-leverage thing you write
 
@@ -250,7 +254,7 @@ class Output(BaseModel):
     raw_payload: str = Field(default="", json_schema_extra={"ui": {"hidden": True}})
 ```
 
-`ui` is checked when the workflow loads. A `ui` value that is not a dict, is empty, or is `False`; an unknown option (the
+`ui` is checked when the workflow loads. A mistake on an `Input` or an `Output` field makes that command fail to load (the rest of the workflow loads), and `fastworkflow run`, `train`, the server and `command preview --check` list it (`docs/design_idioms/removed.html#load-rule`). A `ui` value that is not a dict, is empty, or is `False`; an unknown option (the
 error suggests the closest: `did you mean 'widget'?`); `hidden` or `hero` that is not `True`; a `format` or `widget`
 outside the lists above; an `Output` option on an `Input` (`hero`, `hidden`, `format`) or `widget` on an `Output`;
 `"textarea"` on a field that is not a `str` (`Optional[str]` is fine); and `"radio"` on a field that is not a `Literal` all fail
@@ -290,6 +294,53 @@ A "/" parameter form also needs your cooperation in two places. A `str` field wi
 is drawn masked; its value is sent as ordinary chat text when the user clicks Run, so it is recorded in the
 transcript. Do not put a real secret in a "/" command's `Input`. An `Optional[bool]` field is a three-way choice
 (unset, yes, no), so leaving it unset is not the same as `False`.
+
+## Declare what a value looks like (checklist; full text in the `author-planning-commands` skill, "Declare what a value looks like")
+
+- `Field(examples=[...])` on every text and id `Input` field: 2 to 5 realistic values with the length and shape real values
+  have, never customer data, valid for the field's pattern and validators. Not shown to the extraction model; used for
+  the question hint, the chat placeholder, the preview sample, generated few-shot examples, and the listing the agent
+  reads (so keep them few: the full listing is whole only up to `FULL_LISTING_MAX_CHARS`).
+- `examples` on an `Output` field that an `Input` points at with `from_command_output`; not rendered in the listing.
+- Declare `ge`/`le`/`gt`/`lt` and `pattern` rather than prose, but only what the command already refuses: a declared bound
+  makes validation refuse an out-of-range value. `pattern` is also told to the extraction model.
+- A fixed set known in code is a `Literal`; a set from data is a `str` with a validator plus examples; "One of: a, b" is prose.
+- Descriptions say what a value looks like; an `Input` description is part of the extraction prompt, so editing it changes
+  that command's prompt.
+- `plain_utterances` stay generic (they train which command); values go in `examples`. `words` and `examples_by` below are
+  the training-only declarations.
+- `personas.json` changes a global training input and every utterance-cache key: the next train regenerates all generated
+  utterances (model spend).
+- Any command file edit changes the training signature (retrain at the next `fastworkflow train`) and may stale the
+  planning-command previews (`fastworkflow command preview <workflow> --check`).
+
+## Training-only declarations: `words` and `examples_by`
+
+Two declarations tell the synthetic utterance generator what only you know. They are **training data only**: no
+check, extractor, planner, listing or preview reads them, and the extraction prompt, the command listing, the
+classifier check and the preview are byte-identical with or without them (`tests/test_training_only_field_options.py`).
+They do appear in the field's JSON Schema, so `GET /command_schemas` carries them. Both are checked when the workflow
+loads, on planning and execution commands alike, and a mistake fails that command's load with a message naming the
+field and the rule (misspellings too: `example_by` suggests `examples_by`, `word` suggests `words`).
+
+- `words`, inside `classifier_confirms` on a `Literal` field: the words or short phrases users write for a value
+  (users rarely write the value itself). Each key is a declared value, each list is non-empty text, a word is listed
+  once per value (ignoring case) and under one value only; a value may have none. `{"words": {...}}` without
+  `meanings` is the same check as `classifier_confirms: True`.
+- `examples_by`, on the field whose example values depend on a choice field of the same `Input`: the one key names
+  that `Literal` field (not this field; one choice field only), each inner key is one of its values, and each list
+  holds values valid for THIS field by its type, `pattern` and bounds (field validators are not run on them).
+
+```python
+kind: Literal["identity", "group"] = Field(..., json_schema_extra={"classifier_confirms": {
+    "meanings": {"identity": "one person", "group": "a set of people"},
+    "words": {"identity": ["person", "employee"], "group": ["team", "role"]}}})
+name: str = Field(..., examples=["Maria Okafor", "Payroll Approvers EMEA"], json_schema_extra={
+    "examples_by": {"kind": {"identity": ["Maria Okafor", "Tom Reyes"], "group": ["Payroll Approvers EMEA"]}}})
+```
+
+Like any edit of a command file, adding them changes that workflow's training signature, so the next
+`fastworkflow train` retrains it.
 
 ## Context Model (`context_inheritance_model.json`)
 

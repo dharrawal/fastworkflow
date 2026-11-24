@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="index">
+<aside class="rail"></aside>
+
+<main id="top">
+  <header class="lede">
+    <p class="eyebrow">For people writing a workflow</p>
+    <h1>The shapes a workflow author writes.</h1>
+    <p>A fastWorkflow app lets people, or an AI agent, use your Python application by asking in plain words. You write commands. Each command is one Python file under <code>_commands/</code>, and the framework picks the command a message means, reads the values it needs out of the message, asks for any that are missing, and runs it.</p>
+    <p>There are two kinds of command. An <em>execution command</em> runs your own Python code once. A <em>planning command</em> runs other commands as a short list of steps, and the framework's code runs every step it can. A <em>context</em> is one kind of object in your application, such as a book or a member: a folder under <code>_commands/</code> named after its class, holding the commands that act on that object.</p>
+    <p>How to read this site: start at <a href="e-file.html">One file, two classes</a> and follow the pages in order. There are 23 idioms in three groups: execution commands, planning commands and contexts. Each page is one shape you write, says when to reach for it, and shows a real example, most of them from the shipped <code>library</code> example (<code>fastworkflow/examples/library</code>). A real command file uses several shapes at once.</p>
+    <p>Five reference pages sit beside the idioms. <a href="r-turn.html">How a turn runs</a> follows one user message from start to finish: how it is split into parts, the questions it may ask, the one review and the run. <a href="r-shapes.html">Plain Python, read by the framework</a> is one table of the ordinary Python and Pydantic forms (a class, a docstring, a <code>Field</code>, an annotation, a union, a property, a subclass) that the framework reads, each with the page that teaches it. The other three are <a href="r-helpers.html">Helper modules</a>, <a href="r-steps.html">Planning step helpers</a> and <a href="removed.html">Load errors: one rule, and the removed spellings</a>.</p>
+    <ul class="stats">
+      <li class="execution"><b>10</b> execution</li>
+      <li class="planning"><b>8</b> planning</li>
+      <li class="context"><b>5</b> contexts</li>
+      <li id="shown" hidden></li>
+    </ul>
+  </header>
+  <p id="empty" hidden>Nothing matches that filter.</p>
+
+  <section class="group execution" id="execution">
+    <header class="section-head">
+      <p class="stamp">Execution commands</p>
+      <h2>Code that runs.</h2>
+      <p>One Python file with two classes. <code>Signature</code> describes the command: what it does, example requests, the values it needs and what it returns. <code>ResponseGenerator</code> runs your code. An execution command runs in agent mode, in assistant mode (<code>fastworkflow run --assistant</code>), and when a client calls it directly over HTTP or MCP.</p>
+    </header>
+
+    <!-- TOC execution START -->
+    <ol class="toc">
+      <li data-id="e-file"><a href="e-file.html"><span class="num">01</span>One file, two classes</a></li>
+      <li data-id="e-object"><a href="e-object.html"><span class="num">02</span>The record it acts on</a></li>
+      <li data-id="e-purpose"><a href="e-purpose.html"><span class="num">03</span>How a request finds your command</a></li>
+      <li data-id="e-input"><a href="e-input.html"><span class="num">04</span>An input</a></li>
+      <li data-id="e-words"><a href="e-words.html"><span class="num">05</span>Field options</a></li>
+      <li data-id="e-from"><a href="e-from.html"><span class="num">06</span>A handle's producer</a></li>
+      <li data-id="e-hook"><a href="e-hook.html"><span class="num">07</span>Correct or refuse</a></li>
+      <li data-id="e-return"><a href="e-return.html"><span class="num">08</span>What it returns</a></li>
+      <li data-id="e-writes"><a href="e-writes.html"><span class="num">09</span>Changes data or needs a yes</a></li>
+      <li data-id="e-root"><a href="e-root.html"><span class="num">10</span>The root object</a></li>
+    </ol>
+    <!-- TOC execution END -->
+  </section>
+
+  <section class="group planning" id="planning">
+    <header class="section-head">
+      <p class="stamp">Planning commands</p>
+      <h2>A job written as steps.</h2>
+      <p>Same folder, same <code>Signature</code>. A <code>PlanGenerator</code> takes the place of the <code>ResponseGenerator</code>. Each of its methods without a leading underscore is a phase: it returns the steps of one part of the job, and its return annotation says which command results (the facts) that phase hands on. Phases run in the order the methods are written; a phase with nothing to do returns <code>[]</code>. A method with one leading underscore is a helper, and <code>__result__</code> writes the answer.</p>
+      <p>Write a planning command's <code>Signature</code> docstring with care: besides describing the command everywhere, it is the line the request splitter reads for that kind of job (see <a href="r-turn.html#p-split">how a turn runs</a>).</p>
+    </header>
+
+    <!-- TOC planning START -->
+    <ol class="toc">
+      <li data-id="p-plan"><a href="p-plan.html"><span class="num">01</span>A plan in place of a body</a></li>
+      <li data-id="p-run"><a href="p-run.html"><span class="num">02</span>A step the code runs</a></li>
+      <li data-id="p-facts"><a href="p-facts.html"><span class="num">03</span>What a phase hands on</a></li>
+      <li data-id="p-skip"><a href="p-skip.html"><span class="num">04</span>A phase that does not run</a></li>
+      <li data-id="p-result"><a href="p-result.html"><span class="num">05</span>The answer, in code</a></li>
+      <li data-id="p-fan"><a href="p-fan.html"><span class="num">06</span>Once per item</a></li>
+      <li data-id="p-call"><a href="p-call.html"><span class="num">07</span>Calling a planning command</a></li>
+      <li data-id="p-share"><a href="p-share.html"><span class="num">08</span>Shared phases</a></li>
+    </ol>
+    <!-- TOC planning END -->
+  </section>
+
+  <section class="group context" id="contexts">
+    <header class="section-head">
+      <p class="stamp">Contexts</p>
+      <h2>Where a command lives, and which object it acts on.</h2>
+      <p>The workflow always stands on one object of your application, <code>workflow.record</code>, and offers the commands in the folder named after that object's class. Two declarations let it reach more. <code>base</code>, in <code>_commands/context_inheritance_model.json</code>, gives a context another context's commands. <code>get_parent</code>, on the context's <code>Context</code> class, names the object that encloses this one.</p>
+      <div class="explain">
+        <p><strong>Where a request looks.</strong> This is not a separate shape; it follows from the pages below. A command name typed exactly is found in the nearest place that has it, in this order: the current record's own context, that context's <code>base</code> contexts, then each enclosing record reached through <code>get_parent</code> (with its bases), up to the root object, and last the global commands, the files directly in <code>_commands/</code> (for plain words, a trained global model is asked first). A command runs on the record where it was found, whether a typed or plain-words request or a direct action from a client reached it. The workflow moves onto another record only when a command assigns <code>workflow.record</code>, and <code>@descends_to</code> tells the framework which command does that (see <a href="e-object.html#e-move">the record it acts on</a>).</p>
+      </div>
+    </header>
+
+    <!-- TOC context START -->
+    <ol class="toc">
+      <li data-id="c-folder"><a href="c-folder.html"><span class="num">01</span>A folder for one kind of object</a></li>
+      <li data-id="c-base"><a href="c-base.html"><span class="num">02</span>Commands shared through a base</a></li>
+      <li data-id="c-parent"><a href="c-parent.html"><span class="num">03</span>The enclosing record</a></li>
+      <li data-id="c-state"><a href="c-state.html"><span class="num">04</span>Remember the object</a></li>
+      <li data-id="c-identifiers"><a href="c-identifiers.html"><span class="num">05</span>Identifier formats</a></li>
+    </ol>
+    <!-- TOC context END -->
+  </section>
+
+  <section class="reference-block reference" id="reference">
+    <header class="section-head">
+      <p class="stamp">Reference</p>
+      <h2>How a turn runs, and lookup tables.</h2>
+      <p>Not shapes you write. One page on what the framework does with each user message, so you know what your users will see. Then the lookup tables: the plain Python forms the framework reads, the helper files and step helpers the shapes above use, and what a load error stops, with the old spellings (most of which no longer load), each with what to write instead.</p>
+    </header>
+
+    <!-- TOC reference START -->
+    <ol class="toc">
+      <li data-id="r-turn"><a href="r-turn.html">How a turn runs</a></li>
+      <li data-id="r-shapes"><a href="r-shapes.html">Plain Python, read by the framework</a></li>
+      <li data-id="r-helpers"><a href="r-helpers.html">Helper modules</a></li>
+      <li data-id="r-steps"><a href="r-steps.html">Planning step helpers</a></li>
+      <li data-id="removed"><a href="removed.html">Load errors: one rule, and the removed spellings</a></li>
+    </ol>
+    <!-- TOC reference END -->
+  </section>
+
+  <footer class="colophon">
+    <p>Every page was checked against the code and the shipped examples. For a guided walk through the same shapes, step by step on the library example, read the <a href="../tutorials/planning_commands/README.md">planning-command tutorial</a>. The one-page reference for a planning command file is <a href="../planning_command_file_layout.md">planning_command_file_layout.md</a>, and the rules for command files in general are in <a href="../../.claude/rules/command-authoring.md">command-authoring.md</a>.</p>
+  </footer>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

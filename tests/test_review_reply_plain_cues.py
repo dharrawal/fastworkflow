@@ -30,7 +30,7 @@ def _cue(text: str) -> str:
     "that works", "works for me", "fine", "k", "kk", "k thanks", "nothing to change", "no changes",
     "no changes, go ahead", "no changes needed", "no change", "no edits", "no objections", "no problem",
     "as is", "run as is", "run the plan as is", "\U0001F44D", "\U0001F44D\U0001F44D", "\U0001F44D\U0001F3FD",
-    "lgtm \U0001F44D", "ok \U0001F44D", "don't change anything, go ahead", "do it now", "go ahead",
+    "lgtm \U0001F44D", "ok \U0001F44D", "do it now", "go ahead",
 ])
 def test_plain_accepts(text):
     assert _cue(text) == "accept"
@@ -53,6 +53,8 @@ def test_plain_declines(text):
     "sure, change the first one", "cancel the third one", "no, change the second one to weekly",
     "no changes to step 1, but add a step", "do it later", "do it once the test passes", "continue with step 2 only",
     "don't change the second one", "don't do it", "k, but drop step 2",
+    # bd fix-i8im: "dont change anything" may mean "make no change", so it is no accept cue (the head reads it)
+    "dont change anything", "don't change anything, go ahead",
     # no polarity
     "not sure", "maybe", "hmm", "", "   ", "what do you think?", "asdf", "proced", "okk",
     # a typed edit clause keeps its own path
@@ -113,6 +115,9 @@ reader = pytest.mark.usefixtures("initialized_fastworkflow", "no_live_model", "n
 def _reply(gated, monkeypatch, text):
     from fastworkflow.review_engine import reply_to_proposal
 
+    # A workflow with no command that changes data: the turn's ad hoc part then needs no explicit yes (bd fix-ftdl.8.4),
+    # so the plain cues are read as they are on any turn with no write.
+    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset())
     record = _open_review_two_step(gated, monkeypatch)
     return record, reply_to_proposal(gated.ctx, gated.store, record, text)
 
@@ -269,8 +274,21 @@ def test_an_accept_followed_by_a_request_goes_to_the_edit_reader(text):
 
 
 @pytest.mark.parametrize("text", ACCEPT_THEN_REQUEST[:3])
-def test_an_accept_followed_by_a_request_the_reader_cannot_read_asks_again(text):
-    """A reader that reads no change does not turn the reply back into an accept: the person is asked again."""
+def test_an_accept_followed_by_a_request_the_reader_reads_no_change_in_is_an_accept(text):
+    """A reader that reads no change in the rest of an accept leaves the accept (bd fix-ftdl.8.28): what follows it asks
+    for nothing the plan does not already do, so the reply accepts the plan as shown, with no read-back."""
+    from fastworkflow.review_engine import Change, Verdict
+
+    def reader(reply, proposal):
+        return [Change(index=1, field="goal", value="List the books")]       # the plan as it stands
+
+    decision = re_.ProposalReplyPolicy(reader).decide(_two_step_proposal(), text)
+    assert decision.verdict is Verdict.CONFIRM
+
+
+@pytest.mark.parametrize("text", ["List the books first, then count", "go back and count the members"])
+def test_a_reply_that_is_no_accept_and_reads_as_no_change_asks_again(text):
+    """With no accept before it, a reply the reader reads no change in is asked about again."""
     from fastworkflow.review_engine import Change, Verdict
 
     def reader(reply, proposal):

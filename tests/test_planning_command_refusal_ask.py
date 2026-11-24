@@ -183,13 +183,15 @@ def test_a_refusal_is_not_asked_in_an_unattended_turn(workflow_env):
     assert workflow_agent._planning_command_refusal_may_ask(ctx) is False
 
 
-def test_a_refusal_is_not_asked_when_a_message_queue_blocks_the_turn(workflow_env):
+def test_a_refusal_is_asked_when_a_message_queue_carries_the_replies(workflow_env):
+    """bd fix-ftdl.7.7: the terminal's message queue does not stop a question. The question suspends the turn and the next
+    line typed is its reply, as on the chat page (it used to be refused here, so the terminal never asked)."""
     workflow_env()
     ctx, _wf = _session(RecordingTraceSink(), folder=PLANNING_COMMANDS)
     ctx.set_transport_queues(user_message_queue=queue.Queue())  # the CLI driver's wiring
     ctx._begin_turn(REQUEST)
 
-    assert workflow_agent._planning_command_refusal_may_ask(ctx) is False
+    assert workflow_agent._planning_command_refusal_may_ask(ctx) is True
 
 
 def test_a_refusal_may_be_asked_again_after_a_question_the_asking_rule_decides_how_often(workflow_env):

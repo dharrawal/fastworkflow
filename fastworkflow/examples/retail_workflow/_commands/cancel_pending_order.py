@@ -4,7 +4,7 @@ from fastworkflow.workflow import Workflow
 
 # For command metadata extraction
 import os
-from typing import Annotated
+from typing import Annotated, Literal
 from pydantic import Field, ConfigDict
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -20,21 +20,18 @@ class Signature:
         order_id: Annotated[
             str,
             Field(
+                json_schema_extra={"from_command_output": "get_user_details.order_ids"},
                 description="The order ID to cancel",
-                json_schema_extra={"from_command_output": "get_user_details"},
                 pattern=r"^(#?[\w\d]+)$",
                 examples=["123", "#abc123", "order456"],
             )
         ]
 
         reason: Annotated[
-            str,
+            Literal["no longer needed", "ordered by mistake"],
             Field(
                 default="ordered by mistake",
                 description="Reason for cancellation. If reason is invalid, use the default reason value",
-                json_schema_extra={
-                    "enum": ["no longer needed", "ordered by mistake"]
-                },
                 examples=["no longer needed", "ordered by mistake"]
             )
         ]
@@ -80,6 +77,7 @@ class Signature:
             utterances_obj.plain_utterances, command_name
         )
 
+@fastworkflow.writes
 class ResponseGenerator:
     def __call__(
         self,

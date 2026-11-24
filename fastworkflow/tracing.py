@@ -486,7 +486,49 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # when none changed it) and `attempts` the model calls made (1 or 2). Each text is capped at `MAX_ATTR_BYTES` like
 # `user_message`. User content: stored, redacted and erased with the turn like `user_message` and the `fw.llm.call` that
 # holds the same request. Null when the turn was not split. A span recorded before this carries no such key.
-SPAN_CONTRACT_VERSION = 56
+#
+# v58: fw.nlu.intent v13 and fw.nlu.param_extraction v14 (bd fix-o1lg, one decision on both paths): the plan path writes
+# the two spans for a part's own decision and its own command's extraction, as the "/" path always did, from the same
+# writers (`intent_detection.traced_decision`, `parameter_extraction.traced_extraction`): one `fw.nlu.intent` span per
+# decision (a memo read writes none; a pinned plan is not detected, so it writes none) and one `fw.nlu.param_extraction`
+# span for the extraction of the part's command (the draft's, including the review's edits that draft again).
+# New attribute `part` on both: the 1-based number of the part of the turn the decision or extraction is for, present on
+# the plan path when the caller knows it, absent on the "/" path and on a nested step command's spans (which are not a
+# part's own). A span recorded before this carries no such key, and before this the plan path wrote neither span for a part.
+#
+# v57: fw.nlu.param_extraction v13 and fw.planner.plan / fw.planner.replan v10 (bd fix-qjne.21, recording only) --
+# `argument_check_not_in_request`: the sorted names of the UNMARKED `str` and `int` fields (no `copied_from_command_text`
+# or `record_named_in_command_text`) whose extracted value the request does not write, the test the copy check applies to
+# a marked field. Names only, never the values; the key is absent on a parameter extraction span and null on a planner span
+# when there is none. Advisory: the value stands, nothing is refused. A span recorded before this carries no such key.
+#
+# v59: fw.turn v7 -- `subtask_split.failed`: why the split gave no answer and the request ran as one part, `cut_off`
+# (every answer stopped at the splitter's output cap, the retry without the reasoning field included) or `error` (the
+# model call raised); absent when the split answered. A span recorded before this carries no such key.
+#
+# v60: fw.nlu.param_extraction v15 -- `argument_left_empty`: the sorted names of the OPTIONAL marked fields the duplicate
+# rule left not given (two marked fields held one value the user writes fewer times; the note on `argument_notes` and on
+# the review item or question says why). Names only, never the values; absent when none. A span recorded before this
+# carries no such key, and before this such a field was refused (`argument_check_refusals`, `invalid_fields`).
+#
+# v61: fw.turn v8 (bd fix-qjne.26 stage 0, recording only) -- `subtask_split.prompt_digest` and
+# `subtask_split.prompt_source`: which splitter prompt produced the split. `prompt_digest` is the first 12 hex
+# characters of the SHA-256 of the splitter signature's instructions and field descriptions
+# (`workflow_agent.split_prompt`); `prompt_source` is `built_in` or `workflow` (the workflow's `_commands/_workflow.py`
+# replaces the instructions or a field description). Absent when the prompt was never built. A span recorded before
+# this carries no such keys.
+#
+# v62: fw.turn v9 (bd fix-qjne.26 stage 3) -- `subtask_split.prompt_source` gains the value `built_in+workflow`: the
+# built-in splitter rules (`workflow_agent.SPLIT_RULES`) with the workflow's `split_examples` (`_commands/_workflow.py`)
+# given as demos in place of the generic examples; `prompt_digest` then also covers each example's request and parts.
+# The value `workflow` is no longer written: a `Signature` in that file (a replacement prompt) is a load error, so
+# `prompt_source` is `built_in` or `built_in+workflow`. A span recorded before this never carries the new value. Also `subtask_split.gate`: the one-job gate's verdict, {score, label, threshold, skipped}
+# (`score` the remote decision model's probability of "one", `label` its answer, `one` or `several`, `threshold` the bar
+# `FW_SPLIT_GATE_THRESHOLD`, `skipped` whether the splitter was skipped), present when the gate was asked and absent
+# when it was not (no remote decision model, the gate `off`, a failed call, a `use_plan` turn). A request the gate kept
+# whole is recorded with `raw` empty, `merged` the request, `attempts` 0 and no `prompt_digest` or `prompt_source`
+# (they are present only when the splitter's prompt was built). A span recorded before this carries no such key.
+SPAN_CONTRACT_VERSION = 62
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -628,8 +670,13 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v4: `subtask_bindings` (SPAN_CONTRACT_VERSION v37): shown == run per bound sub-task (fix-48np.1).
     # v5: `subtask_plan_ambiguity` (SPAN_CONTRACT_VERSION v46): the sub-tasks whose planning-command match was ambiguous.
     # v6: `subtask_split` (SPAN_CONTRACT_VERSION v56): the model's split, the merged list and the rules that changed it.
+    # v7: `subtask_split.failed` (SPAN_CONTRACT_VERSION v59): why a split gave no answer.
+    # v8: `subtask_split.prompt_digest` and `.prompt_source` (SPAN_CONTRACT_VERSION v61): which splitter prompt split.
+    # v9: `subtask_split.prompt_source` value `built_in+workflow` (SPAN_CONTRACT_VERSION v62): split_examples as demos,
+    #     and `workflow` (a replacement prompt) is no longer written;
+    #     `subtask_split.gate`: the one-job gate's verdict, and a split the gate skipped (`attempts` 0).
     SPAN_TURN: SpanContract(
-        version=6,
+        version=9,
         attributes=frozenset(
             {
                 "turn_key",
@@ -811,7 +858,8 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # written from Phase 3 without being declared here.
     # v1 (fix-3rsq.p14.6): the deferred answer of a planning command call (3.16). `skill`, `phase`
     # and `phase_index` name the phase whose facts it writes from; `phase_count` the call's phases.
-    # `error_type` is written only when the model call raised.
+    # `error_type` is written only when the model call raised, or when the call's `__result__` failed (fix-qjne.12:
+    # no model call is made then; the span has status error and the exception class).
     SPAN_PLANNING_COMMAND_ANSWER: SpanContract(
         version=1,
         attributes=frozenset({"skill", "phase", "phase_index", "phase_count", "error_type"}),
@@ -935,17 +983,19 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v6 or v7 still carries them.
     # v9: `skill_notes` also carries each verify verdict read (SPAN_CONTRACT_VERSION v39). A span recorded
     # at v8 carries only the notes of the changes.
+    # v10 (SPAN_CONTRACT_VERSION v57): `argument_check_not_in_request`, the unmarked fields whose value the request does not
+    # write, as names (see the v57 note). Null when there is none, and on a span recorded before this.
     SPAN_PLANNER_PLAN: SpanContract(
-        version=9,
+        version=10,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
                               "skill", "skill_args", "skill_notes", "skill_fallback",
-                              "skill_refusal_asked"}),
+                              "skill_refusal_asked", "argument_check_not_in_request"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=9,
+        version=10,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
                               "skill", "skill_args", "skill_notes", "skill_fallback",
-                              "skill_refusal_asked"}),
+                              "skill_refusal_asked", "argument_check_not_in_request"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded
@@ -982,8 +1032,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v10 (fix-o5wi.9): `chosen_command_elsewhere`; the local model's facts carry `outside_labels`, `outside_scores`
     # and `handed_on` (see the v52 note above).
     # v11 (SPAN_CONTRACT_VERSION v53): `remote_failed`, the remote model's failed call (see the v53 note above).
+    # v12 (SPAN_CONTRACT_VERSION v58): `part`, the 1-based part of the turn a plan-path decision is for (see the v58 note).
     SPAN_NLU_INTENT: SpanContract(
-        version=12,
+        version=13,
         attributes=frozenset(
             {
                 "context",
@@ -1014,6 +1065,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "is_cme_command",
                 "ambiguous",
                 "resolved",
+                "part",
             }
         ),
     ),
@@ -1066,7 +1118,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # Absent on earlier versions.
         # v12 (SPAN_CONTRACT_VERSION v55): `argument_refusal` (a refusal of the call as a whole that names no input;
         # written by an earlier step of fix-qoyz, declared here). Absent on earlier versions.
-        version=12,
+        # v13 (SPAN_CONTRACT_VERSION v57): `argument_check_not_in_request` (see the v57 note). Absent on earlier versions.
+        # v14 (SPAN_CONTRACT_VERSION v58): `part`, the 1-based part of the turn a plan-path extraction is for (see the v58 note).
+        # v15 (SPAN_CONTRACT_VERSION v60): `argument_left_empty` (see the v60 note). Absent on earlier versions.
+        version=15,
         attributes=frozenset(
             {
                 "command_name",
@@ -1093,6 +1148,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "argument_check_refusals_final",
                 "argument_check_respelled",
                 "argument_refusal",
+                "argument_check_not_in_request",
+                "part",
+                "argument_left_empty",
             }
         ),
     ),
@@ -1341,6 +1399,17 @@ def split_record_attribute(record: Optional[dict[str, Any]]) -> Optional[dict[st
     }
     if record.get("changed_by"):
         out["changed_by"] = list(record["changed_by"])
+    if record.get("doubts"):
+        # a rewrite the merge did not make because it would have dropped a name the part carried (bd fix-ftdl.12)
+        out["doubts"] = [{"part": cap_attr_value(d.get("part", "")), "missing": list(d.get("missing") or [])}
+                         for d in record["doubts"]]
+    if record.get("failed"):
+        out["failed"] = record["failed"]
+    if record.get("prompt_digest"):
+        out["prompt_digest"] = record["prompt_digest"]
+        out["prompt_source"] = record["prompt_source"]
+    if record.get("gate"):
+        out["gate"] = dict(record["gate"])
     return out
 
 

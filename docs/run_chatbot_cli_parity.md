@@ -14,7 +14,10 @@ Startup commands, startup actions, and per-session context JSON are
 deliberately **not** exposed by the chat UI: the session is driven by what the
 user types, so pre-seeding it from a form makes no sense in an interactive UX.
 They remain server-launch decisions (`run_fastapi_mcp` flags) and programmatic
-`/initialize` request fields.
+`/initialize` request fields. The one exception is the workflow's own
+`startup_action.json`: with no startup flag given and none in the `/initialize`
+request, every entry point (the chat page's server included) runs it when a
+session starts.
 
 | Capability | CLI | Chatbot chat mode | Notes |
 |---|---|---|---|
@@ -23,7 +26,7 @@ They remain server-launch decisions (`run_fastapi_mcp` flags) and programmatic
 | New conversation | `//new` at the CLI prompt | Yes — the **New conversation** header button calls `POST /new_conversation` | |
 | Workflow selection | `run`/`train`/`build` commands take a positional workflow path; `run_chatbot` does not | Yes — pick from the browser (bundled examples + directory browser); switchable at runtime | Workflow selection is deliberately browser-owned for `run_chatbot` |
 | Per-session startup command | `--startup_command` | **Not offered** — no chat-UI input | Set it on the server (`run_fastapi_mcp --startup_command`), or POST `/initialize` yourself. If the server has one, the chatbot renders that first turn rather than hiding it |
-| Per-session startup action | `--startup_action <file.json>` | **Not offered** — no chat-UI input | Same: server flag, or the `/initialize` `startup_action` field via curl/Swagger (mutually exclusive with `startup_command`, 400 if both) |
+| Per-session startup action | `--startup_action <file.json>` | **Not offered** — no chat-UI input, but the workflow's `startup_action.json` runs by itself | Same: server flag, or the `/initialize` `startup_action` field via curl/Swagger (mutually exclusive with `startup_command`, 400 if both) |
 | Per-session workflow context | `--context '<json>'` | **Not offered** — no chat-UI input | The `/initialize` `context` field still exists for programmatic callers; it applies only on the call that creates the session |
 | Structured results | Prints the response text and an artifacts table; the typed `Signature.Output` is not drawn | Yes — a card per turn built from `command_response.output` and `GET /command_schemas`, with no model call (stat strip, tables, badges, collapsed supporting lookups); shown in a side panel behind a **Show results (N)** link under the whole answer | `ui` hints (`hidden`, `hero`, `format`, `table`) apply only here |
 | Composed answer card | Not offered | Yes, with an `LLM_RESPONSE_GEN` model and the **Rich answers** switch: composed automatically (a lead and sections, tables capped at 8 rows, a footer line per result group no block shows), once, on a non-`/` turn with more than one primary result or an answer over 400 characters (`POST /compose_answer_card`); the plain answer shows until the card arrives | Sends the turn's command outputs to that model; every value on the card is read from the turn's data. Absent when the variable is unset |

@@ -242,8 +242,10 @@ def test_the_gaps_of_a_call_are_worked_out_without_a_model(gated):
     assert gaps.values == {"text": NOTE}
 
 
-def test_the_typed_call_path_asks_about_every_missing_argument_too(gated, monkeypatch):
-    """A part named exactly takes the fast path: the planner's typed call is refused, and the question comes from it."""
+def test_a_part_that_names_a_planning_command_is_asked_about_every_missing_argument_at_the_gate(gated, monkeypatch):
+    """A part named exactly takes the fast path, and its missing values are asked at the gate, before it runs, by the
+    same values question a picked or matched plan gets (bd fix-ftdl.7.8: it used to be asked while it ran, after the
+    planner's typed call was refused, a second place that asks)."""
     import dspy
     from dspy.utils import DummyLM
 
@@ -251,8 +253,7 @@ def test_the_typed_call_path_asks_about_every_missing_argument_too(gated, monkey
     script_matcher(monkeypatch, lambda text: {PLAN: 0.9, "none": 0.0})
 
     class Planner(DummyLM):
-        """The planner's model: the typed fill finds nothing, and the text planner (read after a refusal that is not asked
-        about) gives a one-line plan."""
+        """The planner's model: the typed fill finds nothing, and the text planner gives a one-line plan."""
 
         def forward(self, prompt=None, messages=None, **kwargs):
             text = "\n".join(str(m.get("content", "")) for m in (messages or [])) or str(prompt)
@@ -264,15 +265,34 @@ def test_the_typed_call_path_asks_about_every_missing_argument_too(gated, monkey
     first = gated.ctx.process_turn("note_member", approval_surface=HOST)
 
     assert first.status is TurnStatus.AWAITING_USER and gated.ctx._turn_subtask_review == "fast_path"
+    assert gated.ctx._waiting.payload["after"] == "resolve_next"           # the gate's question, not the run's
+    assert not [o for o in gated.ctx._turn_outputs if str(o.command_name).startswith("Library/")]
     request = _request(first)
     assert request["missing"] == ["member", "text"] and "does not give the member and text" in first.answer
+    again = gated.ctx.process_turn("hmm", approval_surface=HOST)
+    assert again.status is TurnStatus.AWAITING_USER and again.answer.startswith("That did not give a value I could use.")
     second = gated.ctx.process_turn(f"member: {MEMBER}", approval_surface=HOST)
     assert second.status is TurnStatus.AWAITING_USER and _request(second)["missing"] == ["text"]
     assert _request(second)["values"] == {"member": MEMBER}
-    again = gated.ctx.process_turn("hmm", approval_surface=HOST)
-    assert again.status is TurnStatus.AWAITING_USER and again.answer.startswith("That did not give a value I could use.")
+    gated.ctx.process_turn(NOTE, approval_surface=HOST)
+    item = gated.ctx._turn_subtask_plan.items[0]
+    assert {each.name: each.value for each in item.inputs} == {"member": MEMBER, "text": NOTE}
+    assert gated.ctx._turn_subtask_review == "fast_path"                    # no review: the part named its command
+
+
+def test_a_part_that_names_a_planning_command_stops_after_two_replies_with_no_progress(gated, monkeypatch):
+    """The one asking rule at the gate: two replies in a row that fill nothing drop the part, which is reported as not
+    run naming every argument still missing."""
+    import dspy
+    from dspy.utils import DummyLM
+
+    script_matcher(monkeypatch, lambda text: {PLAN: 0.9, "none": 0.0})
+    gated.ctx._current_planner_lm = DummyLM([{"reasoning": "nothing", "member": "None", "text": "None"}] * 4,
+                                            adapter=dspy.JSONAdapter())
+    gated.ctx.process_turn("note_member", approval_surface=HOST)
+    gated.ctx.process_turn("hmm", approval_surface=HOST)
     stopped = gated.ctx.process_turn("hmm", approval_surface=HOST)
+
     stop = _stop(stopped)
     assert stopped.status is TurnStatus.COMPLETED
-    assert stop["command"] == PLAN and "missing required argument text" in stop["reason"]
-    assert "member" not in stop["reason"].split("(")[1].split(")")[0]
+    assert stop["command"] == PLAN and "member" in stop["reason"] and "text" in stop["reason"], stop["reason"]

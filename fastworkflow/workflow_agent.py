@@ -6,7 +6,9 @@ Provides workflow tool agent functionality for intelligent tool selection.
 import contextlib
 import contextvars
 import dataclasses
+import difflib
 import functools
+import hashlib
 import json
 import os
 import re
@@ -41,6 +43,7 @@ from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_directory import (
     CommandDirectory, _command_kind_from_ast, _handle_command_field_source_errors, check_no_planning_commands_folder,
+    get_cached_command_directory,
 )
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
@@ -934,8 +937,8 @@ def _apply_reply_intent(agent, intent: str) -> None:
 
 
 def _refusal_may_ask_attended(chat_session_obj) -> bool:
-    """Whether a refusal may be put to the user as a question that suspends the turn (Topology B):
-    the turn can ask (``waiting.can_ask``: attended, no queue-based blocking ask). How often it asks is the
+    """Whether a refusal may be put to the user as a question that suspends the turn:
+    the turn can ask (``waiting.can_ask``: attended). How often it asks is the
     parameter loop's asking rule (``parameter_clarification``), not decided here.
 
     The callers add their own check that nothing ran yet in the turn (a re-run would repeat its
@@ -947,9 +950,9 @@ def _refusal_may_ask_attended(chat_session_obj) -> bool:
 
 
 def _planning_command_refusal_may_ask(chat_session_obj) -> bool:
-    """Whether a refused planning command call may be put to the user, suspending the turn (Topology B).
+    """Whether a refused planning command call may be put to the user, suspending the turn.
 
-    Only when ask_user is available to the turn (attended, no queue-based blocking ask), no
+    Only when the turn can ask (attended), no
     run has happened yet in the turn (a re-run would repeat its side effects).
     Every other case keeps the text planner's fallback.
     """
@@ -1313,8 +1316,8 @@ MAX_SUBTASKS = 10
 
 #: Output cap (tokens) of one splitter call; ``LLM_SPLIT_MAX_TOKENS`` overrides it. Without a cap
 #: the splitter's reasoning can loop for 100k+ characters, past the LM timeout. A capped answer
-#: that does not parse gets DSPy's JSON retry (capped too). A reply cut off at the cap is never
-#: used as the split, even when it parses: ``split_into_subtasks`` retries once, then leaves the
+#: that does not parse gets DSPy's JSON retry (capped too), whose reply is the split when complete. A reply cut off at
+#: the cap is never used as the split, even when it parses: with no complete reply ``_split`` retries once, then leaves the
 #: request whole (fix-rj86). Set from the largest stored splitter output that
 #: did not loop: 17.6k characters, about 4,700 tokens at the fewest characters per token measured
 #: on long splitter outputs (3.77; fix-ajir.1).
@@ -1404,42 +1407,51 @@ def _split_items(reply: str) -> list[str]:
     return [item for item in items if item]
 
 
+#: The built-in splitter's rules: ``SplitIntoSubtasks``'s instructions up to their examples. A workflow that declares
+#: ``split_examples`` in ``_commands/_workflow.py`` gets these alone as the instructions, and its examples as demos
+#: (``_split_signature``, ``split_demos``; bd fix-qjne.26 stage 3).
+SPLIT_RULES = """\
+Split the user's request into the separate requests it bundles together.
+A sub-task is a request the user could have sent on its own, with its own answer. It is NOT a step: never break one request into the steps needed to carry it out.
+- job_types lists kinds of job a request in this workflow may contain, and how each one splits. Use it only to decide how to split: every sub-task is made from the user's own words, never from job_types text, and a job type the user did not ask for is not a sub-task.
+- Sentences that only give background (why the user needs it, what is happening to a group) or announce what follows are not sub-tasks.
+- Copy the user's own words, and every name exactly as written. A name that contains "and" is one name: keep it whole. Change only what a sub-task needs to make sense on its own: replace words that point to another part of the request ("it", "both", "each of them", "the same treatment", "that group", he/she) with what they refer to, using names.
+- When the same work is asked for several named items, make one sub-task per item. What is asked about one item stays together in that item's sub-task.
+- Work asked for a group as a whole (every member of a group, a whole list) is one sub-task.
+- An item together with the things it refers to is one sub-task, even when the request says it in two sentences.
+- Never add, drop or reinterpret any work the user asked for.
+- A request that asks for one thing is returned unchanged, as a single sub-task."""
+
+#: The built-in splitter's generic examples, after ``SPLIT_RULES`` in ``SplitIntoSubtasks``'s instructions. A
+#: workflow's ``split_examples`` replace them; without those the instructions are the two, as they always were.
+SPLIT_GENERIC_EXAMPLES = """\
+Example 1
+user_query: The job on item Alpha and the job on item Beta both fail: check each item and the thing it feeds. Three people need a new account: Pat Doe, Lee Kim and Sam Roe. Go through the whole Group North list too, every member's record. The case 'Queue stalls at night' is still open, so work it and hand it to one of the owners it names. Max Ong is moving teams, so a new locker for Max Ong.
+subtasks:
+1. The job on item Alpha fails: check item Alpha and the thing it feeds.
+2. The job on item Beta fails: check item Beta and the thing it feeds.
+3. Pat Doe needs a new account.
+4. Lee Kim needs a new account.
+5. Sam Roe needs a new account.
+6. Go through the whole Group North list, every member's record.
+7. The case 'Queue stalls at night' is still open: work it and hand it to one of the owners it names.
+8. Max Ong is moving teams: a new locker for Max Ong.
+
+Example 2
+user_query: Show me Pat Doe's record, its owner and the items attached to it.
+subtasks:
+1. Show me Pat Doe's record, its owner and the items attached to it.
+
+Example 3
+user_query: Find item Alpha and tell me who uses it, then list the cases it has.
+subtasks:
+1. Find item Alpha and tell me who uses it.
+2. List the cases item Alpha has."""
+
+
 class SplitIntoSubtasks(dspy.Signature):
-    """
-    Split the user's request into the separate requests it bundles together.
-    A sub-task is a request the user could have sent on its own, with its own answer. It is NOT a step: never break one request into the steps needed to carry it out.
-    - job_types lists kinds of job a request in this workflow may contain, and how each one splits. Use it only to decide how to split: every sub-task is made from the user's own words, never from job_types text, and a job type the user did not ask for is not a sub-task.
-    - Sentences that only give background (why the user needs it, what is happening to a group) or announce what follows are not sub-tasks.
-    - Copy the user's own words, and every name exactly as written. A name that contains "and" is one name: keep it whole. Change only what a sub-task needs to make sense on its own: replace words that point to another part of the request ("it", "both", "each of them", "the same treatment", "that group", he/she) with what they refer to, using names.
-    - When the same work is asked for several named items, make one sub-task per item. What is asked about one item stays together in that item's sub-task.
-    - Work asked for a group as a whole (every member of a group, a whole list) is one sub-task.
-    - An item together with the things it refers to is one sub-task, even when the request says it in two sentences.
-    - Never add, drop or reinterpret any work the user asked for.
-    - A request that asks for one thing is returned unchanged, as a single sub-task.
+    __doc__ = f"{SPLIT_RULES}\n\n{SPLIT_GENERIC_EXAMPLES}"
 
-    Example 1
-    user_query: The job on item Alpha and the job on item Beta both fail: check each item and the thing it feeds. Three people need a new account: Pat Doe, Lee Kim and Sam Roe. Go through the whole Group North list too, every member's record. The case 'Queue stalls at night' is still open, so work it and hand it to one of the owners it names. Max Ong is moving teams, so a new locker for Max Ong.
-    subtasks:
-    1. The job on item Alpha fails: check item Alpha and the thing it feeds.
-    2. The job on item Beta fails: check item Beta and the thing it feeds.
-    3. Pat Doe needs a new account.
-    4. Lee Kim needs a new account.
-    5. Sam Roe needs a new account.
-    6. Go through the whole Group North list, every member's record.
-    7. The case 'Queue stalls at night' is still open: work it and hand it to one of the owners it names.
-    8. Max Ong is moving teams: a new locker for Max Ong.
-
-    Example 2
-    user_query: Show me Pat Doe's record, its owner and the items attached to it.
-    subtasks:
-    1. Show me Pat Doe's record, its owner and the items attached to it.
-
-    Example 3
-    user_query: Find item Alpha and tell me who uses it, then list the cases it has.
-    subtasks:
-    1. Find item Alpha and tell me who uses it.
-    2. List the cases item Alpha has.
-    """
     job_types: str = dspy.InputField(desc="kinds of job a request may contain, and how each one splits")
     user_query: str = dspy.InputField()
     subtasks: str = dspy.OutputField(desc="the sub-tasks as a numbered list, one per line")
@@ -1493,7 +1505,7 @@ def _planning_command_files(root: str) -> list[tuple[str, str]]:
     one is ``_commands/<Context>/<name>.py``, named ``"<Context>/<stem>"`` (the file stem is a
     Python identifier, snake_case; ``_read_planning_command_file`` refuses another). A ``.py`` file or subfolder
     whose name starts with ``_`` or ``.`` (such as ``__pycache__`` or a ``_helpers.py`` module the
-    planning command files import) is skipped silently at both levels; ``_split.py`` is the workflow's split
+    planning command files import) is skipped silently at both levels; ``_workflow.py`` is the workflow's
     settings (``split_settings``). Execution commands and other files are not returned.
     """
     out = []
@@ -1565,22 +1577,20 @@ def _build_parsed_planning_commands(workflow_folderpath: str) -> tuple[
     out = []
     for name, loaded in files:
         command = dataclasses.replace(loaded.command, identifiers=identifiers)
-        if planning_commands.fixed_steps(command):
-            # Its steps are text the planner reads and code runs as they are: not checked
-            # against the workflow's commands (a step that names no command is run by the agent).
-            out.append((name, loaded.description, loaded.steps, command, loaded.plain_utterances))
-            continue
-        step_problems = step_command_problems(command, workflow_folderpath, signatures)
-        field_source_errs = field_resolution.errors_for(name)
-        if field_source_errs and name not in logged_field_source_commands:
+        # Every problem found in the file fails this command's load, a fixed-steps command's too (bd fix-ftdl.2).
+        if load_errors := field_resolution.errors_for(name):
             logged_field_source_commands.add(name)
-            _handle_command_field_source_errors(
-                name, field_source_errs, workflow_folderpath=workflow_folderpath
-            )
+            logger.error(f"skipping planning command {name!r}: " + "; ".join(load_errors))
+            continue
+        # The steps of every planning command are checked, fixed steps included: a run() step names a command of
+        # the workflow with its fields (a plain sentence names none and is run by the agent).
+        step_problems = step_command_problems(command, workflow_folderpath, signatures)
         if step_problems:
             logger.error(f"skipping planning command {name!r}: " + "; ".join(step_problems))
             continue
-        out.append((name, loaded.description, command.template, command, loaded.plain_utterances))
+        fixed = planning_commands.fixed_steps(command)
+        out.append((name, loaded.description, loaded.steps if fixed else command.template, command,
+                    loaded.plain_utterances))
     return tuple(out)
 
 
@@ -1613,7 +1623,20 @@ def step_command_problems(command: PlanningCommandCommand, workflow_folderpath: 
             logger.warning(f"planning command {command.name!r}: could not read the workflow's command signatures "
                            f"to check its steps: {type(error).__name__}: {error}")
             return []
-    return planning_commands.check_step_commands(command, signatures)
+    return planning_commands.check_step_commands(command, signatures, _not_loading(workflow_folderpath))
+
+
+def _not_loading(workflow_folderpath: str) -> frozenset[str]:
+    """The commands of the workflow that do not load (by qualified and by short name): a step naming one says so,
+    pointing at the command's own problem, rather than calling it no command of the workflow."""
+    try:
+        resolution = planning_commands.resolve_field_sources(workflow_folderpath)
+        names = {problem.command for problem in resolution.errors if problem.command}
+        names |= set(resolution.import_errors)
+        names |= set(get_cached_command_directory(workflow_folderpath).load_errors)
+    except Exception:  # noqa: BLE001 - the plain message stands
+        return frozenset()
+    return frozenset(names | {name.rsplit("/", 1)[-1] for name in names})
 
 
 def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
@@ -1627,10 +1650,11 @@ def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tu
     its description. A
     planning command's template text is its steps (its ``steps()`` on placeholder inputs; for a planning command
     without parameters or phases, its fixed ``steps()``), and ``load_planning_command_map`` holds its
-    parsed form. A planning command file that cannot be imported or is malformed is logged as an error and skipped (the
-    other planning commands still load; ``fastworkflow command preview`` fails on it); a malformed split
-    settings file raises PlanningCommandFormatError. ``_commands`` also holds the workflow's
-    split settings, ``_split.py`` (``split_settings``), and helper modules named ``_<name>.py``.
+    parsed form. A planning command file that cannot be imported or is malformed fails that command only: it is not
+    here, the other planning commands still load, and it is a load problem (``command_preview.load_problems``, which
+    ``fastworkflow run``, ``train``, the server and ``command preview`` report); a malformed workflow settings
+    file raises PlanningCommandFormatError. ``_commands`` also holds the workflow's
+    settings, ``_workflow.py`` (``split_settings``), and helper modules named ``_<name>.py``.
     """
     return tuple((name, description, steps) for name, description, steps, *_ in _parsed_planning_commands(workflow_folderpath))
 
@@ -1673,115 +1697,237 @@ def warm_planning_commands(workflow_folderpath: str) -> None:
         _warn_missing_jev_key(workflow_folderpath)
 
 
-#: The workflow's split settings file, ``_commands/_split.py`` (see ``split_settings``).
-SPLIT_FILE = "_split.py"
-#: The fields of ``SplitIntoSubtasks`` a split settings file may describe, as ``Signature.Input``
-#: and ``Signature.Output``.
-_SPLIT_INPUTS, _SPLIT_OUTPUTS = frozenset({"job_types", "user_query"}), frozenset({"subtasks"})
+#: The workflow's own settings file, ``_commands/_workflow.py``: its ``class Context`` holds the workflow-level
+#: request-reading settings (see ``split_settings``). The whole workflow is a context with this one settings file.
+WORKFLOW_FILE = "_workflow.py"
+#: The removed spelling of those settings: a ``_split.py`` file anywhere in ``_commands/`` fails the load.
+REMOVED_SPLIT_FILE = "_split.py"
+#: The workflow-level settings, the only public members ``class Context`` of ``_workflow.py`` may have.
+WORKFLOW_SETTINGS = ("split_examples", "identifier_patterns", "subject_hints")
+
+
+@dataclasses.dataclass(frozen=True)
+class SplitExample:
+    """One splitter example: the request (``user_query``, "" when the example states none) and the sub-tasks it
+    splits into, in order."""
+
+    user_query: str
+    subtasks: tuple[str, ...]
+
+
+#: The most examples a workflow's ``split_examples`` may declare. Each example is one demo of the splitter call, and
+#: each demo repeats the workflow's job list (one line per planning command, about 7,000 characters in a large
+#: workflow), so the splitter's input grows by about one job list per example: 12 keeps such a call near 100,000
+#: characters, and is twice the six examples that did the work measured in bd fix-qjne.26.
+MAX_SPLIT_EXAMPLES = 12
 
 
 @dataclasses.dataclass(frozen=True)
 class SplitSettings:
-    """What a workflow's ``_commands/_split.py`` sets for the split stage; the defaults when absent."""
+    """What a workflow's ``_commands/_workflow.py`` (its ``class Context``) sets for the split stage; the defaults
+    when absent."""
 
-    #: Replaces ``SplitIntoSubtasks``'s instructions (``Signature``'s docstring), or None.
-    instructions: str | None = None
-    #: ``(field, description)`` for each splitter field the file describes.
-    field_descs: tuple[tuple[str, str], ...] = ()
+    #: The workflow's own examples (``split_examples``), given to the splitter as demos in place of the generic
+    #: examples of its instructions; () when it declares none.
+    examples: tuple[SplitExample, ...] = ()
     #: The workflow's identifier formats (``identifier_patterns``).
     identifier_patterns: tuple[re.Pattern, ...] = ()
     #: What the workflow counts as a record, for the referent step (``resolve_referents``), or None.
     subject_hints: str | None = None
 
 
-def _split_field_descs(signature, path: str) -> tuple[tuple[str, str], ...]:
-    """``(field, description)`` of the ``Signature.Input`` / ``Signature.Output`` fields that have one."""
-    import inspect
-
-    from pydantic import BaseModel
-
-    out = []
-    for block, allowed in (("Input", _SPLIT_INPUTS), ("Output", _SPLIT_OUTPUTS)):
-        model = getattr(signature, block, None)
-        if model is None:
-            continue
-        if not (inspect.isclass(model) and issubclass(model, BaseModel)):
-            raise PlanningCommandFormatError(f"{path}: Signature.{block} must be a pydantic BaseModel")
-        for name, info in model.model_fields.items():
-            if name not in allowed:
-                raise PlanningCommandFormatError(f"{path}: Signature.{block}.{name} is not a splitter "
-                                       f"{block.lower()} (one of {', '.join(sorted(allowed))})")
-            if info.description is not None:
-                out.append((name, info.description))
-    return tuple(out)
-
-
 def split_settings_from_module(module, path: str) -> SplitSettings:
-    """The ``SplitSettings`` a split settings file (already imported) declares.
+    """The ``SplitSettings`` the ``class Context`` of a workflow settings file (already imported) declares.
 
-    Every attribute is optional. Raises PlanningCommandFormatError for a malformed one (see ``split_settings``).
+    The file must define ``class Context``; its public members (own or inherited) must be workflow settings
+    (``WORKFLOW_SETTINGS``), each optional. Raises PlanningCommandFormatError for a malformed one (see
+    ``split_settings``).
     """
-    import inspect
+    context = module.__dict__.get("Context")
+    if not isinstance(context, type):
+        stray = [name for name in WORKFLOW_SETTINGS if name in module.__dict__]
+        raise PlanningCommandFormatError(
+            f"{path}: defines no class Context: write the workflow's settings ({', '.join(WORKFLOW_SETTINGS)}) as "
+            f"class attributes of class Context{f' (it sets {stray[0]} outside a class)' if stray else ''}")
+    if stray := [name for name in WORKFLOW_SETTINGS if name in module.__dict__]:
+        raise PlanningCommandFormatError(
+            f"{path}: {stray[0]} is set outside class Context, where it is not read: move it into class Context")
+    if hasattr(context, "split_guidance"):
+        raise PlanningCommandFormatError(
+            f"{path}: split_guidance is removed: write split_examples = [(\"<request>\", [\"<part 1>\", \"<part 2>\"]), "
+            "...], the workflow's own examples of requests and the parts they split into")
+    if hasattr(context, "Signature"):
+        raise PlanningCommandFormatError(
+            f"{path}: a Signature (a replacement splitter prompt) is removed: write split_examples = "
+            "[(\"<request>\", [\"<part 1>\", \"<part 2>\"]), ...] for the workflow's own examples; the framework's "
+            "splitting rules are not replaceable")
+    from fastworkflow.command_context_model import CONTEXT_HOOKS
 
-    instructions, field_descs = None, ()
-    signature = getattr(module, "Signature", None)
-    if signature is not None:
-        if not inspect.isclass(signature):
-            raise PlanningCommandFormatError(f"{path}: Signature must be a class")
-        instructions = inspect.cleandoc(signature.__doc__ or "") or None
-        field_descs = _split_field_descs(signature, path)
-    patterns = getattr(module, "identifier_patterns", ())
+    for name in sorted(name for name in dir(context) if not name.startswith("_") and name not in WORKFLOW_SETTINGS):
+        if name in CONTEXT_HOOKS:
+            raise PlanningCommandFormatError(
+                f"{path}: Context.{name} is a context hook, but the workflow is not a record context and has no "
+                f"parent: class Context of {WORKFLOW_FILE} holds only the workflow's settings, "
+                f"{', '.join(WORKFLOW_SETTINGS)}")
+        close = difflib.get_close_matches(name, WORKFLOW_SETTINGS, n=1)
+        raise PlanningCommandFormatError(
+            f"{path}: Context.{name} is not a workflow setting{f'; did you mean {close[0]!r}?' if close else '.'} "
+            f"The settings are {', '.join(WORKFLOW_SETTINGS)}; a helper starts with _")
+    examples = _declared_split_examples(getattr(context, "split_examples", None), path)
+    patterns = getattr(context, "identifier_patterns", ())
     if isinstance(patterns, (str, re.Pattern)) or not isinstance(patterns, (list, tuple)):
         raise PlanningCommandFormatError(f"{path}: identifier_patterns must be a list of compiled patterns (re.compile)")
     for pattern in patterns:
         if not isinstance(pattern, re.Pattern):
             raise PlanningCommandFormatError(f"{path}: identifier_patterns holds {pattern!r}; write re.compile({pattern!r})")
-    hints = getattr(module, "subject_hints", None)
+    hints = getattr(context, "subject_hints", None)
     if hints is not None and not isinstance(hints, str):
         raise PlanningCommandFormatError(f"{path}: subject_hints must be a str")
-    return SplitSettings(instructions=instructions, field_descs=field_descs,
-                         identifier_patterns=tuple(patterns), subject_hints=hints)
+    return SplitSettings(examples=examples, identifier_patterns=tuple(patterns), subject_hints=hints)
+
+
+def _declared_split_examples(declared, path: str) -> tuple[SplitExample, ...]:
+    """The ``split_examples`` of a workflow settings file as ``SplitExample``s; () when it declares none. Raises
+    PlanningCommandFormatError naming the file and the example for a malformed one (see ``split_settings``)."""
+    if declared is None:
+        return ()
+    shape = 'a non-empty list of (request, parts) pairs, such as [("<request>", ["<part 1>", "<part 2>"])]'
+    if not isinstance(declared, list) or not declared:
+        raise PlanningCommandFormatError(f"{path}: split_examples must be {shape}")
+    if len(declared) > MAX_SPLIT_EXAMPLES:
+        raise PlanningCommandFormatError(
+            f"{path}: split_examples holds {len(declared)} examples, more than {MAX_SPLIT_EXAMPLES}: each one repeats "
+            "the workflow's job list in every splitter call; keep the ones that show this workflow's own rules")
+    examples = []
+    for number, item in enumerate(declared, start=1):
+        where = f"{path}: split_examples example {number}"
+        if not (isinstance(item, tuple) and len(item) == 2):
+            raise PlanningCommandFormatError(f"{where} must be a (request, parts) pair; split_examples must be {shape}")
+        request, parts = item
+        if not (isinstance(request, str) and request.strip()):
+            raise PlanningCommandFormatError(f"{where}: the request must be a non-empty str")
+        if not (isinstance(parts, list) and parts and all(isinstance(part, str) and part.strip() for part in parts)):
+            raise PlanningCommandFormatError(f"{where}: the parts must be a list of at least one non-empty str")
+        if len(parts) > MAX_SUBTASKS:
+            raise PlanningCommandFormatError(
+                f"{where}: {len(parts)} parts, more than the {MAX_SUBTASKS} a split may have")
+        for part in parts:
+            if "\n" in part.strip() or _NUMBERED_LINE.match(part):
+                raise PlanningCommandFormatError(
+                    f"{where}: the part {part.strip()[:60]!r} must be one line without a list number (the framework "
+                    "numbers the parts)")
+        examples.append(SplitExample(request.strip(), tuple(part.strip() for part in parts)))
+    return tuple(examples)
 
 
 @functools.lru_cache(maxsize=None)
 def split_settings(workflow_folderpath: str) -> SplitSettings:
-    """The workflow's split settings, from its optional ``_commands/_split.py``; the defaults without one.
+    """The workflow's split settings, from the ``class Context`` of its optional ``_commands/_workflow.py``; the
+    defaults without one.
 
-    The file configures the split stage (the splitter, the split merge and the referent step); it
-    is not a planning command (its leading ``_`` keeps ``_planning_command_files`` from loading it as one). It is
-    written as a command file is, and every attribute is optional:
+    The whole workflow is a context with its own settings file, ``_commands/_workflow.py`` (beside the global
+    commands; its leading ``_`` keeps it from being read as a command, a planning command or a training input). Its
+    ``class Context`` holds the workflow-level request-reading settings as class attributes, each optional; any other
+    public member fails the load (a context hook such as ``get_parent`` too: the workflow is not a record context and
+    has no parent), and so does a file that defines no ``class Context``:
 
-    - ``class Signature``: its docstring replaces ``SplitIntoSubtasks``'s instructions (as
-      ``inspect.cleandoc`` gives it). ``Signature.Input`` (fields ``job_types``, ``user_query``)
-      and ``Signature.Output`` (field ``subtasks``) are optional pydantic models; a field's
-      ``description`` replaces that splitter field's description. A field the splitter does
-      not have fails the load.
+    - ``split_examples``: the workflow's own examples, as plain data: a non-empty list of at most
+      ``MAX_SPLIT_EXAMPLES`` ``(request, parts)`` pairs, the request a non-empty str and the parts a list of one to
+      ``MAX_SUBTASKS`` non-empty one-line str without a list number. They REPLACE the generic examples of the built-in
+      instructions: the splitter reads ``SPLIT_RULES`` as its instructions and each example as a demo before the real
+      request, with the same job list (``split_demos``; bd fix-qjne.26 stage 3). The splitter's rules are the
+      framework's and are not replaceable: ``split_guidance`` (a str added to the instructions) and a ``Signature``
+      (a replacement prompt) are removed spellings, and a ``Context`` that defines either fails the load naming
+      ``split_examples``.
     - ``identifier_patterns``: a list of compiled regular expressions (``re.compile``), the
       workflow's identifier formats (``identifier_patterns``).
     - ``subject_hints``: a str telling the referent step what the workflow counts as a record
       (``resolve_referents``).
 
+    ``_commands/_workflow.py``, where these settings were once written as module attributes, is a removed spelling: a
+    workflow that has one fails the load, naming ``_workflow.py``; it is never read.
+
     The file is imported as a planning command file is (``python_utils.get_module`` under the workflow's
-    package, so package-relative imports work). It is the whole split configuration, so a file
+    package, so package-relative imports work). It is the whole workflow configuration, so a file
     that cannot be imported (an invalid pattern raises in ``re.compile``) is not skipped, as a
     planning command file would be, but fails the load as a malformed planning command file does: the error is logged
     and PlanningCommandFormatError raised naming the file.
     """
     from fastworkflow.utils import python_utils
 
-    path = os.path.join(workflow_folderpath, "_commands", SPLIT_FILE)
+    removed = os.path.join(workflow_folderpath, "_commands", REMOVED_SPLIT_FILE)
+    if os.path.isfile(removed):
+        raise PlanningCommandFormatError(_removed_split_file_message(removed))
+    path = os.path.join(workflow_folderpath, "_commands", WORKFLOW_FILE)
     if not os.path.isfile(path):
         return SplitSettings()
     try:
         module = python_utils.get_module(path, workflow_folderpath)
     except Exception as exc:  # noqa: BLE001 - reported as the file's error
-        logger.error(f"could not import the split settings {path}", exc_info=True)
-        raise PlanningCommandFormatError(f"{path}: could not import the split settings: {exc}") from exc
+        logger.error(f"could not import the workflow settings {path}", exc_info=True)
+        raise PlanningCommandFormatError(f"{path}: could not import the workflow settings: {exc}") from exc
     return split_settings_from_module(module, path)
 
 
+def _removed_split_file_message(path: str) -> str:
+    return (f"{path}: {REMOVED_SPLIT_FILE} is removed: move its settings (split_examples, identifier_patterns, "
+            f"subject_hints) to class Context in _commands/{WORKFLOW_FILE}, as class attributes")
+
+
+def split_file_problems(workflow_folderpath: str) -> list[str]:
+    """The mistakes of the workflow settings that do not stop them loading, one ``<file>: <reason>`` each (bd fix-qjne.16).
+
+    - A ``_workflow.py`` anywhere but directly in ``_commands/`` (``_commands/Book/_workflow.py``) is never read: the
+      settings come only from ``_commands/_workflow.py``. A ``_split.py`` below ``_commands/`` is the removed spelling
+      (the one directly in ``_commands/`` fails the load, ``split_settings``).
+    - An ``identifier_patterns`` entry anchored to the whole text can never match inside a message, and the patterns
+      are searched inside it: it starts with ``^`` or ``\\A``, or ends with an unescaped ``$`` or ``\\Z``, and was
+      not compiled with ``re.MULTILINE`` (with it ``^`` and ``$`` match at a line boundary inside a message).
+    """
+    root = os.path.join(os.path.abspath(workflow_folderpath), "_commands")
+    problems = []
+    for folder, directories, files in os.walk(root):
+        directories[:] = sorted(d for d in directories if d != "__pycache__")
+        if os.path.abspath(folder) == root:
+            continue
+        for name in (WORKFLOW_FILE, REMOVED_SPLIT_FILE):
+            if name in files:
+                label = os.path.relpath(os.path.join(folder, name), os.path.dirname(root)).replace(os.sep, "/")
+                problems.append(_removed_split_file_message(label) if name == REMOVED_SPLIT_FILE else
+                                f"{label}: the workflow settings are read only from _commands/{WORKFLOW_FILE}; this "
+                                f"file is ignored here: move its settings there")
+    if os.path.isfile(os.path.join(root, WORKFLOW_FILE)):
+        try:
+            patterns = split_settings(os.path.abspath(workflow_folderpath)).identifier_patterns
+        except Exception:  # noqa: BLE001 - a file that does not load is reported by the planning command load
+            patterns = ()
+        problems.extend(
+            f"_commands/{WORKFLOW_FILE}: identifier_patterns holds {pattern.pattern!r}, anchored to the whole text, so "
+            "it can never match inside a message: identifier_patterns are searched inside the message; remove the "
+            "^ and $ anchors, use \\b for word boundaries"
+            for pattern in patterns if _anchored_to_whole_text(pattern))
+    return problems
+
+
+def _anchored_to_whole_text(pattern: re.Pattern) -> bool:
+    """Whether *pattern* can only match the whole text: see ``split_file_problems``. Conservative: only a leading
+    ``^`` / ``\\A`` or a trailing unescaped ``$`` / ``\\Z`` of a pattern without ``re.MULTILINE`` counts."""
+    source = pattern.pattern
+    if not isinstance(source, str) or pattern.flags & re.MULTILINE:
+        return False
+    if source.startswith(("^", "\\A")):
+        return True
+    for end, escaped in (("$", False), ("Z", True)):
+        if source.endswith(end):
+            backslashes = len(source[:-1]) - len(source[:-1].rstrip("\\"))
+            # an odd run of backslashes before the end escapes it (``\$`` is a dollar; ``\Z`` is the anchor)
+            if (backslashes % 2 == 1) == escaped:
+                return True
+    return False
+
+
 def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
-    """The workflow's identifier patterns (``identifier_patterns`` of its optional ``_commands/_split.py``).
+    """The workflow's identifier patterns (``identifier_patterns`` of its optional ``_commands/_workflow.py``).
 
     Each match in a request is a subject for the split merge (``split_merge.merge_subtasks``),
     like a quoted name: the framework knows no workflow's identifier formats.
@@ -1789,17 +1935,95 @@ def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
     return split_settings(workflow_folderpath).identifier_patterns
 
 
+_EXAMPLE_REQUEST_LINE = re.compile(r"^\s*user_query\s*:\s*(.*?)\s*$", re.I)
+_EXAMPLE_SUBTASKS_LINE = re.compile(r"^\s*subtasks\s*:\s*$", re.I)
+
+
+def split_examples(workflow_folderpath: str | None, *, workflow_only: bool = False) -> tuple[SplitExample, ...]:
+    """The examples the splitter is shown for the workflow, as data (bd fix-0iuo.23): the workflow's declared
+    ``split_examples`` when it has them (they replace the generic ones, so with or without *workflow_only* they are
+    the whole answer), else ``SplitIntoSubtasks``'s (also for None).
+
+    An example of the instructions is a line ``subtasks:`` and the numbered lines after it (each read by the rule a
+    splitter reply's numbered lines are read by), up to the first non-blank line that is not numbered; its request is
+    the last ``user_query: ...`` line before it since the previous example. With *workflow_only*, only the workflow's
+    own examples are returned (its ``split_examples``): () when its settings set none. A settings file that does
+    not load raises as ``split_settings`` does."""
+    if workflow_folderpath is not None and (settings := split_settings(workflow_folderpath)).examples:
+        return settings.examples
+    if workflow_only:
+        return ()
+    instructions = SplitIntoSubtasks.instructions
+    examples: list[SplitExample] = []
+    request, subtasks, inside = "", None, False
+    for line in (instructions or "").splitlines():
+        if _EXAMPLE_SUBTASKS_LINE.match(line):
+            if subtasks is not None:
+                examples.append(SplitExample(request, tuple(subtasks)))
+                request = ""
+            subtasks, inside = [], True
+            continue
+        if inside and (match := _NUMBERED_LINE.match(line)):
+            subtasks.append(match.group(1))
+            continue
+        if line.strip():
+            inside = False
+        if match := _EXAMPLE_REQUEST_LINE.match(line):
+            if subtasks is not None:
+                examples.append(SplitExample(request, tuple(subtasks)))
+                subtasks = None
+            request = match.group(1)
+    if subtasks is not None:
+        examples.append(SplitExample(request, tuple(subtasks)))
+    return tuple(examples)
+
+
 @functools.lru_cache(maxsize=None)
 def _split_signature(workflow_folderpath: str) -> type[dspy.Signature]:
-    """``SplitIntoSubtasks``, with the instructions and field descriptions of the workflow's
-    ``_commands/_split.py`` when it sets them."""
-    settings = split_settings(workflow_folderpath)
-    signature = SplitIntoSubtasks
-    if settings.instructions is not None:
-        signature = signature.with_instructions(settings.instructions)
-    for name, desc in settings.field_descs:
-        signature = signature.with_updated_fields(name, desc=desc)
-    return signature
+    """``SplitIntoSubtasks``, with the workflow's ``_commands/_workflow.py`` applied: with its ``split_examples``, the
+    built-in rules alone (``SPLIT_RULES``; the examples are demos, ``split_demos``), else unchanged."""
+    if split_settings(workflow_folderpath).examples:
+        return SplitIntoSubtasks.with_instructions(SPLIT_RULES)
+    return SplitIntoSubtasks
+
+
+def split_demos(workflow_folderpath: str | None, job_types: str) -> list[dspy.Example]:
+    """The workflow's ``split_examples`` as the splitter's demos, in order (none without them): each carries the
+    request as ``user_query``, *job_types* (the job list of the call, the same text the real request is given) and the
+    parts as the numbered list a splitter reply is read as (``subtasks``). No reasoning text is given."""
+    examples = split_settings(workflow_folderpath).examples if workflow_folderpath else ()
+    return [dspy.Example(job_types=job_types, user_query=example.user_query,
+                         subtasks="\n".join(f"{n}. {part}" for n, part in enumerate(example.subtasks, start=1)))
+            .with_inputs("job_types", "user_query") for example in examples]
+
+
+#: ``subtask_split.prompt_source`` on the turn span: the splitter's own instructions, or the built-in rules with a
+#: workflow's ``split_examples`` as demos in place of the generic examples.
+SPLIT_PROMPT_BUILT_IN = "built_in"
+SPLIT_PROMPT_BUILT_IN_AND_WORKFLOW = "built_in+workflow"
+
+
+def split_prompt(workflow_folderpath: str | None) -> dict[str, str]:
+    """Which splitter prompt is in force for the workflow (bd fix-qjne.26 stage 0): ``{"digest", "source"}``.
+
+    ``digest`` is the first 12 hex characters of the SHA-256 of the splitter signature's instructions and of each
+    field's name and description, in order (the turn's optional ``conversation`` field is not part of it), then of
+    each declared example's request and parts (``split_examples``; not the job list its demo carries, which is the
+    call's), so two splits with the same digest were asked with the same prompt text. ``source`` is
+    ``SPLIT_PROMPT_BUILT_IN_AND_WORKFLOW`` when the workflow's ``_commands/_workflow.py`` declares ``split_examples``
+    (the built-in rules and its examples), else ``SPLIT_PROMPT_BUILT_IN`` (also for None). A workflow settings file that does not load raises as
+    ``split_settings`` does."""
+    signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
+    settings = split_settings(workflow_folderpath) if workflow_folderpath else SplitSettings()
+    parts = [signature.instructions or ""]
+    for name, field in signature.fields.items():
+        parts.append(f"{name}: {(field.json_schema_extra or {}).get('desc', '')}")
+    for example in settings.examples:
+        parts.append(f"example: {example.user_query}")
+        parts.extend(f"{n}. {part}" for n, part in enumerate(example.subtasks, start=1))
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+    source = SPLIT_PROMPT_BUILT_IN_AND_WORKFLOW if settings.examples else SPLIT_PROMPT_BUILT_IN
+    return {"digest": digest, "source": source}
 
 
 def _job_types_for(workflow_folderpath: str | None) -> str:
@@ -1822,33 +2046,17 @@ def planning_scopes(workflow) -> tuple[str, ...]:
     Planning commands are matched scope by scope along the lookup path:
     1. The active context.
     2. Its bases, in ``CommandContextModel`` order, transitively.
-    3. Each live ancestor's context (``workflow.get_parent`` on the live chain, up to the
-       root context object) and that ancestor's bases.
+    3. Each live ancestor's context (``context_navigation.live_chain``, up to the root context
+       object) and that ancestor's bases.
     4. The root planning commands (``""``).
 
     A scope already on the path is skipped. Does not depend on intent-classifier code.
     """
     if workflow is None:
         return ("",)
-    folder = getattr(workflow, "folderpath", None)
-    names = [getattr(workflow, "_current_command_context_name", "*")]
-    obj = getattr(workflow, "_current_command_context", None)
-    root = getattr(workflow, "root", None)
-    visited_objs: set[int] = {id(obj)} if obj is not None else set()
-    while obj is not None and obj is not root:
-        try:
-            parent = workflow.get_parent(obj)
-        except Exception:  # noqa: BLE001 - never fail scope lookup on parent walk
-            logger.debug(f"planning_scopes parent walk stopped at {obj!r}", exc_info=True)
-            break
-        if parent is None or id(parent) in visited_objs:
-            break
-        visited_objs.add(id(parent))
-        names.append(fastworkflow.Workflow.get_command_context_name(parent))
-        if parent is root:
-            break
-        obj = parent
-    return lookup_scopes(folder, names)
+    from fastworkflow.context_navigation import live_chain
+
+    return lookup_scopes(getattr(workflow, "folderpath", None), [name for _, name in live_chain(workflow)])
 
 
 def planning_names_on_path(workflow) -> list[str]:
@@ -2261,13 +2469,84 @@ def recording_split():
     """A dict that ``split_into_subtasks`` fills when the model was asked to split the request inside the block, with
     ``request``, ``raw`` (the model's sub-tasks of the attempt used, before any code rule), ``merged`` (the list the
     turn runs with), ``changed_by`` (the code steps that changed it, in order; absent when none) and ``attempts``
-    (model calls made). It stays empty when no split was asked for."""
+    (model calls made), ``failed`` when the split gave no answer (``SPLIT_FAILED_CUT_OFF``, ``SPLIT_FAILED_ERROR``),
+    ``prompt_digest`` and ``prompt_source`` (``split_prompt``) when the splitter's prompt was built, and ``gate`` (the
+    one-job gate's verdict, ``_one_job_gate``) when the gate was asked. A request the gate kept whole has ``raw`` empty,
+    ``merged`` the request, ``attempts`` 0 and no prompt keys. It stays empty when no split was asked for."""
     record: dict = {}
     token = _split_recorder.set(record)
     try:
         yield record
     finally:
         _split_recorder.reset(token)
+
+
+#: The one-job gate in front of the splitter (bd fix-qjne.26): the remote decision model is asked whether the request
+#: is one job, and a confident "one" runs it as one part with no splitter call. ``FW_SPLIT_GATE_THRESHOLD`` (workflow env)
+#: is the bar, read in one place (``split_gate_threshold``); ``off`` turns the gate off. Measured on 167 labelled requests
+#: of one large workflow, three asks each: at 0.9, 83% of the single-part requests skipped the splitter and no
+#: multi-part one did. The default is 0.85: on that workflow's benchmark (168 tasks, two arms) it skipped no multi-part
+#: request (highest score on one 0.69), and the requests scoring between 0.85 and 0.9 were all single-part, including
+#: the over-splits that cost lines. It was chosen on the tasks it was tested on, from one workflow: a workflow that sees
+#: a multi-part request kept whole should raise it.
+SPLIT_GATE_THRESHOLD_SETTING = "FW_SPLIT_GATE_THRESHOLD"
+DEFAULT_SPLIT_GATE_THRESHOLD = 0.85
+SPLIT_GATE_OFF = "off"
+
+_ONE_OR_SEVERAL = (
+    ("one", "The request asks for one job: one thing to look up or do, or several details about one named "
+            "thing that one kind of job covers, or one action over several records handled together."),
+    ("several", "The request asks for two or more separate jobs: different named things that each need their "
+                "own work, or different kinds of work, done one after another."),
+)
+
+
+class OneOrSeveralJobs(dspy.Signature):
+    """Decide whether a request sent to a workflow asks for one job or for several separate jobs."""
+
+    request: str = dspy.InputField(desc="the request sent to the workflow")
+    job_types: str = dspy.InputField(desc="kinds of job a request may contain, and how each one splits")
+    jobs: Choice[_ONE_OR_SEVERAL] = dspy.OutputField(
+        desc="Does the request ask for one job or for several separate jobs? "
+             "Several details or records that one kind of job covers are one job.")
+
+
+def split_gate_threshold() -> float | None:
+    """The one-job gate's bar: ``FW_SPLIT_GATE_THRESHOLD``, a number above 0 and at most 1 (default 0.85; any other
+    value warns once and is the default), or None when it is ``off``."""
+    from fastworkflow.train.intent_model_layout import parse_threshold
+
+    raw = fastworkflow.get_env_var(SPLIT_GATE_THRESHOLD_SETTING, default="")
+    if str(raw if raw is not None else "").strip().lower() == SPLIT_GATE_OFF:
+        return None
+    return parse_threshold(raw, DEFAULT_SPLIT_GATE_THRESHOLD, SPLIT_GATE_THRESHOLD_SETTING)
+
+
+def _one_job_gate(user_query: str, job_types: str) -> dict | None:
+    """The one-job gate's verdict, ``{score, label, threshold, skipped}`` (``score`` is the probability of "one",
+    ``skipped`` whether the splitter is skipped), or None when it was not asked: no remote decision model, the gate
+    ``off``, or a failed call (reported through ``remote_outage``; the splitter then runs). The request and the same job
+    list the splitter is given (``_job_types_for``) are the inputs."""
+    jev_lm = _jev_lm()
+    if jev_lm is None:
+        return None
+    threshold = split_gate_threshold()
+    if threshold is None:
+        return None
+    try:
+        with dspy.context(lm=jev_lm):
+            choice = dspy.Predict(OneOrSeveralJobs)(request=user_query, job_types=job_types).jobs
+        label, probability = _choice_value_and_probability(choice)
+        score = probability if label == "one" else float((choice.probabilities or {}).get("one", 1.0 - probability))
+    except Exception as error:  # noqa: BLE001 - the gate is an optimisation; the splitter runs
+        from fastworkflow import remote_outage
+
+        remote_outage.report(error, "split gate")
+        return None
+    skipped = label == "one" and score >= threshold
+    logger.info(f"split gate: {label} (p(one) {score:.2f}, bar {threshold}); "
+                f"{'the request is one part, no split' if skipped else 'the splitter runs'}")
+    return {"score": score, "label": label, "threshold": threshold, "skipped": skipped}
 
 
 def split_into_subtasks(user_query: str, planner_lm=None,
@@ -2277,18 +2556,33 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     state: dict = {}
     result = _split(user_query, planner_lm, workflow_folderpath, conversation, workflow, state)
     record = _split_recorder.get()
-    if record is not None and state.get("attempts"):
+    if record is not None and (state.get("attempts") or state.get("gate")):
         record.update(request=user_query, raw=list(state.get("raw", [])), merged=[str(t) for t in result],
-                      attempts=state["attempts"])
+                      attempts=state.get("attempts", 0))
+        if state.get("gate"):
+            record["gate"] = dict(state["gate"])
         if state.get("rules"):
             record["changed_by"] = list(state["rules"])
+        if state.get("doubts"):
+            record["doubts"] = list(state["doubts"])
+        if state.get("failed"):
+            record["failed"] = state["failed"]
+        if state.get("prompt"):
+            record["prompt_digest"] = state["prompt"]["digest"]
+            record["prompt_source"] = state["prompt"]["source"]
     return result
+
+
+#: ``subtask_split.failed`` on the turn span: why the split gave no answer and the request ran as one part. Every
+#: answer stopped at the output cap (the retry without the reasoning field included), or the model call raised.
+SPLIT_FAILED_CUT_OFF = "cut_off"
+SPLIT_FAILED_ERROR = "error"
 
 
 def _split(user_query: str, planner_lm, workflow_folderpath: str | None, conversation: str, workflow,
            state: dict) -> list[str]:
     """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
-    ``state`` is filled for the recording: ``attempts``, ``raw`` and ``rules``.
+    ``state`` is filled for the recording: ``attempts``, ``raw``, ``rules`` and ``prompt`` (``split_prompt``).
 
     ``user_query`` is the user's new request only: it is what the merge treats as the request (its ground truth,
     and the text it returns when everything merges back into one job). ``conversation`` (optional) is the
@@ -2300,10 +2594,13 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
     request, not about how to carry it out. It is shown the workflow's planning commands
     (``_commands``), as the kinds of job it may contain.
     Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
-    request whole. A reply cut off at ``split_max_tokens()`` is not an answer, even
+    request whole. A reply cut off at ``split_max_tokens()`` is never parsed into a split, even
     when it parses (a field header written mid-reasoning, e.g. the output template
-    echoed back, parses as "{subtasks}"): it gets the one retry, and a second
-    cut-off reply leaves the request whole. A non-empty sub-tasks field with no numbered item (``it``) is
+    echoed back, parses as "{subtasks}"). A complete reply is the answer whichever adapter produced it: the library's
+    own fallback inside the same call (its JSON retry of a cut-off first reply) is used when its reply was complete.
+    Only a call with no complete reply that parsed gets the one retry, without the free
+    reasoning field (where the model loops), and a second cut-off reply leaves the
+    request whole, recorded as a failed split (``state["failed"]``) and logged. A non-empty sub-tasks field with no numbered item (``it``) is
     visibly broken too and gets the same one retry. When both replies are visibly broken, the
     one that names fewer of the request's records in two sub-tasks is used (``_breakage``).
     The model's split then goes through ``split_merge.merge_subtasks`` (code only), which joins parts that are not independent jobs and returns the
@@ -2315,6 +2612,13 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     job_types = _job_types_for(workflow_folderpath)
+    # The one-job gate: a confident "one" from the remote decision model is the request as one part, as a split the
+    # model left whole returns it, and the splitter is not called (``state["attempts"]`` stays unset: 0 calls).
+    gate = _one_job_gate(user_query, job_types)
+    if gate is not None:
+        state["gate"] = gate
+        if gate["skipped"]:
+            return [user_query]
     # Temperature 0 makes the first attempt less random, not repeatable: the same request can still split
     # differently from one run to the next (the provider is not deterministic at 0). A split that is
     # visibly broken or cut off at the cap is retried once at 0.7, which also misses the LM cache.
@@ -2326,19 +2630,28 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
     usable: list[list[str]] = []
     raws: dict[tuple, list[str]] = {}
     rules: list[str] = state.setdefault("rules", [])
+    cut_off = False
     for attempt, temperature in enumerate((0.0, 0.7)):
         state["attempts"] = attempt + 1
         replies: list = []
+        # A reply that stopped at the output cap is the model looping in its free reasoning text: the one retry then
+        # asks for the sub-tasks without the reasoning field (``dspy.Predict``), the same signature and instructions.
+        reasoned = not cut_off
 
         def split(lm) -> str:
             with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
                 signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
+                state["prompt"] = split_prompt(workflow_folderpath)
                 inputs = {"job_types": job_types, "user_query": user_query}
                 if conversation:
                     signature = signature.insert(
                         1, "conversation", dspy.InputField(desc=SPLIT_CONVERSATION_DESC), type_=str)
                     inputs["conversation"] = conversation
-                return dspy.ChainOfThought(signature)(**inputs).subtasks or ""
+                module = dspy.ChainOfThought(signature) if reasoned else dspy.Predict(signature)
+                demos = split_demos(workflow_folderpath, job_types)
+                for predictor in module.predictors() if demos else ():
+                    predictor.demos = demos
+                return module(**inputs).subtasks or ""
 
         try:
             with watch_cut_off_replies() as replies:
@@ -2347,13 +2660,19 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
         except Exception as error:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
             if any(replies):
                 logger.warning(f"the split was cut off at {split_max_tokens()} tokens and did not parse")
+                cut_off = True
                 continue
             _log_split_failure(planner_lm, error)
+            state["failed"] = SPLIT_FAILED_ERROR
             return [user_query]
         if replies and replies[-1]:
-            # The parsed reply stopped at the cap: whatever parsed is not the model's answer.
+            # The reply that parsed stopped at the cap: whatever parsed is not the model's answer. The parsed reply is
+            # always the call's last one, so a complete fallback reply (the library's JSON retry of a cut-off first
+            # reply, inside the same call) is the answer and is used.
             logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
+            cut_off = True
             continue
+        cut_off = False
         subtasks = [without_repeated_clauses(item.translate(_HYPHENS)) for item in _split_items(text)]
         state["raw"] = list(subtasks)
         # Disabled after benchmark pass 4 (fix-kdag never fired in 840 runs):
@@ -2376,17 +2695,23 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
             return [user_query]
         if not _visibly_broken(subtasks, user_query):
             return _whole_if_placeholder(
-                user_query, _merged(user_query, subtasks, workflow_folderpath, conversation, rules), rules)
+                user_query, _merged(user_query, subtasks, workflow_folderpath, conversation, rules, state.setdefault("doubts", [])), rules)
         # A sub-task the model listed twice is one job: the list without its copies is a candidate too.
         unique = list(dict.fromkeys(subtasks))
         if len(unique) >= 2:
             usable.append(unique)
             raws[tuple(unique)] = list(state["raw"])
     if not usable:
+        if cut_off:
+            # every answer stopped at the cap: the request runs as one part, and the turn says so (span and log)
+            state["failed"] = SPLIT_FAILED_CUT_OFF
+            logger.warning(f"the split failed: every answer stopped at {split_max_tokens()} tokens; the request runs "
+                           "as one part")
         return [user_query]
     best = min(usable, key=lambda subtasks: _breakage(user_query, subtasks, workflow_folderpath))
     state["raw"] = raws[tuple(best)]
-    return _whole_if_placeholder(user_query, _merged(user_query, best, workflow_folderpath, conversation, rules), rules)
+    state["doubts"] = []   # only the doubts of the split that is kept
+    return _whole_if_placeholder(user_query, _merged(user_query, best, workflow_folderpath, conversation, rules, state.setdefault("doubts", [])), rules)
 
 
 def _with_referents(user_query: str, items: list[str], workflow_folderpath: str | None) -> list[str]:
@@ -2437,8 +2762,10 @@ def _reduced_to_cap(user_query: str, subtasks: list[str], workflow_folderpath: s
 
 
 def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None,
-            conversation: str = "", rules: list[str] | None = None) -> list[str]:
-    """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails.
+            conversation: str = "", rules: list[str] | None = None,
+            doubts: list[dict] | None = None) -> list[str]:
+    """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails. *doubts* collects
+    the rewrites the merge did not make because they would have dropped a name the part carried (``merge_subtasks``).
 
     With a Jev key, rule 3's joins (a sub-task naming no subject, or the same subjects as the one before it)
     are Jev's call (``_same_request_check``); without one, the lexical rule joins them as before.
@@ -2451,7 +2778,7 @@ def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | Non
     try:
         identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
         merged = merge_subtasks(user_query, subtasks, identifiers, same_job=_same_request_check(user_query),
-                                context=conversation, applied=applied)
+                                context=conversation, applied=applied, doubts=doubts)
     except Exception:  # noqa: BLE001 - the merge is a clean-up; never fail the turn
         logger.warning("could not merge the split; keeping it as the model gave it", exc_info=True)
         return subtasks
@@ -2524,7 +2851,7 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
     leaves", "Confirm whether Raj Patel is among its holders". For a sub-task that leaves some of
     the request's subjects unnamed, Jev chooses which of them, if any, it is about
     (``split_merge.unnamed_subjects``), told what the workflow counts as a record by its optional
-    ``subject_hints`` in ``_commands/_split.py``; ``split_merge.with_referent`` writes the choice in. Without a Jev
+    ``subject_hints`` in ``_commands/_workflow.py``; ``split_merge.with_referent`` writes the choice in. Without a Jev
     key, or on any failure, the sub-tasks are returned unchanged.
 
     When a record is chosen and the sub-task holds definite descriptions ("the customer", see
@@ -2726,6 +3053,7 @@ def build_query_with_next_steps(user_query: str,
     plan_source = None
     planning_command_args = None
     planning_command_notes = None
+    planning_command_not_in_request = None
     planning_command_fallback = None
     prediction = None
     # The question to put to the user when the planning command call is refused and the turn may ask (see
@@ -2745,6 +3073,7 @@ def build_query_with_next_steps(user_query: str,
                                            check_lm=_jev_lm(), workflow=current_workflow)
                     prediction, plan_text, planning_command_args = call.prediction, call.plan, call.args
                     planning_command_notes = list(call.notes) or None
+                    planning_command_not_in_request = list(call.not_in_request) or None
                     plan_source = "skill_call"
                     chat_session_obj._phased_planning_command_call = (planning_command, call)
                     logger.info(f"planning command call {planning_command.name}{call.args}"
@@ -2782,6 +3111,7 @@ def build_query_with_next_steps(user_query: str,
             "skill_notes": planning_command_notes,
             "skill_fallback": planning_command_fallback,
             "skill_refusal_asked": True if refusal_ask is not None else None,
+            "argument_check_not_in_request": planning_command_not_in_request,
         },
     )
 

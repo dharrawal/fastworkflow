@@ -46,7 +46,8 @@ def _plain_message_reaches_the_agent(todo):
 
 REPLIES = [
     pytest.param("yes", ["Ann"], id="yes"),
-    pytest.param("always", ["Ann"], id="always"),
+    # bd fix-qjne.11: "always" is no longer an answer to a "/" add_note approval (REQUIRED_ALWAYS asks every
+    # time); the test of that reply is test_always_is_not_an_answer_to_a_required_always_approval below.
     pytest.param("no", [], id="no"),
 ]
 
@@ -65,15 +66,29 @@ def test_agent_session_is_reachable_after_a_slash_approval_is_answered(
     assert _added(todo.chores, todo.base) == notes
 
     out = todo.ctx.process_turn("/add_note text=Cy")         # "/" commands still work
-    if reply == "always":
-        assert not out.command_outputs[-1].command_response.artifacts.get("awaiting_user")
-        assert _added(todo.chores, todo.base) == ["Ann", "Cy"]
-    else:
-        assert out.command_outputs[-1].command_response.artifacts["awaiting_user"] is True
-        assert _added(todo.chores, todo.base) == notes
-        assert todo.store.active() is not None
+    assert out.command_outputs[-1].command_response.artifacts["awaiting_user"] is True
+    assert _added(todo.chores, todo.base) == notes
+    assert todo.store.active() is not None
     # (e) last: the plain message and the "/" command above are the behaviour; the flag is its cause.
     assert not _flag(todo) or todo.store.active() is not None
+
+
+@pytest.mark.parametrize("assistant", [False, True], ids=["agent", "assistant"])
+def test_always_is_not_an_answer_to_a_required_always_approval(todo, annotated_library, grant_root, assistant):
+    """The reply the REPLIES list used to carry: it asks again, records nothing, runs nothing; "no" then ends it."""
+    if assistant:
+        todo.ctx._run_as_agent = False
+        todo.ctx._cme_workflow.context.pop("run_as_agent", None)
+        todo.wf.context.pop("run_as_agent", None)
+    _held(todo, "Ann")
+    todo.script.steps = []
+    out = todo.ctx.process_turn("always")
+    assert "asks every time" in out.answer
+    assert todo.store.active() is not None and _added(todo.chores, todo.base) == []
+    todo.ctx.process_turn("no")
+    assert todo.store.active() is None and _added(todo.chores, todo.base) == []
+    again = todo.ctx.process_turn("/add_note text=Cy")                 # no grant: asked again
+    assert again.command_outputs[-1].command_response.artifacts["awaiting_user"] is True
 
 
 def test_a_reply_that_is_not_yes_always_or_no_asks_again_and_keeps_the_approval(
@@ -122,10 +137,7 @@ def test_assistant_session_is_unchanged(todo, annotated_library, grant_root, rep
     assert todo.script.steps == []
     todo.ctx.process_turn("abort")                           # leave the ambiguity round "do it" opened
     out = todo.ctx.process_turn("/add_note text=Cy")
-    if reply == "always":
-        assert _added(todo.chores, todo.base) == ["Ann", "Cy"]
-    else:
-        assert out.command_outputs[-1].command_response.artifacts["awaiting_user"] is True
+    assert out.command_outputs[-1].command_response.artifacts["awaiting_user"] is True
 
 
 # ----------------------------------------------------------------------

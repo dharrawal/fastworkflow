@@ -86,7 +86,7 @@ def _confirmed(todo):
 def test_a_single_confident_sub_task_runs_directly_with_no_review(gated, monkeypatch):
     _split_into(monkeypatch, [FIND])
     intent = resolution.part_intent(gated.wf, FIND)
-    assert resolution.is_fast_path(intent) and intent.decided_by == resolution.BY_CLASSIFIER
+    assert resolution.is_fast_path(intent, gated.wf) and intent.decided_by == resolution.BY_CLASSIFIER
     gated.script.steps = _finish()
     out = gated.ctx.process_turn(FIND)
     assert out.status is TurnStatus.COMPLETED
@@ -97,7 +97,7 @@ def test_a_single_confident_sub_task_runs_directly_with_no_review(gated, monkeyp
 def test_an_exact_command_name_runs_directly_with_no_review(gated, monkeypatch):
     _split_into(monkeypatch, ["count_books"])
     fast = resolution.part_intent(gated.wf, "count_books")
-    assert resolution.is_fast_path(fast) and fast.decided_by == resolution.BY_EXACT_NAME
+    assert resolution.is_fast_path(fast, gated.wf) and fast.decided_by == resolution.BY_EXACT_NAME
     assert fast.command == "Library/count_books" and fast.kind == resolution.KIND_PLANNING
     gated.script.steps = _finish()
     out = gated.ctx.process_turn("count_books")
@@ -108,7 +108,7 @@ def test_an_exact_command_name_runs_directly_with_no_review(gated, monkeypatch):
 
 def test_an_unsure_single_sub_task_is_not_on_the_fast_path(gated, monkeypatch):
     _split_into(monkeypatch, [JOKE])
-    assert not resolution.is_fast_path(resolution.part_intent(gated.wf, JOKE))
+    assert not resolution.is_fast_path(resolution.part_intent(gated.wf, JOKE), gated.wf)
 
 
 # ----------------------------------------------------------------------

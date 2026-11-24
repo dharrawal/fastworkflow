@@ -1,3 +1,5 @@
+import contextlib
+import contextvars
 import os
 import sys
 import threading
@@ -8,6 +10,38 @@ from typing import Optional
 import fastworkflow
 from fastworkflow.kvstore import KVStore
 from fastworkflow.utils.logging import logger
+
+#: How many commands are running in this context (``command_executor.call_response_generator`` counts them). While
+#: one runs, ``workflow.record`` is the record it was invoked on; outside every command it is the current position.
+_RUNNING_COMMANDS: contextvars.ContextVar[int] = contextvars.ContextVar("fw_running_commands", default=0)
+
+
+def command_running() -> bool:
+    """Whether a command's code is running in this context (``workflow.record`` is then its invoked record)."""
+    return _RUNNING_COMMANDS.get() > 0
+
+
+#: ``(workflow, record)`` a command's checks act on in this context, bound by ``running_command(workflow, record)``, or
+#: None: the record the dispatch bound on the workflow (``_command_context_for_response_generation``). A context-local
+#: binding because the plan path checks the drafts of several parts at once (``subtask_pool``), each on its own record.
+_BOUND_RECORD: contextvars.ContextVar[Optional[tuple]] = contextvars.ContextVar("fw_bound_record", default=None)
+
+
+@contextlib.contextmanager
+def running_command(workflow: Optional["Workflow"] = None, record: Optional[object] = None):
+    """Mark a command's code as running for its duration (nested calls count).
+
+    With *workflow*, ``workflow.record`` is *record* in this context while it runs: the binding of a command's checks
+    made outside a dispatch (the plan path validates a part's arguments on the record its command will run on,
+    ``intent_loop.on_owner_record``). Without it, the record is the one the dispatch bound on the workflow; a dispatch
+    nested in a bound check reads its own."""
+    token = _RUNNING_COMMANDS.set(_RUNNING_COMMANDS.get() + 1)
+    bound = _BOUND_RECORD.set((workflow, record) if workflow is not None else None)
+    try:
+        yield
+    finally:
+        _BOUND_RECORD.reset(bound)
+        _RUNNING_COMMANDS.reset(token)
 
 
 # ----------------------------------------------------------------------
@@ -84,6 +118,12 @@ _RETIRED_CONTEXT_ATTRIBUTES = {
     "current_command_context_displayname": "is internal: read the record with workflow.record and its context class's get_displayname",
     "is_current_command_context_root": "is internal: read the record with workflow.record and compare it with workflow.root",
 }
+
+
+class MissingGetParentError(AttributeError):
+    """A workflow with a root stands on a record that is not the root, and the record's context does not say what
+    encloses it: no ``_commands/<Context>/_<Context>.py`` or no ``get_parent`` in its ``class Context``. Raised on the
+    climb (``Workflow.get_parent``); a command that moves onto such a record fails instead (``command_executor``)."""
 
 
 class Workflow:
@@ -178,6 +218,9 @@ class Workflow:
         self._root_command_context = None
         self._current_command_context = None
         self._command_context_for_response_generation = None
+        # How many times ``workflow.record`` was assigned: a command moved the session when this changed while it ran
+        # (``command_executor._check_move``). Setting ``workflow.root`` is not a record move and does not count.
+        self._record_assignments = 0
 
         # Observers invoked when the current position changes (workflow.record = x). Kept on
         # the workflow because the setter is the single chokepoint every context switch
@@ -209,7 +252,7 @@ class Workflow:
     @property
     def record_displayname(self) -> str:
         """The display name of ``workflow.record``, as a command prints it."""
-        return self._displayname_of(self._command_context_for_response_generation)
+        return self._displayname_of(self.record)
 
     def _displayname_of(self, record: Optional[object]) -> str:
         crd = fastworkflow.CommandContextModel.load(self._folderpath)
@@ -225,7 +268,7 @@ class Workflow:
 
     @property
     def _is_current_command_context_root(self) -> bool:
-        return self._current_command_context == self._root_command_context
+        return self._current_command_context is self._root_command_context
 
     def add_context_change_listener(self, listener) -> None:
         """Register a zero-arg callable invoked whenever the current context changes.
@@ -279,19 +322,22 @@ class Workflow:
 
     @property
     def record(self) -> object:
-        """The record the running command acts on: the one it was invoked on.
+        """The record the running command acts on: the one it was invoked on; outside a command, the current position.
 
-        It differs from the current position when the command was found on an
-        enclosing record through ``get_parent``. It keeps returning the invoked
-        record until the command returns, so a command that moves the workflow
-        reads the record once into a local, then assigns ``workflow.record = child``
-        to move. Assigning it sets the current position, which is what listings
-        and navigation read.
+        While a command runs it differs from the current position when the command was found on an
+        enclosing record through ``get_parent`` (or is a global command, run on the root). It keeps returning
+        the invoked record until the command returns, so a command that moves the workflow reads the record
+        once into a local, then assigns ``workflow.record = child`` to move. Assigning it sets the current
+        position, which is what listings and navigation read, and what a read outside a command returns.
         """
-        return self._command_context_for_response_generation
+        if command_running():
+            bound = _BOUND_RECORD.get()
+            return bound[1] if bound is not None and bound[0] is self else self._command_context_for_response_generation
+        return self._current_command_context
 
     @record.setter
     def record(self, value: Optional[object]) -> None:
+        self._record_assignments += 1
         changed = value is not self._current_command_context
         self._current_command_context = value
         if changed:
@@ -304,37 +350,73 @@ class Workflow:
 
     @root.setter
     def root(self, value: Optional[object]) -> None:
-        if self._root_command_context:
+        if self._root_command_context is not None:
             raise ValueError("workflow.root can only be set once per Workflow")
 
         self._root_command_context = value
         self._current_command_context = value
 
     def get_parent(self, record: Optional[object] = None) -> Optional[object]:
-        if record == self._root_command_context or record is None:
+        """The record that encloses *record*: one rule keyed on the root.
+
+        The root (and None) answers the root. With no root, a context with no ``_<Context>.py``, no ``get_parent`` or
+        a ``get_parent`` that returns None all mean "no enclosing record: straight to the global commands". With a
+        root, a record that is not the root needs its context's answer: ``return None`` is the explicit "go to the
+        global commands", and a context with no file or no ``get_parent`` raises ``MissingGetParentError``. A record
+        whose class is no context of the workflow has no enclosing record (a command cannot move onto one).
+        """
+        if record is None or record is self._root_command_context:
             return self._root_command_context
+        context_class, problem = self._enclosing_rule(record)
+        if problem is not None:
+            raise MissingGetParentError(problem)
+        if context_class is None or not hasattr(context_class, "get_parent"):
+            return None
+        return context_class.get_parent(record)
 
-        crd = fastworkflow.CommandContextModel.load(
-            self._folderpath)
-        context_class = crd.get_context_class(
-                Workflow.get_command_context_name(record),
-                fastworkflow.ModuleType.CONTEXT_CLASS
-        )
-        if context_class:
-            record = context_class.get_parent(record)
-        else:
-            record = None
+    def missing_get_parent(self, record: Optional[object]) -> Optional[str]:
+        """Why the climb from *record* cannot go on, or None: the workflow has a root, *record* is not it, its class is
+        a context of the workflow, and that context has no ``get_parent`` (no ``_<Context>.py``, or none in its
+        ``class Context``; one inherited from a Python base class counts). The text names the context, the file to
+        write and the method."""
+        if record is None or record is self._root_command_context:
+            return None
+        return self._enclosing_rule(record)[1]
 
-        return record
+    def is_context(self, context_name: str, model=None) -> bool:
+        """Whether *context_name* is a context of this workflow: a folder ``_commands/<context_name>/`` holding a
+        command, an entry of its inheritance file, or a context with a registered ``_<context_name>.py``."""
+        from fastworkflow.command_directory import get_cached_command_directory
+
+        model = model or fastworkflow.CommandContextModel.load(self._folderpath)
+        return (context_name in model._command_contexts
+                or context_name in get_cached_command_directory(self._folderpath).map_context_2_metadata)
+
+    def _enclosing_rule(self, record: object) -> tuple[object, Optional[str]]:
+        """``(context class or None, the MissingGetParentError text or None)`` for a record that is not the root."""
+        model = fastworkflow.CommandContextModel.load(self._folderpath)
+        context_name = Workflow.get_command_context_name(record)
+        context_class = model.get_context_class(context_name, fastworkflow.ModuleType.CONTEXT_CLASS)
+        if (self._root_command_context is None or hasattr(context_class, "get_parent")
+                or (context_class is None and not self.is_context(context_name, model))):
+            return context_class, None
+        where = f"_commands/{context_name}/_{context_name}.py"
+        missing = (f"its class Context in {where} has no get_parent" if context_class is not None
+                   else f"there is no {where}")
+        return context_class, (
+            f"the context {context_name} has no get_parent ({missing}): the workflow has a root and a {context_name} "
+            f"record is not it, so the framework asks its context for the record that encloses it. Write "
+            f"'@classmethod def get_parent(cls, record)' in the class Context of {where}, returning the enclosing "
+            f"record (return None to go straight to the global commands)")
 
     @property
     def is_record_root(self) -> bool:
         """Whether ``workflow.record`` is the root record (see ``workflow.root``)."""
-        return self._command_context_for_response_generation == self._root_command_context
+        return self.record is self._root_command_context
 
     @staticmethod
     def get_command_context_name(record: Optional[object], for_display = False) -> str:
-        if record:
+        if record is not None:
             return record.__class__.__name__
         return 'global' if for_display else '*'
 

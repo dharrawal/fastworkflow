@@ -115,6 +115,34 @@ def test_a_fixed_phrase_is_read_before_the_values_and_asks_no_model():
     assert reading.kind == replies.MISUNDERSTOOD and calls == []
 
 
+@pytest.mark.usefixtures("initialized_fastworkflow")
+@pytest.mark.parametrize("reply", ["none", "None", "nope", "Change", "Wrong", "What", "You", "Terminator", "Never",
+                                   "Ex", "Stopwatch", "you misunderstood me about the title"])
+def test_a_value_that_only_begins_like_a_fixed_phrase_is_not_that_phrase(reply):
+    """bd fix-ftdl.9: the framework's phrases of abort and "you misunderstood" match a WHOLE reply (case and trailing
+    punctuation ignored), never its opening letters: "none" and "Change" are values, not "you misunderstood", and
+    "Terminator" is a title, not abort."""
+    assert replies.phrase_of(reply) is None
+
+
+@pytest.mark.usefixtures("initialized_fastworkflow")
+@pytest.mark.parametrize("reply, phrase", [("you misunderstood", "misunderstood"), ("You misunderstood.", "misunderstood"),
+                                           ("Wrong command!", "misunderstood"), ("terminate", "abort"),
+                                           ("Never mind", "abort"), ("EXIT", "abort")])
+def test_a_whole_fixed_phrase_is_still_that_phrase(reply, phrase):
+    assert replies.phrase_of(reply) == phrase
+
+
+@pytest.mark.usefixtures("initialized_fastworkflow")
+def test_none_leaves_an_optional_field_empty_through_the_one_reader():
+    """Rule c of ``parameters.read`` ("no / none / neither leave an optional field empty") is reachable: the phrases no
+    longer read "none" as "you misunderstood" first."""
+    calls: list = []
+    reading = replies.read_reply("none", ["note"], ["note"], slots={"note": read.Slot(required=False)},
+                                 phrases=replies.phrase_of, remote=_said("answer", calls))
+    assert (reading.kind, reading.values) == (replies.VALUES, {"note": None})
+
+
 @pytest.mark.parametrize("word, kind", [("wait", replies.WAIT), ("abort", replies.DECLINE),
                                         ("misunderstood", replies.MISUNDERSTOOD),
                                         ("different_command", replies.DIFFERENT)])
@@ -185,6 +213,16 @@ def test_exec_values_in_name_lines_are_merged_and_the_remote_model_is_not_asked(
     assert reply.action == parameter_reply.ACTION_MERGE and remote.calls == []
 
 
+@pytest.mark.parametrize("value", ["Terminator", "Change"])
+def test_exec_a_value_that_begins_like_a_fixed_phrase_is_a_value(monkeypatch, value):
+    """The "/" path reads its reply with the same phrases (bd fix-ftdl.9): a value is merged, never abort or the
+    misunderstanding listing."""
+    _Remote(monkeypatch, "answer")
+    workflow = _pending()
+    reply = parameter_reply.read_reply(workflow, workflow.context["app_workflow"], value)
+    assert reply.action == parameter_reply.ACTION_MERGE and reply.text == value
+
+
 def test_exec_a_plain_value_is_asked_of_the_remote_model_once_and_merged(monkeypatch):
     remote = _Remote(monkeypatch, "answer")
     workflow = _pending()
@@ -217,12 +255,15 @@ def test_exec_the_remote_read_can_say_it_was_misunderstood(_assistant_session, m
     assert len(remote.calls) == 1 and stored is None and stage == intent_loop.WAITING_INTENT
 
 
-def test_exec_a_different_request_leaves_the_question_and_is_routed_as_a_request(_assistant_session, monkeypatch):
+def test_exec_a_different_request_is_not_run_and_the_question_is_asked_again(_assistant_session, monkeypatch):
+    # As on the plan path (bd fix-ftdl.8.10): a reply read as a different request is not run; it counts as a reply
+    # with no progress, so the question stays and says the reply was not run.
     remote = _Remote(monkeypatch, "different_command")
     out = _assistant_session.process_turn("what can i do?")
     stage, stored = _cme_state(_assistant_session)
-    assert len(remote.calls) == 1 and stored is None and stage is None
-    assert "PARAMETER EXTRACTION ERROR" not in str(out.model_dump())
+    assert len(remote.calls) == 1 and stored is not None and stage == intent_loop.WAITING_PARAMETERS
+    assert stored.stalled == 1
+    assert "read as a new request, so it was not run" in str(out.model_dump())
 
 
 @pytest.mark.parametrize("word", ["cancel", "abort"])

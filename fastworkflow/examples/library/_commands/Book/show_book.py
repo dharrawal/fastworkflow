@@ -9,10 +9,12 @@ class Signature:
     """Show the open book: its title, author, branch, copies and how many are on loan."""
 
     class Output(BaseModel):
-        book_uid: str = Field(description="the book's uid")
-        title: str = Field(description="the book's title")
-        author: str = Field(description="the book's author")
-        branch: str = Field(description="the branch that holds the book")
+        book_uid: str = Field(description="the book's uid, such as b1", examples=["b1", "b3"])
+        title: str = Field(description="the book's title", examples=["Dune", "Emma"])
+        author: str = Field(description="the book's author",
+                            examples=["Frank Herbert", "Jane Austen"])
+        branch: str = Field(description="the branch that holds the book",
+                            examples=["Central", "Riverside"])
         copies: int = Field(description="how many copies the library owns")
         on_loan: int = Field(description="how many copies are on loan")
 

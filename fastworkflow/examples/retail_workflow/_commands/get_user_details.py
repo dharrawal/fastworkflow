@@ -1,3 +1,4 @@
+import json
 from typing import List
 
 import fastworkflow
@@ -26,18 +27,17 @@ class Signature:
                 "Detailed user information such as "
                 "first and last name, address, email, payment methods and "
                 "the list of order id's"
-            ),
-            json_schema_extra={
-                "used_by": [
-                    "cancel_pending_order",
-                    "exchange_delivered_order_items",
-                    "get_order_details",
-                    "modify_pending_order_address",
-                    "modify_pending_order_items",
-                    "modify_pending_order_payment",
-                    "return_delivered_order_items",
-                ]
-            },
+            )
+        )
+        order_ids: List[str] = Field(
+            default_factory=list,
+            json_schema_extra={"ui": {"hidden": True}},
+            description="The user's order ids, such as #W0000000; empty when the user is not found.",
+        )
+        payment_method_ids: List[str] = Field(
+            default_factory=list,
+            json_schema_extra={"ui": {"hidden": True}},
+            description="The ids of the user's payment methods, such as credit_card_0000000; empty when the user is not found.",
         )
 
     plain_utterances: List[str] = [
@@ -59,11 +59,27 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow, command_parameters)
-        return output
+        # the response text is the user_details field's JSON alone, as it was before the id lists were added
+        return fastworkflow.CommandResponse(
+            response=output.model_dump_json(include={"user_details"}), output=output)
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
         user_details = GetUserDetails.invoke(data=data, user_id=input.user_id)
-        return Signature.Output(user_details=user_details) 
+        user = _json_object(user_details)
+        return Signature.Output(
+            user_details=user_details,
+            order_ids=[str(order_id) for order_id in user.get("orders") or []],
+            payment_method_ids=[str(key) for key in user.get("payment_methods") or {}],
+        )
+
+
+def _json_object(text: str) -> dict:
+    """The tool's JSON text as a dict; empty for its error text."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}

@@ -32,8 +32,8 @@ The product differences, the only parameters:
 - the callers of ``resolution.part_intent`` add ``pinned`` (a plan the client chose) and ``exclude`` (a review's
   look_up re-match); they are not part of the decision and live there.
 
-The pending question is ONE piece of plain data, a JSON-safe ``dict`` made by ``open_question`` (the plan path keeps it in
-``PlanResolution.choice`` and the CME in the turn's waiting record, kind ``intent``): ``ask`` writes its text, ``answer``
+The pending question is ONE piece of plain data, a JSON-safe ``dict`` made by ``open_question`` (both paths keep it in the turn's
+waiting record, kind ``intent``; the plan path's ``owner`` is ``plan``): ``ask`` writes its text, ``answer``
 reads a reply against it and counts the replies that could not be read (``no_agent_mode.MAX_NO_PROGRESS``). The client
 shape is ``question_kind`` ``plan_choice`` with the artifact ``plan_choice`` (``payload``).
 
@@ -41,6 +41,7 @@ Nothing here imports the model stack at import time.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -67,8 +68,15 @@ BY_QUESTION = "question"
 BY_CHOICE = "choice"
 BY_NOTHING = ""
 
-#: The deciders a single part runs on with no review (the fast path): the signals the local side stands behind.
+#: The deciders a single part runs on with no review (the fast path): the signals the local side stands behind. A close
+#: spelling of a command's name is one, as a confident local model is; neither is the user naming a command.
 FAST_PATH_DECIDERS = frozenset({BY_EXACT_NAME, BY_FUZZY_NAME, BY_CLASSIFIER})
+
+#: The deciders by which the user (or a client) named the command: its exact name, a pinned plan, a pick at the
+#: which-command question (a client's direct call is not decided here at all). A close spelling of a name is NOT one: it
+#: is the closest command, so a command that changes data found that way is confirmed like a model's choice. A command
+#: that changes data or carries an approval mark runs only when it was named, or after a yes (``unconfirmed_pick``).
+NAMED_DECIDERS = frozenset({BY_EXACT_NAME, BY_PINNED, BY_CHOICE})
 
 #: The most other plans a drafted item names when its match was ambiguous.
 MAX_ALTERNATIVES = 3
@@ -394,7 +402,6 @@ def _by_name(workflow, text: str, planning: set[str], core_names: set[str], core
     """Layers 1 to 3: an exact name, the foreign-name guard, a fuzzy name. ``(intent, facts)``: the intent is None when
     none of them decides, and the facts (a fuzzy tie) are then kept for the span of the chain's decision."""
     from fastworkflow import context_navigation
-    from fastworkflow.utils.fuzzy_match import find_best_matches
 
     token = first_word(text)
     bare = token.lstrip("/").lower()
@@ -431,30 +438,34 @@ def _by_name(workflow, text: str, planning: set[str], core_names: set[str], core
             return Intent(NONE, decided_by=BY_FOREIGN_NAME, hint=hint, owners=tuple(owners),
                           evidence=_evidence(workflow, (), None), facts=facts), {}
 
-    # 3. fuzzy: the whole request against each scope's names, nearest scope first
-    spoken = str(text).replace(" ", "_").strip()
+    # 3. fuzzy: the WHOLE request is a misspelling of one WHOLE name (its leaf or its qualified name; spaces, underscores
+    # and case ignored), nearest scope first (``intent_clarification.misspelt``). A request that only begins like a
+    # name is not one. A match is the closest command, not the user naming it (``NAMED_DECIDERS``).
     for index, scope in enumerate(scopes):
-        keys = {name.split("/")[-1]: name for name in _scope_names(workflow, scope.context_name, core_names)}
+        keys: dict[str, str] = {}
+        for name in _scope_names(workflow, scope.context_name, core_names):
+            keys.update({name: name, name.split("/")[-1]: name})
         if core and index == 0:
             keys = {**_core_fuzzy_keys(), **keys}
         if not keys:
             continue
-        matched, distance = find_best_matches(spoken, keys.keys(), threshold=intent_clarification.FUZZY_MAX_DISTANCE)
-        if not matched:
+        matched, distance = intent_clarification.misspelt(text, keys)
+        commands = list(dict.fromkeys(keys[key] for key in matched))
+        if not commands:
             continue
         facts = {"fuzzy_distance": distance, "fuzzy_threshold": intent_clarification.FUZZY_MAX_DISTANCE,
-                 "candidate_count": len(matched)}
-        if len(matched) > 1:
-            # Commands sharing a prefix tie at distance 0 (the matcher scores only the candidate's leading characters),
-            # and picking the first would choose between them by set order. A tie is not a match: the chain decides.
+                 "candidate_count": len(commands)}
+        if len(commands) > 1:
+            # Two names the request is equally close to: picking the first would choose between them by set order. A tie
+            # is not a match: the chain decides.
             from fastworkflow.utils.logging import logger
 
-            logger.warning(f"Fuzzy pre-match tied across {matched} for utterance '{text}' in context "
+            logger.warning(f"Fuzzy pre-match tied across {commands} for utterance '{text}' in context "
                            f"'{scope.context_name}'. Deferring to the chain instead of picking one.")
-            return None, {**facts, "fuzzy_prematch_tie": [str(c) for c in matched]}
+            return None, {**facts, "fuzzy_prematch_tie": [str(c).split("/")[-1] for c in commands]}
         facts["matcher_layer"] = "fuzzy_prematch"
-        return _named(workflow, keys[matched[0]], planning, core_names, BY_FUZZY_NAME,
-                      scope if keys[matched[0]] not in core_names else _current_scope(workflow), facts), {}
+        return _named(workflow, commands[0], planning, core_names, BY_FUZZY_NAME,
+                      scope if commands[0] not in core_names else _current_scope(workflow), facts), {}
     return None, {}
 
 
@@ -611,6 +622,45 @@ def choose(workflow, qualified: str, *, decided_by: str = BY_CHOICE) -> Optional
                   evidence={"context": scope.context_name}, context=scope.context_name, record=scope.record)
 
 
+@contextlib.contextmanager
+def on_owner_record(workflow, qualified: str):
+    """Run what is inside (a command's argument checks made outside a dispatch: the plan path's draft, its values
+    question and reply, its run's check) with ``workflow.record`` the record *qualified* will run on, as the dispatcher
+    binds it before the "/" path extracts (``choose``: the nearest scope of the lookup path that has it, the root for a
+    global command; a command no scope of the path has keeps the current position). The binding is context-local
+    (``workflow.running_command``), so parts checked side by side each see their own; the position does not move."""
+    from fastworkflow.workflow import running_command
+
+    chosen = choose(workflow, qualified) if qualified else None
+    record = chosen.record if chosen is not None else workflow._current_command_context
+    with running_command(workflow, record):
+        yield
+
+
+def unconfirmed_pick(workflow, intent: "Intent", origin) -> bool:
+    """Whether *intent* is a match nobody named, of a command that needs the user's say, that nothing else will confirm:
+    a model (the local or the remote one) or a close spelling of a name (``BY_FUZZY_NAME``) chose a command that writes
+    (``command_writes.write_commands``: an execution command with ``@writes``, or a planning command whose steps reach
+    one) or that carries an approval mark (``approval_annotations.command_approval``, while the gate enforces), and the
+    approval gate will not ask about it for a call by *origin* (``approval_binding.would_ask``: that question names the
+    command, so it is the yes; a person's own "/" message runs a ``REQUIRED_UNTIL_DELEGATED`` command unasked, so a
+    model's pick of one is asked here). Such a match needs the user's yes: the plan path reviews it
+    (``resolution.is_fast_path``), the "/" path asks "Did you mean the command 'X'?" (``CommandNamePrediction.predict``).
+    The one rule both paths read: "a command that changes data or needs approval runs only when the user named it
+    (typed its exact name, picked it at the which-command question, or a client pinned or called it directly), or
+    after the user says yes to it". Raises what reading the workflow's routing raises."""
+    from fastworkflow import approval_annotations, approval_binding, command_writes
+
+    if intent.outcome != MATCH or intent.decided_by in NAMED_DECIDERS or not intent.command:
+        return False
+    folder = workflow.folderpath
+    if (intent.command not in command_writes.write_commands(folder)
+            and not (approval_binding.switch_mode() == approval_binding.MODE_ENFORCE
+                     and approval_annotations.command_approval(folder, intent.command) is not None)):
+        return False
+    return not approval_binding.would_ask(workflow, intent.command, origin)
+
+
 # ======================================================================================================================
 # Learning: the one hook
 # ======================================================================================================================
@@ -650,9 +700,14 @@ EXHAUSTED = "exhausted"
 
 @dataclass(frozen=True)
 class Answer:
-    """A reply applied to the pending question: ``kind`` is ``pick`` (``name``, and the ``rest`` of the reply), ``none``,
-    ``abort``, ``list``, ``ask_again`` (``question`` is the question asked once more) or ``exhausted`` (the second reply
-    that could not be read)."""
+    """A reply applied to the pending question: ``kind`` is ``pick`` (``name``), ``none``, ``abort``, ``list``,
+    ``ask_again`` (``question`` is the question asked once more) or ``exhausted`` (the second reply that could not be
+    read).
+
+    ``rest`` is always empty: a reply answers its question and nothing else (the question says so), so the words after
+    a picked name are not the command's parameter text on either path; the request that was asked about is (bd
+    fix-ftdl.7.8, D5). The field stays only because the CME's router (a frozen ``_commands/`` file) reads it; it goes
+    with the next retrain of that workflow (bd fix-qjne.32)."""
 
     kind: str
     name: Optional[str] = None
@@ -706,7 +761,7 @@ def answer(record: dict[str, Any], reply: str, *, aliases: Optional[Mapping[str,
         if record["stalled"] < no_agent_mode.MAX_NO_PROGRESS:
             return Answer(ASK_AGAIN, question=ask(record, retry=intent_clarification.RETRY))
         return Answer(EXHAUSTED)
-    return Answer(reading.kind, reading.name, reading.rest)
+    return Answer(reading.kind, reading.name)
 
 
 def describe(workflow, names: Iterable[str]) -> dict[str, str]:
@@ -732,10 +787,11 @@ def choices_of(workflow, names: Sequence[str]) -> list[dict[str, Any]]:
     return [{"name": name, "description": described.get(name, ""), "closest": True} for name in names]
 
 
-def core_aliases() -> dict[str, str]:
-    """The phrases the CME reads in a reply to the question besides a candidate's name: the plain utterances of
-    ``abort`` (abort), ``you_misunderstood`` (none of these) and ``what_can_i_do`` (list the commands), and those
-    commands' names. What the CME used to merge into its own matching, now an argument of the one reader."""
+def core_aliases(*, listing: bool = True) -> dict[str, str]:
+    """The phrases a reply to the question reads besides a candidate's name: the plain utterances of ``abort`` (abort),
+    ``you_misunderstood`` (none of these) and, with *listing*, ``what_can_i_do`` (list the commands), and those commands'
+    names. The one source of them: the CME reads all three, the plan path (no listing of commands there) the first two.
+    What the CME used to merge into its own matching, now an argument of the one reader."""
     import fastworkflow
 
     internal = fastworkflow.RoutingRegistry.get_definition(
@@ -745,6 +801,8 @@ def core_aliases() -> dict[str, str]:
     for command, kind in (("IntentDetection/what_can_i_do", intent_clarification.LIST),
                           ("ErrorCorrection/you_misunderstood", intent_clarification.NONE),
                           ("ErrorCorrection/abort", intent_clarification.ABORT)):
+        if kind == intent_clarification.LIST and not listing:
+            continue
         for phrase in (*metadata[command].plain_utterances, command.split("/")[-1].replace("_", " ")):
             aliases[str(phrase).lower()] = kind
     return aliases

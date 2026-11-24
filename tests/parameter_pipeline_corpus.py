@@ -62,14 +62,14 @@ class ResponseGenerator:
 
 EXEC_COMMANDS = {
     "lend_book": _EXEC.format(name="lend_book", doc="Lend one book to a member.", validators="", fields='''
-        member: str = Field(description="the member who borrows", examples=["Jane Roe"])
-        title: str = Field(description="the book's title")
-        copies: int = Field(default=1, description="how many copies")
+        member: str = Field(description="the member who borrows", examples=["Jane Roe"], json_schema_extra={"copied_from_command_text": True})
+        title: str = Field(description="the book's title", json_schema_extra={"copied_from_command_text": True})
+        copies: int = Field(default=1, description="how many copies", json_schema_extra={"copied_from_command_text": True})
         tags: Optional[List[str]] = Field(default=None, description="labels for the loan")
         kind: Literal["loan", "hold"] = Field(default="loan", description="the kind of lending")
         note: Optional[str] = Field(default=None, description="a free note")'''),
     "shelf_code": _EXEC.format(name="shelf_code", doc="Label a shelf with a code.", fields='''
-        code: str = Field(description="the shelf code")
+        code: str = Field(description="the shelf code", json_schema_extra={"copied_from_command_text": True})
         floor: int = Field(default=0, description="the floor")''', validators='''
         @model_validator(mode="after")
         def closed(self, info):
@@ -79,7 +79,7 @@ EXEC_COMMANDS = {
                 raise fastworkflow.Refused("this does not fit the request")
             return self'''),
     "all_defaults": _EXEC.format(name="all_defaults", doc="Show the defaults.", validators="", fields='''
-        page: int = Field(default=1, description="the page")
+        page: int = Field(default=1, description="the page", json_schema_extra={"copied_from_command_text": True})
         label: Optional[str] = Field(default=None, description="a label")'''),
 }
 

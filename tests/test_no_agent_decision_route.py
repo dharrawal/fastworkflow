@@ -22,7 +22,7 @@ import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.turn import TurnStatus
 from tests.test_fastapi_turn_output_contract import (  # noqa: F401 - fixtures and helper
-    _channel, action_app_module, env_files)
+    _channel, action_app_module)
 from tests.test_no_agent_decisions import (  # noqa: F401 - fixtures and helpers
     BOOK_BY_TITLE, BOOK_LOANS, Conditional, _BOOK_BY_TITLE_SOURCE, _build_planning_command, _find_runs,
     _nested_state, _no_agent, _pending, _plan, library_env)

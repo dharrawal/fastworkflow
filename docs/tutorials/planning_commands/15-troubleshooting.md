@@ -28,6 +28,56 @@ _commands/Library/find_or_open.py: defines both ResponseGenerator and PlanGenera
 **The same qualified name twice.** A planning command and an execution command cannot share
 `<Context>/<name>`; a planning command named like a command of another context is fine.
 
+**A `Signature` with no generator class.** A file that has a `Signature` but no class named exactly
+`ResponseGenerator` or `PlanGenerator` (a misspelling such as `ResponseGenerater`) loads as nothing and is reported:
+
+```text
+Library/greet: _commands/Library/greet.py: has a Signature but no ResponseGenerator or PlanGenerator; the class name must be exactly ResponseGenerator (a command that runs code) or PlanGenerator (a planning command); check its spelling and case
+```
+
+**Fix:** spell the class `ResponseGenerator` (or `PlanGenerator`). A file with a generator and no `Signature`
+(a startup command) and a `_` helper are not reported.
+
+**A context class not named `Context`.** The callback file `_commands/<Context>/_<Context>.py` must define
+`class Context`:
+
+```text
+Book: _commands/Book/_Book.py is the context class file of Book but defines no class Context; write the callbacks (get_parent, get_displayname, ...) as methods of a class named exactly Context
+```
+
+**Fix:** rename the class. A context folder with no callback file is fine.
+
+**A `_workflow.py` in the wrong place.** The workflow's settings are read only from `class Context` of
+`_commands/_workflow.py`:
+
+```text
+_commands/Book/_workflow.py: the workflow settings are read only from _commands/_workflow.py; this file is ignored here: move its settings there
+```
+
+**A `_split.py`.** The removed spelling of the same settings stops the workflow:
+
+```text
+/path/to/workflow/_commands/_split.py: _split.py is removed: move its settings (split_examples, identifier_patterns, subject_hints) to class Context in _commands/_workflow.py, as class attributes
+```
+
+**An `identifier_patterns` entry anchored to the whole text.**
+
+```text
+_commands/_workflow.py: identifier_patterns holds '^B\\d+$', anchored to the whole text, so it can never match inside a message: identifier_patterns are searched inside the message; remove the ^ and $ anchors, use \b for word boundaries
+```
+
+**Fix:** write `re.compile(r"\bB\d+\b")`. A pattern compiled with `re.MULTILINE` is left alone.
+
+**A phase annotated with a command's `Input` alone.** `def find(self, input) -> FindBook.Input:` fails the load of
+the command: a phase hands on a command's `Output`, a union of `Output`s, or a facts model.
+
+**Fix:** keep the `Input` as a field of a facts model, `class Facts(BaseModel): asked: FindBook.Input`.
+
+**A record with no enclosing record.** When the workflow has a root object and a record that is not the root has a
+context with no `_<Context>.py` or no `get_parent`, the first climb from it raises `MissingGetParentError`, and a
+command that moves onto such a record fails: write `get_parent` in `_commands/<Context>/_<Context>.py` (`return None`
+sends the lookup straight to the global commands, silently).
+
 **A `_skills/` folder.** It is no longer read, and a workflow that has one fails to load
 with:
 
@@ -309,28 +359,31 @@ with the message below. The decorator is `@user_approval_for_execution` (see the
 [planning command file layout](../../planning_command_file_layout.md), "Approval annotation"):
 
 ```text
-CommandDeclarationError: _commands/retired_approval.py: retired_approval: approval = "mandatory" is removed: write @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)
+retired_approval: _commands/retired_approval.py: approval = "mandatory" is removed: write @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)
 ```
 
 **`writes = True`** is `@writes` on the `ResponseGenerator` (execution commands only):
 
 ```text
-CommandDeclarationError: _commands/retired_writes.py: retired_writes: writes = True is removed: write @writes on the ResponseGenerator (execution commands only)
+retired_writes: _commands/retired_writes.py: writes = True is removed: write @writes on the ResponseGenerator (execution commands only)
 ```
 
 **`descends_to = "Book"`** is `@descends_to("Book")` on the `ResponseGenerator` (page 5), and
-**`descend_parameter = "title"`** is `when_parameter` on the same decorator:
+**`descend_parameter = "title"`** has no replacement: a `@descends_to` is an unconditional move (a command
+that moves only sometimes still assigns `workflow.record` only when it moves). The decorator's own
+`when_parameter` option is removed the same way:
 
 ```text
-CommandDeclarationError: _commands/retired_descends_to.py: retired_descends_to: descends_to = "Book" is removed: write @descends_to("Book") on the ResponseGenerator
-CommandDeclarationError: _commands/descend_parameter_only.py: descend_parameter_only: descend_parameter = "title" is removed: write @descends_to("<Context>", when_parameter="title") on the ResponseGenerator
+retired_descends_to: _commands/retired_descends_to.py: descends_to = "Book" is removed: write @descends_to("Book") on the ResponseGenerator
+descend_parameter_only: _commands/descend_parameter_only.py: descend_parameter = "title" is removed: @descends_to always declares an unconditional move; declare it without the option (a command that moves only sometimes still assigns workflow.record only when it moves)
+open_book: _commands/open_book.py: when_parameter is removed from @descends_to (it was given 'title'): @descends_to always declares an unconditional move; declare it without the option (a command that moves only sometimes still assigns workflow.record only when it moves)
 ```
 
 **A private attribute written by hand**, such as `__fw_writes__ = True`, fails the load: the decorators
 store the mark themselves, so declare the decorator instead:
 
 ```text
-CommandDeclarationError: _commands/retired_private_mark.py: retired_private_mark: __fw_writes__ is written by hand; declare it with @writes instead
+retired_private_mark: _commands/retired_private_mark.py: __fw_writes__ is written by hand; declare it with @writes instead
 ```
 
 **`pick`, `full_list`, `listed` and `num`** are removed helpers. Importing one fails the load with the
@@ -512,11 +565,11 @@ PlanningCommandFormatError: _commands/retired_named_all_pages.py: steps() fails 
 ```
 
 **`named=` on a command with no row id.** A `named=` step needs an id input to open the row with: the
-field declared with `from_command_output`, else the command's one required `str` field. A command with
-neither fails the load:
+field declared with `from_command_output`, else the command's one required field whose name is an id
+(`..._uid` or `..._id`). A command with neither fails the load:
 
 ```text
-_commands/named_no_row.py: a step opens a row of 'list_branches' by named=, but 'list_branches' declares no row id input (a field from_command_output, or its one required str field): pass the id input explicitly
+_commands/named_no_row.py: a step opens a row of 'list_branches' by named=, but 'list_branches' declares no row id input the runtime can find (declare the producer of its id field with from_command_output, or pass the id input explicitly)
 ```
 
 **`command_context_object`**, a parameter of a `Context` classmethod, is `record` (page 5):
@@ -584,11 +637,30 @@ order_id: str = Field(json_schema_extra={"available_from": ["find_order"]})
 ```
 
 ```text
-_commands/Library/get_order.py: Input.order_id: available_from is written by from_command_output; write "from_command_output": "find_order" or "from_command_output": "find_order.<field>"
+_commands/Library/get_order.py: Input.order_id: available_from is written by from_command_output; write "from_command_output": "find_order.<field>"
 ```
 
 **Fix:** `order_id: str = Field(json_schema_extra={"from_command_output": "find_order.order_ids"}, ...)`. Prose that used to sit in the hint
 ("in the current context") belongs in the field's description.
+
+**A `from_command_output` that does not resolve.** The command that wrote it does not load. It is a
+problem line printed by `fastworkflow run`, `fastworkflow train` and the server, and `command preview --check`
+reports it too; the rest of the workflow loads. The reasons follow (a bare command name, a command or field
+that is not there, a producer off the lookup path, a type that does not fit).
+
+**A bare command name.** `from_command_output` names the command and the `Output` field that holds the
+value, `"<command>.<field>"`; the command alone is not accepted, alone or inside a list:
+
+```python
+order_id: str = Field(json_schema_extra={"from_command_output": "find_order"})   # in _commands/Library/get_order.py
+```
+
+```text
+Library/get_order: _commands/Library/get_order.py: Input.order_id (from 'find_order'): a bare command name is not accepted; write "<command>.<field>", an Output field of find_order that fits str: find_order.order_ids
+```
+
+**Fix:** write one of the fields it lists. When the producer has no field that holds the value (it
+returns one block of text), leave the declaration out and describe the value in `description`.
 
 **A `from_command_output` anywhere but an `Input` field.** An `Output` is built by code, and a facts
 model's fields are typed with the commands they come from (page 10), so neither carries one:
@@ -753,13 +825,14 @@ _commands/Library/bad_note.py: phase 'note', step 'add_note text=<text> (only wh
 **Fix:** `when("the member asked", run("add_note", text=input.text))`, or decide in code
 with `if`.
 
-**A phase decided at run time.** While the template is built every fact is a placeholder,
+**A phase that fails on placeholders.** While the template is built every fact is a placeholder,
 which stands in for most of what code does with a value: attributes, indexes, tests,
 iteration and arithmetic all work (`<find.total - 1>`). A phase that does something a
-placeholder cannot, such as looking a fact up in a table, still loads and runs on the real
-facts; the preview, and the agent reading the template as it plans, show it as decided at run time,
-`preview --check` warns, and its steps go unchecked at load. A `__result__` that builds an
-`Output` from the facts is shown the same way (page 4):
+placeholder cannot, such as looking a fact up in a table, fails the load of its command, as every
+mistake in a command file does (the rule is on the design idioms page "What a mistake stops",
+`docs/design_idioms/removed.html#load-rule`). Do the lookup where the real facts are read, in
+`__result__`: a `__result__` that cannot run on placeholders, or that builds an `Output` from the
+facts, still loads, and the preview shows its answer as decided at run time (page 4).
 
 ```python
 def notes(self, book) -> ShowNotes.Output:
@@ -768,7 +841,7 @@ def notes(self, book) -> ShowNotes.Output:
 ```
 
 ```text
-_commands/Book/bad_lookup.py: phase 'notes' is decided at run time: while the template is built (every fact unknown) it raised KeyError: '<book.branch>'
+_commands/Book/bad_lookup.py: phase 'notes' fails while its template is built (every fact unknown): KeyError: <book.branch>
 ```
 
 **`None` written into a step**, for a value of an enum with no entry in a table:
@@ -792,8 +865,8 @@ _commands/Library/bad_order.py: PlanGenerator adds the phase(s) overdue to those
 ## Calls between planning commands
 
 **A cycle.** If `a`'s steps name `b` and `b`'s name `a`, each command on the cycle gets a load
-error that names the path. The commands still load, and `fastworkflow command preview --check`
-fails with the same lines. For `Library/book_loans` and `Library/book_by_title` calling each
+error that names the path, so none of them loads, and `fastworkflow run`, `fastworkflow train`, the
+server and `fastworkflow command preview --check` list the same lines. For `Library/book_loans` and `Library/book_by_title` calling each
 other, the load reports:
 
 ```text
@@ -814,18 +887,20 @@ the calls it makes do, and so do the steps of one a plan calls as a step (page 1
 
 ## At run time, with no error
 
-These are warnings, and one note, each logged once per command (or once per workflow) per
-process.
+These are warnings and one note, each logged once per command (or once per workflow) per
+process, and the two about `__result__`, which are errors logged each time and fail the call.
 
-**A command returned no `Output`.** `book_by_title declares an Output but returned none;
-phases and from_command_output references cannot read it` means a command that declares a
-`Signature.Output` returned only text. Return the `Output` on every path: an execution
-command returns it from `__call__` (page 1), and a planning command from `__result__`, saying
+**A command returned no `Output`.** `book_by_title declares an Output but its __result__ returned
+str; return the Output, or CommandResponse(response=..., output=<Output>)` is an error, not a
+warning: the call fails, with no model-written answer in its place. A command that declares a
+`Signature.Output` must return exactly that `Output` (alone or in a `CommandResponse`) on every path:
+an execution command from `__call__` (page 1), and a planning command from `__result__`, saying
 "not found" in a field when it found nothing (page 11).
 
-**A hook that raised.** A `__result__` that raises, or returns something other than a `str`,
-its command's `Output` or a `CommandResponse`, keeps the call: a model writes the answer from
-the phases' runs, `output` is `None`, and the warning names the command and the exception.
+**A hook that raised.** A `__result__` that raises, returns `None`, returns an empty string or returns something
+the command may not return fails the call, as a failing execution command does: one error log, and a
+failed output `Execution error in <command>'s __result__: ...`. A model never writes the answer in
+its place; return `fastworkflow.planning.ANSWER_BY_MODEL` to let it. `raise fastworkflow.Refused(message)` is a refusal with that message.
 
 **`classifier_confirms` checks nothing.** `library: planning commands are matched by intent detection; without
 JEV_API_KEY, Jev's planning-match candidates and the classifier checks of <fields> are off.`, logged
@@ -833,10 +908,11 @@ once at load, means the workflow has no `JEV_API_KEY`. Planning commands are ord
 so intent detection still matches them. Without the key, the Jev matcher does not run, and the
 fields the line names carry a `classifier_confirms` option that checks nothing (page 9).
 
-**A navigation command without `@descends_to`.** `open_shelf moved the workflow into Shelf but
-declares no @descends_to; declare @descends_to("Shelf") so plans can reach Shelf's commands`
-means a command moved the workflow (by setting `workflow.record`) into a context it does not
-name. Declare it on the command (page 5).
+**A navigation command without `@descends_to`.** `open_shelf moved the workflow onto a Shelf record but
+declares no @descends_to: a command may move the session only onto a context it declares. Declare
+@descends_to("Shelf") on its ResponseGenerator. The move was undone` means a command moved the
+workflow (by setting `workflow.record`) onto a context it does not declare; the command failed and
+the workflow stayed where it was. Declare it on the command (page 5).
 
 **A planning command is refused.** `member_report is a planning command; it runs in agent
 mode.` means it was called by a direct API or MCP call, or it was named in assistant mode and
@@ -866,7 +942,7 @@ itself (`index`, the one item's place) keeps that meaning.
 
 ## Examples that do not load
 
-Each file below is saved as `_commands/<name>.py` in a copy of the tutorial workflow. The message under it is what the load (or the check) reports, with the folder's path left out.
+Each file below is saved as `_commands/<name>.py` in a copy of the tutorial workflow. The message under it is what the load reports, with the folder's path left out.
 
 <!-- broken: no_docstring -->
 ```python
@@ -951,7 +1027,7 @@ class PlanGenerator:
 
 <!-- load-error -->
 ```text
-PlanningCommandFormatError: _commands/bad_option.py: field 'title': unknown option 'strip_words'; its options are copied_from_command_text, record_named_in_command_text, classifier_confirms, classifier_decides, command_text_after_command_name, from_command_output, converted_from_command_text, ui
+PlanningCommandFormatError: _commands/bad_option.py: field 'title': unknown option 'strip_words'; its options are copied_from_command_text, record_named_in_command_text, classifier_confirms, classifier_decides, command_text_after_command_name, from_command_output, ui, examples_by
 ```
 
 <!-- broken: fan_out_param -->
@@ -995,7 +1071,7 @@ class PlanGenerator:
         return [run("list_branches")]
 ```
 
-<!-- check-error -->
+<!-- load-error -->
 ```text
 _commands/fact_source.py: Found.uid is str; a facts field is typed with a command's Output or Input. Compute other values in a property or method of Found; copies are no longer read (fact_from and "from" are removed)
 ```

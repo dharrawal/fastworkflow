@@ -159,7 +159,8 @@ def known_plan_names(workflow) -> dict[str, str]:
         names = {name for context in crd.contexts for name in run_listing._context_names(crd, context)}
         return {name: ("planning" if name in planning else "plain") for name in sorted(names)
                 if name not in core and name not in set(every) - planning
-                and name.rsplit("/", 1)[-1] not in (*run_listing.NON_COMMAND_LABELS, "startup")}
+                and name.rsplit("/", 1)[-1] not in run_listing.NON_COMMAND_LABELS
+                and not crd.command_directory.runs_only_as_action(name)}
     except Exception:  # noqa: BLE001 - a registry that cannot be read means no name beyond the alternatives resolves
         return {}
 

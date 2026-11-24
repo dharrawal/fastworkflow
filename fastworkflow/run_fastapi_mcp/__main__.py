@@ -446,21 +446,21 @@ async def lifespan(_app: FastAPI):
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
 
-        # Command files that do not load are skipped by the server; log each one at startup.
+        # A command that does not load is skipped by the server: log each one at startup. A workflow-wide problem (a
+        # shared file such as startup_action.json or _workflow.py, or neither the agent model nor Jev set:
+        # fastworkflow.no_agent_mode) stops it, naming the file.
         from fastworkflow.command_preview import load_problems
 
         from fastworkflow import no_agent_mode
 
-        startup_problems = set(no_agent_mode.runtime_problems())
-        for problem in load_problems(ARGS.workflow_path, runtime=True):
-            if problem in startup_problems:
-                continue
-            logger.error(f"command file does not load, so the server does not serve it: {problem}")
-        if startup_problems:
-            # Neither the agent model nor Jev is set: the server does not start (fastworkflow.no_agent_mode).
+        problems = load_problems(ARGS.workflow_path, runtime=True)
+        for problem in problems:
+            if not problem.workflow_wide:
+                logger.error(f"command file does not load, so the server does not serve it: {problem}")
+        if startup_problems := [problem for problem in problems if problem.workflow_wide]:
             for problem in startup_problems:
                 logger.critical(f"startup problem: {problem}")
-            raise RuntimeError(f"startup problem: {'; '.join(sorted(startup_problems))}")
+            raise RuntimeError(f"startup problem: {'; '.join(startup_problems)}")
 
         # The detection chain is named once in the log (intent_detector.startup_report), with the contexts
         # that have no trained local model and run on the model matcher. A workflow that may not start that
@@ -478,6 +478,18 @@ async def lifespan(_app: FastAPI):
         # model, nothing instantiated). Not an error and no behaviour change.
         if (pin_line := checkpoint.startup_pinning_warning(ARGS.workflow_path)) is not None:
             logger.warning(f"{pin_line}")
+
+        # A startup file that is not valid stops the server here, not at the first session.
+        startup_action = fastworkflow.resolve_startup_action(
+            ARGS.workflow_path, ARGS.startup_command, ARGS.startup_action)
+        if startup_action is None and not ARGS.startup_command:
+            # A command with no Signature runs only as the startup action. Said here, not refused: a session may pass
+            # its own startup action when it is created; one that does not stands on no record.
+            from fastworkflow.command_preview import missing_startup_action_problem
+
+            if (problem := missing_startup_action_problem(ARGS.workflow_path)) is not None:
+                logger.error(f"startup problem: {problem}; a session that passes no startup_action starts on "
+                             "no record")
 
         # The mode is named once at startup (no agent model: fastworkflow.no_agent_mode).
         if (mode_line := no_agent_mode.startup_line()) is not None:
@@ -1811,12 +1823,17 @@ async def initialize(
 
         startup_command_str = request.startup_command or ARGS.startup_command
 
-        # Prepare startup action if provided in request (takes precedence over CLI args)
-        startup_action = None
+        # Precedence, top wins: the request's startup_action; the process flag --startup_action; the
+        # request's startup_command, else the process flag --startup_command; then, only when none of
+        # the four is given, the workflow folder's startup_action.json.
         if request.startup_action:
             startup_action = fastworkflow.Action(**request.startup_action)
         elif ARGS.startup_action:
             startup_action = fastworkflow.load_startup_action(ARGS.startup_action)
+        elif startup_command_str:
+            startup_action = None
+        else:
+            startup_action = fastworkflow.workflow_startup_action(ARGS.workflow_path)
 
         # Per-session workflow context [R24]: the request field overrides the
         # server-level --context CLI arg for this session; absent means the

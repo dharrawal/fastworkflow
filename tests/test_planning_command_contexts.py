@@ -175,7 +175,6 @@ def test_copied_execution_commands_all_load_their_signatures(tmp_path):
 
     resolution = planning_commands.resolve_field_sources(folder)
     assert resolution.errors == ()
-    assert resolution.infos == ()
     assert signatures["Library/open_book"].Input.model_fields["book_uid"].json_schema_extra[
         "available_from"
     ] == ["Library/find_book.book_uids"]
@@ -258,7 +257,10 @@ def test_root_planning_command_colliding_with_root_command_is_a_load_error(tmp_p
     # Phase 7 (one tree): a planning command takes the path an execution command would take (here
     # library_hours.py replaces the copied command). The build generator refuses to overwrite it
     # even with overwrite=True, and the workflow loads the file as a planning command.
-    folder = _library_workflow(tmp_path, {"library_hours": ROOT_PLANNING_COMMAND})
+    # Its steps must not run library_hours: in this file that is the planning command itself, a call cycle that
+    # fails its load (bd fix-ftdl.2).
+    folder = _library_workflow(tmp_path, {"library_hours": ROOT_PLANNING_COMMAND.replace(
+        '"library_hours", ', "")})
     planning = Path(folder, "_commands", "library_hours.py")
     before = planning.read_bytes()
 

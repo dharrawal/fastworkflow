@@ -142,7 +142,7 @@ def plan_wording(commands: dict):
                     (f"{p.name}='zz' {pc.PLACEHOLDER_WHY}", "missing", pc.PLACEHOLDER_WHY),
                     (f"{p.name}='zz' {pc.PRONOUN_WHY}", "missing", pc.PRONOUN_WHY),
                     (f"{p.name}='zz' is odd", "invalid", "is odd"),
-                    (f"validate_extracted_parameters: {p.name} is wrong", None, f"{p.name} is wrong"),
+                    (f"{p.name} is wrong", None, f"{p.name} is wrong"),
                     ("the arguments break a rule of x: nope", None, "nope")):
                 if state is None:       # a validator's own refusal naming no input: its bare message is carried
                     refusal = pc.PlanningCommandInputError(text)
@@ -153,7 +153,7 @@ def plan_wording(commands: dict):
                                                 why, None if state == "missing" and not why else "zz", text))
                 out[f"synthetic|{name}|{p.name}|{text}"] = plan_refusal_outputs(command, refusal)
             for fields in ((p.name,), (p.name, "other")):
-                refusal = pc.PlanningCommandInputError("validate_extracted_parameters: bad things", fields)
+                refusal = pc.PlanningCommandInputError("bad things", fields)
                 refusal.refusal = "bad things"
                 out[f"fields|{name}|{fields}"] = plan_refusal_outputs(command, refusal)
         out[f"missing_argument_question|{name}"] = {p.name: pc.missing_argument_question(command, p.name) for p in command.params}

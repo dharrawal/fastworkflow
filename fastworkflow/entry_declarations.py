@@ -1,7 +1,7 @@
 """Navigation facts a workflow declares on its classes, and the retired entry-command declaration.
 
-How a command enters a context is declared once, on the command: ``@descends_to("<Context>")``, or
-``@descends_to("<Context>", when_parameter="<param>")``, on its ``ResponseGenerator`` class, read by
+How a command enters a context is declared once, on the command: ``@descends_to("<Context>")`` on its
+``ResponseGenerator`` class, read by
 ``context_navigation.collect_descend_edges`` (design 3.15). The context class used to declare it
 too, as ``enter_command`` / ``enter_commands``. Those shipped, so a context class that still
 declares either is a load error (:func:`check_retired_entry_declarations`), not a second source

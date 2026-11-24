@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One file, two classes · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-file">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-file">
+      <div class="prose">
+        <p class="num">01</p>
+        <h3>One file, two classes</h3>
+        <p>A command is one thing a user can ask your workflow to do, such as "when are you open?". Each command is one Python file in your workflow's <code>_commands/</code> folder, and the file name is the command's name.</p>
+        <p>Put the file directly in <code>_commands/</code> when the command needs no object to act on: it can then be found from everywhere (see <a href="c-folder.html#c-global">commands with no object</a>). Put it in a subfolder, such as <code>_commands/Book/</code>, when it acts on one kind of object: the folder name is that kind, called a context (see <a href="c-folder.html">a folder for one kind of object</a>). Files whose names start with <code>_</code> are not commands.</p>
+        <p>The file holds two classes. The framework finds them by name, so spell them exactly: a file that has a <code>Signature</code> but no class named <code>ResponseGenerator</code> (or <code>PlanGenerator</code>) is reported when the workflow loads, and its command is unavailable.</p>
+        <ul>
+          <li><code>Signature</code> describes the command. Its docstring says what the command does, and the framework uses it to pick this command for a request (see <a href="e-purpose.html">the purpose sentence</a>). <code>plain_utterances</code> are example requests the intent model (the classifier that picks a command for a message) is trained on (see <a href="e-purpose.html#e-seeds">seed utterances</a>). The optional <code>Input</code> lists the values the command needs; the framework reads them out of the user's words and asks for any that are missing (see <a href="e-input.html">an input</a>). The optional <code>Output</code> is the typed result; a command that declares none returns a text (see <a href="e-return.html">what it returns</a>). Nothing else public goes on <code>Signature</code>: its members are <code>Input</code>, <code>Output</code>, <code>plain_utterances</code>, <code>generate_utterances</code>, <code>template_utterances</code> and, on a planning command, <code>template</code> (<code>planning_commands.SIGNATURE_MEMBERS</code>); any other fails the command's load, and a helper's name starts with <code>_</code>. A declaration decorator (<code>@writes</code>, <code>@user_approval_for_execution</code>, <code>@descends_to</code>) put on <code>Signature</code> fails it too: declarations go on the generator class. So does an <code>Input</code> field whose default is the framework's not-given marker (<code>default="NOT_FOUND"</code>): a required field has no default, and an optional one is <code>&lt;type&gt; | None = None</code> (see <a href="e-input.html">an input</a>).</li>
+          <li><code>ResponseGenerator</code> does the work. Its <code>__call__</code> runs your code.</li>
+        </ul>
+        <p><code>__call__</code> takes exactly three arguments after <code>self</code>: the workflow, the user's message as text, and the filled <code>Input</code>. For a command with no <code>Input</code> the third argument is <code>None</code>. The workflow gives you the object the command acts on, <code>workflow.record</code> (see <a href="e-object.html">the record it acts on</a>). Return the <code>Output</code> and the framework sends it as the response to the user or to the agent (the language model that calls commands for the user in agent mode, the default) (see <a href="e-return.html">what it returns</a>). To say no, raise <code>fastworkflow.Refused</code> with a message; the user sees that message.</p>
+        <p>The common mistake is a <code>__call__</code> with two arguments, <code>(self, workflow, input)</code>, or with a default such as <code>input=None</code>. The command does not load, and <code>fastworkflow run</code>, <code>train</code> and the server list it before they start: <code>ResponseGenerator.__call__ must take three arguments ... it takes 2 here</code>, or, for the default, <code>input has a default here, which it must not have</code>. A second mistake is to read the second argument as the command's name. It is the text the user typed only when a user's message reached the command; for a step of a plan it is the generated step text, such as <code>find_book query=Dune</code>, for a startup action it is an empty string, and for a direct call from a client it is whatever the client sent.</p>
+        <p>A command that runs a plan of other commands writes a <code>PlanGenerator</code> in place of the <code>ResponseGenerator</code> (see <a href="p-plan.html">a plan in place of a body</a>). One file cannot hold both: like every other mistake on this page, it fails the load of that command only, and the rest of the workflow loads (see <a href="removed.html#load-rule">what a mistake stops</a>). A file with a <code>ResponseGenerator</code> and no <code>Signature</code> is still a command; the startup command is one (see <a href="e-root.html">the root object</a>). Two more mistakes fail that command's load the same way: a file in <code>_commands/</code> with neither a <code>Signature</code> nor a generator (a helper you forgot to start with <code>_</code>; the message says to name it with a leading underscore), and a generator that is imported or assigned rather than defined: a generator is a class defined in the command's own file (it may inherit a base from a <code>_</code> helper module). An <code>async def __call__</code> fails the load too: the framework calls it synchronously.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/library_hours.py (shortened: fewer example requests, no display hints, a comment added)</figcaption>
+        <pre><code>import fastworkflow
+from pydantic import BaseModel, Field
+
+from ..application.library import HOURS
+
+
+class Signature:
+    """Say when the library's branches are open, or one branch's hours."""
+
+    class Input(BaseModel):
+        branch: str = Field(default="", description="one branch's name; empty for every branch")
+
+    class Output(BaseModel):
+        branches: list[str] = Field(description="each branch named, in row order")
+        hours: list[str] = Field(description="each branch's opening hours, in row order")
+
+    plain_utterances = [
+        "when are you open",
+        "what are Riverside's opening hours",
+        "hours for Central",
+        "is the library open on Tuesday",
+    ]
+
+
+class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str,
+                 input: Signature.Input) -&gt; Signature.Output:
+        <span class="c"># command is the user's message; input is the filled Input</span>
+        wanted = input.branch.casefold()
+        rows = [(name, hours) for name, hours in HOURS.items()
+                if not wanted or name.casefold() == wanted]
+        if not rows:
+            raise fastworkflow.Refused(
+                f"no branch is named {input.branch}; the branches are "
+                f"{', '.join(HOURS)}")
+        return Signature.Output(branches=[n for n, _ in rows], hours=[h for _, h in rows])</code></pre>
+      </figure>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="next" href="e-object.html"><span>Next</span>The record it acts on</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

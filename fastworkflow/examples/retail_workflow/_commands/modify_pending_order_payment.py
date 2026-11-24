@@ -12,14 +12,14 @@ class Signature:
     """Modify pending order payment method"""
     class Input(BaseModel):
         order_id: str = Field(
+            json_schema_extra={"from_command_output": "get_user_details.order_ids"},
             description="The order ID to modify",
-            json_schema_extra={"from_command_output": "get_user_details"},
             pattern=r"^(#?[\w\d]+)$",
             examples=["#W0000000"],
         )
         payment_method_id: str = Field(
+            json_schema_extra={"from_command_output": "get_user_details.payment_method_ids"},
             description="Payment method ID to switch to",
-            json_schema_extra={"from_command_output": "get_user_details"},
             pattern=r"^((gift_card|credit_card|paypal)_\d+)$",
             examples=["gift_card_0000000", "credit_card_0000000", "paypal_0000000"],
         )
@@ -51,6 +51,7 @@ class Signature:
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
 
+@fastworkflow.writes
 class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)

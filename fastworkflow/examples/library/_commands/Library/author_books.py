@@ -28,6 +28,7 @@ class Signature:
 
     class Input(BaseModel):
         author: str = Field(description="the author's name",
+                            examples=["Frank Herbert", "Jane Austen", "Austen"],
                             json_schema_extra={"copied_from_command_text": True})
 
 

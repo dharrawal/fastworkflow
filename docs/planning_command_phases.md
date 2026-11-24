@@ -52,7 +52,7 @@ max_items=None, bind=True, until=None, noun=None, optional=False)`, one per meth
   may be skipped or fail), and one without a default fails the phase. A parameter must
   still name an earlier phase with facts in at least one call the inputs give, so a
   misspelled name fails the load (`check_bindings`).
-- `output`: the method's return annotation (or `@phase(output=lambda input: ...)`): a command's
+- `output`: the method's return annotation (or `@phase(output=lambda input: ...)`: a function of `input` alone): a command's
   `Signature.Output` (`-> FindBook.Output`, returned as `CommandResponse.output`), a union of them, or a
   facts model whose every field is typed with a command's `Signature.Output` or `Signature.Input`
   (`show: ShowBook.Output`). Other values are properties or methods of the facts model. Copy edges
@@ -92,8 +92,9 @@ without `self`, an annotation that is not a model, a parameter no earlier phase 
 provides (and no default) or that names no such phase in any call, a facts field typed with anything but
 a command's `Output` or `Input` (a copy included), a method that fails while its template is built or writes `None` into a step, and a step that
 names a command the workflow lacks or a parameter its `Signature.Input` lacks
-(`planning_commands.check_step_commands`) fail the load: the planning command is logged as an error and
-skipped, and `fastworkflow command preview` fails naming it. Each output model is then checked
+(`planning_commands.check_step_commands`) fail the load of that planning command only: it does not load,
+the rest of the workflow does, and `fastworkflow run`, `fastworkflow train`, the server and
+`fastworkflow command preview --check` list it (`docs/design_idioms/removed.html#load-rule`). Each output model is then checked
 against the workflow's command signatures (`typed_phase_facts.check_typed_facts_model`): a field typed with a
 class that is not a loaded command's `Output` or `Input` is a load error;
 `fastworkflow command preview --check` fails on it. A plain command name that several
@@ -114,19 +115,28 @@ class PlanGenerator:
         return f"{book.uid} has loans {', '.join(book.loan_uids) or 'none'}."
 ```
 
-It returns a `str` (the answer), a `CommandResponse`, or an instance of the planning command's
-`Signature.Output` model; that is the call's output for the step that called it
-(`planning_phases.command_response_from_call_result`). A declared `Signature.Output` is built only
-by `__result__`, so it is a load error without one. Any other return, an empty `str`, or an
-exception makes one model call write the answer instead, with a logged warning
-(`planning_phases.run_call_result`). `None` is not a failure: it means no code-written answer on
-this path (3.16). The answer is then written as if the command had no `__result__`, with no
+It returns what an execution command's `__call__` may return, judged by the same rule
+(`command_executor.command_response_of`): a `str` (the answer) or a `CommandResponse` when the command
+declares no `Signature.Output`; when it declares one, exactly that `Output`, alone or in
+`CommandResponse(output=...)`, and text, a `CommandResponse` without it or a subclass instance is an error.
+That is the call's output for the step that called it. A declared `Signature.Output` is built only
+by `__result__`, so it is a load error without one, and a `-> str` or other-model return annotation on
+it is a load error too. An exception, `None` (message: "__result__ returned None; it must return the answer, or
+fastworkflow.planning.ANSWER_BY_MODEL to leave the answer to a model"), an empty or whitespace-only `str` or an unsupported return FAILS the
+call, as a failing execution command does, and no model writes the answer in its place
+(`planning_phases.run_call_result`): one error log, a failed output `Execution error in <command>'s
+__result__: ...` with `error_type`, `error_message` and `traceback` artifacts, and a `fw.skill.answer` span
+with status error and `error_type`; `raise fastworkflow.Refused(message)` is a refusal with that message. A nested
+call hands its caller that failed output, so the caller's step fails; with no agent model the turn is the failed
+output, never the "needs a model" stop; `command run-code` stops with exit 1. `fastworkflow.planning.ANSWER_BY_MODEL`
+is not a failure: it is the one way to say there is no code-written answer on this path (3.16), and a command with no
+`__result__` at all is the same. The answer is then written as if the command had no `__result__`, with no
 warning: the agent's answer for a flat call, and for a phased call one model call with the phases'
 facts (`fw.skill.answer`, fix-3rsq.p14.6). A phased call's last phase runs its steps only and writes no
 answer of its own. A last phase that names no command gets one model call with no tools either way.
-Return `None` to let the model answer.
+Return `ANSWER_BY_MODEL` to let the model answer.
 When `__result__` returns text, its answer is the call's answer and the answers of the phases are
-not shown; a model call that would write a phase's answer runs only when `__result__` returns `None`.
+not shown; a model call that would write a phase's answer runs only when `__result__` returns `ANSWER_BY_MODEL`.
 
 ## How a phased planning command call runs
 
@@ -708,8 +718,9 @@ Nothing changes for the app developer.
 ## Tracing
 
 The deferred answer of a phased call (one model call with the phases' facts, made only when `__result__`
-returns `None`) is one `fw.skill.answer` span
-(span contract v34, `fw.skill.answer` v1) with `skill`, `phase`, `phase_index` and `phase_count`. It is
+returns `ANSWER_BY_MODEL`) is one `fw.skill.answer` span
+(span contract v34, `fw.skill.answer` v1) with `skill`, `phase`, `phase_index` and `phase_count`. A failing
+`__result__` also opens one, with no model call: status error and `error_type` (none for a `Refused`). It is
 not a phase, so it has no `fw.agent.execute` child.
 
 Each phase run (each item of a fan-out phase) is one `fw.skill.phase` span (span
@@ -721,7 +732,7 @@ contract v24, `fw.skill.phase` v6), the parent of that run's `fw.agent.execute`:
 | `step_budget`, `first_step` | the run's budget and its first step number |
 | `answer_only` | the phase named no command: one model call with no tools wrote its answer (its `fw.agent.execute` is the child, with no tool calls) |
 | `answer_by_code` | an answer-only phase only: `true` when code wrote its answer from its steps, with no model call (every step verbatim or a guard, `answer_by_code`) |
-| `uses_result` | an answer-only phase of a command with a result method: its span is skipped (no executor); its model call, if it needs one, runs only when `__result__` returns `None` (3.16) |
+| `uses_result` | an answer-only phase of a command with a result method: its span is skipped (no executor); its model call, if it needs one, runs only when `__result__` returns `ANSWER_BY_MODEL` (3.16) |
 | `item`, `item_index`, `item_count`, `items_total` | one item of a fan-out phase: the item, its 0-based index of `item_count` items run, of `items_total` before the cap |
 | `record_issues` | a bound item's record-check flags (a list, `[]` when none); `record` is then the item's bound record |
 | `skipped` | the phase's callable `when` was false: nothing ran, no child span (`false` with `facts_error` when deciding it failed) |

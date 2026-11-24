@@ -109,6 +109,24 @@ def test_both_paths_decide_a_name_alike(chain, monkeypatch, text, decided_by):
 
 
 @pytest.mark.usefixtures("no_planner_key")
+@pytest.mark.parametrize("text", ["get_all", "get", "g", "get all of them please"])
+def test_a_prefix_of_a_command_name_is_not_a_name_on_either_path(chain, monkeypatch, text):
+    """bd fix-ftdl.9: the fuzzy name layer compares the WHOLE request with each whole name, so a request that only
+    begins like a name (``get_all`` for ``get_all_children``) is not the user naming it: the chain decides."""
+    app, cme, *_ = chain
+    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context({}, []))
+    for decided in (resolution.part_intent(app, text), CommandNamePrediction(cme).predict(text)):
+        assert decided.decided_by not in (intent_loop.BY_EXACT_NAME, intent_loop.BY_FUZZY_NAME), (text, decided)
+
+
+def test_a_fuzzy_name_is_not_a_named_decider():
+    """A misspelt name is the closest command, not the user naming it: a command that changes data found that way is
+    confirmed (``unconfirmed_pick``), and one that changes nothing still runs directly (the fast path)."""
+    assert intent_loop.BY_FUZZY_NAME not in intent_loop.NAMED_DECIDERS
+    assert intent_loop.BY_FUZZY_NAME in intent_loop.FAST_PATH_DECIDERS
+
+
+@pytest.mark.usefixtures("no_planner_key")
 def test_both_paths_refuse_a_foreign_name_with_the_same_hint_and_ask_no_model(chain_without_the_manager, monkeypatch):
     """The foreign-name guard is shared: the plan path gains it (a known name whose owner is not on the path is not sent
     to a model)."""
@@ -191,6 +209,27 @@ def test_a_number_picks_on_both_paths_and_none_and_cancel_are_answers():
 def test_a_fuzzy_tie_is_unclear_never_the_first():
     assert intent_loop.read("find", ["Library/find_book", "Library/find_member"]).kind == "unclear"
     assert intent_loop.read("find_bok", ["Library/find_book", "Library/find_member"]).name == "Library/find_book"
+
+
+@pytest.mark.parametrize("reply", ["a", "ad", "add", "find_m", "Library/f", "addnote please"])
+def test_a_prefix_of_a_name_is_not_a_misspelt_name(reply):
+    """bd fix-ftdl.9: a reply is compared with each WHOLE name (and its leaf), so only a misspelling of the whole name
+    picks; the opening letters of a name do not."""
+    assert intent_loop.read(reply, NAMES).kind == "unclear"
+
+
+def test_a_misspelt_whole_name_still_picks():
+    assert intent_loop.read("add_notte", NAMES).name == "Record/add_note"
+    assert intent_loop.read("find membr", NAMES).name == "Library/find_member"
+    assert intent_loop.read("Library/find_bok", NAMES).name == "Library/find_book"
+
+
+@pytest.mark.usefixtures("setup_test_environment")
+@pytest.mark.parametrize("reply", ["Terminator", "Change", "Wrong", "Never", "endless", "none of this"])
+def test_the_core_aliases_match_a_whole_reply_only(reply):
+    """The aliases (abort, you_misunderstood, what_can_i_do) are fixed phrases: a reply that only begins like one is not
+    it (bd fix-ftdl.9)."""
+    assert intent_loop.read(reply, NAMES, aliases=intent_loop.core_aliases()).kind == "unclear"
 
 
 def test_a_reply_whose_first_word_names_a_candidate_returns_the_pick_and_the_rest():
@@ -309,14 +348,17 @@ def test_difference_2_one_candidate_the_cme_asks_did_you_mean_and_yes_picks_it(c
     assert cme.context["command"] == "make a list"            # no rest in the reply: the request is the parameter text
 
 
-def test_a_pick_with_the_rest_of_the_reply_uses_the_rest_as_the_parameter_text(chain, monkeypatch):
+def test_a_pick_with_more_words_in_the_reply_keeps_the_request_as_the_parameter_text(chain, monkeypatch):
+    """A reply answers its question and nothing else (bd fix-ftdl.7.8, D5): the words after the picked name are not the
+    command's values on the "/" path, as they are not on the plan path; the request that was asked about is."""
     app, cme, *_ = chain
     two = intent_loop.Intent(intent_loop.AMBIGUOUS, decided_by=intent_loop.BY_QUESTION,
                              ambiguous=("TodoListManager/create_todo_list", "TodoListManager/get_todo_list"))
     monkeypatch.setattr(CommandNamePrediction, "predict", lambda self, command: two)
     wildcard.ResponseGenerator()(cme, "do the list thing", None)
     wildcard._answer_question(cme, app, "get_todo_list 3", CommandNamePrediction(cme))
-    assert cme.context["command_name"] == "TodoListManager/get_todo_list" and cme.context["command"] == "3"
+    assert cme.context["command_name"] == "TodoListManager/get_todo_list"
+    assert cme.context["command"] == "do the list thing"
 
 
 def test_difference_3_after_two_unreadable_replies_the_cme_lists_the_commands(chain, monkeypatch):

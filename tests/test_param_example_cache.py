@@ -158,9 +158,7 @@ class StructuredFieldTypesInput(BaseModel):
     item_ids: list[str]
     reference: str | int
     mode: DeliveryMode
-    reason: str = Field(
-        json_schema_extra={"enum": ["no longer needed", "ordered by mistake"]}
-    )
+    reason: Literal["no longer needed", "ordered by mistake"]
     note: str | None = None
 
 

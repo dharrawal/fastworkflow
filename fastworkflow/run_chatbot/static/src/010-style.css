@@ -1253,9 +1253,6 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
   font-size: 12.5px; margin: 0; }
 .approvalCard .rKv dt { color: var(--muted); }
 .approvalCard .rKv dd { margin: 0; overflow-wrap: anywhere; }
-.approvalIrreversible { padding: 5px 8px; border: 1px solid var(--fail); border-radius: 6px;
-  background: var(--fail-soft); color: var(--fail); font-weight: 600; font-size: 12.5px; }
-.approvalIrreversible::before { content: "\26A0\00a0"; }
 .approvalText { white-space: pre-wrap; overflow-wrap: anywhere; }
 .approvalCard .approvalActions button.ghost { background: transparent; border-color: transparent;
   color: var(--muted); }
@@ -1289,7 +1286,7 @@ textarea.fitText:not(.reviewGoal) { font-size: 13px; }
 .reviewFieldNote { color: var(--bar-human); font-size: 11.5px; font-weight: 600; }
 .reviewFieldNote[hidden], .reviewGuard[hidden] { display: none; }
 .reviewFixed { color: var(--muted); }
-.reviewMeans, .reviewOutcome, .reviewGuard { color: var(--muted); font-size: 12px; }
+.reviewMeans, .reviewOutcome, .reviewNote, .reviewGuard { color: var(--muted); font-size: 12px; }
 .reviewPlanSteps { margin: 0; padding-left: 20px; color: var(--muted); font-size: 12px; }
 .reviewSkip { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
 .reviewDetails { margin-top: 10px; }

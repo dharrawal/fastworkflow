@@ -262,6 +262,13 @@ def load_persona_config(path: str) -> PersonaConfig:
             f"understands {PERSONA_SCHEMA_VERSION}."
         )
 
+    if "personas" in raw and "domain_keywords" in raw:
+        raise PersonaConfigError(
+            f"Persona file {path} has both 'personas' and 'domain_keywords'. Keep one of "
+            f"the two keys: 'personas' to supply the personas yourself, or "
+            f"'domain_keywords' to filter PersonaHub."
+        )
+
     personas = [
         _coerce_persona(entry, index)
         for index, entry in enumerate(raw.get("personas") or [])
@@ -764,9 +771,8 @@ def persona_source_from_config(
 ) -> PersonaSource:
     """Build the source a parsed config asks for.
 
-    An explicit ``personas`` list wins over ``domain_keywords``: supplying personas is the
-    stronger statement, and honouring the keywords as well would silently mix generic
-    PersonaHub rows into a set the developer curated.
+    A file that has both ``personas`` and ``domain_keywords`` never gets here:
+    `load_persona_config` refuses it, because one of the two would silently win.
 
     ``num_personas_hint`` is advisory and only sizes a domain-conditioned pool. None
     means "read the configured per-command persona count", which is what every

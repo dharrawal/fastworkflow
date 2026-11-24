@@ -1049,8 +1049,12 @@ def run_fastapi_mcp_with_defaults(args):  # sourcery skip: extract-duplicate-met
         if getattr(args, flag, False):
             cmd.append(f'--{flag}')
 
-    # Run the subprocess
-    return subprocess.run(cmd).returncode
+    # Run the subprocess. Its exit code is this process's: a server that did not start (a load or runtime startup
+    # problem; uvicorn exits 3) must not read as a clean exit to whatever supervises it.
+    returncode = subprocess.run(cmd).returncode
+    if returncode:
+        sys.exit(returncode)
+    return returncode
 
 def main():
     """Main function for the fastworkflow CLI."""

@@ -44,13 +44,17 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
+                           examples=["Dune", "Dune Messiah", "Persuasion"],
                            json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         found: bool = Field(description="whether a book was opened for the title")
-        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened")
-        title: Optional[str] = Field(default=None, description="its title, as the library has it")
-        author: Optional[str] = Field(default=None, description="its author")
+        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened, such as b1",
+                                        examples=["b1", "b3"])
+        title: Optional[str] = Field(default=None, description="its title, as the library has it",
+                                     examples=["Dune", "Emma"])
+        author: Optional[str] = Field(default=None, description="its author",
+                                      examples=["Frank Herbert", "Jane Austen"])
         copies: int = Field(default=0, description="how many copies the library owns")
 
 
@@ -191,11 +195,11 @@ No title is exactly "Dune Messia", but the listing has only one row, so code ope
 
 ```text
 Phase find
-  1. find_book query=Dune Messia
-  code runs: find_book query=Dune Messia
+  1. find_book query="Dune Messia"
+  code runs: find_book query="Dune Messia"
   facts: Output(book_uids=['b2'], titles=['Dune Messiah'], total=1)
 Phase book
-  1. open_book with the uid of the Dune Messia match
+  1. open_book with the uid of the "Dune Messia" match
   code runs: open_book book_uid=b2
   now in: Book: Dune Messiah (b2)
   facts: Output(book_uid='b2', title='Dune Messiah', author='Frank Herbert', copies=1)

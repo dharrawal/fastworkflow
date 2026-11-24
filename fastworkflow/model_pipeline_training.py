@@ -1346,13 +1346,13 @@ def calculate_ndcg_at_k(logits, true_labels, k=3):
     return ndcg.mean().item()
 
 def _requires_utterances(cmd_dir: object, cmd_name: str) -> bool:
-    """Return True if *cmd_name* defines `Signature.Input` and therefore
+    """Return True if *cmd_name* declares a `Signature` (with or without an `Input`) and therefore
     needs utterance-based intent classification.
 
     This is determined after lazy-hydrating the command so the metadata is
-    accurate.  A command with *no* `Signature.Input` is expected to be
-    dispatched exclusively via `perform_action` and should be excluded from
-    model training.
+    accurate.  A command with *no* `Signature` (such as a startup command, whatever its
+    name) runs only as an action and is excluded from model training, as routing
+    excludes it (`command_directory.declares_signature`).
     """
     # Ensure metadata is fully populated before inspection
     cmd_dir.ensure_command_hydrated(cmd_name)
@@ -1365,7 +1365,7 @@ def _get_utterances(workflow: fastworkflow.Workflow,
                     cmd_dir: object, cmd: str) -> list[str]:
     """Safely retrieve utterances for *cmd* when required.
 
-    If the command does not have `Signature.Input`, we return an empty list
+    If the command does not declare a `Signature`, we return an empty list
     (no utterances needed) **without** calling `get_utterance_metadata`.
     """
     if not _requires_utterances(cmd_dir, cmd):
@@ -1542,7 +1542,7 @@ def trained_command_labels(ctx_name: str, crd: RoutingDefinition) -> set[str]:
     about the label space, which is the disagreement AR5 was.
 
     EXPERIMENT-ONLY (Phase 9 step 3): under the ``scoped`` head layout the base is the
-    context's own list and action-only commands (no ``Signature.Input``) are left out.
+    context's own list and action-only commands (no ``Signature``) are left out.
     Those never had rows, so the flattened label set is unchanged in practice.
     """
     cmd_dir = crd.command_directory
@@ -1890,10 +1890,6 @@ HEAD_SCOPES = (FLATTENED, SCOPED)
 #: ``active_experiment_head_scope`` are the readers.
 _EXPERIMENT_HEAD_SCOPE: Optional[str] = None
 
-#: The global, action-only command that starts a session. It has no ``Signature.Input``, so
-#: it is never a head label, never a training row and never a holdout case.
-STARTUP_COMMAND = "startup"
-
 #: Written by ``train()`` under the scoped layout, once per run, into ``___command_info``.
 LOOKUP_HOLDOUT_FILENAME = "lookup_holdout.json"
 
@@ -2033,8 +2029,8 @@ def planning_command_names_of(crd: RoutingDefinition) -> list[str]:
 
 
 def _is_action_only(cmd_dir: object, name: str) -> bool:
-    """True for ``startup`` and any command without ``Signature.Input``: never a label or a row."""
-    return name == STARTUP_COMMAND or not _requires_utterances(cmd_dir, name)
+    """True for a command with no ``Signature`` (a startup command, whatever its name): never a label or a row."""
+    return not _requires_utterances(cmd_dir, name)
 
 
 def _stable_rank(context_name: str, command_name: str, seed: str) -> str:
@@ -2308,7 +2304,7 @@ def lookup_split_command_names(crd: RoutingDefinition, contexts: Iterable[str]) 
     """The commands the scoped layout's ONE persona holdout is drawn over (sorted).
 
     Every command any context OWNS, once each, minus planning commands and action-only
-    commands (``startup``): those are never held out. Inherited commands are not added
+    commands (no ``Signature``, such as a startup command): those are never held out. Inherited commands are not added
     separately because each is owned by exactly one context.
     """
     cmd_dir = crd.command_directory
@@ -2372,7 +2368,7 @@ def write_lookup_holdout_export(
     path = os.path.join(folder, LOOKUP_HOLDOUT_FILENAME)
     notes = [
         f"one persona split over {len(command_names)} owned command(s); planning and "
-        f"action-only commands (startup) are not held out",
+        f"action-only commands (no Signature) are not held out",
         *split.notes,
     ]
     document = {

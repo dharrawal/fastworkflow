@@ -1,3 +1,4 @@
+import dataclasses
 from typing import Optional
 import os
 
@@ -58,11 +59,10 @@ _FUZZY_PREMATCH_MAX_DISTANCE = intent_clarification.FUZZY_MAX_DISTANCE
 
 # Identifies the matcher that produced a fuzzy distance, so a curve drawn from one
 # matcher is not silently continued by another. The name carries the two properties
-# that fix the units: a normalized Levenshtein distance, and `best_window=False`,
-# which scores only the candidate's LEADING len(input) characters. Turning
-# `best_window` on can only lower distances, so it would shift every bin without
-# changing the field name.
-_FUZZY_MATCHER_VERSION = "levenshtein-leading-window/1"
+# that fix the units: a normalized Levenshtein distance, and the WHOLE request scored
+# against each WHOLE name (`intent_clarification.misspelt`). Version 1 scored only the
+# name's leading len(request) characters, so its distances are not comparable.
+_FUZZY_MATCHER_VERSION = "levenshtein-whole/2"
 
 # The matching layer between the context-scoped exact-name match and the fuzzy
 # pre-match: the first token names a real command of this workflow, and this
@@ -243,7 +243,7 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
         )
     else:
         # No matcher claimed the utterance. The fuzzy pre-match did run and compared
-        # a distance against the threshold, but `find_best_matches` returns
+        # a distance against the threshold, but `intent_clarification.misspelt` returns
         # ``([], None)`` above the threshold and discards the value, so the one
         # measurement taken here is not recoverable at this call site.
         signals_absent_reason = "not-instrumented"
@@ -290,6 +290,151 @@ def _recorded_command_identity_uncertainty(
         return {"capture_error": type(exc).__name__}
 
 
+def _labels_of(intent: intent_loop.Intent) -> list[str]:
+    deciding = intent.deciding
+    return [str(label) for label in deciding.labels] if deciding is not None else []
+
+
+def _facts_of(app_workflow, intent: intent_loop.Intent) -> dict:
+    """The span facts of a decision, read off its engine answers (the keys the span contract names)."""
+    trace: dict = {"escalation_outcome": ESCALATION_OUTCOME_NOT_EVALUATED}
+    # What the name layers found, key by key (the span contract is read from these lines).
+    facts = intent.facts
+    if "matcher_layer" in facts:
+        trace["matcher_layer"] = facts["matcher_layer"]
+    if "known_name_foreign_context" in facts:
+        trace["known_name_foreign_context"] = facts["known_name_foreign_context"]
+        trace["known_name_owner_contexts"] = facts["known_name_owner_contexts"]
+        trace["known_name_foreign_context_hint"] = facts["known_name_foreign_context_hint"]
+    if "fuzzy_distance" in facts:
+        trace["fuzzy_distance"] = facts["fuzzy_distance"]
+        trace["fuzzy_threshold"] = facts["fuzzy_threshold"]
+    if "fuzzy_prematch_tie" in facts:
+        trace["fuzzy_prematch_tie"] = facts["fuzzy_prematch_tie"]
+    if "candidate_count" in facts:
+        trace["candidate_count"] = facts["candidate_count"]
+    answers = intent.answers
+    head = matcher = None
+    for answer in answers:
+        details = answer.details or {}
+        if answer.engine == intent_detector.ENGINE_MATCHER:
+            matcher = answer
+            if isinstance(details.get("classifier"), dict):
+                head = head or details["classifier"]
+        else:
+            head = details
+    classifier_answer = next((a for a in reversed(answers) if a.engine == intent_detector.ENGINE_CLASSIFIER), None)
+    if not answers:
+        return trace
+    deciding = intent.deciding
+    context = intent.context or app_workflow._current_command_context_name
+    if head is not None:
+        trace["classifier"] = head
+        trace["classifier_signal_version"] = _classifier_signal_version(
+            f"{app_workflow.folderpath}/___command_info/{context}",
+            head.get("model_tier", _UNKNOWN_MODEL_TIER))
+        labels = [str(label) for label in (classifier_answer.labels if classifier_answer is not None else ())]
+        if labels:
+            trace["candidate_count"] = len(labels)
+            trace["escalation_outcome"] = escalation_outcome_of(labels)
+    failed = next((a.details for a in answers if a.details.get("matcher_error")), None)
+    if matcher is None and failed is not None:
+        # The remote model was asked and its call failed: the local answer stands, carrying what happened.
+        trace["matcher"] = {"error": failed["matcher_error"], "error_class": failed.get("matcher_error_class"),
+                            "status_code": failed.get("matcher_status_code")}
+        trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER, intent_detector.ENGINE_MATCHER]
+    elif matcher is not None:
+        trace["matcher"] = matcher.details
+        trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER, intent_detector.ENGINE_MATCHER] \
+            if head is not None else [intent_detector.ENGINE_MATCHER]
+        trace["escalation_outcome"] = escalation_outcome_of([str(label) for label in matcher.labels])
+        trace["candidate_count"] = len(matcher.labels) if matcher.kind != intent_detector.NOT_MINE else 0
+    else:
+        trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER]
+    errored = next((a.details for a in answers if a.details.get("error_class") or a.details.get("matcher_error_class")), None)
+    if errored is not None:
+        trace["remote_failed"] = {
+            "error_class": errored.get("error_class") or errored.get("matcher_error_class"),
+            "status_code": errored.get("status_code") or errored.get("matcher_status_code")}
+    trace["engine"] = deciding.engine
+    trace["engine_fallback"] = deciding.fallback
+    trace["matcher_layer"] = "matcher" if deciding.engine == intent_detector.ENGINE_MATCHER else "classifier"
+    if intent.decided_by == intent_loop.BY_QUESTION:
+        trace["candidates"] = list(intent.ambiguous)
+        trace["candidate_count"] = len(intent.ambiguous)
+        # The runtime is about to ask, and the answer resolves this: requirements §4.14's reducible uncertainty,
+        # recorded where the asking happens.
+        trace["reducible"] = True
+        trace["engine"] = intent_detector.ENGINE_QUESTION
+    return trace
+
+
+def _predict_impl(app_workflow, text: str, core: bool, nlu_trace: dict) -> intent_loop.Intent:
+    """The decision (``intent_loop.resolve``) and the raw facts it leaves in *nlu_trace*; nothing else."""
+    intent = intent_loop.resolve(app_workflow, text, core=core)
+    nlu_trace.update(_facts_of(app_workflow, intent))
+    if intent.outcome == intent_loop.AMBIGUOUS and intent.decided_by == intent_loop.BY_QUESTION:
+        if escalation_signals := CommandNamePrediction.escalation_signals_in(_labels_of(intent)):
+            logger.warning(
+                f"Top-k escalation signal discarded for utterance '{text}'. "
+                f"predictions={_labels_of(intent)}, suppressed={escalation_signals}. The classifier ranked "
+                "an escalation label alongside local candidates; the user will be prompted with the local "
+                "candidates only and the 'this belongs to an ancestor context' signal is dropped.")
+            nlu_trace["escalation_labels_discarded"] = [str(label) for label in escalation_signals]
+    return intent
+
+
+def traced_decision(app_workflow, text: str, *, core: bool, part: Optional[int] = None) -> tuple[intent_loop.Intent, dict]:
+    """``(intent, span facts)``: the decision ``intent_loop.resolve`` makes for *text* from where *app_workflow* stands, in
+    ONE ``fw.nlu.intent`` span. THE writer of that span: the CME's intent stage (``CommandNamePrediction.predict``,
+    ``core`` True) and the plan path's decision for a part of a turn (``resolution.part_intent``, ``core`` False, with
+    *part*, its 1-based number) both call it.
+
+    The span carries which layer decided (exact prefix / fuzzy pre-match / foreign name / classifier / matcher), the
+    classifier's confidence and threshold when it ran, and the candidate set on an ambiguity. Emission never affects the
+    decision: the helpers no-op without a bound host/sink. It also carries the §6.6.1 ``DecisionUncertainty`` for the
+    command-identity decision, assembled by ``command_identity_uncertainty`` from the facts below (written to the span and
+    read by nothing else: FW-REQ-021 P0, representation only)."""
+    host = tracing.current_host()
+    nlu_trace: dict = {}
+    if part is not None:
+        nlu_trace["part"] = part     # the part's number is a fact of the decision like the rest: it goes out with the bag
+    span = tracing.start_span(
+        host,
+        tracing.SPAN_NLU_INTENT,
+        attributes={
+            "context": app_workflow._current_command_context_name,
+            "stage": "INTENT_DETECTION",
+            "utterance": text,
+            **nlu_trace,
+        },
+    )
+    try:
+        intent = _predict_impl(app_workflow, text, core, nlu_trace)
+    except BaseException:
+        # No DecisionUncertainty here: the prediction did not complete, so there is no decision to characterise.
+        # The raw facts gathered so far still go out.
+        tracing.end_span(host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace)
+        raise
+    tracing.end_span(
+        host,
+        span,
+        status=tracing.STATUS_OK,
+        attributes={
+            **nlu_trace,
+            "context": intent.context or app_workflow._current_command_context_name,
+            "decision_uncertainty": _recorded_command_identity_uncertainty(span, nlu_trace),
+            "command_name": intent.command,
+            "is_cme_command": intent.kind == intent_loop.KIND_CORE,
+            "ambiguous": intent.outcome == intent_loop.AMBIGUOUS,
+            # None = no command: the CME files a misunderstanding (or a routing hint) — exactly the routing
+            # signal a debugging agent needs.
+            "resolved": intent.command is not None,
+        },
+    )
+    return intent, nlu_trace
+
+
 class CommandNamePrediction:
     """The CME's intent stage: ``intent_loop.resolve`` for the request, wrapped in the ``fw.nlu.intent`` span.
 
@@ -306,144 +451,29 @@ class CommandNamePrediction:
         self.trace: dict = {}
 
     def predict(self, command: str) -> intent_loop.Intent:
-        """The intent of *command* from where the application workflow stands, in one ``fw.nlu.intent`` span.
+        """The intent of *command* from where the application workflow stands, in one ``fw.nlu.intent`` span
+        (``traced_decision``, the one writer: the plan path's decisions are written by it too). The CME may answer the
+        framework's core commands (``core=True``).
 
-        One span per decision, with the context the command lives in (or the current context when nothing was
-        decided). It carries which layer decided (exact prefix / fuzzy pre-match / foreign name / classifier /
-        matcher), the classifier's confidence and threshold when it ran, and the candidate set on an ambiguity. Emission
-        never affects the decision: the helpers no-op without a bound host/sink.
+        A command that changes data or carries an approval mark and that a model alone chose (``intent_loop.unconfirmed_pick``, for the call's
+        origin: a person's message, or the agent's own call) is not run on that guess: it becomes the one-candidate
+        question "Did you mean the command 'X'?", which the user confirms by its name or ``yes`` (the deterministic
+        path's form of the plan path's review). When the command's approval question will be asked anyway, that question
+        is the yes and the match stands. The span keeps the decision as the chain made it."""
+        from fastworkflow.approval_binding import current_origin
 
-        It also carries the §6.6.1 ``DecisionUncertainty`` for the command-identity decision, assembled by
-        ``command_identity_uncertainty`` from the facts below. That record is written to the span and read by nothing
-        else (FW-REQ-021 P0: representation only).
-        """
-        host = tracing.current_host()
-        span = tracing.start_span(
-            host,
-            tracing.SPAN_NLU_INTENT,
-            attributes={
-                "context": self.app_workflow._current_command_context_name,
-                "stage": "INTENT_DETECTION",
-                "utterance": command,
-            },
-        )
-        nlu_trace: dict = {}
-        try:
-            intent = self._predict_impl(command, nlu_trace)
-        except BaseException:
-            # No DecisionUncertainty here: the prediction did not complete, so there is no decision to characterise.
-            # The raw facts gathered so far still go out.
-            tracing.end_span(host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace)
-            raise
-        self.trace = nlu_trace
-        tracing.end_span(
-            host,
-            span,
-            status=tracing.STATUS_OK,
-            attributes={
-                **nlu_trace,
-                "context": intent.context or self.app_workflow._current_command_context_name,
-                "decision_uncertainty": _recorded_command_identity_uncertainty(span, nlu_trace),
-                "command_name": intent.command,
-                "is_cme_command": intent.kind == intent_loop.KIND_CORE,
-                "ambiguous": intent.outcome == intent_loop.AMBIGUOUS,
-                # None = no command: the CME files a misunderstanding (or a routing hint) — exactly the routing
-                # signal a debugging agent needs.
-                "resolved": intent.command is not None,
-            },
-        )
-        return intent
-
-    def _predict_impl(self, command: str, nlu_trace: dict) -> intent_loop.Intent:
-        intent = intent_loop.resolve(self.app_workflow, command, core=True)
-        nlu_trace.update(self._facts_of(intent))
-        if intent.outcome == intent_loop.AMBIGUOUS and intent.decided_by == intent_loop.BY_QUESTION:
-            if escalation_signals := self.escalation_signals_in(self._labels_of(intent)):
-                logger.warning(
-                    f"Top-k escalation signal discarded for utterance '{command}'. "
-                    f"predictions={self._labels_of(intent)}, suppressed={escalation_signals}. The classifier ranked "
-                    "an escalation label alongside local candidates; the user will be prompted with the local "
-                    "candidates only and the 'this belongs to an ancestor context' signal is dropped.")
-                nlu_trace["escalation_labels_discarded"] = [str(label) for label in escalation_signals]
+        intent, self.trace = traced_decision(self.app_workflow, command, core=True)
+        if intent_loop.unconfirmed_pick(self.app_workflow, intent, current_origin()):
+            return dataclasses.replace(intent, outcome=intent_loop.AMBIGUOUS, command=None, kind=None,
+                                       ambiguous=(intent.command,), decided_by=intent_loop.BY_QUESTION)
         return intent
 
     @staticmethod
     def _labels_of(intent: intent_loop.Intent) -> list[str]:
-        deciding = intent.deciding
-        return [str(label) for label in deciding.labels] if deciding is not None else []
+        return _labels_of(intent)
 
     def _facts_of(self, intent: intent_loop.Intent) -> dict:
-        """The span facts of a decision, read off its engine answers (the keys the span contract names)."""
-        trace: dict = {"escalation_outcome": ESCALATION_OUTCOME_NOT_EVALUATED}
-        # What the name layers found, key by key (the span contract is read from these lines).
-        facts = intent.facts
-        if "matcher_layer" in facts:
-            trace["matcher_layer"] = facts["matcher_layer"]
-        if "known_name_foreign_context" in facts:
-            trace["known_name_foreign_context"] = facts["known_name_foreign_context"]
-            trace["known_name_owner_contexts"] = facts["known_name_owner_contexts"]
-            trace["known_name_foreign_context_hint"] = facts["known_name_foreign_context_hint"]
-        if "fuzzy_distance" in facts:
-            trace["fuzzy_distance"] = facts["fuzzy_distance"]
-            trace["fuzzy_threshold"] = facts["fuzzy_threshold"]
-        if "fuzzy_prematch_tie" in facts:
-            trace["fuzzy_prematch_tie"] = facts["fuzzy_prematch_tie"]
-        if "candidate_count" in facts:
-            trace["candidate_count"] = facts["candidate_count"]
-        answers = intent.answers
-        head = matcher = None
-        for answer in answers:
-            details = answer.details or {}
-            if answer.engine == intent_detector.ENGINE_MATCHER:
-                matcher = answer
-                if isinstance(details.get("classifier"), dict):
-                    head = head or details["classifier"]
-            else:
-                head = details
-        classifier_answer = next((a for a in reversed(answers) if a.engine == intent_detector.ENGINE_CLASSIFIER), None)
-        if not answers:
-            return trace
-        deciding = intent.deciding
-        context = intent.context or self.app_workflow._current_command_context_name
-        if head is not None:
-            trace["classifier"] = head
-            trace["classifier_signal_version"] = _classifier_signal_version(
-                f"{self.app_workflow_folderpath}/___command_info/{context}",
-                head.get("model_tier", _UNKNOWN_MODEL_TIER))
-            labels = [str(label) for label in (classifier_answer.labels if classifier_answer is not None else ())]
-            if labels:
-                trace["candidate_count"] = len(labels)
-                trace["escalation_outcome"] = escalation_outcome_of(labels)
-        failed = next((a.details for a in answers if a.details.get("matcher_error")), None)
-        if matcher is None and failed is not None:
-            # The remote model was asked and its call failed: the local answer stands, carrying what happened.
-            trace["matcher"] = {"error": failed["matcher_error"], "error_class": failed.get("matcher_error_class"),
-                                "status_code": failed.get("matcher_status_code")}
-            trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER, intent_detector.ENGINE_MATCHER]
-        elif matcher is not None:
-            trace["matcher"] = matcher.details
-            trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER, intent_detector.ENGINE_MATCHER] \
-                if head is not None else [intent_detector.ENGINE_MATCHER]
-            trace["escalation_outcome"] = escalation_outcome_of([str(label) for label in matcher.labels])
-            trace["candidate_count"] = len(matcher.labels) if matcher.kind != intent_detector.NOT_MINE else 0
-        else:
-            trace["engine_chain"] = [intent_detector.ENGINE_CLASSIFIER]
-        errored = next((a.details for a in answers if a.details.get("error_class") or a.details.get("matcher_error_class")), None)
-        if errored is not None:
-            trace["remote_failed"] = {
-                "error_class": errored.get("error_class") or errored.get("matcher_error_class"),
-                "status_code": errored.get("status_code") or errored.get("matcher_status_code")}
-        trace["engine"] = deciding.engine
-        trace["engine_fallback"] = deciding.fallback
-        trace["matcher_layer"] = "matcher" if deciding.engine == intent_detector.ENGINE_MATCHER else "classifier"
-        if intent.decided_by == intent_loop.BY_QUESTION:
-            trace["candidates"] = list(intent.ambiguous)
-            trace["candidate_count"] = len(intent.ambiguous)
-            # The runtime is about to ask, and the answer resolves this: requirements §4.14's reducible uncertainty,
-            # recorded where the asking happens.
-            trace["reducible"] = True
-            trace["engine"] = intent_detector.ENGINE_QUESTION
-        return trace
+        return _facts_of(self.app_workflow, intent)
 
     @staticmethod
     def escalation_signals_in(route_choice_list: list[str]) -> list[str]:

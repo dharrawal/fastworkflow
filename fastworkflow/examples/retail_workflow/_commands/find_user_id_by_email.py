@@ -28,10 +28,7 @@ class Signature:
 
     class Output(BaseModel):
         user_id: str = Field(
-            description="User identifier returned by lookup.",
-            json_schema_extra={
-                "used_by": ["get_user_details"]
-            }
+            description="User identifier returned by lookup."
         )
 
     plain_utterances: List[str] = [

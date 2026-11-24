@@ -30,7 +30,7 @@ modes:
       at finish every record listed by <list command> must have been read, and
       every record read in the eligible state must have a successful
       <operation command>.
-    hook: before-finish    # before-side-effect | after-observation | before-finish
+    hook: before-finish    # before-side-effect | after-observation | before-finish (several: comma-separated)
     compiled: R7           # the rule id it becomes, or false
     overlap: none          # mode / rule in another taxonomy, or none
     notes: >               # required when compiled is false - the reason
@@ -49,7 +49,7 @@ gaps:                      # optional: causes in the grading no insight names
 coverage:
   insights: 24
   in_compiled_modes: 15
-  compiled_rules: 7
+  compiled_rules: [R7, ...]
   not_compiled:            # reason -> insight ids
     contradicts-policy: [E13, P8]
     needs-judge: [E9, P7]
@@ -75,7 +75,7 @@ coverage:
 - `compiled: false` requires `notes` starting with one reason:
   `contradicts-policy`, `lexical-only`, `no-deterministic-signal`,
   `not-outcome-relevant`, `needs-judge`, `task-specific`, `covered-by`; then
-  the specifics
-  (for policy contradictions, quote the policy line).
+  the specifics (for policy contradictions, quote the policy line; for
+  `covered-by`, the rule or the workflow mechanism that covers it).
 - Incremental rounds: append modes under `# --- round N ---`; never renumber
   insights; update `corpus.rounds` and `coverage`.

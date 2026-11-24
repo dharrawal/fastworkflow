@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `query` | str | required | `<query>` |  | yes | words of the title or the author's name |
+| `query` | str | required | `Austen` |  | yes | words of the title or the author's name |
 
 - `query` must be written in the command text (`copied_from_command_text`).
 
@@ -54,10 +54,10 @@ For the sample inputs; no input changes them.
 
 Reads no earlier facts. Output: `Output`.
 
-1. `find_book query=<query>`
+1. `find_book query=Austen`
 
 Pages: step 1 reads page 1 only.
 
 ## Answer
 
-Written by `__result__`: \<query> matches \<find.total> book.
+Written by `__result__`: Austen matches \<find.total> book.

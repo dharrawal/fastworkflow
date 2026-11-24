@@ -60,17 +60,6 @@ _BEFORE_FINISH = frozenset({DecisionPhase.BEFORE_FINISH})
 # declared workflow facts
 # ---------------------------------------------------------------------------
 
-#: Commands that change the store. Declared, not inferred.
-WRITE_COMMANDS = frozenset({
-    "cancel_pending_order",
-    "modify_pending_order_address",
-    "modify_pending_order_items",
-    "modify_pending_order_payment",
-    "modify_user_address",
-    "return_delivered_order_items",
-    "exchange_delivered_order_items",
-})
-
 ORDER_ID = r"#W\d+"
 NUMERIC_ID = r"\d{6,}"  # item, product and payment ids
 
@@ -176,7 +165,6 @@ CONFIRM_DETAILS = {
 }
 
 FACTS = ContractFacts(
-    write_commands=WRITE_COMMANDS,
     id_patterns=(ORDER_ID, NUMERIC_ID),
     enum_arguments=ENUM_ARGUMENTS,
     intent_operations=INTENT_OPERATIONS,

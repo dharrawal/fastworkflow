@@ -29,7 +29,7 @@ bind=True, until=None, noun=None, optional=False)``:
   callable whose parameters bind by name to earlier phases' outputs, like ``steps_fn``
   (``when=lambda find: bool(find.item_uids)``). It is called just before the phase would
   run (``runs_now``); a false result skips the phase, which then counts as not run: a
-  later parameter named after it keeps its default. See 8 below.
+  later parameter named after it receives ``None`` (``bound_arguments``). See 8 below.
 - ``over`` makes the phase a fan-out, run once per item (see 7 below); ``steps_fn``
   gets the item as its parameter named ``item``. ``until`` (a fan-out only) stops it
   early once the items' outputs so far meet a condition (see 9 below). ``noun`` (a
@@ -137,7 +137,7 @@ How the runner (``WorkflowExecutionContext``) runs a phased planning command cal
    was capped.
 10. An ``optional`` phase that fails (its fill, its ``steps_fn``, its ``when``, its
    fan-out items) does not stop the call: it counts as not run (no output, so a later
-   parameter named after it keeps its default; its runs' answers are dropped), its span
+   parameter named after it receives ``None``; its runs' answers are dropped), its span
    records the error with ``optional: true``, and the next phase runs.
 11. STEPS RUN BY CODE (``CodeSteps``): code runs a
    phase's leading mechanical steps (``code_step``) through the agent's own command tool
@@ -164,6 +164,7 @@ import contextvars
 import inspect
 import json
 import re
+import traceback
 import types
 from dataclasses import dataclass
 import typing
@@ -289,6 +290,31 @@ def over_path_problem(cls: Any, path: Sequence[str]) -> Optional[str]:
         label = type_text(annotation)
         model = _model_of(annotation)
     return None
+
+
+def over_path_single_value(cls: Any, path: Sequence[str]) -> Optional[str]:
+    """The type, as text, of the one value an ``over=`` path reads on one output of the facts model *cls*, when no
+    name along it is a list (a fan-out over it would run once); None when it reads a list somewhere, or when a type
+    along it is not known before the phase runs (a union of models, ``Any``, an untyped property)."""
+    model: Any = cls
+    label = None
+    for name in path:
+        if not (inspect.isclass(model) and issubclass(model, BaseModel)) or not over_path_has_name(model, name):
+            return None
+        annotation = (model.model_fields[name].annotation if name in model.model_fields
+                      else _property_return_annotation(model, name))
+        if annotation is None:
+            return None
+        bare = annotation
+        if get_origin(bare) in (Union, types.UnionType):
+            members = [arg for arg in get_args(bare) if arg is not type(None)]
+            bare = members[0] if len(members) == 1 else bare
+        if bare is Any or isinstance(bare, str) or get_origin(bare) in (list, tuple, set, frozenset, Union,
+                                                                      types.UnionType, typing.Annotated):
+            return None
+        label = type_text(annotation)
+        model = _model_of(annotation)
+    return label
 
 
 def _property_return_annotation(cls: type, name: str) -> Any:
@@ -635,6 +661,9 @@ def active_phases(phases: Any, where: str = "plan()") -> list[Phase]:
                     or phase.max_items < 1):
                 raise PhaseError(f"{where}: phase {phase.name!r}: max_items must be a "
                                  f"positive int, got {phase.max_items!r}")
+            if not isinstance(phase.bind, bool):
+                raise PhaseError(f"{where}: phase {phase.name!r}: bind must be True or False, got "
+                                 f"{phase.bind!r}")
         if phase.noun is not None:
             if not phase.fans_out:
                 raise PhaseError(f"{where}: phase {phase.name!r}: noun needs a fan-out "
@@ -979,6 +1008,7 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
     """
     defaults: dict[tuple[str, str, str], bool] = {}
     with_output: dict[str, tuple[type[BaseModel], ...]] = {}
+    fanned: set[str] = set()    # the earlier phases that fan out: their output is a list of outputs
     earlier_names: set[str] = set()
     for phase in phases:
         reference = phase.over_reference
@@ -996,6 +1026,11 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
                 problem = problems[0] if problems else f"has no field {path!r}"
                 raise PhaseError(f"{where}: phase {phase.name!r}: over={phase.over!r}: "
                                  f"{names} {problem}")
+            single = [over_path_single_value(member, path.split(".")) for member in members]
+            if source not in fanned and all(single):
+                raise PhaseError(f"{where}: phase {phase.name!r}: over={phase.over!r} reads one value "
+                                 f"({single[0]}), not a list, so the fan-out would run once: name a list field "
+                                 "of the earlier phase's output, or read the value without over=")
         if phase.fans_out and phase.item in with_output:
             raise PhaseError(f"{where}: phase {phase.name!r}: its item parameter {phase.item!r} "
                              "is also an earlier phase's name; give item= another name")
@@ -1032,6 +1067,8 @@ def check_bindings(phases: Sequence[Phase], where: str = "plan()") -> dict[tuple
                         + "; give the parameter a default")
         if phase.output is not None:
             with_output[phase.name] = output_members(phase.output)
+        if phase.fans_out:
+            fanned.add(phase.name)
         earlier_names.add(phase.name)
     message = last_phase_say_that_message(_plan_path(where), phases)
     if message:
@@ -1703,7 +1740,7 @@ def phase_query(request: str, plan_text: str, *, index: int, count: int, name: s
     the run cannot take on the rest of the job (later phases do it). The last phase
     gets the request too, since it writes the answer to it, unless *result_driven* is
     true: a command with ``__result__`` gets the answer from ``__result__``, or, when that
-    returns None, from one model call with the phases' facts (3.16), so this phase only
+    returns ``ANSWER_BY_MODEL``, from one model call with the phases' facts (3.16), so this phase only
     runs its steps. An *answer_only* phase is told to
     run no command and to write from the facts its steps carry (``ANSWER_ONLY_RULE``).
     *item* ``(k, n, value)`` (0-based *k*) frames one item's sub-plan of a fan-out phase.
@@ -1845,7 +1882,7 @@ def code_step(step: Any, parameters_class: Any) -> Optional[str]:
     a command step (``KIND_COMMAND``) whose first word is its command, and whose CHAIN (the
     text after the command, cut at the first ``(`` or ``;`` outside a quoted value,
     ``finish_check.step_chain``) is empty with every field defaulted, or binds with the
-    key=value parser (which declines placeholders, examples and values that do not
+    key=value parser (which declines placeholders and values that do not
     validate), every bound value the step's own value
     (``finish_check.step_arguments``, so prose swallowed into a value is caught) and every
     required field given. Code runs ``command chain``: the note after it is never sent.
@@ -1858,7 +1895,7 @@ _CONDITION_LEAD_RE = re.compile(r"^\s*(?:only\s+when|only\s+if|if|when)\s+", re.
 #: Option keys of an Input field that mark a value that must be FOUND (a listing's row, a record's name, text copied
 #: from the command text): such a value is not one a client can simply be asked for.
 _FOUND_VALUE_OPTIONS = ("from_command_output", "record_named_in_command_text", "command_text_after_command_name",
-                        "copied_from_command_text", "converted_from_command_text")
+                        "copied_from_command_text")
 
 
 def conditional_decision(step_text: str, number: int, commands: Iterable[str], core_commands: Iterable[str],
@@ -1950,7 +1987,7 @@ def step_with_value(step_text: str, field: str, value: str) -> str:
             f"{chain[len(body):]}{rest[len(chain):]}")
 
 
-_PICK_NAMED_RE = re.compile(r"\bwith the (?:uid|id) of the (.+?) match\b", re.IGNORECASE)
+_PICK_NAMED_RE = finish_check.MATCH_NAME_RE
 
 
 def _uid_parameter(step: Any,
@@ -2048,9 +2085,9 @@ def _lookup_values_for_step(step: Any, lookup_or_run: Any, paging: Iterable[str]
         args = finish_check._given_inputs(lookup_or_run.get("input"))
     else:
         args = getattr(lookup_or_run, "arguments", None) or {}
-    match = _PICK_NAMED_RE.search(step.text)
-    if match is not None:
-        wanted = _folded(match.group(1))
+    named = finish_check.match_name(step.text)
+    if named is not None:
+        wanted = _folded(named)
         return [finish_check.plain_value(value) for key, value in args.items()
                 if key not in paging and wanted and _folded(value) == wanted]
     text = _folded(step.text)
@@ -3432,19 +3469,6 @@ def typed_phase_outputs(raw: Mapping[str, Any], phases: Sequence[Phase]) -> dict
     return typed
 
 
-def command_response_from_call_result(value: Any, output_model: type[BaseModel] | None):
-    """Build a ``CommandResponse`` from what ``__result__`` or ``__call__`` returned (3.14)."""
-    import fastworkflow
-
-    if isinstance(value, fastworkflow.CommandResponse):
-        return value
-    if isinstance(value, str):
-        return fastworkflow.CommandResponse(response=value, output=None)
-    if output_model is not None and isinstance(value, output_model):
-        return fastworkflow.CommandResponse(response=value.model_dump_json(), output=value)
-    raise TypeError(type(value).__name__)
-
-
 def _result_fn_on_class(plan_cls: type) -> Callable | None:
     """The ``__result__`` function as defined on *plan_cls* or a base (not inherited descriptor)."""
     for klass in plan_cls.__mro__:
@@ -3453,39 +3477,77 @@ def _result_fn_on_class(plan_cls: type) -> Callable | None:
     return None
 
 
-def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
-                    phase_names: frozenset[str], output_model: type[BaseModel] | None,
-                    command_name: str, request: str) -> tuple[Any, bool]:
-    """Run ``__result__`` once. Its text (or CommandResponse) is the answer; ``None`` means no
-    code-written answer on this path, and the caller writes the answer as with no ``__result__``
-    (3.16), with no warning. On failure or any other return, one model call writes the answer.
+def call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
+                phase_names: frozenset[str], output_model: type[BaseModel] | None,
+                command_name: str):
+    """Run ``__result__`` once and judge what it returned by the one result rule (``command_executor.
+    command_response_of``): the ``CommandResponse`` that is the call's answer, or ``None`` when ``__result__`` returned
+    ``None`` (no code-written answer on this path: the caller has a model write it, or, with no agent model, stops).
 
-    Returns ``(command_response, fallback_used)``, or ``(None, False)`` for a ``None`` return.
+    Raises what ``__result__`` raised (``fastworkflow.Refused`` included), and ``TypeError`` for an empty or
+    whitespace-only ``str`` and for a value the rule refuses. Nothing here calls a model.
     """
-    import fastworkflow
-
     result_fn = _result_fn_on_class(plan_cls)
     if result_fn is None:
         raise PhaseError(f"{plan_cls.__qualname__} defines no __result__")
-    instance = plan_cls()
     kwargs = bound_result_arguments(result_fn, input, outputs, phase_names=phase_names)
+    return judge_result(result_fn(plan_cls(), **kwargs), command_name=command_name, output_model=output_model)
+
+
+def judge_result(raw: Any, *, command_name: str, output_model: type[BaseModel] | None):
+    """What one ``__result__`` return means, by the one result rule (``command_executor.command_response_of``): the
+    call's ``CommandResponse``, or None for ``ANSWER_BY_MODEL`` (a command with no declared Output). Raises
+    ``TypeError`` for a return the rule refuses. The runtime (``call_result``) and the preview
+    (``command_preview.result_answer``) judge with it."""
+    from fastworkflow.command_executor import command_response_of
+    from fastworkflow.planning import ANSWER_BY_MODEL
+
+    if raw is ANSWER_BY_MODEL:
+        if output_model is not None:
+            raise TypeError(f"{command_name} declares an Output but its __result__ returned ANSWER_BY_MODEL; return "
+                            "the Output, or CommandResponse(response=..., output=<Output>), or remove "
+                            "Signature.Output to leave the answer to a model")
+        return None
+    if raw is None:
+        raise TypeError(f"{command_name}'s __result__ returned None; it must return the answer, or "
+                        "fastworkflow.planning.ANSWER_BY_MODEL to leave the answer to a model")
+    if isinstance(raw, str) and not raw.strip():
+        raise TypeError(f"{command_name} returned an empty str from its __result__; return the answer text, "
+                        "or fastworkflow.planning.ANSWER_BY_MODEL to let a model write it")
+    return command_response_of(raw, command_name=command_name, output_model=output_model,
+                               returned_by="__result__")
+
+
+def run_call_result(plan_cls: type, input: Any, outputs: Mapping[str, Any], *,
+                    phase_names: frozenset[str], output_model: type[BaseModel] | None,
+                    command_name: str):
+    """Run ``__result__`` once (``call_result``) for a call made in a turn. Its text, ``Signature.Output`` or
+    ``CommandResponse`` is the answer; ``ANSWER_BY_MODEL`` means no code-written answer on this path, and the caller
+    writes it as with no ``__result__`` (3.16, no warning).
+
+    A ``__result__`` that fails does NOT hand the answer to a model (it did until fix-qjne.12, which hid an author's
+    bug behind a fluent answer). The call fails as an execution command's call fails: ``fastworkflow.Refused`` is a
+    refusal (a failed response with its message and, when it named fields, the artifact ``refused_fields``; no error
+    artifacts), any other exception or unsupported return is
+    one ERROR log and a failed response ``Execution error in <command>'s __result__: <error>`` with the artifacts
+    ``error_type``, ``error_message`` and ``traceback`` that a raising command's failed output carries. The caller
+    reads ``response.success is False``. Returns the response, or ``None`` for ``ANSWER_BY_MODEL``.
+    """
+    import fastworkflow
+
     try:
-        raw = result_fn(instance, **kwargs)
-        if raw is None:
-            return None, False
-        if isinstance(raw, str) and not raw.strip():
-            raise TypeError("empty str")
-        try:
-            return command_response_from_call_result(raw, output_model), False
-        except TypeError as error:
-            raise TypeError(str(error)) from None
-    except Exception as error:  # noqa: BLE001 - runtime rule 3.16
-        logger.warning("planning command %r: __result__ failed (%s: %s); writing the answer "
-                       "with one model call", command_name, type(error).__name__, error)
-        # The model writes from the facts the phases filled, as the call's answer does with no __result__ (3.16).
-        facts = "\n\n".join(found_facts(outputs))
-        query = f"{request}\n\n{facts}" if facts else request
-        return fastworkflow.CommandResponse(response=write_answer(query), output=None), True
+        return call_result(plan_cls, input, outputs, phase_names=phase_names, output_model=output_model,
+                           command_name=command_name)
+    except fastworkflow.Refused as refusal:
+        return refusal.as_output().command_response
+    except Exception as error:  # noqa: BLE001 - the call fails, saying why (fix-qjne.12)
+        logger.error("planning command %r: __result__ failed (%s: %s); the call fails and no model writes the "
+                     "answer", command_name, type(error).__name__, error)
+        return fastworkflow.CommandResponse(
+            response=f"Execution error in {command_name}'s __result__: {error!r}"[:500],
+            success=False,
+            artifacts={"error_type": type(error).__name__, "error_message": str(error)[:1000],
+                       "traceback": traceback.format_exc()[:4000]})
 
 
 #: The author-facing API: what a planning command file writes (``Phase``, ``concatenated_steps``,

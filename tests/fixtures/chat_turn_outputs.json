@@ -300,7 +300,7 @@
   "cases": [
     {
       "case": "todo: startup is a global command",
-      "message": "/startup",
+      "message": "startup action",
       "outputs": [
         {
           "command_name": "startup",
@@ -395,7 +395,7 @@
     },
     {
       "case": "library: startup",
-      "message": "/startup",
+      "message": "startup action",
       "outputs": [
         {
           "command_name": "startup",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import inspect
 import json
 from dataclasses import dataclass, field
@@ -8,7 +9,7 @@ import os
 from pathlib import Path
 
 import fastworkflow
-from fastworkflow.command_directory import get_cached_command_directory
+from fastworkflow.command_directory import get_cached_command_directory, is_visible_planning
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
@@ -30,14 +31,16 @@ relationships between contexts.
 Schema (see Cursor rule ``context-model-design``):
 ------------------------------------------------
 Context := {  # As defined in context_inheritance_model.json
-    "base": list[str]      # Contexts whose commands are inherited. Cannot be empty or missing.
+    "base": list[str]      # Contexts whose commands are inherited. May be empty; cannot be missing.
 }
 
 Validation Rules:
 -----------------------------------------------
 - For any context defined in ``context_inheritance_model.json``:
-    - The "base" key MUST be present and be a list of strings. It cannot be empty or missing.
+    - The "base" key MUST be present and be a list of strings. An empty list means no base.
 - An empty or missing ``context_inheritance_model.json`` file is valid.
+- Every key names a context folder (``context_folders``), and a context folder that holds no command file must
+  inherit one.
 -----------------------------------------------
 This loader performs:
 1. Validation of ``context_inheritance_model.json`` against the rules above.
@@ -50,6 +53,15 @@ This loader performs:
 
 #: The callback-class methods whose first parameter is the record (renamed from ``command_context_object``).
 _RECORD_PARAMETER_METHODS = ("get_parent", "get_displayname", "get_state", "get_locator")
+
+
+#: Every public member a context callback class may have: the hooks the framework reads. Anything else public is a
+#: misspelling (a hook the framework would never call); a helper's name starts with ``_``.
+CONTEXT_HOOKS = ("get_parent", "get_displayname", "instance_label_attr", "get_state", "from_state", "state_version",
+                 "get_locator", "find_by_locator", "occupiable")
+#: Retired members, each with its own load error elsewhere (``instance_label`` here, ``enter_command(s)`` in
+#: ``entry_declarations``).
+_RETIRED_CONTEXT_MEMBERS = ("instance_label", "enter_command", "enter_commands")
 
 
 def context_class_problems(context_class: Any) -> list[str]:
@@ -76,7 +88,65 @@ def context_class_problems(context_class: Any) -> list[str]:
         if "command_context_object" in parameters:
             problems.append(
                 f'{method_name}: parameter "command_context_object" is removed: name it "record"')
+    for name in sorted(dir(context_class)):
+        if name.startswith("_") or name in CONTEXT_HOOKS or name in _RETIRED_CONTEXT_MEMBERS:
+            continue
+        close = difflib.get_close_matches(name, CONTEXT_HOOKS, n=1)
+        problems.append(
+            f"Context.{name} is not a context hook{f'; did you mean {close[0]!r}?' if close else '.'} The hooks are "
+            f"{', '.join(CONTEXT_HOOKS)}; a helper starts with _")
     return problems
+
+
+def context_folders(workflow_path: str | Path) -> dict[str, Path]:
+    """Every context of the workflow, as its folder: a directory of ``_commands/`` whose name does not start with
+    ``_`` or ``.``, in this workflow or a base workflow (``workflow_inheritance_model.json``; this workflow's folder
+    wins). A folder is a context whether or not it holds a command file of its own. The one definition of a context
+    folder, read by :meth:`CommandContextModel.load` and :meth:`CommandContextModel.load_base_contexts`."""
+    workflow_path_obj = Path(workflow_path)
+    base_paths = [Path(p) for p in WorkflowInheritanceModel.load(str(workflow_path_obj))
+                  .resolve_base_paths(str(workflow_path_obj))]
+    folders: dict[str, Path] = {}
+    for workflow_dir in (*base_paths, workflow_path_obj):
+        commands_dir = workflow_dir / "_commands"
+        if commands_dir.is_dir():
+            for entry in sorted(commands_dir.iterdir()):
+                if entry.is_dir() and not entry.name.startswith(("_", ".")) and entry.name != "Core":
+                    folders[entry.name] = entry
+    return folders
+
+
+def _check_keys_are_folders(raw_contexts: dict[str, Any], folders: set[str] | dict[str, Path]) -> None:
+    """Raise :class:`CommandContextModelValidationError` for the first key of the inheritance file that is no context
+    folder (``*``, the global context, is always one), naming the folder it probably meant."""
+    for key in raw_contexts:
+        if key == "*" or key in folders:
+            continue
+        close = difflib.get_close_matches(key, sorted(folders), n=1)
+        raise CommandContextModelValidationError(
+            f"the key {key!r} is no context folder{f'; did you mean {close[0]!r}?' if close else ''} Every "
+            f"context is a folder of _commands/ (one whose commands are all inherited may hold only its context "
+            f"class file); the folders are: {', '.join(sorted(folders)) or 'none'}")
+
+
+def _check_no_empty_folder(folders: dict[str, Path], contexts: dict[str, dict[str, list[str]]],
+                           cmd_dir: Any) -> None:
+    """Raise :class:`CommandContextModelValidationError` naming every context folder that holds no command file and
+    inherits none: no scope of ``(folder, *its bases)`` holds a command file (``*`` the global ones). Command files
+    count, loaded or not: a command that does not load is that command's own problem. One line per folder."""
+    # a core command is in no folder of an application (its folders are the core workflow's own), but the global
+    # core command (wildcard) gives an application's "*" nothing
+    core = set(cmd_dir.core_command_names)
+    owning = {name.split("/", 1)[0] if "/" in name else "*"
+              for name in (*cmd_dir.map_command_2_metadata, *cmd_dir.load_errors) if "/" in name or name not in core}
+    lines = [
+        f"{path}: the context folder {name!r} holds no command file and inherits none (no entry in "
+        f"context_inheritance_model.json, or every context it inherits from is empty): add a command, give it a "
+        f"base that has commands in context_inheritance_model.json, or start a helper folder's name with _"
+        for name, path in sorted(folders.items())
+        if not ({name, *CommandContextModel._ordered_bases_from_map(name, contexts)} & owning)]
+    if lines:
+        raise CommandContextModelValidationError("\n".join(lines))
 
 
 class CommandContextModelError(Exception):
@@ -105,7 +175,10 @@ class CommandContextModel:
     @classmethod
     def load(cls, workflow_path: str | Path) -> CommandContextModel:
         """Loads and validates the command context model from a workflow path,
-        augmenting with contexts and commands discovered from the _commands directory."""
+        augmenting with contexts and commands discovered from the _commands directory. A context is a folder of
+        ``_commands/`` (``context_folders``); a key of the inheritance file must name one, and a folder must hold a
+        command file, execution or planning, or inherit one. Its ``"/"`` list holds its execution commands only
+        (planning commands are read apart, ``RoutingDefinition.get_planning_command_names``)."""
         workflow_path_obj = Path(workflow_path)
         
         # 1. Load command inheritance from JSON file (if it exists)
@@ -124,25 +197,44 @@ class CommandContextModel:
                 if "*" not in fs_derived_direct_commands:
                     fs_derived_direct_commands["*"] = {"/": []}
                 fs_derived_direct_commands["*"]["/"].append(qualified_cmd_name)
+        # A folder named after a class is a context whatever kind of command it holds: one that holds only planning
+        # commands is a context with no execution command of its own (bd fix-ftdl.7.3).
+        for qualified_cmd_name, metadata in cmd_dir.map_command_2_metadata.items():
+            if is_visible_planning(metadata) and "/" in qualified_cmd_name:
+                fs_derived_direct_commands.setdefault(qualified_cmd_name.split("/", 1)[0], {"/": []})
         fs_derived_direct_commands.pop('Core', None)
         for context_data in fs_derived_direct_commands.values():
             context_data["/"] = sorted(list(set(context_data["/"])))
 
+        # Every context is a folder (this workflow's or a base workflow's): a key that is none is a mistake.
+        folders = context_folders(workflow_path_obj)
+        json_model_path = workflow_path_obj / '_commands' / 'context_inheritance_model.json'
+        try:
+            _check_keys_are_folders(raw_contexts_from_json, folders)
+        except CommandContextModelValidationError as error:
+            raise CommandContextModelValidationError(f"{json_model_path}: {error}") from None
+
         # 3. Merge JSON-defined inheritance with Filesystem-derived direct commands
         merged_contexts = {}
-        all_context_names = set(raw_contexts_from_json.keys()) | set(fs_derived_direct_commands.keys())
+        all_context_names = (set(raw_contexts_from_json.keys()) | set(fs_derived_direct_commands.keys())
+                             | set(folders))
         for name in all_context_names:
-            json_def = raw_contexts_from_json.get(name, {})
-            fs_def = fs_derived_direct_commands.get(name, {})
+            # A JSON entry always has "base" (validated on load) and a filesystem-derived entry holds a command
+            # (its execution commands are its "/" list, which is empty for a folder of planning commands only).
             current_context_definition: dict[str, list[str]] = {}
-            if "base" in json_def:
+            if "base" in (json_def := raw_contexts_from_json.get(name, {})):
                 current_context_definition["base"] = json_def["base"]
-            current_context_definition["/"] = fs_def.get("/", [])
-            if not current_context_definition.get("/") and "base" not in current_context_definition:
-                raise CommandContextModelValidationError(
-                    f"Context '{name}' has no commands and is not used as a base for inheritance."
-                )
+            current_context_definition["/"] = fs_derived_direct_commands.get(name, {}).get("/", [])
             merged_contexts[name] = current_context_definition
+
+        # Every declared base is checked now, at load, not when a context's commands are first asked for; the
+        # error names the file and the context that declares the base.
+        for name in sorted(raw_contexts_from_json):
+            try:
+                cls._validate_context_inheritance(name, merged_contexts)
+            except CommandContextModelValidationError as error:
+                raise CommandContextModelValidationError(f"{json_model_path}: {error}") from None
+        _check_no_empty_folder(folders, merged_contexts, cmd_dir)
 
         # Create the instance with the merged command contexts
         instance = cls(_workflow_path=str(workflow_path_obj), _command_contexts=merged_contexts)
@@ -198,6 +290,14 @@ class CommandContextModel:
         return raw_contexts_from_json
 
     @classmethod
+    def declared_bases(cls, workflow_path: str | Path) -> dict[str, list[str]]:
+        """``{context: [base, ...]}`` exactly as ``_commands/context_inheritance_model.json`` declares them
+        (direct bases, in file order), validated: the runtime's reader of the file for display. The
+        scoring tools (``train/score_listing.py``, ``train/score_lookup.py``) and ``fastworkflow build``'s
+        regenerator read the file directly."""
+        return {name: list(entry["base"]) for name, entry in cls._load_inheritance_json(workflow_path).items()}
+
+    @classmethod
     def _validate_context_inheritance(
         cls,
         context_name: str,
@@ -227,6 +327,12 @@ class CommandContextModel:
         next_visiting = visiting.copy()
         next_visiting.add(context_name)
         for base_context_name in contexts.get(context_name, {}).get("base") or []:
+            if base_context_name not in allowed:
+                known = ", ".join(sorted(allowed - {"*"})) or "none"
+                raise CommandContextModelValidationError(
+                    f"context {context_name!r} declares the base {base_context_name!r}, which is no context of "
+                    f"the workflow (a context is a folder of _commands/; its contexts: "
+                    f"{known})")
             cls._validate_context_inheritance(
                 base_context_name, contexts, allowed, next_visiting
             )
@@ -271,24 +377,18 @@ class CommandContextModel:
         if not raw_contexts:
             return {}
 
-        if known_contexts is None:
-            known: set[str] = set()
-            inh = WorkflowInheritanceModel.load(str(workflow_path_obj))
-            base_wf_paths = [Path(p) for p in inh.resolve_base_paths(str(workflow_path_obj))]
-            for wf_dir in (*base_wf_paths, workflow_path_obj):
-                cmds_dir = wf_dir / "_commands"
-                if cmds_dir.is_dir():
-                    for entry in cmds_dir.iterdir():
-                        if entry.is_dir() and not entry.name.startswith(("_", ".")):
-                            known.add(entry.name)
-        else:
-            known = set(known_contexts)
+        known = set(context_folders(workflow_path_obj)) if known_contexts is None else set(known_contexts)
 
         # The global context "*" always exists (command routing gives it a context even when no
         # global command does), so a base of "*" names the global commands and is never missing.
         valid_contexts = set(raw_contexts.keys()) | known | {"*"}
         for ctx_name in raw_contexts:
-            cls._validate_context_inheritance(ctx_name, raw_contexts, valid_contexts)
+            try:
+                _check_keys_are_folders({ctx_name: None}, known)
+                cls._validate_context_inheritance(ctx_name, raw_contexts, valid_contexts)
+            except CommandContextModelValidationError as error:
+                raise CommandContextModelValidationError(
+                    f"{workflow_path_obj / '_commands' / 'context_inheritance_model.json'}: {error}") from None
 
         all_contexts = (set(raw_contexts.keys()) | known) - {"*", ""}
         return {
@@ -398,7 +498,8 @@ class CommandContextModel:
                 problems = context_class_problems(context_class)
                 if problems:
                     raise CommandContextModelError(
-                        f"context {context_name!r} does not load: " + "; ".join(problems))
+                        f"{context_metadata.context_module_path}: context {context_name!r} does not load: "
+                        + "; ".join(problems))
             return context_class
         else:
             return None
@@ -436,15 +537,15 @@ def get_workflow_info(chat_session_or_path: fastworkflow.ChatSession | str) -> d
     {
       "workflow_name": str,
       "available_contexts": list[str],
-      "context_inheritance_model": dict
+      "context_inheritance_model": dict[str, list[str]]   # context -> its declared bases
     }
 
     Notes:
     - available_contexts are derived from CommandContextModel.load(workflow_path)
       so they reflect filesystem + inheritance.
     - current context and purpose/description are intentionally omitted.
-    - Raw JSON for inheritance (from _commands/context_inheritance_model.json) is
-      returned verbatim when present. The parent hierarchy is not described here:
+    - The declared bases of each context (``CommandContextModel.declared_bases``) are
+      returned when the file is present. The parent hierarchy is not described here:
       it lives in the live chain, and context_hierarchy_model.json is ignored.
     """
     if isinstance(chat_session_or_path, str):
@@ -454,7 +555,7 @@ def get_workflow_info(chat_session_or_path: fastworkflow.ChatSession | str) -> d
     workflow_name = os.path.basename(os.path.abspath(workflow_path_str))
 
     available_contexts: list[str]
-    inheritance_json: dict[str, Any] = {}
+    inheritance: dict[str, list[str]] = {}
 
     try:
         # Derive contexts via consolidated model
@@ -464,16 +565,14 @@ def get_workflow_info(chat_session_or_path: fastworkflow.ChatSession | str) -> d
     except Exception:
         available_contexts = ["/"]
 
-    # Load raw context inheritance model (if present)
+    # The declared bases of each context, through the one reader of the file
     try:
-        inheritance_path = Path(workflow_path_str) / "_commands" / "context_inheritance_model.json"
-        if inheritance_path.is_file():
-            inheritance_json = json.loads(inheritance_path.read_text())
+        inheritance = CommandContextModel.declared_bases(workflow_path_str)
     except Exception:
-        inheritance_json = {}
+        inheritance = {}
 
     return {
         "workflow_name": workflow_name,
         "available_contexts": available_contexts,
-        "context_inheritance_model": inheritance_json,
+        "context_inheritance_model": inheritance,
     }

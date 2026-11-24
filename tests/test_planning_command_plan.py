@@ -2,6 +2,7 @@
 how the planner's template renders unknown facts (and the tests made on them), the load-time
 step check, fastworkflow.Refused and the default generate_utterances. Offline,
 workflow-neutral."""
+import functools
 import inspect
 import shutil
 import types
@@ -96,7 +97,7 @@ def test_run_named_writes_the_id_or_the_match_wording():
         "open_item_by_uid with the uid of the Dune match"
     # Without a row id declared (checked in test_run_step_helper.py), named= needs the id input.
     with command_inputs_for_steps({"open_x": types.SimpleNamespace(
-            Input=type("I", (BaseModel,), {"__annotations__": {"x_uid": int}}))}):
+            Input=type("I", (BaseModel,), {"__annotations__": {"x_ref": int}}))}):
         with pytest.raises(StepFormError):
             run("open_x", named="Dune")
     with pytest.raises(StepFormError):
@@ -612,6 +613,68 @@ def test_output_and_a_return_annotation_on_one_phase_is_a_load_error():
     with pytest.raises(PhaseError, match=r"phase 'find' of .*Both has both @phase\(output=\.\.\.\) and a "
                                          r"return annotation: use the return annotation"):
         planned(Both)
+
+
+def test_a_fixed_output_model_is_a_load_error_that_says_what_output_takes():
+    from fastworkflow.planning_phases import PhaseError
+
+    class Fixed:
+        @phase(output=Found)
+        def find(self, input):
+            return ["find it"]
+
+    with pytest.raises(PhaseError, match=r"phase 'find' of .*Fixed: @phase\(output=\.\.\.\) takes a "
+                                         r"function of input \(lambda input: \.\.\.\), got Found"):
+        planned(Fixed)
+
+
+def test_a_fixed_output_model_is_refused_beside_other_options_too():
+    from fastworkflow.planning_phases import PhaseError
+
+    class Fixed:
+        def find(self, input) -> Found:
+            return ["find it"]
+
+        @phase(over="find.uids", output=Found)
+        def opened(self, uid):
+            return ["open it"]
+
+    with pytest.raises(PhaseError, match=r"phase 'opened' of .*Fixed: @phase\(output=\.\.\.\) takes a function of input"):
+        planned(Fixed)
+
+
+def _found_of_input(input):
+    return Found
+
+
+def _found_of_kind(kind, input):
+    return Found
+
+
+@pytest.mark.parametrize("value", [Found, Found.model_construct(), None, "Found", lambda: Found, lambda x: Found,
+                                   lambda input, other: Found,
+                                   functools.partial(_found_of_kind)])
+def test_output_that_is_not_a_function_of_input_alone_is_a_load_error(value):
+    from fastworkflow.planning_phases import PhaseError
+
+    class Bad:
+        @phase(output=value)
+        def find(self, input):
+            return ["find it"]
+
+    with pytest.raises(PhaseError, match=r"phase 'find' of .*Bad: @phase\(output=\.\.\.\) takes a function of input"):
+        planned(Bad)
+
+
+@pytest.mark.parametrize("value", [lambda input: Found, _found_of_input,
+                                   functools.partial(_found_of_kind, "book")])
+def test_output_that_is_a_function_of_input_alone_loads(value):
+    class Good:
+        @phase(output=value)
+        def find(self, input):
+            return ["find it"]
+
+    assert [p.name for p in planned(Good)(_input())] == ["find"]
 
 
 def test_output_alone_and_a_return_annotation_alone_both_load():

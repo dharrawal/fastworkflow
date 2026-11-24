@@ -89,49 +89,44 @@ class InheritanceBlockRegenerator:
         return self._model_data
     
     def regenerate_inheritance(self, classes: Optional[Dict[str, ClassInfo]] = None) -> Dict[str, Any]:
-        """Regenerate the inheritance block based on directory structure and class information.
-        
+        """Merge the bases found from the classes (or, with none, an entry for each context folder) into the file.
+
+        An entry already in the file keeps every base it lists, in its order; a base found from the classes that it
+        does not list is added after them. A context with no entry gets one. Nothing is removed, so a hand-written
+        base survives and analysing no classes changes no existing entry. Each entry added or changed is printed.
+
         Args:
             classes: Optional dictionary mapping class names to ClassInfo objects from AST analysis.
-                    If provided, inheritance relationships will be based on this data.
-        
+
         Returns:
-            Dict[str, Any]: The updated context model with regenerated inheritance relationships
-                           in a flat structure (no "inheritance" wrapper key)
+            Dict[str, Any]: The merged context model (flat: context name -> {"base": [...]}).
         """
-        # Scan directory structure to identify contexts
-        contexts = self.scan_contexts()
-        
-        # Build inheritance map - now directly as the top-level structure
-        inheritance_map: Dict[str, Dict[str, List[str]]] = {}
-        
         if classes:
-            # Use class information to build inheritance relationships
             all_class_names = set(classes.keys())
-            
-            # Include all classes in the inheritance block, not just those with base classes
-            for class_name, class_info in classes.items():
-                # Only include base classes that are also in the analyzed set
-                base_contexts = [b for b in class_info.bases if b in all_class_names]
-                inheritance_map[class_name] = {"base": base_contexts}
+            # Only bases that are also in the analysed set
+            discovered = {name: [b for b in info.bases if b in all_class_names] for name, info in classes.items()}
         else:
-            # Without class info, we can't determine inheritance relationships,
-            # so we'll just create empty entries for all contexts found in the directory
-            inheritance_map = {context: {"base": []} for context in contexts}
-        
-        # Load existing model to check for any existing entries we should preserve
+            # Without class info no base can be found: an empty entry for each context folder
+            discovered = {context: [] for context in sorted(self.scan_contexts())}
+
         existing_model = self.load_existing_model()
-        
-        # Preserve any existing entries not derived from class analysis
-        for context, data in existing_model.items():
-            if context not in inheritance_map:
-                inheritance_map[context] = data
-        
-        # Write updated model back to file
+        inheritance_map: Dict[str, Any] = dict(existing_model)
+        for context, bases in discovered.items():
+            entry = existing_model.get(context)
+            if entry is None:
+                inheritance_map[context] = {"base": list(bases)}
+                print(f"{self.model_path.name}: {context}: added with bases {list(bases)}")
+                continue
+            old = list(entry.get("base", [])) if isinstance(entry, dict) else []
+            merged = old + [b for b in bases if b not in old]
+            if merged != old:
+                inheritance_map[context] = {**(entry if isinstance(entry, dict) else {}), "base": merged}
+                print(f"{self.model_path.name}: {context}: bases {old} -> {merged}")
+
         self.write_model(inheritance_map)
-        
+        self._model_data = inheritance_map
         return inheritance_map
-    
+
     def write_model(self, model: Dict[str, Any]) -> None:
         """Write the updated model to file.
         

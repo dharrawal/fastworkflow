@@ -9,7 +9,6 @@ copy's own. The one stand-in is the CME hop (``script_command_extraction``, from
 """
 from __future__ import annotations
 
-import logging
 import os
 import re
 import shutil
@@ -18,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import command_executor
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.context_navigation import DescendEdge, collect_descend_edges
 from tests.test_step_helpers import script_command_extraction
@@ -36,13 +34,22 @@ _COPY_IGNORE = shutil.ignore_patterns(
 #: The library's navigation edges, recorded before Phase 10 step 2 (the library declared
 #: ``descends_to`` on open_book and open_member and no ``enter_command`` anywhere).
 LIBRARY_EDGES_BEFORE = (
-    DescendEdge("Library", "open_book", "Book", ("book_uid",), ()),
-    DescendEdge("Library", "open_member", "Member", ("member_uid",), ()),
+    DescendEdge("Library", "open_book", "Book", ("book_uid",)),
+    DescendEdge("Library", "open_member", "Member", ("member_uid",)),
 )
 
-UNDECLARED_WARNING = (
-    'open_book moved the workflow into Book but declares no @descends_to; '
-    'declare @descends_to("Book") on its ResponseGenerator so plans can reach Book\'s commands'
+UNDECLARED_FAILURE = (
+    'open_book moved the workflow onto a Book record but declares no @descends_to: a command may move the session '
+    'only onto a context it declares. Declare @descends_to("Book") on its ResponseGenerator. The move was undone'
+)
+
+#: The todo workflow's declared moves (load-check sweep, batch 2: every command that moves declares it). A move within
+#: a context (add_child_todolist: a TodoList opens another TodoList) is declared but is no edge.
+TODO_EDGES = (
+    DescendEdge("TodoList", "add_child_todoitem", "TodoItem", ("description", "assign_to", "is_complete")),
+    DescendEdge("TodoList", "get_child_by_id", "TodoItem", ("todoitem_id",)),
+    DescendEdge("TodoListManager", "create_todo_list", "TodoList", ("description",)),
+    DescendEdge("TodoListManager", "get_todo_list", "TodoList", ("id",)),
 )
 
 
@@ -61,6 +68,13 @@ def _edit(path, marker: str, insertion: str) -> None:
 def _declare_descends_to(folder, command_file: str, context: str) -> None:
     _edit(folder / "_commands" / command_file, "class ResponseGenerator:\n",
           f'@fastworkflow.descends_to("{context}")\nclass ResponseGenerator:\n')
+
+
+def _undeclare_all(folder) -> None:
+    for path in (folder / "_commands").rglob("*.py"):
+        text = path.read_text()
+        if "@fastworkflow.descends_to(" in text:
+            path.write_text(re.sub(r'@fastworkflow\.descends_to\("\w+"\)\n', "", text))
 
 
 def _undeclare_open_book(folder) -> None:
@@ -87,12 +101,6 @@ def _session(app):
     """The three members _invoke_command_impl reads off a session: the active workflow, the CME
     workflow and its context. The workflows are real."""
     return SimpleNamespace(get_active_workflow=lambda: app, cme_workflow=_cme_for(app))
-
-
-@pytest.fixture
-def warnings_reset(monkeypatch):
-    """The once-per-process record of undeclared moves starts empty in every test."""
-    monkeypatch.setattr(command_executor, "_UNDECLARED_MOVES_WARNED", set())
 
 
 # ---------------------------------------------------------------------------
@@ -161,17 +169,25 @@ def test_enter_command_stays_a_load_error_when_the_definition_was_persisted(
 
 def test_descends_to_on_a_command_is_the_collected_edge(tmp_path, initialized_fastworkflow):
     folder = _copy(tmp_path, TODO, "todo_descends")
+    _undeclare_all(folder)
     _declare_descends_to(folder, "TodoListManager/get_todo_list.py", "TodoList")
 
     edges = collect_descend_edges(str(folder))
 
     assert edges == (
-        DescendEdge("TodoListManager", "get_todo_list", "TodoList", ("id",), ()),
+        DescendEdge("TodoListManager", "get_todo_list", "TodoList", ("id",)),
     )
+
+
+def test_the_todo_workflows_declared_moves_are_its_edges(tmp_path, initialized_fastworkflow):
+    folder = _copy(tmp_path, TODO, "todo_declared")
+
+    assert set(collect_descend_edges(str(folder))) == set(TODO_EDGES)
 
 
 def test_a_command_without_descends_to_collects_no_edge(tmp_path, initialized_fastworkflow):
     folder = _copy(tmp_path, TODO, "todo_no_descends")
+    _undeclare_all(folder)
 
     assert collect_descend_edges(str(folder)) == ()
 
@@ -185,11 +201,11 @@ def test_library_navigation_edges_are_unchanged_by_the_migration(tmp_path, initi
 
 
 # ---------------------------------------------------------------------------
-# A move the command does not declare is reported, once
+# A move the command does not declare fails the command, every time
 # ---------------------------------------------------------------------------
 
-def test_an_undeclared_move_warns_once_per_command_and_context(
-        tmp_path, initialized_fastworkflow, monkeypatch, warnings_reset, caplog):
+def test_an_undeclared_move_fails_the_command_every_time_and_the_record_is_put_back(
+        tmp_path, initialized_fastworkflow, monkeypatch):
     folder = _copy(tmp_path, LIBRARY, "library_undeclared")
     _undeclare_open_book(folder)
     app = _application(folder)
@@ -198,18 +214,14 @@ def test_an_undeclared_move_warns_once_per_command_and_context(
     session = _session(app)
     script_command_extraction(monkeypatch, app)
 
-    with caplog.at_level(logging.WARNING, logger=command_executor.__name__):
-        CommandExecutor._invoke_command_impl(session, "open_book book_uid=b1")
-        assert app._current_command_context_name == "Book"
-        CommandExecutor._invoke_command_impl(session, "open_book book_uid=b2")
-
-    warnings = [r for r in caplog.records if "declares no @descends_to" in r.getMessage()]
-    assert [r.getMessage() for r in warnings] == [UNDECLARED_WARNING]
-    assert warnings[0].levelno == logging.WARNING
+    for uid in ("b1", "b2"):
+        output = CommandExecutor._invoke_command_impl(session, f"open_book book_uid={uid}")
+        assert not output.command_response.success
+        assert output.command_response.response == UNDECLARED_FAILURE
+        assert app._current_command_context is app.root
 
 
-def test_a_declared_move_does_not_warn(
-        tmp_path, initialized_fastworkflow, monkeypatch, warnings_reset, caplog):
+def test_a_declared_move_is_made(tmp_path, initialized_fastworkflow, monkeypatch):
     folder = _copy(tmp_path, LIBRARY, "library_declared")
     app = _application(folder)
     app.root = _library_root()
@@ -217,11 +229,10 @@ def test_a_declared_move_does_not_warn(
     session = _session(app)
     script_command_extraction(monkeypatch, app)
 
-    with caplog.at_level(logging.WARNING, logger=command_executor.__name__):
-        CommandExecutor._invoke_command_impl(session, "open_book book_uid=b1")
+    output = CommandExecutor._invoke_command_impl(session, "open_book book_uid=b1")
 
+    assert output.command_response.success, output.command_response.response
     assert app._current_command_context_name == "Book"
-    assert not [r for r in caplog.records if "declares no @descends_to" in r.getMessage()]
 
 
 def _library_root():

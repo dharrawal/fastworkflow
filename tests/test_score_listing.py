@@ -269,7 +269,7 @@ def test_the_oracle_seeds_bound_the_shortlist_from_above_on_this_workflow(tutori
 
 def test_without_a_planning_match_the_exact_name_gather_misses_natural_requests(tutorial_run):
     """Offline gathering reads exact names only (the per-scope head answers need live heads): recall is the floor."""
-    # the production threshold now gives the tutorial's full listing whole (6,353 < 7,000), so the shortlist's own
+    # the production threshold now gives the tutorial's full listing whole (5,901 < 8,000), so the shortlist's own
     # floor is read from the sweep row where the threshold forces the shortlist
     assert tutorial_run["sweep"]["thresholds"]["3000"]["recall"][sl.MODE_NONE]["command_shortlist"] == 0.0
 

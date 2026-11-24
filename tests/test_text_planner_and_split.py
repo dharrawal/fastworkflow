@@ -375,8 +375,9 @@ def test_the_split_goes_through_the_merge():
 
 
 def _split_file(folder, text):
-    (folder / "_commands").mkdir(parents=True, exist_ok=True)
-    (folder / "_commands" / "_split.py").write_text(text)
+    from tests.workflow_settings_file import write_workflow_file
+
+    write_workflow_file(folder / "_commands", text)
     return str(folder)
 
 
@@ -391,11 +392,11 @@ def test_identifier_patterns_come_from_the_workflows_split_file(tmp_path):
 
 
 @pytest.mark.parametrize("text, match", [
-    ("import re\nidentifier_patterns = [re.compile('[unclosed')]\n", "could not import the split settings"),
+    ("import re\nidentifier_patterns = [re.compile('[unclosed')]\n", "could not import the workflow settings"),
     ("identifier_patterns = [r'\\bcase_[0-9]+']\n", "write re.compile"),
     ("import re\nidentifier_patterns = re.compile('x')\n", "must be a list of compiled patterns"),
     ("subject_hints = ['not', 'text']\n", "subject_hints must be a str"),
-    ("Signature = 'text'\n", "Signature must be a class"),
+    ("Signature = 'text'\n", "a Signature .* is removed: write split_examples"),   # any Signature, class or not
 ])
 def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
     from fastworkflow.planning_commands import PlanningCommandFormatError
@@ -403,7 +404,7 @@ def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
 
     folder = _split_file(tmp_path, text)
     with pytest.raises(PlanningCommandFormatError, match=match):
-        load_planning_commands(folder)   # the skills carry the identifier patterns, so the split file loads with them
+        load_planning_commands(folder)   # the skills carry the identifier patterns, so the settings file loads with them
 
 
 def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch):
@@ -600,11 +601,38 @@ def test_a_cut_off_reply_that_does_not_parse_uses_dspys_json_retry():
     assert lm.finishes == ["length", "stop"]
 
 
+def test_a_complete_json_retry_reply_of_a_cut_off_reply_is_the_split_and_no_retry_is_made():
+    """DSPy's own JSON retry of a cut-off first reply answers inside the same call; a complete reply is the answer
+    whichever adapter wrote it, so its split is used and the retry without the reasoning field is not made."""
+    from fastworkflow.workflow_agent import recording_split, split_into_subtasks
+
+    lm = _ScriptedReplies([_CUT, _JSON_SPLIT, _SUBTASKS_ONLY])
+    with recording_split() as record:
+        assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "stop"]
+    assert record["attempts"] == 1 and record["raw"] == ["Audit right A.", "Sweep Hubbard."] and "failed" not in record
+
+
 def test_a_cut_off_json_retry_still_gets_the_split_retry():
     from fastworkflow.workflow_agent import split_into_subtasks
 
     lm = _ScriptedReplies([_CUT, ('{"reasoning": "Rule 7 says', "length", 4700), _GOOD])
     assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    assert lm.finishes == ["length", "length", "stop"]
+
+
+# The retry after a cut-off reply asks without the reasoning field: the sub-tasks alone.
+_SUBTASKS_ONLY = ("[[ ## subtasks ## ]]\n1. Audit right A.\n2. Sweep Hubbard.\n\n[[ ## completed ## ]]", "stop", 20)
+
+
+def test_the_retry_after_a_cut_off_reply_asks_without_the_reasoning_field():
+    """The splitter loops in its reasoning until the cap; the one retry asks for the sub-tasks alone (``dspy.Predict``
+    of the same signature) and its answer is the split."""
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    lm = _ScriptedReplies([_CUT, ('{"reasoning": "Rule 7 says', "length", 4700), _SUBTASKS_ONLY])
+    assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
+    # a reasoned call would refuse this answer (no reasoning field) and ask its JSON adapter, which has no reply left
     assert lm.finishes == ["length", "length", "stop"]
 
 
@@ -932,46 +960,42 @@ def test_the_planner_template_gets_the_planning_commands_steps(tmp_path):
     assert "- find them\n- close it\n" in workflow_agent._template_text(steps)
 
 
-def test_the_split_files_signature_docstring_replaces_the_default_instructions(tmp_path):
-    from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature, load_planning_commands
+def test_the_split_files_examples_change_the_splitter_prompt(tmp_path):
+    """A workflow changes its splitter's prompt with ``split_examples`` (bd fix-qjne.26; a ``Signature`` replacing the
+    instructions is retired): the instructions become the built-in rules alone, the field descriptions stay the
+    splitter's, another workflow keeps the default, and ``_workflow.py`` is not a planning command."""
+    from fastworkflow.workflow_agent import SPLIT_RULES, SplitIntoSubtasks, _split_signature, load_planning_commands
 
-    folder = _split_file(tmp_path, 'class Signature:\n    """Split it my way.\n\n    - one rule\n    """\n')
+    folder = _split_file(tmp_path, "split_examples = [('Find Dune and Emma.', ['Find Dune.', 'Find Emma.'])]\n")
     other = tmp_path / "other"
     (other / "_commands").mkdir(parents=True)
 
-    assert _split_signature(folder).instructions == "Split it my way.\n\n- one rule"
-    assert _split_signature(folder).fields["job_types"].json_schema_extra["desc"] == \
-        SplitIntoSubtasks.fields["job_types"].json_schema_extra["desc"]
+    assert _split_signature(folder).instructions == SPLIT_RULES != SplitIntoSubtasks.instructions
+    for name in ("job_types", "user_query", "subtasks"):
+        assert _split_signature(folder).fields[name].json_schema_extra["desc"] == \
+            SplitIntoSubtasks.fields[name].json_schema_extra["desc"]
     assert _split_signature(str(other)).instructions == SplitIntoSubtasks.instructions
-    assert load_planning_commands(folder) == ()   # _split.py is not a skill
+    assert load_planning_commands(folder) == ()   # _workflow.py is not a skill
 
 
-def test_the_split_files_input_and_output_describe_the_splitter_fields(tmp_path):
+@pytest.mark.parametrize("text", [
+    'class Signature:\n    """Split it my way.\n\n    - one rule\n    """\n',
+    ("from pydantic import BaseModel, Field\n\n"
+     "class Signature:\n"
+     "    class Input(BaseModel):\n"
+     "        job_types: str = Field(description='the kinds of job')\n"
+     "    class Output(BaseModel):\n"
+     "        subtasks: str = Field(description='one sub-task per numbered line')\n"),
+], ids=["instructions", "field_descriptions"])
+def test_a_split_file_signature_no_longer_replaces_the_prompt_it_fails_the_load(tmp_path, text):
+    """The replace path is removed: neither the docstring (instructions) nor ``Input``/``Output`` (field descriptions)
+    is read; the file fails the load naming ``split_examples``."""
     from fastworkflow.planning_commands import PlanningCommandFormatError
-    from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature
+    from fastworkflow.workflow_agent import _split_signature
 
-    folder = _split_file(tmp_path / "ok", (
-        "from pydantic import BaseModel, Field\n\n"
-        "class Signature:\n"
-        "    class Input(BaseModel):\n"
-        "        job_types: str = Field(description='the kinds of job')\n"
-        "        user_query: str\n"
-        "    class Output(BaseModel):\n"
-        "        subtasks: str = Field(description='one sub-task per numbered line')\n"))
-    signature = _split_signature(folder)
-    assert signature.instructions == SplitIntoSubtasks.instructions   # no docstring: the default
-    assert signature.fields["job_types"].json_schema_extra["desc"] == "the kinds of job"
-    assert signature.fields["subtasks"].json_schema_extra["desc"] == "one sub-task per numbered line"
-    assert signature.fields["user_query"].json_schema_extra["desc"] == \
-        SplitIntoSubtasks.fields["user_query"].json_schema_extra["desc"]
-
-    bad = _split_file(tmp_path / "bad", (
-        "from pydantic import BaseModel\n\n"
-        "class Signature:\n"
-        "    class Input(BaseModel):\n"
-        "        request: str\n"))
-    with pytest.raises(PlanningCommandFormatError, match="Signature.Input.request is not a splitter input"):
-        _split_signature(bad)
+    folder = _split_file(tmp_path, text)
+    with pytest.raises(PlanningCommandFormatError, match=r"_workflow\.py: a Signature .*write split_examples"):
+        _split_signature(folder)
 
 
 def _planning_command_folder(tmp_path):

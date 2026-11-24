@@ -41,7 +41,7 @@ from fastworkflow.examples.library._commands.Library.open_book import Signature 
 from fastworkflow.planning import run
 from fastworkflow.planning import phase
 from fastworkflow.planning_commands import PlanningCommandFormatError
-from fastworkflow.turn import TurnStatus, reset_missing_declared_output_warnings
+from fastworkflow.turn import TurnStatus
 from fastworkflow.utils import python_utils
 
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - the fixture, imported by name
@@ -119,11 +119,6 @@ def _run_planning_command(env, planning_command, args: dict | None = None):
     return env.ctx.process_turn("look up the book")
 
 
-@pytest.fixture(autouse=True)
-def _clear_missing_output_warnings():
-    reset_missing_declared_output_warnings()
-    yield
-    reset_missing_declared_output_warnings()
 
 
 def test_result_str_gives_text_and_no_output(library_env):
@@ -144,7 +139,10 @@ def test_result_str_gives_text_and_no_output(library_env):
     assert outputs[0].command_response.output is None
 
 
-def test_missing_output_warning_once_for_planning_command(library_env, caplog):
+def test_text_result_for_a_declared_output_fails_the_call_instead_of_warning_of_a_missing_output(library_env, caplog):
+    # Was test_missing_output_warning_once_for_planning_command (fix-qjne.12): a command that declares an Output and
+    # writes text from __result__ used to get a once-per-process "declares an Output but returned none" warning
+    # (and a response with no Output); the one result rule now fails the call where the text is written.
     def build(output_cls):
         class Plan:
             def find(self, input) -> FoundBooks:
@@ -158,10 +156,10 @@ def test_missing_output_warning_once_for_planning_command(library_env, caplog):
     planning_command = _planning_command_with_output(build)
     with caplog.at_level(logging.WARNING):
         _run_planning_command(library_env, planning_command)
-        _run_planning_command(library_env, planning_command)
-    msgs = [r.message for r in caplog.records if "declares an Output but returned none" in r.message]
-    assert len(msgs) == 1
-    assert planning_command.name in msgs[0]
+    outputs = [o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name]
+    assert [o.success for o in outputs] == [False]
+    assert "declares an Output but its __result__ returned str" in outputs[0].command_response.response
+    assert not [r for r in caplog.records if "declares an Output but returned none" in r.message]
 
 
 def test_result_output_json_is_the_response(library_env):
@@ -208,7 +206,8 @@ def test_with_result_no_phase_agent_writes_the_answer(library_env):
     assert library_env.model.asked == []
 
 
-def test_result_raises_falls_back_to_one_model_call(library_env, caplog):
+def test_result_raises_fails_the_call_and_no_model_writes_the_answer(library_env, caplog):
+    # Was test_result_raises_falls_back_to_one_model_call: fix-qjne.12 made a failing __result__ fail the command.
     class Plan:
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
@@ -220,11 +219,13 @@ def test_result_raises_falls_back_to_one_model_call(library_env, caplog):
     with caplog.at_level(logging.WARNING):
         result = _run_planning_command(library_env, planning_command)
 
-    assert result.answer == "written"
+    assert result.answer != "written"
     assert library_env.model.asked == []
     assert sum(1 for r in caplog.records if "__result__ failed" in r.message) == 1
     out = next(o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name)
     assert out.command_response.output is None
+    assert out.success is False
+    assert "boom" in out.command_response.response
 
 
 def test_skipped_phase_is_none_in_result(library_env):
@@ -840,7 +841,7 @@ def test_library_author_books_from_real_module_runs_fan_out(library_proof_env):
     # 3.9: open_book is a Library command, on the path from the Book it opened, so it runs in
     # place (bound to the library) and no go_up is inserted before the second book.
     assert library_proof_env.runner.sent == [
-        "find_book query=Frank Herbert",
+        'find_book query="Frank Herbert"',
         "open_book book_uid=b1",
         "open_book book_uid=b2",
     ]
@@ -864,7 +865,7 @@ def test_library_count_books_from_real_module_uses_find_total(library_proof_env)
     assert out.success is True
     assert out.command_response.output is None
     assert out.command_response.response == expected
-    assert library_proof_env.runner.sent == [f"find_book query={query}"]
+    assert library_proof_env.runner.sent == [f'find_book query="{query}"']
 
 
 def test_library_member_report_from_real_module_lists_loans_and_notes(library_proof_env):
@@ -903,9 +904,9 @@ def test_library_note_member_from_real_module_writes_note_on_member(library_proo
     assert result.status == TurnStatus.COMPLETED
     assert lib.members["m1"].notes == before + [text]
     assert library_proof_env.runner.sent == [
-        f"find_member query={member}",
+        f'find_member query="{member}"',
         "open_member member_uid=m1",
-        f"add_note text={text}",
+        f'add_note text="{text}"',
     ]
     add_out = next(
         o for o in library_proof_env.ctx._turn_outputs if o.command_name == "Record/add_note"
@@ -1196,6 +1197,7 @@ _BOOK_LOANS_EXECUTOR_ENTRY = (
     "  Say who has a book on loan, given its title.\n"
     "  inputs:\n"
     "  - the book's title, type: str\n"
+    "    examples: ['Dune', 'Dune Messiah', 'Persuasion']\n"
 )
 
 _BOOK_LOANS_PLANNER_ENTRY = (
@@ -1243,8 +1245,11 @@ def test_library_planning_commands_listed_in_executor_catalog_with_signature(
         "  Show who wrote a book, and how many copies the library owns, given its title.\n"
         "  inputs:\n"
         "  - the book's title, type: str\n"
+        "    examples: ['Dune', 'Dune Messiah', 'Persuasion']\n"
         "  outputs:\n"
     ) in text
+    # An Input field's examples are listed; an Output field's are not (fix-xj0x).
+    assert "examples: ['b1', 'b3']" not in text
     assert "template:" not in text
 
 
@@ -1578,7 +1583,7 @@ ALL_RULE_SENTENCES = (
     planning_commands.IN_REQUEST_STR_SENTENCE,
     planning_commands.IN_REQUEST_INT_SENTENCE,
     planning_commands.SUBJECT_SENTENCE,
-    planning_commands.VERIFY_BOOL_SENTENCE,
+    planning_commands.BOOL_SENTENCE,
 )
 TUTORIAL_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "planning_tutorial_workflow")
 
@@ -1591,7 +1596,7 @@ def test_each_rule_sentence_reaches_only_the_extractor_of_the_field_whose_check_
     assert planning_commands.extraction_sentences_for(folder, RULE_CHECK) == {
         "title": (planning_commands.SUBJECT_SENTENCE,),
         "copies": (planning_commands.IN_REQUEST_INT_SENTENCE,),
-        "loaned": (planning_commands.VERIFY_BOOL_SENTENCE,),
+        "loaned": (planning_commands.BOOL_SENTENCE,),   # the bool type's sentence
     }
     assert planning_commands.extraction_sentences_for(folder, "Library/book_by_title") == {
         "title": (planning_commands.IN_REQUEST_STR_SENTENCE,)}

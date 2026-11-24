@@ -176,6 +176,32 @@ def test_the_global_head_never_learns_the_startup_command_under_either_layout(tm
     assert not picks.get("startup")
 
 
+def _rename_startup(tmp_path: Path, name: str) -> str:
+    """A library copy whose startup action is ``begin`` and whose ``startup`` is an ordinary command."""
+    workflow = Path(_copy(tmp_path, name))
+    commands = workflow / "_commands"
+    (commands / "startup.py").rename(commands / "begin.py")
+    (commands / "library_hours.py").rename(commands / "startup.py")
+    (workflow / "startup_action.json").write_text('{"command_name": "begin"}\n', encoding="utf-8")
+    RoutingRegistry.clear_registry()
+    return str(workflow)
+
+
+def test_action_only_is_no_signature_whatever_the_command_is_named(tmp_path):
+    # The startup action named by startup_action.json has no Signature: action-only, under any name.
+    # A command named `startup` that has a Signature and is not the startup action is an ordinary command:
+    # it is a label and a holdout command like any other, as routing already treats it.
+    workflow = _rename_startup(tmp_path, "renamed_startup")
+    crd = RoutingRegistry.get_definition(workflow, load_cached=False)
+    assert {"begin", "startup"} <= own_command_names(crd, "*")
+    assert _is_action_only(crd.command_directory, "begin")
+    assert not _is_action_only(crd.command_directory, "startup")
+    assert "begin" not in _labels(workflow, SCOPED, "*")
+    assert "startup" in _labels(workflow, SCOPED, "*")
+    names = lookup_split_command_names(crd, sorted(st.contexts_for_training(workflow)))
+    assert "startup" in names and "begin" not in names
+
+
 def test_the_global_split_names_skip_planning_and_startup(tmp_path):
     workflow = _copy(tmp_path, "split_names")
     crd = RoutingRegistry.get_definition(workflow, load_cached=False)

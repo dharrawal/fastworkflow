@@ -7,8 +7,6 @@ from __future__ import annotations
 import contextlib
 from typing import Any, Dict, List
 import inspect
-from pathlib import Path
-import json
 import logging
 
 import fastworkflow
@@ -214,11 +212,6 @@ class CommandMetadataAPI:
             if pattern_attr := getattr(field_info, 'pattern', None):
                 return str(pattern_attr)
 
-        with contextlib.suppress(Exception):
-            extra = getattr(field_info, 'json_schema_extra', None)
-            if isinstance(extra, dict) and 'pattern' in extra and extra['pattern']:
-                return str(extra['pattern'])
-
         # Inspect metadata/annotation for Annotated[StringConstraints]
         with contextlib.suppress(Exception):
             annotation = getattr(field_info, 'annotation', None)
@@ -342,12 +335,10 @@ class CommandMetadataAPI:
                                         if doc_text := " ".join(
                                             str(doc_text).split()
                                         ).strip():
-                                            processed_cmd_name = cmd_name.replace('_', ' ').lower()
-                                            if processed_cmd_name not in doc_text.lower() and doc_text.lower() != processed_cmd_name:
-                                                if omit_command_name:
-                                                    lines.append(f"{doc_text}")
-                                                else:
-                                                    lines.append(f"{indent_str}  {doc_text}")
+                                            if omit_command_name:
+                                                lines.append(f"{doc_text}")
+                                            else:
+                                                lines.append(f"{indent_str}  {doc_text}")
                                 elif not omit_command_name:
                                     lines.append(f"{indent_str}-")
 
@@ -595,25 +586,16 @@ class CommandMetadataAPI:
             active_context_name=active_context_name,
         )
 
-        # Build minimal context info (inheritance/containment if available)
+        # Build minimal context info (its declared bases, if any)
         context_info: Dict[str, Any] = {
             "name": active_context_name,
             "display_name": ("global" if active_context_name == "*" else active_context_name),
         }
 
         with contextlib.suppress(Exception):
-            inheritance_path = Path(subject_workflow_path) / "context_inheritance_model.json"
-            if inheritance_path.exists():
-                with open(inheritance_path) as f:
-                    inheritance_data = json.load(f)
-                    if vals := inheritance_data.get(active_context_name, []):
-                        context_info["inheritance"] = vals
-            containment_path = Path(subject_workflow_path) / "context_containment_model.json"
-            if containment_path.exists():
-                with open(containment_path) as f:
-                    containment_data = json.load(f)
-                    if vals := containment_data.get(active_context_name, []):
-                        context_info["containment"] = vals
+            from fastworkflow.command_context_model import CommandContextModel
+            if vals := CommandContextModel.declared_bases(subject_workflow_path).get(active_context_name):
+                context_info["inheritance"] = vals
 
         # Massage commands for display
         cmds = sorted(meta.get("commands", []), key=lambda x: x.get("name", ""))
@@ -1054,24 +1036,15 @@ class CommandMetadataAPI:
             display_obj = CommandMetadataAPI._prune_empty(display_obj, remove_keys={"default"})
             return CommandMetadataAPI._to_yaml_like(display_obj, omit_command_name=omit_command_name)
 
-        # Build minimal context info (inheritance/containment if available)
+        # Build minimal context info (its declared bases, if any)
         context_info: Dict[str, Any] = {
             "name": active_context_name,
             "display_name": ("global" if active_context_name == "*" else active_context_name),
         }
         with contextlib.suppress(Exception):
-            inheritance_path = Path(subject_workflow_path) / "context_inheritance_model.json"
-            if inheritance_path.exists():
-                with open(inheritance_path) as f:
-                    inheritance_data = json.load(f)
-                    if vals := inheritance_data.get(active_context_name, []):
-                        context_info["inheritance"] = vals
-            containment_path = Path(subject_workflow_path) / "context_containment_model.json"
-            if containment_path.exists():
-                with open(containment_path) as f:
-                    containment_data = json.load(f)
-                    if vals := containment_data.get(active_context_name, []):
-                        context_info["containment"] = vals
+            from fastworkflow.command_context_model import CommandContextModel
+            if vals := CommandContextModel.declared_bases(subject_workflow_path).get(active_context_name):
+                context_info["inheritance"] = vals
 
         inputs: List[Dict[str, Any]] = []
         for inp in target_cmd.get("inputs", []) or []:
@@ -1104,8 +1077,9 @@ class CommandMetadataAPI:
                 out_out["type"] = CommandMetadataAPI._simplify_type_str(outp.get("type", ""))
             if desc := outp.get("description", ""):
                 out_out["description"] = desc
-            if examples := outp.get("examples", []) or []:
-                out_out["examples"] = examples
+            # An Output field's examples are not rendered in this listing text (the agent and planner read it, and
+            # it counts toward run_listing.FULL_LISTING_MAX_CHARS); they stay declared and in the structured
+            # metadata (get_enhanced_command_info, get_params_for_all_commands) for the other readers.
             if (af := outp.get("available_from", None)) is not None:
                 out_out["available_from"] = af
             outputs.append(out_out)

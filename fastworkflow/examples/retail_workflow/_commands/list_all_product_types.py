@@ -1,3 +1,4 @@
+import json
 from typing import List
 
 from pydantic import BaseModel, Field
@@ -19,10 +20,12 @@ class Signature:
 
     class Output(BaseModel):
         status: str = Field(
-            description="List of product type and product id tuples, or a JSON string representation of that list.",
-            json_schema_extra={
-                "used_by": ["get_product_details"]
-            }
+            description="List of product type and product id tuples, or a JSON string representation of that list."
+        )
+        product_ids: List[str] = Field(
+            default_factory=list,
+            json_schema_extra={"ui": {"hidden": True}},
+            description="The ids of all the product types, in the order of the listing.",
         )
 
     # ---------------------------------------------------------------------
@@ -64,4 +67,5 @@ class ResponseGenerator:
         """Run domain logic and wrap into `Signature.Output`."""
         data = load_data()
         result = ListAllProductTypes.invoke(data=data)
-        return Signature.Output(status=result) 
+        listing = json.loads(result)
+        return Signature.Output(status=result, product_ids=[str(pid) for pid in listing.values()])

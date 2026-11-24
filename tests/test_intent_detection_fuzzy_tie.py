@@ -2,11 +2,12 @@
 
 Covers fix-0xn. Before the guard, the CME's intent stage took
 `best_matched_commands[0]` from a list that `find_best_matches` documents as
-*all* candidates tying for the minimum distance. Commands sharing a prefix tie
-at distance 0.0, because scoring compares only the leading `len(input)`
-characters, and `command_name_dict` is built by iterating a set — so the pick
-varied between processes and bypassed both the classifier and the ambiguity
-prompt.
+*all* candidates tying for the minimum distance. Commands sharing a prefix tied
+at distance 0.0 (that scoring compared only the leading `len(input)` characters),
+and `command_name_dict` is built by iterating a set — so the pick varied between
+processes and bypassed both the classifier and the ambiguity prompt. Since bd
+fix-ftdl.9 the name layer scores the whole request against each whole name
+(`intent_clarification.misspelt`), and the shared stem still ties the two names.
 
 Real components throughout: a real `RoutingDefinition` for a real test workflow
 and the real `predict` path. Only the classifier result is injected, the same
@@ -29,7 +30,7 @@ from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     CommandNamePrediction,
 )
-from fastworkflow.utils.fuzzy_match import find_best_matches
+from fastworkflow.intent_clarification import misspelt
 
 # tests/todo_list_workflow exposes two commands sharing the 'add_child_todo'
 # prefix, which is the ordinary shape of a generated command set.
@@ -127,22 +128,19 @@ def _router_returning(predictions, modelpipeline=...):
 # ---------------------------------------------------------------------------
 
 
-def test_prefix_sharing_commands_tie_at_distance_zero(todolist_command_names):
-    matches, distance = find_best_matches(
-        TIED_PREFIX, todolist_command_names.keys(), threshold=FUZZY_THRESHOLD)
+def test_prefix_sharing_commands_tie_at_the_same_distance(todolist_command_names):
+    matches, distance = misspelt(TIED_PREFIX, todolist_command_names.keys())
     assert set(matches) == TIED_COMMANDS
-    assert distance == 0.0
+    assert distance == 0.25 <= FUZZY_THRESHOLD     # four letters of sixteen, for each of the two
 
 
 def test_tie_is_also_reachable_from_a_spaced_utterance(todolist_command_names):
-    """A user typing words, not a command name, reaches the same tie: predict
-    replaces spaces with underscores before matching."""
+    """A user typing words, not a command name, reaches the same tie: spaces and
+    underscores are ignored."""
     utterance = "add child todo"
-    matches, distance = find_best_matches(
-        utterance.replace(" ", "_"), todolist_command_names.keys(),
-        threshold=FUZZY_THRESHOLD)
+    matches, distance = misspelt(utterance, todolist_command_names.keys())
     assert set(matches) == TIED_COMMANDS
-    assert distance == 0.0
+    assert distance == 0.25
 
 
 # ---------------------------------------------------------------------------

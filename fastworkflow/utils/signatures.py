@@ -8,13 +8,12 @@ import dspy
 from dspy.experimental import Choice
 import os
 from contextlib import suppress
-from dataclasses import dataclass, field as dataclass_field
-from types import UnionType
+from dataclasses import dataclass, field as dataclass_field, replace as dataclass_replace
 from typing import Literal, NamedTuple, Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
 import re
-from difflib import SequenceMatcher, get_close_matches
+from difflib import get_close_matches
 from concurrent.futures import ThreadPoolExecutor
 import json
 
@@ -34,7 +33,8 @@ from fastworkflow.utils.input_validation import bound_fields, is_pydantic_model,
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import planning_commands
-from fastworkflow.parameters import ask
+from fastworkflow.parameters import ask, rules
+from fastworkflow.parameters.rules import allowed_member, is_union, literal_values, pattern_refusal
 from fastworkflow.utils.workflow_vocabulary import (
     KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 
@@ -68,7 +68,7 @@ def not_given_value(field_info: Any) -> Any:
     if field_info.default_factory is not None:
         return field_info.default_factory()
     annotation = field_info.annotation
-    if get_origin(annotation) in (Union, UnionType):
+    if is_union(annotation):
         return None
     origin = get_origin(annotation)
     if origin is list or annotation is list:
@@ -86,7 +86,7 @@ def is_required_argument(field_info: Any) -> bool:
     """Whether a caller must give the field: no declared default, and not Optional."""
     if not field_info.is_required():
         return False
-    return get_origin(field_info.annotation) not in (Union, UnionType)
+    return not is_union(field_info.annotation)
 
 
 def parameters_with_unfilled(model_class: Type[BaseModel], values: Dict[str, Any]) -> BaseModel:
@@ -127,10 +127,6 @@ def parameters_with_unfilled(model_class: Type[BaseModel], values: Dict[str, Any
 # placeholder the agent never filled in, and running the command with it would
 # only produce a not-found or an empty result that reads like an answer.
 
-# The whole value is one bracketed token, possibly doubled (``<<x>>``). A value
-# with brackets inside it, or text outside them, is left alone.
-_BRACKETED_VALUE = re.compile(r"^\s*<+\s*([^<>]*?)\s*>+\s*$")
-
 # How many rounds of HTML entity decoding a value gets before it is matched. A model that answers
 # through a forced tool call sometimes writes the brackets escaped (``&lt;UNKNOWN&gt;``), and once
 # more for a doubly escaped reply (``&amp;lt;UNKNOWN&amp;gt;``) (fix-3koe).
@@ -148,57 +144,22 @@ def decode_entities(text: str) -> str:
         text = decoded
     return text
 
-# Lowercase words joined by ``_`` or ``-``, no digits: the shape of a variable
-# name, which is what a usage-text placeholder is.
-_IDENTIFIER_SHAPE = re.compile(r"[a-z]+(?:[_\-][a-z]+)*")
 
-# Words a placeholder is made of when it does not repeat the field's own name.
-_PLACEHOLDER_WORDS = frozenset({
-    "uid", "uuid", "id", "ids", "key", "code", "value", "values", "name",
-    "placeholder", "param", "parameter", "arg", "argument",
-})
+def classify_bracketed_value(value: Any) -> Tuple[str, Any]:
+    """Classify one parameter value by THE template-token verdict (``rules.placeholder_like``), which every path
+    reaches through here or through ``screen_parameter_values`` (bd fix-ftdl.6.1).
 
-
-def _is_placeholder_text(inner: str, field_name: str) -> bool:
-    """Whether *inner* (the text between the brackets) names a value instead of
-    being one.
-
-    Placeholder: empty, punctuation only, or variable-name shaped (lowercase
-    words, no digits, all one case) and either snake_case or made of the field's
-    own words / generic placeholder words: ``repo_uid``, ``uid``,
-    ``first_order_uid``, ``&_catalog_uid_``, ``filter`` for a ``filter``
-    field. Anything carrying a digit, a space, or mixed case is a value:
-    ``9a1b2c3d...``, ``Ann Lee``, ``PayHub``.
-    """
-    core = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", inner)
-    if not core or core.lower() == "unknown":
-        # ``<UNKNOWN>`` is the extractor's not-given marker (fix-1pfu), never a value.
-        return True
-    if not (core.islower() or core.isupper()):
-        return False
-    lowered = core.lower()
-    if not _IDENTIFIER_SHAPE.fullmatch(lowered):
-        return False
-    if "_" in lowered:
-        return True
-    words = set(re.split(r"[_\-]", lowered))
-    field_words = set(field_name.lower().split("_"))
-    return bool(words & (field_words | _PLACEHOLDER_WORDS))
-
-
-def classify_bracketed_value(value: Any, field_name: str) -> Tuple[str, Any]:
-    """Classify one parameter value for angle brackets around it.
-
-    Returns ``("unchanged", value)``, ``("unwrapped", inner_value)`` for a real
-    value inside brackets, or ``("placeholder", value)`` for bracketed text that
-    holds no value. Only strings are inspected; a list is checked item by item
-    and is a placeholder if any item is.
+    Returns ``("unchanged", value)``, ``("unwrapped", inner_value)`` for a real value inside angle brackets
+    (``<Dune>``, ``<9a1b2c3d>``), or ``("placeholder", value)`` for a value that is entirely one template token: a
+    variable name in angle brackets or braces (``<item_uid>``, ``<ID>``, ``{name}``; the shape alone,
+    ``rules.placeholder_inner``). Braces are never unwrapped: ``{"a": 1}`` is a value as written. Only strings are inspected; a list is checked item by item and is a placeholder if
+    any item is. There is no list of stand-in words and the field is not read.
     """
     if isinstance(value, list):
         changed = False
         items = []
         for item in value:
-            kind, new_item = classify_bracketed_value(item, field_name)
+            kind, new_item = classify_bracketed_value(item)
             if kind == "placeholder":
                 return "placeholder", value
             changed = changed or kind == "unwrapped"
@@ -207,11 +168,11 @@ def classify_bracketed_value(value: Any, field_name: str) -> Tuple[str, Any]:
     if not isinstance(value, str) or isinstance(value, Enum):
         return "unchanged", value
     # Escaped brackets (``&lt;item_uid&gt;``) are brackets: matched on the decoded text (fix-3koe).
-    match = _BRACKETED_VALUE.match(decode_entities(value))
-    if not match:
-        return "unchanged", value
-    inner = match[1]
-    if _is_placeholder_text(inner, field_name):
+    decoded = decode_entities(value)
+    inner = rules.bracketed_inner(decoded)
+    if inner is None:
+        return ("placeholder", value) if rules.placeholder_like(rules.clean_str(decoded)) else ("unchanged", value)
+    if rules.placeholder_inner(inner) or rules.placeholder_like(inner):   # ``<{name}>`` is a token too
         return "placeholder", value
     return "unwrapped", inner
 
@@ -299,20 +260,16 @@ def unwrap_quoted_value(value: Any, request_text: Optional[str] = None) -> Tuple
     return (True, current) if unwrapped else (False, value)
 
 
-# --- Placeholder-shaped values the request never writes -----------------------------
+# --- A value that only echoes the field's own name -----------------------------------
 #
-# Without brackets a placeholder still has a recognisable shape: a qualifier
-# word plus the field's own name (``desired-tag``, ``your_uid``, ``new-name``),
-# or nothing but the field's name / generic placeholder words (``uid`` for an
-# ``item_uid`` field). Such a value is a placeholder only if the request does
-# not write it: a request that says "add the tag new-name" means it.
-
-_PLACEHOLDER_QUALIFIERS = frozenset({
-    "desired", "your", "my", "new", "some", "example", "sample", "placeholder",
-    "target", "actual", "real", "specific", "chosen", "selected", "appropriate",
-    "relevant", "correct", "given", "the", "a", "an", "any",
-})
-
+# Without brackets a placeholder still has a recognisable shape: the field's own
+# name, whole or in part (``uid`` or ``item_uid`` for an ``item_uid`` field), or
+# one word before the field's whole name (``your_item_uid``, ``desired-tag`` for
+# ``tag``). Such a value is a placeholder only if the request does not write it:
+# a request that says "add the tag desired-tag" means it. There is no list of
+# stand-in words: a generic stand-in that does not echo the field's name
+# (``value``, ``your_name``) is the remote "was this value given" check's
+# business, and a marked field's strict check refuses it (bd fix-ftdl.6.1).
 
 def _is_declared_choice(annotation: Any, value: Any) -> bool:
     """Whether str *value* is one of the choices *annotation* declares: a member of a ``Literal``,
@@ -320,7 +277,7 @@ def _is_declared_choice(annotation: Any, value: Any) -> bool:
     whatever word it is: ``code`` for ``Literal["code", "name"]`` is never a placeholder."""
     if not isinstance(value, str):
         return False
-    options = get_args(annotation) if get_origin(annotation) is Union else (annotation,)
+    options = get_args(annotation) if is_union(annotation) else (annotation,)
     for option in options:
         if get_origin(option) is Literal and value in get_args(option):
             return True
@@ -331,30 +288,26 @@ def _is_declared_choice(annotation: Any, value: Any) -> bool:
 
 def is_ungrounded_placeholder(value: Any, field_name: str,
                               request_text: Optional[str]) -> bool:
-    """Whether str *value* is placeholder-shaped and *request_text* never writes it.
+    """Whether str *value* only echoes *field_name* and *request_text* never writes it.
 
-    Placeholder-shaped: lowercase words joined by ``-`` or ``_`` (no digits, no
-    spaces), and either a qualifier word followed by words that include one of
-    the field's own words or a generic placeholder word (``desired-tag`` for
-    ``tag``, ``your_item_uid`` for ``item_uid``), or made only of such words
-    (``uid`` for ``item_uid``). The request is searched case-insensitively for
-    the value as written. With no request text there is nothing to ground
-    against and the value is left alone. A list is a placeholder if any item is.
+    Echo: lowercase words joined by ``-`` or ``_`` (no digits, no spaces), either all of them words of the field's
+    own name (``uid`` or ``item_uid`` for ``item_uid``) or one word before the field's whole name
+    (``your_item_uid`` for ``item_uid``, ``desired-tag`` for ``tag``). The request is searched case-insensitively
+    for the value as written. With no request text there is nothing to ground against and the value is left alone.
+    A list is a placeholder if any item is.
     """
     if isinstance(value, list):
         return any(is_ungrounded_placeholder(v, field_name, request_text) for v in value)
     if not isinstance(value, str) or isinstance(value, Enum) or not request_text:
         return False
     text = value.strip()
-    if not text or not _IDENTIFIER_SHAPE.fullmatch(text):
+    if not text or not rules.IDENTIFIER_SHAPE.fullmatch(text):
         return False
     if text.lower() in request_text.lower():
         return False
     words = re.split(r"[_\-]", text)
-    known = set(field_name.lower().split("_")) | _PLACEHOLDER_WORDS
-    if len(words) >= 2 and words[0] in _PLACEHOLDER_QUALIFIERS:
-        return bool(set(words[1:]) & known)
-    return set(words) <= known
+    own = field_name.lower().split("_")
+    return set(words) <= set(own) or words[1:] == own
 
 
 # --- A command's name written as a value -----------------------------------------------
@@ -391,7 +344,7 @@ def _is_declared_choice_of(annotation: Any, value: Any) -> bool:
     """``_is_declared_choice`` for a field, and for the items of a list field."""
     if _is_declared_choice(annotation, value):
         return True
-    options = get_args(annotation) if get_origin(annotation) is Union else (annotation,)
+    options = get_args(annotation) if is_union(annotation) else (annotation,)
     return any(
         get_origin(option) in (list, List) and get_args(option)
         and _is_declared_choice(get_args(option)[0], value)
@@ -441,8 +394,8 @@ def command_name_refusals(cmd_parameters: BaseModel, subject_command_name: str,
 # (``fastworkflow.utils.workflow_vocabulary``) and the closed pronoun list decide. Only a value
 # that is exactly such a word is refused; a value that merely contains one passes. A declared
 # choice (a Literal or an Enum field) is never screened, whatever word it is. A kind-selector
-# field (its description or labeled examples name the kinds it takes, ``kind_options``) is exempt
-# from the kind-word refusal for the values it lists; the pronoun refusal still applies to it.
+# field (its labeled examples give the kinds it takes, ``kind_options``; a description exempts nothing) is exempt
+# from the kind-word refusal for those values; the pronoun refusal still applies to it.
 # The text ``None`` is the missing-value marker and is never a kind word (``default_unfilled_optional_strs``).
 
 PRONOUN_WHY = "is a pronoun, not a value"
@@ -463,9 +416,26 @@ def _workflow_vocabulary(app_workflow) -> Optional[WorkflowVocabulary]:
 
 def word_screen_refusals(cmd_parameters: BaseModel, vocabulary: Optional[WorkflowVocabulary],
                          skip: Any, command_name: Optional[str]) -> Dict[str, Tuple[Any, str]]:
+    """``{field: (value, wording)}`` of the free-text values ``word_screen_whys`` finds (see there), each with the
+    sentence the `/` question says it in."""
+    return {field_name: (value, f"{field_name} {value!r} {why}: pass the real {field_name} the request names.")
+            for field_name, (value, why) in word_screen_whys(cmd_parameters, vocabulary, skip, command_name).items()}
+
+
+def word_screen_reasons(cmd_parameters: BaseModel, vocabulary: Optional[WorkflowVocabulary],
+                        command_name: Optional[str]) -> Tuple[Tuple[str, str], ...]:
+    """``((field, "'it' is a pronoun, not a value"), ...)``: the free-text values of *cmd_parameters* (as extracted, before
+    the screens cleared them) that are only a pronoun or a word of the workflow's vocabulary, each with why: what the
+    question of a plan says about a value it could not take (``Extraction.screened``)."""
+    return tuple((name, f"{value!r} {why}")
+                 for name, (value, why) in word_screen_whys(cmd_parameters, vocabulary, (), command_name).items())
+
+
+def word_screen_whys(cmd_parameters: BaseModel, vocabulary: Optional[WorkflowVocabulary],
+                     skip: Any, command_name: Optional[str]) -> Dict[str, Tuple[Any, str]]:
     """Free-text ``str`` fields whose value is only a pronoun or only a kind word or field name.
 
-    Returns ``{field: (value, wording)}``. A ``str`` or ``Optional[str]`` field only; the
+    Returns ``{field: (value, why)}``. A ``str`` or ``Optional[str]`` field only; the
     fields in *skip* were already refused by an earlier screen and are left alone. A kind-selector
     field (``WorkflowVocabulary.kind_options``) is exempt from the kind-word refusal only: a value
     it lists is a kind it takes. The pronoun refusal still applies.
@@ -489,7 +459,7 @@ def word_screen_refusals(cmd_parameters: BaseModel, vocabulary: Optional[Workflo
             why = KIND_WORD_WHY
         else:
             continue
-        refused[field_name] = (value, f"{field_name} {value!r} {why}: pass the real {field_name} the request names.")
+        refused[field_name] = (value, why)
     return refused
 
 
@@ -520,7 +490,7 @@ _INT_TEXT = re.compile(r"^\s*[+-]?\d+\s*$")
 def _numeric_kind(annotation: Any) -> Optional[Type[Any]]:
     """``int`` or ``float`` when the field is a plain (optional) number, else None."""
     candidates = [annotation]
-    if get_origin(annotation) is Union:
+    if is_union(annotation):
         candidates = [t for t in get_args(annotation) if t is not type(None)]
     if int in candidates and bool not in candidates:
         return int
@@ -698,7 +668,7 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
         original_value = field_value
 
         quoted, field_value = unwrap_quoted_value(field_value, quote_texts)
-        kind, new_value = classify_bracketed_value(field_value, field_name)
+        kind, new_value = classify_bracketed_value(field_value)
         if kind == "unwrapped":
             inner_quoted, new_value = unwrap_quoted_value(new_value, quote_texts)
             quoted = quoted or inner_quoted
@@ -722,8 +692,8 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
         if field_value is not original_value:
             set_field_unvalidated(cmd_parameters, field_name, field_value)
         # A declared Literal or Enum choice is never ungrounded: it is the field's own vocabulary,
-        # and a choice that looks like a placeholder word (``code``) is not one. A bracketed
-        # placeholder (``<code>``) is still refused: it is not the choice itself.
+        # and a choice that echoes the field's name (``code`` for a ``code`` field) is not a placeholder.
+        # A bracketed placeholder (``<code>``) is still refused: it is not the choice itself.
         if kind == "placeholder" or (
             kind == "unchanged"
             and not _is_declared_choice(field_info.annotation, field_value)
@@ -791,15 +761,6 @@ def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any
             logger.warning(f"Error loading trainset for {subject_command_name}: {e}")
             
         return trainset
-
-
-# Jev's pick among the candidates of an undecided fuzzy match (DatabaseValidator.fuzzy_match_with_request).
-# Measured: with value descriptions, 97 confident picks and 1 wrong; without them (value names alone)
-# 6 wrong picks in 26, so the helper never calls Jev without descriptions. 0.9 is the conservative bar.
-VALUE_PICK_THRESHOLD = 0.9
-VALUE_PICK_ENV_VAR = "FW_JEV_VALUE_PICK"
-_VALUE_PICK_OFF = ("off", "0", "false")
-_VALUE_PICK_FALLBACK_CANDIDATES = 5
 
 
 #: A unique fuzzy match is applied only when no other candidate scores within this margin of it (edits /
@@ -921,84 +882,6 @@ class DatabaseValidator:
 
         return False, None, []
 
-    @staticmethod
-    def fuzzy_match_with_request(value: str, key_values: list[str], request: str,
-                                 descriptions: Optional[Dict[str, str]],
-                                 threshold: float = 0.6, suggest_threshold: float = 0.7,
-                                 auto_apply_threshold: float = 0.2,
-                                 argument_name: str = "") -> Tuple[bool, Optional[str], List[str]]:
-        """``fuzzy_match``, and when that is not decisive, Jev reads the request to pick the intended value.
-
-        Same return contract as ``fuzzy_match``. A unique fuzzy match stands and Jev is not called. When
-        fuzzy matching leaves several candidates (its suggestions, or the five closest keys by ``difflib``
-        when it has none), one Jev call sees the *request* and each candidate with its description. The
-        pick is returned as a match only when Jev is at least ``VALUE_PICK_THRESHOLD`` sure of it and it is
-        one of the candidates; "ask" or a less sure answer returns ``fuzzy_match``'s result, so the hook
-        still asks the user to choose.
-
-        Descriptions are required. ``descriptions`` maps each key value to a short description of what it
-        is. Without them Jev picks from bare names and makes wrong picks (measured: 6 wrong in 26), so with
-        no descriptions (None or {}) Jev is not called. An empty *request* also makes no call.
-
-        A hook gets the request text through its ``command_text`` parameter: ``validate_parameters`` passes
-        the command's request (its statement) to a hook that declares ``command_text`` and to no other hook.
-        Pass that text as *request*.
-
-        Jev is not called when the value is empty or NOT_FOUND, *key_values* is empty, no Jev LM is
-        configured (no JEV_API_KEY), or the switch ``FW_JEV_VALUE_PICK`` is off (``off``, ``0`` or ``false``,
-        case-insensitive; default on). The call never raises: a failure logs a warning and returns
-        ``fuzzy_match``'s result.
-        """
-        fuzzy = DatabaseValidator.fuzzy_match(value, key_values, threshold, suggest_threshold,
-                                              auto_apply_threshold)
-        if fuzzy[0]:
-            return fuzzy
-        if not request or not descriptions or not value or value == NOT_FOUND or not key_values:
-            return fuzzy
-        switch = str(fastworkflow.get_env_var(VALUE_PICK_ENV_VAR, default="on")).strip().lower()
-        if switch in _VALUE_PICK_OFF:
-            return fuzzy
-        try:
-            from fastworkflow.workflow_agent import _jev_lm   # read at call time (workflow_agent imports this module)
-            lm = _jev_lm()
-            if lm is None:
-                return fuzzy
-            candidates = list(dict.fromkeys(fuzzy[2]))
-            if not candidates:
-                candidates = sorted(
-                    key_values,
-                    key=lambda k: SequenceMatcher(None, value.lower(), k.lower()).ratio(),
-                    reverse=True,
-                )[:_VALUE_PICK_FALLBACK_CANDIDATES]
-                candidates = list(dict.fromkeys(candidates))
-            if "ask" in candidates:
-                return fuzzy
-            options = tuple(
-                (v, f"{v} ({descriptions.get(v, 'no other details')})") for v in candidates
-            ) + (("ask", "The request does not say which one; the user must choose."),)
-            signature = dspy.make_signature({
-                "request": (str, dspy.InputField(desc="the user's request")),
-                "argument": (str, dspy.InputField(
-                    desc="the argument being filled and the value written for it")),
-                "value": (Choice[options], dspy.OutputField(
-                    desc="Which of these does the request mean? 'ask' if it does not say.")),
-            }, "Decide which candidate value the user's request means for the argument.")
-            where = f"{argument_name}; " if argument_name else ""
-            with dspy.context(lm=lm):
-                choice = dspy.Predict(signature)(
-                    request=request,
-                    argument=f"{where}value written for it: '{value}'",
-                ).value
-            picked = str(choice.value)
-            probability = float((choice.probabilities or {}).get(picked, choice.confidence))
-            logger.info(f"value pick for '{value}': {picked} (probability {probability:.2f})")
-            if picked != "ask" and picked in candidates and probability >= VALUE_PICK_THRESHOLD:
-                return True, picked, []
-            return fuzzy
-        except Exception:  # noqa: BLE001 - the pick is an extra; fuzzy_match's result stands
-            logger.warning(f"could not pick the value for '{value}' from the request", exc_info=True)
-            return fuzzy
-
 
 def _planning_command_of(app_workflow, subject_command_name: str):
     """The loaded planning command *subject_command_name* of *app_workflow*, or None."""
@@ -1072,8 +955,9 @@ def reject_retired_db_lookup(signature_class, input_model, where: str) -> None:
 
 # Jev's check of the fields an LLM extraction filled (fields_not_given). A filled field is reset
 # to its not-given value when Jev is at least FIELD_GIVEN_THRESHOLD sure the statement does not
-# give it a value. Measured: 775/778 agreement with a reference model, and at probability >= 0.7
-# it never blanked a correct value; 0.9 is the conservative bar.
+# give it a value. Measured (bd fix-jd9o.3), two samples: on 778 agent-written statements 775 agreed
+# with a reference model, and at probability >= 0.7 it never blanked a correct value; on 1,471 archived
+# extractions a reset at >= 0.9 was right 266 of 267 times. 0.9 is the conservative bar.
 FIELD_GIVEN_THRESHOLD = 0.9
 FIELD_GIVEN_ENV_VAR = "FW_JEV_FIELD_GIVEN"
 _FIELD_GIVEN_OFF = ("off", "0", "false")
@@ -1135,8 +1019,10 @@ def _check_field_given(lm, statement: str, name: str, field_info: Any) -> tuple[
 def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict) -> dict[str, float]:
     """``{field_name: probability}`` for the filled fields of *values* that Jev is at least
     FIELD_GIVEN_THRESHOLD sure the *statement* does not give a value for. One Jev call per filled
-    field, in parallel. Empty without a Jev LM or when FW_JEV_FIELD_GIVEN is off. A failed check
-    leaves the extracted value standing; never raises."""
+    UNMARKED field, in parallel: a field marked ``copied_from_command_text`` or ``record_named_in_command_text`` is
+    decided by the strict check, so it is not asked about (bd fix-ftdl.6.2), and neither is a value the statement
+    writes at word boundaries (``_written_in``: the text gives it, a model call cannot overrule it). Empty without a Jev LM or when
+    FW_JEV_FIELD_GIVEN is off. A failed check leaves the extracted value standing; never raises."""
     try:
         if not _field_given_enabled():
             return {}
@@ -1144,8 +1030,11 @@ def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict)
         lm = _jev_lm()
         if lm is None:
             return {}
+        from fastworkflow.parameters.check import is_marked
+
         checks = [(name, info) for name, info in model_class.model_fields.items()
-                  if _is_filled(info, values.get(name))]
+                  if _is_filled(info, values.get(name)) and not is_marked(info)
+                  and not _written_in(values.get(name), statement)]
         if not checks:
             return {}
 
@@ -1167,6 +1056,20 @@ def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict)
     except Exception:  # noqa: BLE001
         logger.warning("could not check which fields the statement gives", exc_info=True)
         return {}
+
+
+def _written_in(value: Any, statement: str) -> bool:
+    """Whether *statement* writes *value* at word boundaries (``rules.written_at``, the strict check's own rule): a
+    scalar's text, an ``Enum``'s value, each item of a list. Such a value is given by the text itself, so no model is
+    asked whether it is (``fields_not_given``)."""
+    from fastworkflow.parameters.rules import fold, written_at
+
+    if isinstance(value, Enum):
+        value = value.value
+    items = value if isinstance(value, (list, tuple)) else [value]
+    folded = fold(statement or "").lower()
+    texts = [str(item).strip() for item in items if not isinstance(item, bool) and item is not None]
+    return bool(texts) and len(texts) == len(items) and all(text and written_at(text, folded) >= 0 for text in texts)
 
 
 def reset_to_not_given(model_class: Type[BaseModel], values: dict, fields) -> None:
@@ -1198,34 +1101,19 @@ def drop_unknown_markers(value: Any, not_given: Any) -> Any:
     return value
 
 
-def planning_verbatim_sentences(model_class: Type[BaseModel], command_name: Optional[str],
-                                workflow_folderpath: Optional[str],
-                                sentences: Dict[str, Tuple[str, ...]]) -> Dict[str, Tuple[str, ...]]:
-    """*sentences*, with the copy-it-exactly sentence added to each ``str`` field of a planning command's ``Input``
-    that does not already carry one (fix-48np).
+class _TextLiteralsAsText(dspy.JSONAdapter):
+    """The extractor's adapter: the model is shown every field's own type (a ``Literal`` lists its allowed values), but
+    an answer is parsed with each ``Literal`` of text read as the text it is, even outside the allowed values. One
+    field's bad value then no longer fails the whole answer and loses every other field: the guard
+    (``parameters.check``) refuses THAT field by name, and takes a member written in another case or spacing in its
+    declared spelling. A wrong TYPE in some other field (text for an int) still fails the answer, as before."""
 
-    The typed planning call told its model that every ``str`` argument is "Copied verbatim from the request"
-    (``planning_commands._field_desc``); the extractor told it only for an ``in_request`` field, and paraphrased a
-    free-text argument (a note) that no check reads. A planning command's ``str`` fields now get
-    ``planning_commands.IN_REQUEST_STR_SENTENCE`` here. An execution command's fields are unchanged: *model_class*
-    is a planning command's ``Input`` only when *command_name* names a planning command of the workflow at
-    *workflow_folderpath* with the same fields.
-    """
-    if not command_name or not workflow_folderpath:
-        return sentences
-    try:
-        command = planning_commands.planning_command(workflow_folderpath, command_name)
-    except Exception:  # noqa: BLE001 - no planning command, no sentence: the extraction is as before
-        return sentences
-    if command is None or {p.name for p in command.params} != set(model_class.model_fields):
-        return sentences
-    out = dict(sentences)
-    for param in command.params:
-        if param.type == "str" and param.name in model_class.model_fields:
-            have = out.get(param.name, ())
-            if planning_commands.IN_REQUEST_STR_SENTENCE not in have and planning_commands.SUBJECT_SENTENCE not in have:
-                out[param.name] = (*have, planning_commands.IN_REQUEST_STR_SENTENCE)
-    return out
+    def parse(self, signature, completion):
+        for name, field in signature.output_fields.items():
+            if literal_values(field.annotation):
+                optional = type(None) in get_args(field.annotation)
+                signature = signature.with_updated_fields(name, type_=Optional[str] if optional else str)
+        return super().parse(signature, completion)
 
 
 class InputForParamExtraction(BaseModel):
@@ -1239,6 +1127,11 @@ Today's date is {today}.
     fields_reset_not_given: Dict[str, float] = Field(default_factory=dict, exclude=True)
     #: True when every extraction attempt failed to parse into the fields' types (a value outside a Literal or enum).
     unparsed: bool = Field(default=False, exclude=True)
+    #: Set by validate_parameters: a marked value the Input's validators rewrote, as the checks accepted it before
+    #: (name -> value), when the validators passed.
+    unvalidated: Dict[str, Any] = Field(default_factory=dict, exclude=True)
+    #: Set by validate_parameters: the optional fields the duplicate rule left not given, with its note (name -> line).
+    left_empty: Dict[str, str] = Field(default_factory=dict, exclude=True)
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
@@ -1286,14 +1179,16 @@ Today's date is {today}.
 
         Args:
             pydantic_model: The Pydantic model class to convert
-            sentences: ``{field: rule sentences}`` appended after that field's description
-                (``planning_commands.extraction_sentences_for``); nothing else reads them
+            sentences: ``{field: sentences}`` appended after that field's description; None means the field's own
+                declarations' sentences (``planning_commands.option_sentences``, the one builder of both kinds)
             skip: fields the extractor is not asked for (``verify: "alone"``, which the classifier
                 decides: ``planning_commands.classifier_alone_fields``)
 
         Returns:
             A DSPy Signature class
         """
+        if sentences is None:
+            sentences = planning_commands.option_sentences(pydantic_model)
         signature_components = {
             "statement": (str, dspy.InputField(desc="Statement according to Dhar"))
         }
@@ -1307,7 +1202,7 @@ Today's date is {today}.
             is_optional = False
             attribute_type = attribute_metadata.annotation
 
-            if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
+            if is_union(attribute_type):
                 union_elements = get_args(attribute_type)
                 if type(None) in union_elements:
                     is_optional = True
@@ -1330,10 +1225,10 @@ Today's date is {today}.
                 default_value = attribute_metadata.default
 
             info_text = attribute_metadata.description or f"The {attribute_name}"
-            if rule_sentences := (sentences or {}).get(attribute_name):
-                # the rule sentences of the field's options (3.4, Descriptions), after its description;
+            if rule_sentences := sentences.get(attribute_name):
+                # the sentences of the field's declarations (its marks, its type, its pattern), after its description;
                 # the ". This field is ..." below ends the last one
-                info_text = f"{info_text.rstrip('. ')}. {' '.join(s.rstrip('.') for s in rule_sentences)}"
+                info_text = ". ".join([info_text.rstrip(". "), *(s.rstrip(".") for s in rule_sentences)])
 
             if attribute_name != "query": 
                 steps.append(f"Step {field_num}: Identify the {attribute_name} ({info_text}).")
@@ -1342,15 +1237,9 @@ Today's date is {today}.
             if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
                 possible_values = [f"'{option.value}'" for option in attribute_type]
                 info_text += f". Valid values: {', '.join(possible_values)}"
-            elif isinstance(extra := attribute_metadata.json_schema_extra, dict) and \
-                    isinstance(declared := extra.get("enum"), (list, tuple)) and declared:
-                # allowed values declared outside the type (JSON Schema ``enum``): the model is told
-                # them, and argument_checks refuses any other value (fix-1pfu.enum-in-extra, fix-qjf4)
-                info_text += f". Valid values: {', '.join(repr(str(v)) for v in declared)}"
 
-            if attribute_metadata.examples:
-                sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])
-                info_text += f". Examples: {sample_values}"
+            # The field's ``examples`` are NOT shown to the model (a model copies them as values): they feed the
+            # generated few-shot examples and the hint in a question. A declared pattern is one of its sentences.
 
             requirement_status = "Optional" if is_optional else "Required"
             info_text += f". This field is {requirement_status}."
@@ -1397,12 +1286,8 @@ Today's date is {today}.
         if model_class is None:
             raise ValueError("No model class provided")
         
-        params_signature = self.create_signature_from_pydantic_model(
-            model_class,
-            planning_verbatim_sentences(model_class, subject_command_name, workflow_folderpath,
-                                        planning_commands.option_sentences(model_class)),
-            planning_commands.classifier_alone_fields(model_class))
-        
+        params_signature = extraction_signature(model_class)
+
         class ParamExtractor(dspy.Module):
             def __init__(self, signature):
                 super().__init__()
@@ -1419,7 +1304,7 @@ Today's date is {today}.
 
         param_dict = {}
         field_names = list(model_class.model_fields.keys())
-        with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
+        with dspy.context(lm=lm, adapter=_TextLiteralsAsText()):
             optimizer = dspy.LabeledFewShot(k=length)
             compiled_model = optimizer.compile(
                 student=param_extractor,
@@ -1427,12 +1312,8 @@ Today's date is {today}.
             )
 
             def basic_checks(args, pred):
-                for field_name in field_names:
-                    # return 0 if it extracts an example value instead of correct value | None
-                    extracted_param_value = getattr(pred, field_name, None)   # None: not asked for
-                    examples = model_class.model_fields[field_name].examples
-                    if examples and extracted_param_value in examples:
-                        return 0.0
+                # No criterion: a value equal to one of a field's ``examples`` is a value like any other (the
+                # examples are not shown to the model). BestOfN still retries an attempt that raised.
                 return 1.0
 
             # Up to 3 attempts: the first at temperature 0, the retries (reward 0)
@@ -1489,7 +1370,8 @@ Today's date is {today}.
         for a command of either kind (2.46, 3.4).
 
         ``check_verdicts`` (one classifier call per ``verify`` field, when a Jev LM is set) and then
-        ``check_arguments``' guards; the guarded values are written back onto *cmd_parameters*.
+        ``check_arguments``' guards; the guarded values are written back onto *cmd_parameters*, also when a guard
+        refuses one: the others' corrections are kept (``planning_commands.checked_around_gaps``).
         Returns the refusal (an exception: its ``gap`` names the argument the guard refused), or None when every
         guard passes.
 
@@ -1499,26 +1381,42 @@ Today's date is {today}.
         # workflow_agent imports this module (through command_executor), so it is read at call time.
         from fastworkflow.workflow_agent import _jev_lm
 
+        # the request as the user wrote it: the command word an agent's text starts with is not part of it
+        # (``fill.without_own_command_word``, the text the extraction's check stage reads too)
+        from fastworkflow.parameters.fill import without_own_command_word
+
         raw = {param.name: getattr(cmd_parameters, param.name, None) for param in command.params}
+        request = without_own_command_word(self.command, command.name)
         try:
             if verdicts is None:
                 verdicts = planning_commands.check_verdicts(_jev_lm(), command, self.command)
             elif hasattr(verdicts, "result"):
                 verdicts = verdicts.result()
-            args, notes = planning_commands.check_arguments(command, raw, self.command, verdicts)
+            args, notes = planning_commands.check_arguments(command, raw, request, verdicts)
         except planning_commands.PlanningCommandCallError as refusal:
-            if diagnostics is not None:
-                diagnostics["argument_refusal"] = str(refusal)
+            # what the guards correct in the arguments they do not refuse is kept, as when they all pass: a refusal
+            # of one argument does not drop a sure verdict or a respelling of another
+            args, notes = planning_commands.checked_around_gaps(
+                command, raw, request, None if hasattr(verdicts, "result") else verdicts)
+            self._write_guarded(cmd_parameters, args, notes, diagnostics)
             return refusal
+        self._write_guarded(cmd_parameters, args, notes, diagnostics)
+        return None
+
+    def _write_guarded(self, cmd_parameters: BaseModel, args: dict, notes: list,
+                       diagnostics: Optional[Dict[str, Any]]) -> None:
+        """Write the guarded *args* onto *cmd_parameters*, and their *notes* into *diagnostics*. The duplicate rule's
+        notes of the optional fields it left not given are kept as ``left_empty`` (the lines a question and the review
+        item show; ``validate_parameters`` names them on the span)."""
+        self.left_empty = ask.left_empty_lines(notes)
         if diagnostics is not None and notes:
             diagnostics["argument_notes"] = list(notes)
         for name, value in args.items():
             set_field_unvalidated(cmd_parameters, name, value)
-        return None
 
     @staticmethod
     def _name_refused_argument(refusal, cmd_parameters: BaseModel, missing_fields: list, invalid_fields: list,
-                               refusal_messages: list) -> bool:
+                               refusal_messages: list, audience: Optional[str] = None) -> bool:
         """Put the argument a guard's refusal names (its ``gap``) among the missing or invalid fields, with the
         refusal's text, so it is asked for like any other; False when the refusal names no argument (then it is not
         a question)."""
@@ -1529,7 +1427,8 @@ Today's date is {today}.
             missing_fields.append(gap.name)
         else:
             invalid_fields.append(f"{gap.name} '{getattr(cmd_parameters, gap.name, None)}'")
-            refusal_messages.append(str(refusal))
+            # a person reads the plan path's words for the refused value (``ask.refused_clause``); an agent the guard's
+            refusal_messages.append(str(refusal) if audience == ask.AGENT else ask.refused_clause(gap))
         return True
 
     def _check_input_rules(self, command, cmd_parameters: BaseModel, app_workflow,
@@ -1558,18 +1457,23 @@ Today's date is {today}.
         changed = tuple(outcome.written)
         for name, value in outcome.written.items():
             set_field_unvalidated(cmd_parameters, name, value)
+        # A marked value as the checks accepted it, before a validator rewrote it: what a later check of these values
+        # reads (the strict check reads the request's value, never one a validator wrote; the run's validators write it
+        # again). Only when the validators pass, as their writes are only kept then.
+        from fastworkflow.parameters.check import is_marked
+
+        fields = type(cmd_parameters).model_fields
+        self.unvalidated = {name: args[name] for name in changed
+                            if outcome.refusal is None and name in fields and is_marked(fields[name])}
         refusal = outcome.refusal
         if refusal is None:
             return _InputRules(ran, None, (), None, changed)
-        # The hook's wording on this path (HEAD's signature hook): a validator's Refused is its bare message,
-        # a plain ValueError the hook-prefixed one, a validator that raised is "Exception in X's
-        # validate_extracted_parameters function: e".
+        # A validator's Refused (a plain ValueError is the same, with no field) is its bare message; a validator
+        # that raised is "Exception in X's validators: e".
         if refusal.kind == one_driver.REFUSED:
             return _InputRules(ran, refusal.message, tuple(refusal.fields), None, changed)
-        if refusal.kind == one_driver.PLAIN:
-            return _InputRules(ran, f"validate_extracted_parameters: {refusal.message}", (), None, changed)
         if refusal.kind == one_driver.RAISED:
-            message = f"Exception in {command.name}'s validate_extracted_parameters function: {refusal.message}"
+            message = f"Exception in {command.name}'s validators: {refusal.message}"
             return _InputRules(ran, message, (), refusal.raised, changed)
         return _InputRules(ran, refusal.message, (), None, changed)
 
@@ -1579,27 +1483,32 @@ Today's date is {today}.
                             cmd_parameters: BaseModel,
                             diagnostics: Optional[Dict[str, Any]] = None,
                             verdicts=None,
-                            command_text: Optional[str] = None
+                            command_text: Optional[str] = None,
+                            audience: Optional[str] = None
                             ) -> Tuple[bool, str, Dict[str, List[str]], List[str]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
 
         ``diagnostics`` (optional, additive): a caller-owned dict this method
-        fills with STRUCTURED validation outcomes — db_lookup events (field,
-        input value, correction applied / suggestions offered), the
-        validate_extracted_parameters hook's verdict, and the missing/invalid
+        fills with STRUCTURED validation outcomes — the corrections and refusals of the
+        Input's validators (field, input value, correction applied / suggestions offered), and the missing/invalid
         field lists. The observability layer attaches it to the
         fw.nlu.param_extraction span so debugging agents read fields instead
         of parsing the prose error message. Passing None changes nothing.
 
         ``command_text``: what the ``Input``'s model validators see as ``info.context["command_text"]``: the request
         with the user's replies after it. None means this round's text alone (``self.command``).
+
+        ``audience``: who reads the question (``ask.AGENT`` or ``ask.HUMAN``); None means the session's (``ask.audience_of``
+        of the app context). The CME passes the round's, so a person's "/" message in an agent session gets a person's wording.
         """
         is_valid = True
         missing_fields = []
         invalid_fields = []
         all_suggestions = {}
         refusal_messages: List[str] = []
+        self.unvalidated = {}
+        self.left_empty = {}
 
         # Wrappers and placeholders first, before type coercion, patterns,
         # db_lookup and the workflow's hook see the value: every extraction
@@ -1674,7 +1583,7 @@ Today's date is {today}.
 
                         # Build list of candidate concrete types (exclude NoneType from Union)
                         candidate_types: List[Type[Any]] = []
-                        if hasattr(annotation, "__origin__") and annotation.__origin__ is Union:
+                        if is_union(annotation):
                             for t in get_args(annotation):
                                 if t is not type(None):  # noqa: E721
                                     candidate_types.append(t)  # type: ignore[arg-type]
@@ -1841,14 +1750,13 @@ Today's date is {today}.
                             return False, None
 
                         def _try_coerce_literal(literal_type: Any, val: Any) -> Tuple[bool, Optional[str]]:
-                            # A member as written, else the one member it matches in any case (as an enum's name)
+                            # A member as written, else the member the shared rule finds (case and whitespace ignored)
                             members = get_args(literal_type)
                             if val in members:
                                 return True, val
-                            if isinstance(val, str):
-                                folded = [m for m in members if isinstance(m, str) and m.lower() == val.lower()]
-                                if len(folded) == 1:
-                                    return True, folded[0]
+                            if isinstance(val, str) and (allowed := literal_values(literal_type)):
+                                if member := allowed_member(allowed, val):
+                                    return True, member
                             return False, None
 
                         for t in candidate_types:
@@ -1880,37 +1788,11 @@ Today's date is {today}.
                                     valid_by_type = True
                                     break
 
+                        # A declared ``Field(pattern=...)`` is checked once, by the one driver of the Input's checks
+                        # (``parameters.validate``), after the guard has widened a marked id (bd fix-ftdl.6.4).
                         if valid_by_type:
                             if corrected_value is not None:
-                                pattern = next(
-                                    (meta.pattern
-                                        for meta in getattr(field_info, "metadata", [])
-                                        if hasattr(meta, "pattern")),
-                                    None,
-                                )
-                                if pattern and field_value is not None and field_value != NOT_FOUND:
-                                    pattern_regex = re.compile(pattern)
-                                    if not pattern_regex.fullmatch(str(field_value)):
-                                        invalid_fields.append(f"{field_name} '{field_value}'")
-                                        pattern_str = str(pattern)
-                                        examples = getattr(field_info, "examples", [])
-                                        example = examples[0] if examples else ""
-
-                                        invalid_fields.append(f"{field_name} '{field_value}'")
-                                        all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
-                                        is_valid = False
-                                    else:
-                                        try:
-                                            set_field_unvalidated(cmd_parameters, field_name, corrected_value)
-                                        except Exception as e:
-                                            logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
-                                            raise e
-                                else:
-                                    try:
-                                        set_field_unvalidated(cmd_parameters, field_name, corrected_value)
-                                    except Exception as e:
-                                        logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
-                                        raise e
+                                set_field_unvalidated(cmd_parameters, field_name, corrected_value)
                         else:
                             invalid_fields.append(f"{field_name} '{field_value}'")
                             all_suggestions[field_name] = build_type_suggestion()
@@ -1918,7 +1800,7 @@ Today's date is {today}.
 
                 is_optional = False
                 attribute_type = field_info.annotation
-                if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
+                if is_union(attribute_type):
                     union_elements = get_args(attribute_type)
                     if type(None) in union_elements:
                         is_optional = True
@@ -1931,7 +1813,7 @@ Today's date is {today}.
                 is_list_field = False
                 check_type = field_info.annotation
                 check_origin = get_origin(check_type)
-                if check_origin is Union:
+                if is_union(check_type):
                     check_args = get_args(check_type)
                     non_none = [t for t in check_args if t is not type(None)]
                     if non_none:
@@ -1963,31 +1845,42 @@ Today's date is {today}.
             if unfilled:
                 missing_fields.extend(unfilled)
                 is_valid = False
-        # One validation step for every command (3.4, The argument path): the options' checks, then the
-        # roles, then the Input's validators (the former hook). A command's checks are its option fields (2.46).
+        # One validation step for every command (3.4, The argument path): the options' checks (the one strict check of
+        # the marked fields, the duplicate rule among them), then the Input's field checks (its declared patterns) and
+        # validators. A command's checks are its option fields (2.46).
         command = self.checked_command(app_workflow, subject_command_name, type(cmd_parameters))
-        if is_valid and command.params:
-            guard_refusal = self._check_option_arguments(command, cmd_parameters, diagnostics, verdicts)
+        # The guard runs on every value given, also when another one is missing or refused, so one question names
+        # every missing or refused argument (the ones already open are left out of it).
+        open_now = set(missing_fields) | {field.split(" '")[0].strip() for field in invalid_fields}
+        guarded = command if not open_now else dataclass_replace(
+            command, params=tuple(p for p in command.params if p.name not in open_now))
+        if guarded.params:
+            guard_refusal = self._check_option_arguments(guarded, cmd_parameters, diagnostics, verdicts)
+            if diagnostics is not None:
+                # the guard's own text (the retry's note reads it); a refusal of an earlier attempt is not this one's
+                diagnostics.pop("argument_refusal", None)
+                # the optional fields the duplicate rule left not given (names only; the notes say why)
+                diagnostics.pop("argument_left_empty", None)
+                if self.left_empty:
+                    diagnostics["argument_left_empty"] = sorted(self.left_empty)
+                if guard_refusal is not None:
+                    diagnostics["argument_refusal"] = str(guard_refusal)
             if guard_refusal is not None:
                 if not self._name_refused_argument(guard_refusal, cmd_parameters, missing_fields, invalid_fields,
-                                                   refusal_messages):
+                                                   refusal_messages, audience or ask.audience_of(context)):
                     return (False, str(guard_refusal), {}, [])   # names no input: not a question (``argument_refusal``)
                 is_valid = False
-        # The roles of two required str inputs given one value (3.4), as the typed planning call checks them.
-        # HEAD's order on this path: the option checks, the roles, then the hook (now the Input's validators).
-        if is_valid and planning is not None:
-            values = {param.name: getattr(cmd_parameters, param.name, None) for param in planning.params}
-            try:
-                planning_commands._check_roles(planning, values, self.command)
-            except planning_commands.PlanningCommandInputError as refusal:
-                if diagnostics is not None:
-                    diagnostics["argument_refusal"] = str(refusal)
-                if not self._name_refused_argument(refusal, cmd_parameters, missing_fields, invalid_fields,
-                                                   refusal_messages):
-                    return (False, str(refusal), {}, [])
+        # A declared pattern, after the guard has widened a marked id: the one rule (``rules.pattern_refusal``, which
+        # the validators' driver applies too), here for every value not already open, so one question names them all.
+        open_now = set(missing_fields) | {field.split(" '")[0].strip() for field in invalid_fields}
+        for name, info in type(cmd_parameters).model_fields.items():
+            value = getattr(cmd_parameters, name, None)
+            if name not in open_now and value != NOT_FOUND and (mismatch := pattern_refusal(name, info, value)):
+                invalid_fields.append(f"{name} '{value}'")
+                refusal_messages.append(mismatch)
                 is_valid = False
-        # The Input's validators (the former hook: after the option checks and the roles). A refusal with a
-        # field asks for that field again with its message; one without, or a call error, answers the call.
+        # The Input's validators (the former hook: after the option checks). A refusal with a field asks for that
+        # field again with its message; one without, or a call error, answers the call.
         if is_valid:
             rules = self._check_input_rules(command, cmd_parameters, app_workflow, command_text)
             if diagnostics is not None:
@@ -2036,10 +1929,11 @@ Today's date is {today}.
 
         message = ask.word(
             form=ask.FORM_VALIDATION, command_name=subject_command_name,
-            audience=ask.audience_of(getattr(app_workflow, "context", None)),
+            audience=audience or ask.audience_of(getattr(app_workflow, "context", None)),
             parts=ask.Parts(
                 missing=missing_fields, invalid=invalid_fields, available_from=available_from,
                 notes=[
+                    *self.left_empty.values(),
                     *(placeholder_value_message(field, value) for field, value in placeholder_fields.items()),
                     *(wording for _, wording in command_name_fields.values()),
                     *(wording for _, wording in word_fields.values())],
@@ -2049,3 +1943,67 @@ Today's date is {today}.
                 suggestions=all_suggestions)).text
         combined_fields = ask.open_names(missing_fields, invalid_fields)
         return (False, message, all_suggestions, combined_fields)
+
+
+# The parameter extractor's prompt and answer as data (bd fix-0iuo.23). ``extract_parameters`` builds its signature with
+# ``extraction_signature``, and a caller that writes training pairs in the extractor's own format reads the prompt and
+# the answer format through ``extraction_messages`` and ``extraction_answer``, so the two cannot drift.
+
+def extraction_signature(model_class: Type[BaseModel]) -> Type[dspy.Signature]:
+    """The parameter extractor's signature for *model_class*, as ``extract_parameters`` builds it: each field's
+    declaration sentences (``planning_commands.option_sentences``), and no field the classifier alone decides
+    (``planning_commands.classifier_alone_fields``). It has no chain-of-thought field: the extractor's
+    ``dspy.ChainOfThought`` adds it."""
+    return InputForParamExtraction.create_signature_from_pydantic_model(
+        model_class, planning_commands.option_sentences(model_class),
+        planning_commands.classifier_alone_fields(model_class))
+
+
+def _extraction_predictor(model_class: Type[BaseModel], demos) -> "dspy.Predict":
+    """The extractor's predictor: ``dspy.ChainOfThought`` over ``extraction_signature``, with *demos* placed the way
+    ``extract_parameters`` places its trainset (``dspy.LabeledFewShot`` with k = the number of demos)."""
+    signature = extraction_signature(model_class)
+
+    class _Extractor(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.predictor = dspy.ChainOfThought(signature)
+
+    demos = list(demos)
+    compiled = dspy.LabeledFewShot(k=len(demos)).compile(student=_Extractor(), trainset=demos)
+    return compiled.predictor.predict
+
+
+def extraction_messages(model_class: Type[BaseModel], subject_command_name: str, workflow_folderpath: str,
+                        text: str, demos=None) -> list[dict[str, Any]]:
+    """The chat messages the parameter extractor formats for the request *text* of the command
+    *subject_command_name*: its signature with the chain-of-thought field, its labelled examples and its adapter
+    (``_TextLiteralsAsText.format``), as ``extract_parameters`` builds them. No model is called.
+
+    *demos* are the labelled examples shown; None means the command's own (``get_trainset``), as at run time. A caller
+    that must leave some out (a held-out text) passes the rest."""
+    if demos is None:
+        demos = get_trainset(subject_command_name, workflow_folderpath)
+    predict = _extraction_predictor(model_class, demos)
+    inputs = {name: text for name in predict.signature.input_fields}
+    return _TextLiteralsAsText().format(predict.signature, list(predict.demos), inputs)
+
+
+def extraction_answer(model_class: Type[BaseModel], values: Dict[str, Any]) -> str:
+    """The parameter extractor's answer holding *values* (``{argument: value}``), in the format its adapter reads
+    (``_TextLiteralsAsText.format_assistant_message_content``). An output of the signature that *values* does not name
+    holds what the prompt tells the model to return when the request does not mention it (the output field's
+    default), and the chain-of-thought field is empty unless given. ``KeyError`` for a name that is not an output of
+    the extractor's signature (a field the classifier alone decides is not one). No model is called."""
+    signature = _extraction_predictor(model_class, ()).signature
+    outputs = signature.output_fields
+    unknown = [name for name in values if name not in outputs]
+    if unknown:
+        raise KeyError(f"not outputs of the extractor of {getattr(model_class, '__name__', model_class)}: {unknown}")
+    answer = {}
+    for name, info in outputs.items():
+        if name in values:
+            answer[name] = values[name]
+        else:
+            answer[name] = "" if info.default is PydanticUndefined else info.default
+    return _TextLiteralsAsText().format_assistant_message_content(signature, answer)

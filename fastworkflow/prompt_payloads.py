@@ -24,26 +24,29 @@ def _approval(ctx, held) -> dict[str, Any]:
 
     store = review_engine.store_for(ctx._app_workflow)
     record = store.get(held.payload["record_id"])
-    can_always = approval_grants.identity_key(store.surface, store.channel) is not None
+    # A REQUIRED_ALWAYS command asks every time: no standing approval is offered for it (bd fix-qjne.11).
+    can_always = (record.annotation != approval_annotations.REQUIRED_ALWAYS
+                  and approval_grants.identity_key(store.surface, store.channel) is not None)
     return {"approval": _json_safe({
         "command": record.command,
         "parameters": dict(record.binding.get("params") or {}),
         "origin": record.origin,
-        "irreversible": record.origin == "user" or record.annotation == approval_annotations.REQUIRED_ALWAYS,
+        # No "irreversible": whether a change can be undone is the author's to say (bd fix-ftdl.7.6).
         "can_always": bool(can_always),
     })}
 
 
 def _review(ctx, held) -> dict[str, Any]:
-    from fastworkflow import command_writes, review_engine
+    from fastworkflow import review_engine, review_proposals
 
     record = review_engine.store_for(ctx._app_workflow).get(held.payload["record_id"])
     proposal = review_engine.proposal_of(record)
-    writes = command_writes.write_commands(ctx._app_workflow.folderpath) if ctx._app_workflow else frozenset()
-    changes_data = [
-        bool(getattr(item, "means", None) and item.means.kind != "from_scratch" and item.means.name in writes)
-        for item in proposal.items
-    ]
+    # The one definition of each part's badge (``SubTaskProposal.badges``): the text shows the same.
+    badges = (proposal.badges(ctx._app_workflow.folderpath if ctx._app_workflow else None)
+              if isinstance(proposal, review_proposals.SubTaskProposal) else [""] * len(proposal.items))
+    # True for a part that needs the explicit yes: it changes data, or (ad hoc) may change it.
+    changes_data = [badge in (review_proposals.CHANGES_DATA_BADGE, review_proposals.MAY_CHANGE_DATA_BADGE)
+                    for badge in badges]
     items_data = [item.model_dump(mode="json") for item in proposal.items]
     if ctx.no_agent_mode:
         # No agent model: an ad hoc item (means from_scratch) will not be run here; it carries the planner's text
@@ -63,6 +66,7 @@ def _review(ctx, held) -> dict[str, Any]:
         "revision": record.revision,
         "items": items_data,
         "changes_data": changes_data,
+        "badges": badges,
         # The replies the shown prompt's hint promises (the text stays as it is).
         "reply_forms": review_engine.reply_forms(
             getattr(record, "rendering", "") or "", proposal, structured=record.turns_seen >= 1),

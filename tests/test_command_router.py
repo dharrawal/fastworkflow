@@ -26,23 +26,25 @@ def _create_commands(root_dir: Path):
     """
     root = root_dir / "_commands"
     root.mkdir()
+    # Each stub is a command that loads: a command that does not load is in no scope's command set (B6 item 5).
+    stub = "class ResponseGenerator:\n    def __call__(self, workflow, command, input):\n        return 'ok'"
 
     # global command
-    (root / "a.py").write_text("# dummy\nclass ResponseGenerator:\n    pass")
+    (root / "a.py").write_text("# dummy\n" + stub)
     # ignored file
     (root / "ignore.txt").write_text("txt")
 
     # ctx1 with two commands
     ctx1 = root / "ctx1"
     ctx1.mkdir()
-    (ctx1 / "x.py").write_text("# x\nclass ResponseGenerator:\n    pass")
-    (ctx1 / "y.py").write_text("# y\nclass ResponseGenerator:\n    pass")
+    (ctx1 / "x.py").write_text("# x\n" + stub)
+    (ctx1 / "y.py").write_text("# y\n" + stub)
 
     # ctx2 with context implementation
     ctx2 = root / "ctx2"
     ctx2.mkdir()
     (ctx2 / "_ctx2.py").write_text("# ctx2 impl\nclass Context:\n    pass")
-    (ctx2 / "dummy.py").write_text("# dummy\nclass ResponseGenerator:\n    pass")
+    (ctx2 / "dummy.py").write_text("# dummy\n" + stub)
 
     return root
 

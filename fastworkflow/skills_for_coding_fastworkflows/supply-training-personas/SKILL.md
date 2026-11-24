@@ -14,29 +14,32 @@ description: >-
 
 ## The mechanism being changed
 
-Training utterances are written by an LLM role-playing a persona. By default that persona is
-drawn uniformly from the whole PersonaHub corpus (~200k rows) and conditioned on **nothing** — a
-retail workflow and an identity-governance workflow get the same population of astrophysicists,
-sommeliers and marine biologists. Most drawn personas have no relationship to the vocabulary the
-application's users actually employ.
+`fastworkflow train` asks an LLM (`LLM_SYNDATA_GEN`) to write extra utterances for each command
+while role-playing a persona. By default the persona is drawn from the whole PersonaHub corpus
+(about 200k rows) and conditioned on nothing, so a retail workflow and a library
+workflow get the same population of astrophysicists, sommeliers and marine biologists.
 
-`personas.json` is how an application states who its users are. It changes the *pool*; the
-sampling itself is unchanged and stays deterministic.
+`personas.json` states who the application's users are. It changes the *pool*; the draw from it
+stays deterministic per training seed and command.
+
+In the default `embedding` layout the intent head is fitted on those generated utterances plus
+each command's seed utterances (each counted three times), its humanised name and the first
+sentence of its `Signature` docstring. Personas shape only the generated rows.
 
 ## Two modes, one file
 
 | `personas.json` contains | Source | Effect |
 |---|---|---|
-| a non-empty `personas` list | `app_supplied` | Your personas are used verbatim. **PersonaHub is never consulted or downloaded.** |
-| `domain_keywords` (or `domain`) and no `personas` | `domain_conditioned` | PersonaHub is filtered to rows mentioning those keywords; the usual deterministic sample is taken from the survivors. |
-| neither | — | error, not a fallback |
+| a non-empty `personas` list | `app_supplied` | Your personas are used verbatim. **PersonaHub is never loaded or downloaded**, and the `datasets` package is not needed. |
+| `domain_keywords` (or `domain`) and no `personas` | `domain_conditioned` | PersonaHub is filtered to rows mentioning those keywords and the usual sample is drawn from them. |
+| neither | | an error, not a fallback |
 
-An explicit `personas` list **wins** over `domain_keywords` — supplying personas is the stronger
-statement, and honouring the keywords as well would mix generic rows into a curated set.
+A `personas` list wins over `domain_keywords`: honouring both would mix generic rows into a
+curated set.
 
 ## The file
 
-Discovered at `<workflow>/personas.json`. Both forms parse:
+`<workflow>/personas.json`, next to `intent_benchmark.json`:
 
 ```json
 {
@@ -51,138 +54,113 @@ Discovered at `<workflow>/personas.json`. Both forms parse:
 ```
 
 - A **bare JSON array** of personas is accepted, so a quick file needs no wrapper.
-- An entry may be a **bare string** instead of an object; its id becomes its position.
+- An entry may be a **bare string**; its id becomes its position.
 - An object entry takes its text from `persona` or `text`, and its id from `id` or its position.
-- `schema_version` must be `1`.
-- `domain` prose with no `domain_keywords` is usable on its own — its own words (longer than two
-  characters, lowercased) become the keywords. That is the least-effort form of the feature.
+- `schema_version` may be omitted; any value other than `1` is an error.
+- `domain` with no `domain_keywords` is enough on its own: its words longer than two characters,
+  lowercased, become the keywords. That is the least-effort form of the feature.
 
-`SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE` points at a persona file outside the workflow folder, and
-is the only route that needs no change to the workflow at all. Set it in `fastworkflow.env`, not
-as a shell `export`.
+`SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE` points at a persona file outside the workflow folder, the
+one route that needs no change to the workflow. Set it in `fastworkflow.env` (a process
+environment value is read when the env file does not set it). It applies to every workflow the
+run trains that has no `personas.json` of its own, including child workflows under `_workflows/`.
 
-Discovery order: `<workflow>/personas.json` → `SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE` → plain
-PersonaHub.
+Discovery order, per workflow: `<workflow>/personas.json`, then
+`SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE`, then plain PersonaHub.
 
-## Rule 1 — a broken file fails the run, a broken env path does not
+## Rule 1: a broken file fails the run, a missing env path does not
 
-A `personas.json` that exists but cannot be used raises `PersonaConfigError` and stops training.
-That is deliberate: an application that ships a persona file has stated an intent about its
-training data, and silently training on the generic draw instead would produce a model whose
-provenance record does not describe how it was built.
+A `personas.json` that exists but cannot be used (bad JSON shape, wrong `schema_version`, an
+entry with no text, a bad or duplicate id, no personas and no keywords) raises
+`PersonaConfigError` and stops training. A file that states an intent about the training data
+must not silently train on the generic draw instead. The message for an empty file says the fix:
+delete the file to use the default draw.
 
-The env-var route is weaker. A `SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE` pointing at a path that
-does not exist is treated as unset and the run falls back to PersonaHub **silently**. If you use
-the env route, confirm the file was actually read by looking for the `Persona source:` line in
-the training log.
+A `SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE` naming a path that does not exist is treated as unset,
+and the run uses PersonaHub **silently**. If you use the env route, confirm the file was read
+from the `Persona source:` log line.
 
-An empty file — no personas and no keywords — is an error too, with the fix stated in the
-message: delete the file to use the default draw. An empty file is more likely a mistake than an
-intent.
+## Rule 2: ids must not break the persona holdout
 
-## Rule 2 — ids must not collide with the holdout's vocabulary
+Training holds out whole personas to score generalisation, and it finds the personas behind a
+generated utterance by parsing persona ids. Your ids are prefixed `app:` automatically, so they
+never collide with PersonaHub row numbers or the reserved ids. Two rules remain, both checked at
+load time:
 
-Your ids are namespaced to `app:<id>` automatically, so PersonaHub row 42 and your persona `42`
-stay distinguishable in a provenance record. Two constraints survive that namespacing:
+- **No `+` in an id.** `+` joins the personas of a composite id; an id containing it would be
+  split into fragments and the holdout would leak.
+- **Ids are unique.** Otherwise provenance cannot say which persona wrote what.
 
-- **No `+` in an id.** `+` joins the contributors of a composite persona id, and
-  `heldout_evaluation.expand_persona_id` splits on it to recover the atomic personas behind one
-  utterance. An id containing `+` is silently split into fragments and the whole-persona holdout
-  leaks — which is the exact defect that holdout exists to prevent. Rejected at load time.
-- **Ids must be unique.** Otherwise the provenance record cannot say which persona wrote what.
+## Rule 3: a domain-filtered pool has a floor, and padding is reported
 
-The reserved ids `__seed__` (hand-written seed utterances, never held out) and the
-`__unresolved__:` prefix are also rejected, though the `app:` prefix means a hand-written file
-cannot reach them.
+A keyword matches a whole word of the lowercased persona text; a keyword containing a space or a
+hyphen matches as a substring. A row matching any keyword survives and keeps its PersonaHub id.
 
-## Rule 3 — a domain-filtered pool has a floor, and padding is reported
-
-Filtering is a whole-word match on the lowercased persona text; multi-word keywords match as
-substrings; a row matching any keyword survives. Surviving rows keep their original PersonaHub
-ids, so a provenance record stays comparable with an unfiltered run.
-
-The pool needs to be at least `4 x` the per-command persona count
-(`SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS`), because a smaller pool gives every command nearly the
-same handful of rows — which reintroduces the near-duplication the whole-persona holdout exists
-to detect. Three outcomes, each reported once per run as a `Persona source:` log line:
+The pool should hold at least `4 x SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS` rows (at least 4 when
+the setting is absent), or every command draws nearly the same handful. Each outcome is logged
+once per run as a `Persona source:` line:
 
 | Matched rows | What happens | What to do |
 |---|---|---|
 | enough | the pool is exactly the matched rows | nothing |
-| some, but under the floor | topped up from the unfiltered corpus; **matched rows are still drawn first**, so a command asking for more personas than matched gets unconditioned ones for the remainder | add keywords, or supply `personas` |
-| none | falls back to the full corpus; "Domain conditioning had no effect on this run" | fix the keywords — they are almost certainly misspelt or too specific |
+| some, under the floor | topped up with unfiltered rows to the floor; the matched rows are drawn first, so a command asking for more personas than matched gets unconditioned ones for the rest | add keywords, or supply `personas` |
+| none | the full corpus is used: "Domain conditioning had no effect on this run" | fix the keywords; they are almost certainly misspelt or too specific |
 
-Padding rather than failing is deliberate: a mistyped keyword must not stop a multi-hour training
-run at its first command. That makes the log line the only thing that tells you the feature did
-nothing, so read it.
+Padding instead of failing is deliberate (a typo must not stop a long run), so the log line is
+the only sign the feature did nothing. Read it.
 
-An app-supplied set of fewer than 4 personas gets its own warning for the same reason: every
-command draws from nearly the same set, the utterances share a voice, and the holdout has little
-to hold out.
+Supplying fewer than 4 personas logs a warning for the same reason: the utterances share a voice
+and the holdout has little to hold out.
 
-## Rule 4 — adding or editing this file forces a full retrain
+## Rule 4: adding, editing or removing this file retrains everything
 
-The active persona source contributes to two different keys, and a change moves both:
+The persona source (its kind, the persona text or keyword list, and the framework's pool code)
+is an input of two keys:
 
-1. **The utterance-cache key.** Every cached generated utterance for the workflow is invalidated,
-   so generation runs again and **costs money**.
-2. **The training signature's global header.** A global-header change is one of the conditions
-   that makes `fastworkflow train` choose a **full** retrain over a selective one — every
-   context, not just the ones whose commands changed.
+1. **The utterance-cache key of every command.** Every command's utterances are generated again,
+   which **costs LLM calls** and is most of the run's time. A cache miss is logged with the input
+   that moved (`persona_source`). Returning to a source used recently (for example deleting the
+   file to go back to PersonaHub) reuses that source's cached utterances while they are among
+   the 3 most recent variants kept per command.
+2. **The training signature's global header.** `fastworkflow train` chooses a full retrain. In the
+   `embedding` layout that is one refit of the head, which takes seconds once the utterances
+   exist; in the `per_context` and `workflow` layouts it fine-tunes every model again.
 
-Three things independently move that key, and the cache-miss report names which:
-
-- the source **name** — app-supplied and domain-conditioned are different variants;
-- the **content** — the persona text, or the keyword list, so editing either invalidates the
-  utterances they wrote;
-- the **pool code** — the framework's own row-filtering and padding logic, so tuning it cannot
-  serve you the old personas back.
-
-The default PersonaHub draw contributes **nothing** to either key. That is why adding this
-feature invalidated no existing workflow, and it is also why removing your `personas.json` is not
-free: it is another change of source.
-
-Plan for this. Do not add a `personas.json` in the same change as a seed-utterance edit you want
-to measure — you will not be able to attribute the result.
+Do not add a `personas.json` in the same change as a seed-utterance edit you want to measure:
+you will not be able to attribute the result.
 
 ## What this does not do
 
-It does not improve intent detection. Domain-conditioned personas are a **hypothesis** —
-plausibly a larger generalisation lever than anything in the training loop, but unmeasured in
-this repository, and currently not measurable from a single paired run, because the utterances
-come from a live LLM and two runs at the same seed produce different training data. The feature
-makes that experiment possible. Nothing in the code or in this skill reports a result.
-
-So treat a persona change as a change of training data, not as a fix. If you want to claim it
-helped, you need the paired-build discipline in the `evaluate-intent-routing` skill.
+It is not a measured improvement to intent detection. Domain-conditioned personas are a
+hypothesis, unmeasured in this repository, and not measurable from one paired run: the
+utterances come from a live LLM, so two runs at the same seed produce different training data.
+Treat a persona change as a change of training data, not a fix. To claim it helped, use the
+paired-build discipline in the `evaluate-intent-routing` skill.
 
 ## Verifying it took effect
 
 ```
-- [ ] The training log shows a `Persona source:` line naming the source you configured
+- [ ] The training log has a `Persona source:` line naming the source you configured
 - [ ] For a domain-conditioned pool, that line reports a match count, not a fallback or a top-up
-- [ ] `___command_info/training_provenance.json` records the source name for each command
-- [ ] The utterance cache regenerated rather than reusing (the cache summary line at the end of
-      the run distinguishes reused from generated)
+- [ ] `___command_info/training_provenance.json` records the source (`generator_config.persona_source`) for each command
+- [ ] The cache summary line (`Utterance cache ... X reused, Y generated, Z written`) shows the commands generated, not reused
 ```
 
 ## Authoring checklist
 
 ```
-- [ ] personas.json is at the workflow root, next to intent_benchmark.json
-- [ ] schema_version is 1
-- [ ] Exactly one mode is expressed: a personas list, or domain keywords — not both by accident
+- [ ] personas.json is at the workflow root
+- [ ] Exactly one mode is meant: a personas list, or domain keywords (a list silently overrides keywords)
 - [ ] No id contains '+'; ids are unique
 - [ ] Each persona describes how someone TALKS, not just who they are
 - [ ] At least 4 personas if supplying them outright
 - [ ] Domain keywords are common words that appear in persona descriptions, not product names
-- [ ] The retrain this forces is budgeted for, and isolated from other changes being measured
+- [ ] The regeneration this forces is budgeted for, and isolated from other changes being measured
 ```
 
 ## Related
 
-- The retrain this triggers, and why it is full rather than selective: the
-  `train-and-publish-models` skill.
-- Measuring whether the resulting models are any good: the `evaluate-intent-routing` skill.
-- If the problem is two commands that no persona could phrase apart, personas will not fix it —
-  see the `detect-duplicate-capabilities` skill.
+- What a full retrain and the caches involve: the `train-and-publish-models` skill.
+- Measuring whether the resulting model is any good: the `evaluate-intent-routing` skill.
+- Two commands no persona could phrase apart: personas will not fix it; see the
+  `detect-duplicate-capabilities` skill.

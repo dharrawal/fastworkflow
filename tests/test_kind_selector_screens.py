@@ -1,11 +1,11 @@
 """Kind selectors, and the ``None`` marker.
 
-A ``str`` field whose description lists the kinds it takes ("One of: application, group, ...") or
-whose labeled examples give kind words as its value is a kind selector: a value it lists is a kind
-it takes, so the kind-word screen does not refuse it. The same word in a free-text field with no
-such description is still refused. The pronoun refusal applies to a kind selector too. The text
-``None`` is the missing-value marker, not a kind word: a required field holding it is missing, and
-an optional field takes its default.
+A ``str`` field whose labeled examples give kind words as its value is a kind selector: a value they give is a kind
+it takes, so the kind-word screen does not refuse it. A field's DESCRIPTION exempts nothing (bd fix-ftdl.6.1): a
+description that lists kinds ("One of: application, group, ...") is prose, and the same word is refused there as in
+any free-text field (a fixed set of kinds is a ``Literal``). The pronoun refusal applies to a kind selector too. The
+text ``None`` is the missing-value marker, not a kind word: a required field holding it is missing, and an optional
+field takes its default.
 
 Integration only: a temporary copy of ``todo_list_workflow`` (its contexts are the kind words) and of
 ``planning_tutorial_workflow`` (with one skill added), the real vocabulary builder, loader, screens and
@@ -143,14 +143,13 @@ def _screened(command: str, vocabulary: wv.WorkflowVocabulary, **values) -> dict
     return signatures.word_screen_refusals(params, vocabulary, frozenset(), command)
 
 
-def test_a_kind_listed_by_the_description_passes_and_the_same_word_elsewhere_is_refused(todo_copy):
+def test_a_kind_listed_by_the_description_is_refused_as_the_same_word_elsewhere(todo_copy):
     wv.write_workflow_vocabulary(todo_copy)
     vocabulary = _load(todo_copy)
-    assert vocabulary.kind_options(ASSIGN_TO, "assign_to") == frozenset({"todoitem", "todolist"})
+    assert vocabulary.kind_options(ASSIGN_TO, "assign_to") == frozenset()   # a description makes no kind selector
 
-    # listed by the description of this command's field: a kind it takes
-    assert _screened(ASSIGN_TO, vocabulary, assign_to="todolist", query="engineering") == {}
-    # the free-text field of the same command, which lists nothing: refused
+    refused = _screened(ASSIGN_TO, vocabulary, assign_to="todolist", query="engineering")
+    assert set(refused) == {"assign_to"}
     refused = _screened(ASSIGN_TO, vocabulary, assign_to="John Smith", query="todolist")
     assert set(refused) == {"query"}
     assert refused["query"][1].startswith("query 'todolist' is a kind word of this workflow")
@@ -210,15 +209,30 @@ def test_the_labeled_files_of_the_real_workflow_are_not_read_for_writing(todo_co
 
 # ---------------------------------------------------------------- the stored vocabulary
 
-def test_the_stored_vocabulary_is_format_two_with_kind_words_and_selectors(todo_copy):
+def test_the_stored_vocabulary_is_format_three_with_kind_words_and_selectors(todo_copy):
+    _labeled(todo_copy, ASSIGN_TO, [{"command": "x", "assign_to": "todolist"}])
     path = wv.write_workflow_vocabulary(todo_copy)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["format"] == wv.FORMAT_VERSION == 2
+    assert payload["format"] == wv.FORMAT_VERSION == 3
     assert payload["labeled_fingerprint"] == wv.labeled_fingerprint(todo_copy)
     assert set(payload["kind_words"]) == {"todoitem", "todolist", "todolistmanager"}
-    assert payload["kind_selectors"][ASSIGN_TO]["assign_to"] == ["todoitem", "todolist"]
+    assert payload["kind_selectors"][ASSIGN_TO]["assign_to"] == ["todolist"]   # the labeled example, not the description
     assert _load(todo_copy).origin == "file"
+
+
+def test_a_format_two_file_is_stale_and_its_description_selectors_are_not_read(todo_copy):
+    """A format-2 file may hold a selector a description made: it is not read (bd fix-ftdl.6.1)."""
+    wv.write_workflow_vocabulary(todo_copy)
+    payload = json.loads(wv.vocabulary_path(todo_copy).read_text(encoding="utf-8"))
+    payload["format"] = 2
+    payload["kind_selectors"] = {ASSIGN_TO: {"assign_to": ["todoitem", "todolist"]}}
+    wv.vocabulary_path(todo_copy).write_text(json.dumps(payload), encoding="utf-8")
+    wv._IN_MEMORY.pop(str(Path(todo_copy).resolve()), None)
+
+    vocabulary = _load(todo_copy)
+
+    assert vocabulary.origin == "derived" and vocabulary.kind_options(ASSIGN_TO, "assign_to") == frozenset()
 
 
 def test_a_stored_vocabulary_read_back_equals_the_derived_one(todo_copy):
@@ -246,7 +260,7 @@ def test_a_version_one_file_is_stale_and_the_loader_derives_in_memory(todo_copy)
 
     assert vocabulary.origin == "derived"
     assert not vocabulary.has_word("sentinel_word")
-    assert vocabulary.kind_options(ASSIGN_TO, "assign_to") == frozenset({"todoitem", "todolist"})
+    assert vocabulary.kind_options(ASSIGN_TO, "assign_to") == frozenset()
 
 
 def test_a_changed_labeled_example_makes_the_stored_vocabulary_stale(todo_copy):
@@ -258,7 +272,7 @@ def test_a_changed_labeled_example_makes_the_stored_vocabulary_stale(todo_copy):
     vocabulary = _load(todo_copy)
 
     assert vocabulary.origin == "derived"
-    assert vocabulary.kind_options(ASSIGN_TO, "assign_to") == frozenset({"todoitem", "todolist"})
+    assert vocabulary.kind_options(ASSIGN_TO, "assign_to") == frozenset({"todoitem"})
 
 
 # ---------------------------------------------------------------- the typed skill screen
@@ -271,19 +285,19 @@ def _raw(command: sc.PlanningCommandCommand, **values) -> dict:
     return {p.name: values.get(p.name) for p in command.params}
 
 
-def test_a_planning_command_argument_whose_description_lists_a_kind_takes_it(tutorial_copy):
+def test_a_planning_command_argument_whose_description_lists_a_kind_is_refused_like_free_text(tutorial_copy):
     command = _planning_command(tutorial_copy, "file_request")
 
-    args, _ = sc.check_arguments(command, _raw(command, resource_type="book", query="Dune"),
-                                 "show the book Dune")
+    with pytest.raises(sc.PlanningCommandInputError) as refused:
+        sc.check_arguments(command, _raw(command, resource_type="book", query="Dune"), "show the book Dune")
 
-    assert args["resource_type"] == "book"
+    assert "resource_type='book' is a kind word of this workflow" in str(refused.value)
 
 
 def test_the_same_kind_word_in_a_free_text_planning_command_argument_is_refused(tutorial_copy):
     command = _planning_command(tutorial_copy, "file_request")
     with pytest.raises(sc.PlanningCommandInputError) as refused:
-        sc.check_arguments(command, _raw(command, resource_type="book", query="book"), "show the book Dune")
+        sc.check_arguments(command, _raw(command, resource_type="paperback", query="book"), "show the book Dune")
 
     assert "query='book' is a kind word of this workflow" in str(refused.value)
 
@@ -291,7 +305,7 @@ def test_the_same_kind_word_in_a_free_text_planning_command_argument_is_refused(
 def test_the_none_marker_makes_a_required_planning_command_argument_missing(tutorial_copy):
     command = _planning_command(tutorial_copy, "file_request")
     with pytest.raises(sc.PlanningCommandInputError) as refused:
-        sc.check_arguments(command, _raw(command, resource_type="book", query="None"), "show the book Dune")
+        sc.check_arguments(command, _raw(command, resource_type="paperback", query="None"), "show the book Dune")
 
     assert str(refused.value) == "missing required argument query"
     assert sc.refusal_question(command, refused.value) == (
@@ -301,7 +315,7 @@ def test_the_none_marker_makes_a_required_planning_command_argument_missing(tuto
 def test_the_none_marker_gives_an_optional_planning_command_argument_its_default(tutorial_copy):
     command = _planning_command(tutorial_copy, "file_request")
 
-    args, _ = sc.check_arguments(command, _raw(command, resource_type="book", query="Dune", note="None"),
+    args, _ = sc.check_arguments(command, _raw(command, resource_type="paperback", query="Dune", note="None"),
                                  "show the book Dune")
 
     assert args["note"] == ""

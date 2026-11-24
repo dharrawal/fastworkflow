@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple, List
 
 import fastworkflow
+from fastworkflow.parameters.rules import is_union
 from fastworkflow.utils.logging import logger
 
 
@@ -270,7 +271,7 @@ def _process_field(field_info, is_input: bool) -> Tuple[Any, Any, bool]:
     
     # Handle Optional types
     is_optional = False
-    if get_origin(field_type) is Union:
+    if is_union(field_type):
         args = get_args(field_type)
         if type(None) in args:
             is_optional = True

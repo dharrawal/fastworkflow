@@ -14,8 +14,8 @@ import pytest
 from pydantic import Field
 
 import fastworkflow
-from fastworkflow import command_writes, tracing
-from fastworkflow.command_declarations import CommandDeclarationError
+from fastworkflow import command_preview, command_writes, tracing, workflow_agent
+from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.planning import phase, run, when
 from fastworkflow.turn import TurnStatus
@@ -155,8 +155,12 @@ def test_the_retired_writes_attribute_fails_the_load_naming_the_decorator(tmp_pa
         "@fastworkflow.writes\nclass ResponseGenerator:\n", "class ResponseGenerator:\n    writes = True\n", 1)
     assert "writes = True" in text
     folder = _library_workflow(tmp_path, command_texts={"_commands/Record/add_note.py": text})
-    with pytest.raises(CommandDeclarationError, match=r"writes = True is removed: write @writes"):
-        RoutingRegistry.get_definition(folder)
+    # that command does not load and is listed; the workflow loads (bd fix-ftdl.2)
+    problems = [p for p in command_preview.load_problems(folder) if p.startswith("Record/add_note: ")]
+    assert len(problems) == 1 and "writes = True is removed: write @writes" in problems[0], problems
+    with pytest.raises(CommandLoadError, match=r"writes = True is removed: write @writes"):
+        RoutingRegistry.get_definition(folder).get_command_class(
+            "Record/add_note", fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
     RoutingRegistry.clear_registry()
 
 
@@ -169,8 +173,10 @@ def test_a_planning_command_may_not_declare_writes(tmp_path):
     assert "@fastworkflow.writes" in text
     folder = _library_workflow(tmp_path, command_texts={"_commands/Library/note_member.py": text},
                                extra_commands=WRITES_FILES)
-    with pytest.raises(command_writes.WritesDeclarationError, match="note_member is a planning command"):
-        RoutingRegistry.get_definition(folder)
+    # that planning command does not load and is listed; the workflow loads (bd fix-ftdl.2)
+    problems = [p for p in command_preview.load_problems(folder) if p.startswith("Library/note_member: ")]
+    assert len(problems) == 1 and "a planning command cannot carry @writes" in problems[0], problems
+    assert "Library/note_member" not in workflow_agent.load_planning_command_map(folder)
     RoutingRegistry.clear_registry()
 
 
@@ -295,3 +301,47 @@ def test_a_write_that_fails_does_not_use_up_the_phases_count(flaky_writes_env):
     after = _notes(env)
     assert after["b3"] == before["b3"] + ["a good note"]
     assert after["b4"] == before["b4"]
+
+
+# ----------------------------------------------------------------------
+# bd fix-ftdl.7.6: the policy layer's writing commands are the @writes marks (one list)
+# ----------------------------------------------------------------------
+
+_TABLE_HEAD = (
+    "from fastworkflow.policy_decision import ContractFacts, DecisionTable\n"
+    "TABLE = DecisionTable(version='writes-test/1', rows=())\n"
+)
+
+
+def _with_policy_table(tmp_path, body: str) -> str:
+    folder = _library_workflow(tmp_path, extra_commands=WRITES_FILES)
+    os.makedirs(os.path.join(folder, "_policy"), exist_ok=True)
+    with open(os.path.join(folder, "_policy", "table.py"), "w", encoding="utf-8") as handle:
+        handle.write(_TABLE_HEAD + body)
+    return folder
+
+
+def test_the_policy_reads_the_writes_marks(tmp_path):
+    from fastworkflow.policy_loader import load_policy
+
+    RoutingRegistry.clear_registry()
+    folder = _with_policy_table(tmp_path, "FACTS = ContractFacts(failure_pattern='Error')\n")
+    _point, facts = load_policy(folder)
+    # By qualified name and by leaf name (the policy rows read the name the agent called).
+    assert facts.is_write("Record/add_note") and facts.is_write("add_note")
+    assert facts.is_write("note_member")                 # writes through its steps
+    assert not facts.is_write("find_book") and not facts.is_write("author_books")
+    assert facts.reports_failure("Error: no such member")   # the table's other facts are kept
+    RoutingRegistry.clear_registry()
+
+
+def test_a_policy_table_that_lists_its_own_writing_commands_fails_the_load(tmp_path):
+    from fastworkflow.policy_decision import PolicyError
+    from fastworkflow.policy_loader import load_policy
+
+    RoutingRegistry.clear_registry()
+    folder = _with_policy_table(tmp_path, "FACTS = ContractFacts(write_commands=frozenset({'add_note'}))\n")
+    with pytest.raises(PolicyError, match=r"FACTS\.write_commands is removed: mark each command that changes "
+                                          r"data with @fastworkflow\.writes"):
+        load_policy(folder)
+    RoutingRegistry.clear_registry()

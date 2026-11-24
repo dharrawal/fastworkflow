@@ -758,6 +758,10 @@ def test_the_detector_contract_reads_the_layout_without_change(published_experim
         assert intent_detector.has_head(intent_detector.head_folder(workflow, scope))
     engine = intent_detector.engine_for(workflow, "Book", allow_matcher=False)
     assert isinstance(engine, intent_detector.ClassifierEngine)
+    # The folder holds only the published model (no _commands/), so the engine's filter of the commands that do not
+    # load (RoutingDefinition.not_loading, which reads the workflow's routing) cannot run here: the model's answers are
+    # read through the same engine with no workflow to filter against.
+    engine = intent_detector.ClassifierEngine(engine.router)
 
     assert engine.decide("show me this book").kind == intent_detector.MATCH
     assert engine.decide("list all the branches").kind == intent_detector.NOT_MINE

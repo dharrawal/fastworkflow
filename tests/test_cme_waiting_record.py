@@ -98,9 +98,8 @@ def test_the_record_survives_serialize_state_and_apply_serialized_state(session,
     ctx = _which_command_question(session) if which == "intent" else _parameter_question(session)
     saved = json.loads(json.dumps(ctx.serialize_state(channel_id="saved")))
     assert saved["waiting"]["kind"] == which and "cme" not in saved and "plan_cme" not in saved
-    # The "/" round rides with the record. (A handled reply, "you misunderstood", ends the round before the which-command
-    # question is out: that was so before the record moved, and the saved form says what the context held.)
-    assert saved["waiting"]["assistant"] is ctx.assistant_round is (which == "parameters") and "assistant_command" not in saved
+    # The "/" round rides with the record, for either question: it is kept while the question is out.
+    assert saved["waiting"]["assistant"] is ctx.assistant_round is True and "assistant_command" not in saved
     command, name = ctx._cme_workflow.context.get("command"), ctx._cme_workflow.context.get("command_name")
 
     rebuilt = session(False)
@@ -310,9 +309,14 @@ def test_read_reply_returns_the_action_each_kind_of_reply_had_before(session, mo
     monkeypatch.setattr(parameter_reply, "_missing_value_reply_intent", lambda *args: ("wait", ["count"]))
     wait = parameter_reply.read_reply(workflow, app, "hold on")
     assert wait.action == "wait" and wait.reply_intent == "wait" and wait.text.startswith("OK, take your time.")
-    assert wait.text.endswith("count")
+    # The question comes back as it was, under that line, as on the plan path (bd fix-ftdl.7.8, D9).
+    assert wait.text == f"OK, take your time.\n\n{parameter_clarification.pending(workflow.context).question}"
     for intent, name_ in (("abort", parameter_reply.ABORT), ("misunderstood", parameter_reply.MISUNDERSTOOD)):
         monkeypatch.setattr(parameter_reply, "_missing_value_reply_intent", lambda *args, intent=intent: (intent, []))
         assert parameter_reply.read_reply(workflow, app, "x") == Reply("run", name=name_, reply_intent=intent)
     monkeypatch.setattr(parameter_reply, "_missing_value_reply_intent", lambda *args: ("different_command", []))
-    assert parameter_reply.read_reply(workflow, app, "list the users") == Reply("different", reply_intent="different_command")
+    # A different request is not run (bd fix-ftdl.8.10): the question comes back once, saying so.
+    different = parameter_reply.read_reply(workflow, app, "list the users")
+    assert different.action == "wait" and different.reply_intent == "different_command"
+    assert "read as a new request" in different.text
+    assert different.text.endswith(parameter_clarification.pending(workflow.context).question)

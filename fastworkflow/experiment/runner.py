@@ -62,6 +62,8 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 # (`__init__.py:244-286`), so an arm that needs different values needs a
 # different process.
 LM_CACHE_VAR = "FW_LM_CACHE"
+# Learning from use changes the intent head while a round runs, so the harness turns both off itself.
+LEARNING_OFF_SETTINGS = {"INTENT_LEARNING_REFIT": "off", "INTENT_LEARNING_RECORD": "off"}
 
 
 class ExperimentAborted(RuntimeError):
@@ -891,6 +893,11 @@ class ExperimentHarness:
             # after the harness had already been blamed and cleared.
             fastworkflow._env_vars[LM_CACHE_VAR] = "0"
             posture[LM_CACHE_VAR] = "0"
+        # Same mechanism, forced whether or not the caches are defeated: a head refitted or a row recorded
+        # mid-round is a different model under test for the attempts that follow.
+        for name, value in LEARNING_OFF_SETTINGS.items():
+            fastworkflow._env_vars[name] = value
+            posture[name] = value
 
         # The DSPy memory policy. A long agentic sweep in one process fills
         # DSPy's retention structures unbounded, and unlike the
@@ -1180,6 +1187,11 @@ class ExperimentHarness:
             "scores": self._store.experiment_scores(self.experiment_id),
         }
 
+    def _head_version(self) -> Optional[str]:
+        from fastworkflow.train.artifact_versioning import resolve_current_version
+
+        return resolve_current_version(self.workflow_folderpath)
+
     # -- one attempt ------------------------------------------------------
 
     def _run_attempt(
@@ -1264,6 +1276,8 @@ class ExperimentHarness:
             # forces the grader to be fixed and the attempt re-run.
             outcome, source, reward = "incomplete", "grader_error", None
             detail = {"grader_error": repr(exc)}
+        # Additive: the intent head version in force when the attempt ended (None when untrained).
+        detail = {**(detail or {}), "intent_head_version": self._head_version()}
         with self._lock:
             self._controller.finish_attempt(
                 self.experiment_id,

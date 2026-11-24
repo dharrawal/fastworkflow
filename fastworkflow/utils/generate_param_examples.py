@@ -265,16 +265,14 @@ def extract_field_details(
         description = ""
         examples = []
         pattern = None
-        enum_values = []
+        # the allowed values are the Literal type's (the one spelling of them)
+        enum_values = list(get_args(base_annotation)) if get_origin(base_annotation) is Literal else []
 
         if hasattr(field_info, 'json_schema_extra') and field_info.json_schema_extra:
             schema_extra = field_info.json_schema_extra
             description = schema_extra.get('description', '')
             if 'examples' in schema_extra:
                 examples = schema_extra['examples']
-            if 'pattern' in schema_extra:
-                pattern = schema_extra['pattern']
-            enum_values = list(schema_extra.get('enum', []))
         description = field_info.description or description
         examples = list(field_info.examples or examples)
         for metadata in field_info.metadata:

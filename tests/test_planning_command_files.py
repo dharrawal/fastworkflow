@@ -358,7 +358,7 @@ class PlanGenerator:
 
 @pytest.mark.parametrize("field, message", [
     ("ratios: list[int] = []", "has type"),
-    ("count: Optional[int] = None", "Optional is for an argument the command text may leave out"),
+    ("count: Optional[int] = None", "a planning command.s arguments reach it as text"),
     ("name: Optional[str] = 'x'", "Optional is for"),
     ("name: str = None", "default must be a value of its type"),
     ("flag: bool = 1", "bool parameter .* default must be true or false"),
@@ -368,12 +368,12 @@ class PlanGenerator:
     ("name: str = Field(json_schema_extra={'classifier_confirms': True})", "option classifier_confirms does not apply to field 'name' of type str"),
     ("name: str = Field(json_schema_extra={'strip': ['group']})", "strip: \\[\"group\"\] is removed: write \"copied_from_command_text\": \\{\"ignore\""),
     ("name: str = Field(json_schema_extra={'subject': 'yes'})", "subject: \"yes\" is removed: write \"record_named_in_command_text\": True"),
-    ("name: str = Field(json_schema_extra={'in_request': 'yes'})", "in_request: \"yes\" is removed: write"),
+    ("name: str = Field(json_schema_extra={'in_request': 'yes'})", "in_request: \"yes\" is removed: leave the key out"),
     ("count: int = Field(default=1, json_schema_extra={'requires': 'name'})",
      "requires is not a planning command option; .*a model validator on Input"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'classifier_confirms': {'meanings': {'c': 'x'}}})", "'c' is not a value of it"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'a': 'x'}})", "means: \\{\"a\": \"x\"\} is removed: write \"classifier_confirms\": \\{\"meanings\""),
-    ("reasoning: int = 1", "bad parameter name 'reasoning'"),
+    ("reasoning: int = 1", "field 'reasoning' is reserved for the framework's own planner inputs"),
 ])
 def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
     assert re.search(message, _load_error(_write(tmp_path, {"bad": FIELD.format(field=field)})))
@@ -439,7 +439,8 @@ def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path
 def test_only_the_python_files_of_the_planning_commands_folder_not_starting_with_an_underscore_are_planning_commands(tmp_path, caplog):
     folder = _write(tmp_path, {"close_out": CLOSE_OUT, "_helpers": "import no_such_module_anywhere\n"})
     planning_commands = tmp_path / "_commands"
-    (planning_commands / "_split.py").write_text('class Signature:\n    """Split it my way."""\n')
+    (planning_commands / "_workflow.py").write_text(
+        "class Context:\n    split_examples = [('Find Dune.', ['Find Dune.'])]\n")
     (planning_commands / "notes.md").write_text("Not read.")
     (planning_commands / "__pycache__").mkdir()
     # a subfolder of _commands is a context (Phase 7: one tree), so its planning command is a skill of it
@@ -515,7 +516,7 @@ def test_the_input_validator_can_refuse_or_correct_a_call(tmp_path):
     notes: list[str] = []
     args = sc._validate_arguments(replace(command, input_model=Correcting), _args(), "who is in Payroll", "WF", notes)
     assert args["name"] == "PAYROLL" and seen == [("WF", "show_record", "who is in Payroll")]
-    assert notes == ["name='Payroll' -> 'PAYROLL' (validate_extracted_parameters)"]
+    assert notes == ["name='Payroll' -> 'PAYROLL' (validator)"]
 
     class Raising(command.input_model):
         @model_validator(mode="after")
@@ -572,15 +573,16 @@ def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls
     # Unattended: an attended turn would put a refusal to the user (Topology B) instead of falling
     # back, and this test pins the fallback to the text planner.
     ctx._begin_turn(request, unattended=True)
-    # the hook's refusal is shown to the extractor once; refused again (a rule, not a missing argument: no typed
-    # fill fallback), the text planner plans
-    extractor = script_extractor(monkeypatch, *[_arguments(_typed(person="Ann Lee", include_risk=True))] * 2)
+    # the hook's refusal names no field (a rule of the call as a whole), so the extractor is NOT asked again (bd
+    # fix-ftdl.9: a fieldless refusal gets no second fill) and, with no missing argument (no typed fill fallback), the
+    # text planner plans
+    extractor = script_extractor(monkeypatch, _arguments(_typed(person="Ann Lee", include_risk=True)))
     lm = DummyLM([_text_answer()])
     _plan_planning_command(ctx, wf, lm, request, command)
     span = sink.named("fw.planner.plan")[-1]
     assert span.attributes["plan_source"] == "text"
     assert "the risk is assessed for the whole record" in span.attributes["skill_fallback"]
-    assert "was refused: validate_extracted_parameters: the risk is assessed" in extractor.prompts[1]
+    assert len(extractor.prompts) == 1 and "was refused" not in extractor.prompts[0]
     assert "TEMPLATE TEXT" in _prompt(lm, 0)
 
 

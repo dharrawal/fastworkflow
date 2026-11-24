@@ -40,62 +40,78 @@ harness = ExperimentHarness.from_benchmark_experiment(
     max_workers=1,
 )
 # grade_attempt is the application's outcome checker (see Grader in experiment/runner.py).
-result = harness.run(tasks, attempts=1, grader=grade_attempt)
+result = harness.run(tasks, grader=grade_attempt)
 ```
 
-`from_benchmark_experiment` carries the registration's `description` — the optional prose its
-author wrote in the studio — into the recorded experiment. Pass `description=` explicitly to
-override it.
+`from_benchmark_experiment` takes the registration's `description` and `runs_per_task` as
+defaults (pass `description=`, or `attempts=` to `run`, to override them). `run` refuses a task
+set that is not exactly the pinned version's tasks.
 
-`ExperimentTask.messages` is an in-process harness input, not a native benchmark manifest field.
-Multi-turn or conditional-response drivers should map their own payload to it or use their existing
-collector. The harness accepts one experiment per instance. Constructing it opens/initializes the
-working evidence store even before model execution; do not instantiate it to inspect archives.
+`ExperimentTask.messages` is an in-process harness input, not a benchmark manifest field. The
+messages are sent in order, each as its own turn; a message sent while a question is out is the
+reply to it. `unattended=True` runs the turns with no ask_user tool. The experiment's conformance
+check reads `invalid` when a run's first message differs from its task's saved prompt (a task without
+a prompt is not checked; a registration with the user-simulator flag is not checked). The
+harness accepts one experiment per instance. Constructing it opens the live evidence store even
+before model execution; do not instantiate it to inspect archives.
 
 A grader receives `AttemptRun` and returns `(outcome, outcome_source, reward, detail)`;
 returning `None` uses the framework's derived fallback. That fallback only measures whether
 commands reported failure, and can mark a recovered command error as a failed attempt. Supply
 a real application grader for task-success claims, with its identity and evidence in the result.
 A task grader must check the expected application outcome. Runtime completion and all commands
-succeeding do not prove that the user received the right answer. An unanswered `awaiting_user`
-attempt is incomplete; do not count it as a verified success or erase it to make a run finish.
+succeeding do not prove that the user received the right answer. An attempt whose last turn
+is `awaiting_user` is incomplete; do not count it as a verified success or erase it to make a run
+finish. The last command output's `artifacts["question_kind"]` names the question (`agent`,
+`plan_choice`, `planning_parameter`, `review`, `approval`, `phase_step`). To end a question inside
+an attempt, reply to it (`cancel`, or `no` to a review or approval); `cancel_pending` records no
+turn, so the attempt would still read `awaiting_user`.
 For interactive tasks, define who answers, which inputs are valid, the question/turn budget and
 a timeout. Record Q/A and responder identity in the driver's evidence. A simulated responder is
 not a human rater, and a saved review decision does not implement this responder.
 
 ## External / HTTP collectors
 
-Use `ExperimentController(workflow_folderpath, expected_store_identity, ...)`; it records into
+Use `ExperimentController(workflow_folderpath, expected_store_identity)`, with the store identity
+the server reports as `experiment_store_readiness.store_id` on `GET /probes/readyz`. It records into
 the workflow's one live DB, `state_paths.observability_db(workflow_folderpath)`, which the server
-and the UI resolve too. Do not give the run its own `FASTWORKFLOW_STATE_ROOT`: a different root is
-a different DB, so a registered experiment raises `ExperimentNotRegisteredHere` (naming the path
-and both location variables) and an ad-hoc one logs a WARNING. External controllers open an
-already initialized compatible store with `migrate=False`. Pass the UI's `experiment_id`, the
-complete task set and `registered=True` to `create_experiment`:
-`declarations` contains `(task_id, attempt_number, channel_id)` tuples; `declared_tasks` is the
-number of unique tasks and `declared_attempts` is the repetitions per task.
+and the UI resolve too. Do not give the run its own `FASTWORKFLOW_STATE_ROOT` or
+`FASTWORKFLOW_WORKFLOW_ID`: a different location is a different DB, so a registered experiment
+raises `ExperimentNotRegisteredHere` (naming the path and both variables) and an unregistered one
+logs a WARNING. The server must be started first (it installs the store; the controller never
+migrates it).
 
-The controller resolves the registration, validates the pin and task set, declares attempts and
-binds the registration to that store. Continue through the existing register/bootstrap, claim/bind,
-invoke, terminalize and evidence-drain lifecycle. Merely inserting experiment labels after sending
-HTTP turns loses attempt provenance. Read the controller and the app's collector before adapting
-this path; channel IDs, claims and attempt fencing are not interchangeable with UI labels.
+1. `controller.create_experiment(experiment_id, description, declared_tasks=..., declared_attempts=...,
+   declarations=..., registered=True)` with the UI's `experiment_id`. `declarations` holds one
+   `(task_id, attempt_number, source_key)` tuple per attempt; `declared_tasks` is the number of
+   unique tasks and `declared_attempts` the repetitions per task. The pin and the user-simulator
+   flag come from the registration.
+2. Per attempt, `register_attempt(experiment_id, task_id, attempt, source_key, channel_id)` returns
+   an `AttemptBootstrap`. Send `POST /initialize` with that `channel_id` and
+   `experiment_bootstrap = {registration_id, secret, store_id}`; the server claims the attempt,
+   binds the session and stamps its runtime snapshot. Then send the attempt's turns.
+3. `finish_attempt(...)`, which marks the attempt finished and records its outcome in one call.
+4. After stopping the server, `drain_before_certify()`, then `complete_experiment(experiment_id)`.
+
+Inserting experiment labels after sending HTTP turns loses attempt provenance; channel IDs,
+claims and attempt fencing are not interchangeable with UI labels.
 
 For a server-backed run, examine the bound attempt's `runtime_snapshot` to see what actually ran.
-It can contain feature settings, workflow/skill fingerprints, model version, deadlines, output
-limits and observability regime. A null snapshot means it was not recorded, not that the intended
-settings were used. `/probes/readyz?runtime=true` describes the current server; it is not historical
+It holds the workflow's content fingerprint, the trained model version, whether observability
+was on and pruning suppressed, and the server's pid. A null snapshot means it was not recorded,
+not that the intended settings were used. `/probes/readyz?runtime=true` describes the current server; it is not historical
 proof of a prior attempt's configuration. For measured external runs, pruning suppression must be
 set in the server environment before startup (`FW_OBS_SUPPRESS_PRUNE=1`).
 
 ## Optional reviewable experiment setup
 
-When a project uses pre-run review, create a `fastworkflow-experiment-setup/1` spec via
-`ExperimentSetups(workflow_folderpath).save(spec, expected_revision=0)` for a new setup. The
-required spec fields are:
+When a project uses pre-run review, save a spec via
+`ExperimentSetups(workflow_folderpath).save(spec, expected_revision=0)` for a new setup
+(`fastworkflow.experiment.setup`). The spec fields are:
 
 | Fields | Content |
 |---|---|
+| `schema` | `"fastworkflow-experiment-setup/1"` |
 | `experiment_id` | Nonempty simple identifier (up to 120 characters); same name as the studio experiment |
 | `description` | Optional free-text string; empty if the author wrote nothing |
 | `configuration`, `model_routes`, `budgets` | Nonempty JSON objects describing the intended execution |
@@ -109,7 +125,8 @@ benchmark catalog; it does not automatically resolve benchmark pins or drive the
 input/configuration consistent explicitly.
 
 Saving edits requires the revision read and creates a new revision needing review. Decisions
-(`approved` or `changes_requested`) name an exact revision and digest. Use
+(`decide(experiment_id, revision, digest, decision, reviewer, comment)`, `approved` or
+`changes_requested`, the latter with a comment) name an exact revision and digest. Use
 `approved(experiment_id, revision, digest)` to retrieve an exact current review receipt for a driver
 that supports this check. The reviewer name is self-declared; a receipt is not authenticated
 execution authority and does not prove the runner used the settings. Do not record the owner's
@@ -123,7 +140,8 @@ programmatic UI requests. URL-encode IDs. These are `run_chatbot` APIs, not `/in
 | Action | Method and route |
 |---|---|
 | Save simple benchmark | `POST /api/benchmark-setup` with the `save_benchmark` body |
-| Register experiment | `POST /api/benchmarks/<benchmark_id>/experiments` with `{"version":"v1"}` |
+| Write a version with explicit IDs | `POST /api/benchmarks/<benchmark_id>/versions` with the `write_version` spec |
+| Register experiment | `POST /api/benchmarks/<benchmark_id>/experiments` with `{"version":"v1"}`; optional `description`, `runs_per_task`, `user_simulator` |
 | Read registration and pinned tasks | `GET /api/benchmark-experiments/<experiment_id>` |
 | Read version | `GET /api/benchmarks/<benchmark_id>/versions/<version>` |
 | Read/write experiment notes | `GET /api/experiment/<experiment_id>` / `PATCH /api/experiment/<experiment_id>` with `{"notes": "..."}` |

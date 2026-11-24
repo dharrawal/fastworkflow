@@ -202,9 +202,11 @@ function tmBuildReviewForm(review, items, text) {
     var row = el("div", "reviewStep");
     row.setAttribute("data-step", String(number));
     step.row = row;
-    if (review.changes_data && review.changes_data[position] === true) {
+    /* The part's badge, as the review text words it ("changes data", "look up only"; SubTaskProposal.badges). */
+    var badge = review.badges && review.badges[position];
+    if (badge) {
       var head = el("div", "reviewStepHead");
-      head.appendChild(el("span", "reviewBadge", "Changes data"));
+      head.appendChild(el("span", "reviewBadge", badge.charAt(0).toUpperCase() + badge.slice(1)));
       row.appendChild(head);
     }
 
@@ -268,6 +270,13 @@ function tmBuildReviewForm(review, items, text) {
       if (means) { row.appendChild(el("div", "reviewMeans", means)); }
       if (typeof item.outcome === "string" && item.outcome.trim()) {
         row.appendChild(el("div", "reviewOutcome", item.outcome));
+      }
+      /* The duplicate rule's notes (SubTask.check_notes): an optional value the step runs without, and why. */
+      if (tmIsPlainObject(item.check_notes)) {
+        Object.keys(item.check_notes).forEach(function (name) {
+          var line = item.check_notes[name];
+          if (typeof line === "string" && line.trim()) { row.appendChild(el("div", "reviewNote", line)); }
+        });
       }
     }
 

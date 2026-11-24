@@ -35,6 +35,10 @@ import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
 
 
+class Signature:
+    """Report the record a global command was bound to."""
+
+
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> CommandResponse:
         bound = workflow.record
@@ -125,7 +129,7 @@ def test_an_enclosing_context_command_by_exact_name_runs_bound_and_filed_under_i
 
     assert output.command_name == "TodoList/get_all_children"
     # Bound to the list, not the item: the command ran on the record it is filed under.
-    assert app.record is todo_list
+    assert app._command_context_for_response_generation is todo_list
     assert output.ran_on_context_name == "TodoList"
     assert output.ran_on_context_clause == "TodoList"
     # The current object does not move.
@@ -141,7 +145,7 @@ def test_a_global_command_by_exact_name_from_inside_a_context_runs_bound_to_the_
 
     assert output.response == "global_probe bound to TodoListManager"
     # The global scope binds the root object, and the run is filed under it.
-    assert app.record is manager
+    assert app._command_context_for_response_generation is manager
     assert output.ran_on_context_name == "TodoListManager"
     assert app._current_command_context is item
 
@@ -165,7 +169,7 @@ def test_a_qualified_name_on_the_path_runs_that_scope_even_when_a_nearer_scope_s
     output = _run(app, cme, monkeypatch, "TodoList/get_properties")
 
     assert output.command_name == "TodoList/get_properties"
-    assert app.record is todo_list
+    assert app._command_context_for_response_generation is todo_list
     assert output.ran_on_context_name == "TodoList"
 
 

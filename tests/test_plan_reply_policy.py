@@ -114,7 +114,14 @@ def _open_review_two_step(gated, monkeypatch) -> re_.ReviewRecord:
     return record
 
 
+def _no_writes(monkeypatch) -> None:
+    """The workflow has no command that changes data, so the turn's ad hoc part (JOKE) does not need the explicit yes
+    (bd fix-ftdl.8.4: with one, an ad hoc part may change data) and an accept paraphrase confirms."""
+    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset())
+
+
 def test_policy_decide_confirm_paraphrase(gated, monkeypatch):
+    _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)
     from fastworkflow.review_engine import Verdict, proposal_of, reply_policy
 
@@ -131,6 +138,7 @@ def test_policy_decide_confirm_paraphrase(gated, monkeypatch):
 def test_confirm_paraphrase(gated, monkeypatch):
     from fastworkflow.review_engine import reply_to_proposal
 
+    _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)
     review = reply_to_proposal(gated.ctx, gated.store, record, "sounds good to me")
     assert review.done and record.state == CONFIRMED
@@ -224,6 +232,7 @@ def test_item_slot_jev_escape(intent, gated, monkeypatch, planner):
 def test_cap_turn_confirm_paraphrase(gated, monkeypatch):
     from fastworkflow.review_engine import reply_to_proposal
 
+    _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)
     gated.ctx._current_planner_lm = _PlannerLM([{"edits": "not-a-list"}] * 12)
     for _ in range(8):
@@ -423,6 +432,7 @@ def test_slot_whole_plan_confirm_clears_edit_slot(gated, monkeypatch, planner):
     from fastworkflow.review_engine import reply_to_proposal
     from fastworkflow.utils.signatures import NOT_FOUND
 
+    _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)
     cme = gated.ctx._plan_cme.context
     cme["command_name"] = "ProposalReview/edit"
@@ -700,7 +710,8 @@ def test_tag_feed_confirmations_on_q1_with_plan(gated, monkeypatch):
 
 def test_unknown_kind_judgment_routes_to_edit_not_lookup_slot(gated, monkeypatch, planner):
     record = _open_review_two_step(gated, monkeypatch)
-    planner(
+    goal = "who wrote Emma and how many copies do we have, for IT Support"
+    lm = planner(
         gated,
         {
             "edits": [
@@ -712,9 +723,12 @@ def test_unknown_kind_judgment_routes_to_edit_not_lookup_slot(gated, monkeypatch
                 },
             ],
         },
+        # step 1 has no input ``unit``: the reader is asked once more with why, before the user (bd fix-ftdl.8.28)
+        {"edits": [{"op": "change", "index": 1, "field": "goal", "value": goal}]},
     )
     out = gated.ctx.process_turn(
         "I don't know whether IT Support is a unit or a group; use your best judgment"
     )
     assert "Which of the 2 steps do you mean?" not in (out.answer or "")
     assert record.state == REVISED
+    assert re_.proposal_of(record).items[0].goal == goal and len(lm.history) == 2

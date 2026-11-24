@@ -13,8 +13,8 @@ class Signature:
     """List the control findings recorded for a scope."""
 
     class Input(BaseModel):
-        scope: str = Field(default="NOT_FOUND", description="Scope to list findings for")
-        severity: str = Field(default="NOT_FOUND", description="Severity filter")
+        scope: str = Field(description="Scope to list findings for")
+        severity: str = Field(description="Severity filter")
 
     class Output(BaseModel):
         findings: str = Field(description="The findings that were found.")

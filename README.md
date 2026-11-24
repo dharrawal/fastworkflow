@@ -377,7 +377,7 @@ sits directly under fw.turn.)
 The diagnosis lives in the attributes of `fw.command.execute`. It records `raw_command` (the natural-language command the agent sent), `command_name` (what intent detection *resolved* it to), the extracted `parameters`, the `response_text`, and `success`. Comparing the first two is the whole trick:
 
 - **`raw_command` was reasonable but `command_name` is the wrong command** → an intent-detection miss. Add seed utterances for that command and retrain.
-- **`command_name` is right but `parameters` are wrong** → a parameter-extraction miss. Strengthen the `Field(description=…, examples=[…])` in that command's Signature.
+- **`command_name` is right but `parameters` are wrong** → a parameter-extraction miss. Strengthen the `Field(description=…)` (and `examples=[…]`, which feed the generated sample requests) in that command's Signature.
 - **Both right, span status is `error`** → the bug is in your own code, and `response_text` usually says how.
 
 Two turn-level fields are worth knowing because they are deliberately independent. `status` is the turn's lifecycle (`completed`, `failed`, …) and `success` means every command in it succeeded. A turn that is `completed` but not `success` is the case worth hunting: a command failed and the agent wrote a confident answer over it.
@@ -400,12 +400,12 @@ The turn's `answer` is the default plain-text rendering. Every part of it that t
 |---|---|---|
 | Parts of a multi-part answer (`### N. title` headings, "Part i of n:" labels of a step-cap hand-off) | `fw_sub_tasks` | the turn's last command output; one entry per sub-task: `number`, `text`, `title`, `answered` (the part has text under its heading), `not_run` (`true` only in no-agent mode, for a part with an `fw_not_run` entry: its text is the stop's explanation, not a command's answer; absent otherwise), `start`, `end` (offsets of the part's answer in `answer`), and `runs` only for a part that was continued: `[{index, of, start, end}]`, the offsets of each run's answer after its label |
 | A review or plan proposal and the replies it accepts | `review` with `question_kind: "review"` | the waiting entry; `kind`, `title`, `revision`, `items`, `changes_data`, `reply_forms`: `[{kind: accept/decline/edit/add/drop, reply or pattern or free_text, per_item, separator?}]`, the replies the shown hint promises (the reply reader's own cues are wider); an ambiguous part is asked the `plan_choice` question before the review, so a review lists no other plans; the typed reply `step N: use NAME` switches a step to any planning or execution command of the workflow (it has no entry in `reply_forms`) |
-| An approval question | `approval` with `question_kind: "approval"` | the waiting entry; `command`, `parameters`, `origin`, `irreversible`, `can_always` |
+| An approval question | `approval` with `question_kind: "approval"` | the waiting entry; `command`, `parameters`, `origin`, `can_always` |
 | A which-command question (one shape on every path) | `plan_choice` with `question_kind: "plan_choice"` | `request` (the text asked about), `sub_task` (its number in a split turn, else `null`), `choices` (`{name, description, closest}` each), `none_reply` (`"none"`), `decline` (`"cancel"`), `ambiguous` (the choices are the commands one request fits) and `misunderstood` (nothing fitted and the choices are every command). Plan path: a part no planning command matched or more than one command fits, the waiting entry of an `awaiting_user` turn. Deterministic ("/") path: an ambiguous or unmatched request, the last output of a failed COMPLETED turn (human session only). Reply with a name or the number the question lists it under, `none`, or `cancel`; a name may be followed by its parameter text on the deterministic path |
 | A refused planning call or a failed "/" command's missing values | `parameter_request` | `command`, `missing`, `invalid`, `values` (one question names every argument the call lacks; `values` are the ones already obtained; with no agent model it is asked again while each reply makes progress, and a second reply with none ends the part as not run naming exactly what is missing) |
 | A capability answer written in code (agent mode, a workflow with planning commands) | `capabilities` | the answer's own `CommandResponse` (the `CommandOutput` that `process_message` returns and the CLI shows); it is not in `command_outputs`, which has no entry for that turn. `{planning_commands: [{name, title, example}], commands: [{name, title}], other_contexts: [{context, title, commands, more}]}` |
 | The `what_can_i_do` listing | `capabilities` and `command_response.output` | `{workflow: {name, contexts, context_inheritance}, context, commands: [{name, qualified_name, context, planning, approval_marker, description, parameters, outputs, sample_utterances}]}` |
-| `abort` ("command aborted") | `aborted` and `output` | what it ended: `{stage, command?, command_name?}`; `output` is `{command, command_name}` |
+| `abort` ("command aborted") | `aborted` and `output` | what it ended: `{waiting_for, command?, command_name?}`; `output` is `{command, command_name}` |
 | `you_misunderstood` | `command_choices` and `output.valid_command_names` | the command names it lists, in its order |
 | A command's own result | `command_response.output` | the typed `Signature.Output` |
 
@@ -441,7 +441,7 @@ When a turn waits for you, the chat shows a form instead of only a text prompt. 
 | a `/` command lacks or has a rejected parameter | a form of the command's `Input` fields, the asked ones marked | `/add_two_numbers first_num=2 second_num=3` (**Run**); **Edit as text** copies it to the composer; **Cancel** sends `abort` | none |
 | a `/` command name is ambiguous | one button per candidate command, **See all commands**, **Cancel** | the command's name; `what can i do?`; `abort` | none |
 | an agent's planning command call was refused for an input | a form of only the asked `Input` fields | `<field name>: <value>`, one line per field; the extraction model reads these lines, no code parses them | none |
-| a command needs your approval | **Approve**, **Always allow** (hidden when the server has no identity to grant to; a standing approval made here applies in this chat page only, not in the CLI, and never to an unattended run; list or revoke it with `/approvals` and `/revoke_approval <command>`), **Decline** | exactly `yes`, `always`, `no`; plus `approval_token` when the server delivered one (never shown or stored) | none |
+| a command needs your approval | **Approve**, **Always allow** (hidden when the server has no identity to grant to, and for a command that must be confirmed every time; a standing approval made here applies in this chat page only, not in the CLI, and never to an unattended run; list or revoke it with `/approvals` and `/revoke_approval <command>`), **Decline** | exactly `yes`, `always`, `no`; plus `approval_token` when the server delivered one (never shown or stored) | none |
 | a sub-task or plan review | an editable list of the steps | `yes`, `no`, or edits in the review grammar (`change 1: goal=...; drop 2`) | none |
 | the agent asks an open question | a form composed from the question, only when it offers a pick, a yes/no or a date; otherwise the plain question | `<Label>: <value>`, one line per field; **Edit in composer** copies them instead | `LLM_RESPONSE_GEN` |
 
@@ -462,7 +462,7 @@ ORDER BY t.start_ns;
 
 It counts `fw.ask_user` spans per `fw.turn`, which share a `trace_id` (the turn key) across suspensions; a turn that never asked shows 0, and a question still waiting is counted.
 
-There is deliberately no box for a startup command or a per-session context: the session is driven by what you type, so pre-seeding it from a chat form makes no sense. Those stay launch-time decisions — `run_fastapi_mcp --startup_command`, or the `/initialize` request fields if you are calling the API yourself.
+There is deliberately no box for a startup command or a per-session context: the session is driven by what you type, so pre-seeding it from a chat form makes no sense. A workflow's own `startup_action.json` is run when a session starts, so a workflow with a root object has it here without any flag. A startup command or a context stays a launch-time decision (`run_fastapi_mcp --startup_command`), or the `/initialize` request fields if you are calling the API yourself.
 
 A spawned server always binds `127.0.0.1`, has CORS pinned to loopback origins, and is stopped when the chatbot exits (SIGTERM included). It runs with unsigned dev JWTs — fine for a loopback-only dev server whose tokens the chatbot mints itself; pass `--expect-encrypted-jwt` to require signed tokens instead (then paste one in the chat's Advanced panel). Already have a server running? Launch with `--server-port <port>` and connect via the Advanced panel.
 
@@ -599,7 +599,7 @@ Yes. `ResponseGenerator.__call__` is plain Python — call `requests`, `httpx`, 
 
 **Learning from corrections.** Earlier versions adapted after one clarification by remembering a corrected request and answering a similar later request from that memory. That similarity cache was measured to add nothing on unseen requests and to give many wrong answers, so it was removed. Its replacement is learning from use: recorded, confirmed requests and a gated refit of the local intent model (`fastworkflow learn`; see "The local intent model" and `INTENT_LEARNING_*` below). Until you run it, or turn on `INTENT_LEARNING_REFIT=background`, a clarification fixes that turn only. An old `___convo_info/cache.sqlite3` is never read again and may be deleted (the suggested commands of an ambiguity question are kept there and rewritten as needed).
 
-**Signatures** — Pydantic `BaseModel` + `Field` (à la [DSPy](https://dspy.ai)) is the contract between natural language and your code. Strong descriptions and `examples` directly improve extraction accuracy, and the same schema feeds DSPy integration.
+**Signatures** — Pydantic `BaseModel` + `Field` (à la [DSPy](https://dspy.ai)) is the contract between natural language and your code. Strong descriptions directly improve extraction accuracy (a field's `examples` are not shown to the extraction model: they feed the sample requests it learns from and the hint in a question; a `pattern` is shown to it as the format), and the same schema feeds DSPy integration.
 
 **Context navigation at runtime** — Classes hold state; method availability can change with state. fastWorkflow enables/disables commands and navigates object hierarchies at run-time, which is what makes complex, finite-state workflows possible.
 
@@ -614,6 +614,8 @@ import dspy
 dspy_sig = dspySignature(Signature.Input, Signature.Output)
 prediction = dspy.Predict(dspy_sig)(input)
 ```
+
+**Startup action file** — a `startup_action.json` in the workflow folder is run as the first turn of every session by `fastworkflow run`, `fastworkflow run_fastapi_mcp` and the chat page, with no flag. `--startup_action` or `--startup_command` given explicitly replaces it, and on the server a session's own `startup_command` or `startup_action` in the `/initialize` request beats both.
 
 **Startup commands & headless mode** — initialize context or run non-interactively (batch/CI) by combining a startup command/action with `--keep_alive False`:
 
@@ -845,7 +847,7 @@ When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and
 
 ## Troubleshooting / FAQ
 
-> **`PARAMETER EXTRACTION ERROR`** — the LLM couldn't extract a required parameter. Rephrase more specifically, or strengthen the `Field(description=…, examples=[…])` in your Signature.
+> **`PARAMETER EXTRACTION ERROR`** — the LLM couldn't extract a required parameter. Rephrase more specifically, or strengthen the `Field(description=…)` (and `examples=[…]`) in your Signature.
 
 > **`CRASH RUNNING FASTWORKFLOW`** — the persistent-state folder is corrupted. Delete `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/` (default `~/.local/state/fastworkflow/...`) and re-run.
 

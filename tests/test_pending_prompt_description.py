@@ -70,7 +70,8 @@ def test_an_agent_originated_approval_is_tagged_approval_with_its_payload(todo, 
     artifacts = _last_artifacts(out)
     assert artifacts["question_kind"] == "approval"
     assert artifacts["approval"] == {"command": "Record/add_note", "parameters": {"text": "Ann"},
-                                     "origin": "agent", "irreversible": True, "can_always": True}
+                                     "origin": "agent", "can_always": False}   # fix-qjne.11
+    # bd fix-ftdl.7.6: no "irreversible" key: the framework does not know whether a change can be undone.
     assert "review" not in artifacts and "parameter_request" not in artifacts
 
     # The answered prompt's tag stays on its own entry and does not leak into the turn's final answer.
@@ -94,7 +95,7 @@ def test_a_user_typed_slash_approval_is_tagged_although_the_turn_is_completed(to
     assert artifacts["awaiting_user"] is True
     assert artifacts["question_kind"] == "approval"
     assert artifacts["approval"]["origin"] == "user"
-    assert artifacts["approval"]["irreversible"] is True
+    assert "irreversible" not in artifacts["approval"]            # bd fix-ftdl.7.6
     assert artifacts["approval"]["command"] == "Record/add_note"
     assert artifacts["approval"]["parameters"] == {"text": "Ann"}
     assert _added(todo.chores, todo.base) == []
@@ -124,7 +125,7 @@ def _gap_refusal(state: str, code: str, why: str, value) -> pc.PlanningCommandIn
 
 
 @pytest.mark.parametrize("refusal_factory, missing, invalid", [
-    (lambda: pc.PlanningCommandInputError("validate_extracted_parameters: no such member",
+    (lambda: pc.PlanningCommandInputError("no such member",
                                           fields=("title", "title")), [], ["title"]),
     (lambda: _gap_refusal("missing", "missing", "", None), ["title"], []),
     (lambda: _gap_refusal("missing", "refused", pc.PRONOUN_WHY, "everyone"), ["title"], []),
@@ -290,7 +291,7 @@ def test_can_always_is_false_when_the_surface_names_no_grant_identity(todo, anno
     from fastworkflow.approval_binding import Surface
 
     host = Surface("host", verified=True, uid="alice")
-    out = _ask(todo, "add_note <text>Ann</text>", steps=_finish(), approval_surface=host)
+    out = _ask(todo, "show_notes", steps=_finish(), approval_surface=host)   # delegatable: fix-qjne.11
     entry = out.command_outputs[-1]
     with_identity = dict(entry.command_response.artifacts["approval"])
     assert with_identity["can_always"] is True

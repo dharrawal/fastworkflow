@@ -174,6 +174,44 @@ def required_commands_for_output(model: Any, model_to_command: Mapping[type, str
     return out
 
 
+def _is_input_model(model: type, mapping: Mapping[type, str], signatures: Mapping[str, Any]) -> bool:
+    """Whether *model* is a command's ``Signature.Input`` (the role :func:`_role_for_model` gives it)."""
+    return model in mapping and _role_for_model(model, mapping[model], signatures) == "input"
+
+
+def input_phase_output_errors(
+    model: Any,
+    model_to_command: Mapping[type, str],
+    signatures: Mapping[str, Any],
+) -> list[str]:
+    """The load error for a phase annotated with a command's ``Input`` alone, or with a union that has an ``Input``
+    member (bd fix-qjne.16); empty otherwise. A phase hands on a command's Output, a union of Outputs or a facts
+    model, so the Input never filled and failed at run time ("the values found do not fit the model"). The Input of a
+    command stays supported as a FIELD of a facts model."""
+    mapping = _extended_mapping(model, signatures, model_to_command)
+    members = union_members(model)
+    if members is not None:
+        inputs = [m for m in members if _is_input_model(m, mapping, signatures)]
+    elif inspect.isclass(model) and issubclass(model, BaseModel) and _is_input_model(model, mapping, signatures):
+        inputs = [model]
+    else:
+        return []
+    if not inputs:
+        return []
+    command = mapping[inputs[0]].split("/")[-1]
+    return [
+        f"a phase is annotated with {command}'s Input ({_type_label(model)}), which is not a phase output: a phase "
+        f"hands on a command's Output, a union of Outputs, or a facts model. A command's Input may be a FIELD of a "
+        f"facts model (class Facts(BaseModel): asked: {_pascal(command)}.Input), so write the facts model and "
+        f"annotate the phase with it"
+    ]
+
+
+def _pascal(command: str) -> str:
+    """The name a command's ``Signature`` is conventionally imported as (``find_book`` -> ``FindBook``)."""
+    return "".join(part[:1].upper() + part[1:] for part in command.split("_"))
+
+
 def check_typed_facts_model(
     file_path: str,
     model: Any,
@@ -181,6 +219,8 @@ def check_typed_facts_model(
     signatures: Mapping[str, Any],
 ) -> list[str]:
     """Load errors for a phase output type (3.12); empty when valid or copy-based."""
+    if refused := input_phase_output_errors(model, model_to_command, signatures):
+        return refused
     mapping = _extended_mapping(model, signatures, model_to_command)
     members = union_members(model)
     if members is not None:
@@ -188,7 +228,7 @@ def check_typed_facts_model(
             if member not in mapping:
                 return [
                     f"phase output {member.__name__} is not a loaded command's "
-                    "Signature.Output or Signature.Input"
+                    "Signature.Output"
                 ]
         return []
     if not (inspect.isclass(model) and issubclass(model, BaseModel)):
@@ -207,6 +247,8 @@ def check_phase_steps_name_commands(
     signatures: Mapping[str, Any],
 ) -> list[str]:
     """Load error when *step_commands* never names a command *model* needs."""
+    if input_phase_output_errors(model, model_to_command, signatures):
+        return []       # refused as a phase output already (check_typed_facts_model)
     plain = {c.split("/")[-1] for c in step_commands}
     qualified = set(step_commands)
     members = union_members(model)

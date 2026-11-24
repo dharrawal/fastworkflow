@@ -9,13 +9,16 @@ class Signature:
     """Find library members by name."""
 
     class Input(BaseModel):
-        query: str = Field(description="words of the member's name", examples=["Jane Doe"])
+        query: str = Field(description="words of the member's name", examples=["Jane Doe"],
+                              json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
-        member_uids: list[str] = Field(description="the uid of each member found, in row order; "
-                                                   "open_member takes one",
+        member_uids: list[str] = Field(description="the uid of each member found, in row order, "
+                                                   "such as m1, m2; open_member takes one",
+                                       examples=[["m2"], ["m1", "m3"]],
                                        json_schema_extra={"ui": {"table": "members"}})
         names: list[str] = Field(description="the name of each member found, in row order",
+                                 examples=[["Raj Patel"], ["Ann Lee", "Mia Chen"]],
                                  json_schema_extra={"ui": {"table": "members"}})
         total: int = Field(description="how many members match")
 

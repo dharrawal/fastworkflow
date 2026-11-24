@@ -377,10 +377,14 @@ def step(record: Optional[Waiting], event: Event, facts: Facts = Facts()) -> Mov
 
 
 def can_ask(ctx: Any) -> bool:
-    """Whether a question can be put to somebody on this turn and its reply come back: the turn is attended and no
-    blocking queue answers ``ask_user`` (a ``ChatSession`` read blocks instead of suspending). The one predicate; each
-    call site adds only its own further conditions (nothing ran yet, not asked yet, the agent path, ...)."""
-    return getattr(ctx, "_turn_unattended", True) is False and getattr(ctx, "user_message_queue", True) is None
+    """Whether a question can be put to somebody on this turn and its reply come back: the turn is attended. The one
+    predicate; each call site adds only its own further conditions (nothing ran yet, not asked yet, the agent path, ...).
+
+    Every question it governs suspends the turn on its waiting record, and the reply is the next message on every
+    transport, the terminal's included (``ChatSession`` reads it from its queue and routes it through ``step`` like any
+    message; ``//cancel`` answers it with its kind's cancel reply). Only the agent's own ``ask_user`` blocks on that
+    queue instead of suspending, and it does not ask this predicate (bd fix-ftdl.7.7)."""
+    return getattr(ctx, "_turn_unattended", True) is False
 
 
 def can_review(ctx: Any) -> bool:

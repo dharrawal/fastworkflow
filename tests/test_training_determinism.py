@@ -587,6 +587,12 @@ def test_inherited_command_generation_is_cached_by_fully_qualified_name(tmp_path
     commands = workflow_path / "_commands"
     parent = commands / "Parent"
     parent.mkdir(parents=True)
+    # every context is a folder; Child's holds only its context class, its one command is inherited
+    (commands / "Child").mkdir()
+    (commands / "Child" / "_Child.py").write_text(
+        "class Context:\n    @classmethod\n    def get_parent(cls, record):\n        return None\n",
+        encoding="utf-8",
+    )
     (commands / "context_inheritance_model.json").write_text(
         json.dumps({"Child": {"base": ["Parent"]}}),
         encoding="utf-8",
@@ -608,6 +614,11 @@ def test_inherited_command_generation_is_cached_by_fully_qualified_name(tmp_path
                         workflow.context.get("generation_calls", 0) + 1
                     )
                     return [command_name, *Signature.plain_utterances]
+
+            class ResponseGenerator:
+                # a command needs one of the two generator classes to load (bd fix-ftdl.2)
+                def __call__(self, workflow, command, command_parameters):
+                    return None
             """
         ),
         encoding="utf-8",

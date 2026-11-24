@@ -1,9 +1,10 @@
 """Command class declarations are decorators (design idioms, spec section 4).
 
-``@user_approval_for_execution(UserApproval.X)``, ``@writes`` and ``@descends_to("<Context>", when_parameter=...)``
+``@user_approval_for_execution(UserApproval.X)``, ``@writes`` and ``@descends_to("<Context>")``
 replace the class attributes ``approval``, ``writes`` and ``descends_to`` / ``descend_parameter``. Each decorator
-stores its value on a private attribute with a mark only the decorator sets. The load fails for a retired
-attribute (naming the decorator to write) and for a private attribute written by hand.
+stores its value on a private attribute with a mark only the decorator sets. A retired attribute (naming the
+decorator to write) and a private attribute written by hand fail the load of THAT command: it is listed by
+``command_preview.load_problems`` and does not load, and the rest of the workflow loads (bd fix-ftdl.2).
 
 Each load case runs on a COPY of the library example, edited in the copy. Nothing is mocked: the routing
 definition, the command classes and the saved ``command_directory.json`` are the copy's own.
@@ -17,11 +18,12 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import command_declarations, command_writes
+from fastworkflow import command_declarations, command_preview, command_writes, workflow_agent
+from fastworkflow import planning_commands as pc
 from fastworkflow.approval_annotations import command_approval
-from fastworkflow.command_declarations import CommandDeclarationError, UserApproval
+from fastworkflow.command_declarations import UserApproval
+from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.command_writes import WritesDeclarationError
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -49,6 +51,25 @@ def _edit(folder: Path, command_file: str, old: str, new: str) -> None:
 def _load(folder: Path):
     RoutingRegistry.clear_registry()
     return RoutingRegistry.get_definition(str(folder))
+
+
+def _fails_load(folder: Path, command: str) -> str:
+    """The one load problem of *command* (the workflow itself loads): the command does not load and is listed."""
+    _load(folder)
+    pc.resolve_field_sources.cache_clear()
+    problems = command_preview.load_problems(str(folder))
+    mine = [p for p in problems if p.startswith(f"{command}: ")]
+    assert len(mine) == 1, problems
+    metadata = RoutingRegistry.get_definition(str(folder)).command_directory.map_command_2_metadata[command]
+    if metadata.is_planning:
+        assert command not in workflow_agent.load_planning_command_map(str(folder))
+    else:
+        with pytest.raises(CommandLoadError):
+            RoutingRegistry.get_definition(str(folder)).get_command_class(
+                command, fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
+    assert RoutingRegistry.get_definition(str(folder)).get_command_class(
+        "Library/find_book", fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS) is not None
+    return mine[0]
 
 
 def _command_directory(folder: Path) -> dict:
@@ -103,31 +124,26 @@ def test_writes_on_something_that_is_not_a_class_fails():
         fastworkflow.writes(42)
 
 
-def test_descends_to_stores_the_context_and_the_optional_parameter():
-    @fastworkflow.descends_to("Member", when_parameter="member_uid")
-    class Gated:
+def test_descends_to_stores_the_context():
+    @fastworkflow.descends_to("Member")
+    class Moves:
         pass
 
-    @fastworkflow.descends_to("Book")
-    class Plain:
+    @fastworkflow.descends_to("  Book ")
+    class Stripped:
         pass
 
-    assert Gated.__fw_descends_to__ == ("Member", "member_uid")
-    assert Plain.__fw_descends_to__ == ("Book", None)
-    assert command_declarations.declared_descend(Gated) == ("Member", "member_uid")
-    assert command_declarations.declared_descend(Plain) == ("Book", None)
+    assert Moves.__fw_descends_to__ == "Member"
+    assert Stripped.__fw_descends_to__ == "Book"
+    assert command_declarations.declared_descend(Moves) == "Member"
+    assert command_declarations.declared_descend(Stripped) == "Book"
+    assert command_declarations.declared_descend(object) is None
 
 
 @pytest.mark.parametrize("context", ["", "   ", None, 3])
 def test_descends_to_needs_a_context_name(context):
     with pytest.raises(TypeError, match="takes the name of a context"):
         fastworkflow.descends_to(context)
-
-
-@pytest.mark.parametrize("parameter", ["", "  ", 0])
-def test_descends_to_needs_an_input_name_when_one_is_given(parameter):
-    with pytest.raises(TypeError, match="takes an input field name"):
-        fastworkflow.descends_to("Book", when_parameter=parameter)
 
 
 def test_the_package_exports_the_four_names():
@@ -202,8 +218,7 @@ def test_writes_on_a_planning_command_fails_the_load(tmp_path):
     _edit(folder, "Library/note_member.py", "class PlanGenerator:\n",
           "import fastworkflow\n\n\n@fastworkflow.writes\nclass PlanGenerator:\n")
 
-    with pytest.raises(WritesDeclarationError, match="cannot carry @writes"):
-        _load(folder)
+    assert "cannot carry @writes" in _fails_load(folder, "Library/note_member")
 
 
 def test_a_retired_descends_to_attribute_fails_the_load_naming_the_decorator(tmp_path):
@@ -212,21 +227,32 @@ def test_a_retired_descends_to_attribute_fails_the_load_naming_the_decorator(tmp
           '@fastworkflow.descends_to("Book")\nclass ResponseGenerator:\n',
           'class ResponseGenerator:\n    descends_to = "Book"\n')
 
-    with pytest.raises(CommandDeclarationError) as caught:
-        _load(folder)
-    assert 'descends_to = "Book" is removed: write @descends_to("Book")' in str(caught.value)
+    assert 'descends_to = "Book" is removed: write @descends_to("Book")' in _fails_load(folder, "Library/open_book")
 
 
-def test_a_retired_descend_parameter_fails_the_load_naming_when_parameter(tmp_path):
+def test_a_retired_descend_parameter_fails_the_load_saying_the_move_is_unconditional(tmp_path):
     folder = _copy(tmp_path, "retired_gate")
     _edit(folder, "Library/open_book.py",
           '@fastworkflow.descends_to("Book")\nclass ResponseGenerator:\n',
           'class ResponseGenerator:\n    descends_to = "Book"\n    descend_parameter = "book_uid"\n')
 
-    with pytest.raises(CommandDeclarationError) as caught:
-        _load(folder)
-    assert ('descends_to = "Book" is removed: write @descends_to("Book", when_parameter="book_uid")'
-            in str(caught.value))
+    text = _fails_load(folder, "Library/open_book")
+    assert 'descends_to = "Book" is removed: write @descends_to("Book")' in text
+    assert 'descend_parameter = "book_uid" is removed' in text
+    assert "unconditional" in text
+
+
+@pytest.mark.parametrize("spelling", ['when_parameter="book_uid"', 'when_parameter=""', "when_parameter=3"])
+def test_descends_to_with_when_parameter_fails_the_load_of_that_command(tmp_path, spelling):
+    folder = _copy(tmp_path, "when_parameter_removed")
+    _edit(folder, "Library/open_book.py", '@fastworkflow.descends_to("Book")',
+          f'@fastworkflow.descends_to("Book", {spelling})')
+
+    text = _fails_load(folder, "Library/open_book")
+    assert "open_book" in text
+    assert "when_parameter is removed" in text
+    assert "@descends_to always declares an unconditional move" in text
+    assert "assigns workflow.record only when it moves" in text
 
 
 def test_a_retired_writes_attribute_fails_the_load(tmp_path):
@@ -234,8 +260,7 @@ def test_a_retired_writes_attribute_fails_the_load(tmp_path):
     _edit(folder, "Record/add_note.py", "@fastworkflow.writes\nclass ResponseGenerator:\n",
           "class ResponseGenerator:\n    writes = True\n")
 
-    with pytest.raises(CommandDeclarationError, match=r"writes = True is removed: write @writes"):
-        _load(folder)
+    assert "writes = True is removed: write @writes" in _fails_load(folder, "Record/add_note")
 
 
 def test_a_hand_written_approval_attribute_fails_the_load(tmp_path):
@@ -243,10 +268,9 @@ def test_a_hand_written_approval_attribute_fails_the_load(tmp_path):
     _edit(folder, "Library/open_book.py", "class ResponseGenerator:\n",
           "class ResponseGenerator:\n    __fw_approval__ = fastworkflow.UserApproval.REQUIRED_ALWAYS\n")
 
-    with pytest.raises(CommandDeclarationError) as caught:
-        _load(folder)
-    assert "__fw_approval__ is written by hand" in str(caught.value)
-    assert "@user_approval_for_execution" in str(caught.value)
+    text = _fails_load(folder, "Library/open_book")
+    assert "__fw_approval__ is written by hand" in text
+    assert "@user_approval_for_execution" in text
 
 
 def test_a_hand_written_writes_attribute_fails_the_load(tmp_path):
@@ -254,10 +278,9 @@ def test_a_hand_written_writes_attribute_fails_the_load(tmp_path):
     _edit(folder, "Record/add_note.py", "@fastworkflow.writes\nclass ResponseGenerator:\n",
           "class ResponseGenerator:\n    __fw_writes__ = True\n")
 
-    with pytest.raises(CommandDeclarationError) as caught:
-        _load(folder)
-    assert "__fw_writes__ is written by hand" in str(caught.value)
-    assert "@writes" in str(caught.value)
+    text = _fails_load(folder, "Record/add_note")
+    assert "__fw_writes__ is written by hand" in text
+    assert "@writes" in text
 
 
 def test_a_hand_written_descends_to_attribute_fails_the_load(tmp_path):
@@ -265,7 +288,6 @@ def test_a_hand_written_descends_to_attribute_fails_the_load(tmp_path):
     _edit(folder, "Library/open_book.py", '@fastworkflow.descends_to("Book")\nclass ResponseGenerator:\n',
           'class ResponseGenerator:\n    __fw_descends_to__ = ("Book", None)\n')
 
-    with pytest.raises(CommandDeclarationError) as caught:
-        _load(folder)
-    assert "__fw_descends_to__ is written by hand" in str(caught.value)
-    assert "@descends_to" in str(caught.value)
+    text = _fails_load(folder, "Library/open_book")
+    assert "__fw_descends_to__ is written by hand" in text
+    assert "@descends_to" in text

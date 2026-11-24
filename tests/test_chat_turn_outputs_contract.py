@@ -79,11 +79,20 @@ def produce(tmp_path) -> dict:
         cases = []
 
         def run(label, ctx, message):
+            # Each case is a request, never a reply to the previous case's parameter question: the question is dropped
+            # the way a client drops it (cancel_pending), so no reply reader (and no remote model) is involved.
+            ctx.cancel_pending()
             cases.append({"case": label, "message": message, "outputs": _facts(ctx.process_turn(message))})
+
+        def start(label, ctx):
+            # A startup command has no Signature: it runs only as the startup action, never by a typed "/startup".
+            action = fastworkflow.Action(command_name="startup", command="")
+            cases.append({"case": label, "message": "startup action",
+                          "outputs": _facts(ctx.process_action_turn(action))})
 
         folder, ctx, wf = _make(tmp_path, TESTS / "todo_list_workflow", "todo")
         todo_schemas = _schemas(folder)
-        run("todo: startup is a global command", ctx, "/startup")
+        start("todo: startup is a global command", ctx)
         run("todo: a command of the current root context", ctx, "/create_todo_list description=Chores")
         run("todo: a leaf owned by TodoList, TodoList current", ctx, "/get_properties")
         run("todo: a parent context's command run from TodoList", ctx, "/list_todo_lists")
@@ -95,7 +104,7 @@ def produce(tmp_path) -> dict:
 
         folder, ctx, wf = _make(tmp_path, TESTS.parent / "fastworkflow" / "examples" / "library", "library")
         library_schemas = _schemas(folder)
-        run("library: startup", ctx, "/startup")
+        start("library: startup", ctx)
         run("library: a global command with a root context current", ctx, "/library_hours")
         run("library: an execution command of the root context", ctx, "/count_overdue")
         run("library: a planning command, parameters missing", ctx, "/count_books")
@@ -111,6 +120,7 @@ def _framework(initialized_fastworkflow, tmp_path):  # noqa: F811
     yield
 
 
+@pytest.mark.usefixtures("no_planner_key")
 def test_the_checked_in_fixture_is_what_the_real_turns_produce(tmp_path):
     assert json.loads(FIXTURE.read_text(encoding="utf-8")) == produce(tmp_path)
 

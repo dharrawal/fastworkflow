@@ -33,7 +33,7 @@ def test_an_exact_command_name_is_decided_with_no_model(gated, monkeypatch):
     intent = resolution.part_intent(gated.wf, "count_books")
     assert (intent.outcome, intent.command, intent.kind, intent.decided_by) == (
         resolution.MATCH, "Library/count_books", resolution.KIND_PLANNING, resolution.BY_EXACT_NAME)
-    assert resolution.is_fast_path(intent) and asked == []
+    assert resolution.is_fast_path(intent, gated.wf) and asked == []
 
 
 def test_a_confident_local_plain_command_wins_and_the_remote_model_is_not_asked(gated, monkeypatch):
@@ -42,7 +42,7 @@ def test_a_confident_local_plain_command_wins_and_the_remote_model_is_not_asked(
     intent = resolution.part_intent(gated.wf, FIND)
     assert (intent.outcome, intent.command, intent.kind, intent.decided_by) == (
         resolution.MATCH, "Library/find_member", resolution.KIND_EXECUTION, resolution.BY_CLASSIFIER)
-    assert resolution.is_fast_path(intent) and asked == []
+    assert resolution.is_fast_path(intent, gated.wf) and asked == []
 
 
 def test_an_unsure_local_model_hands_the_part_to_the_remote_model_whose_match_decides(gated, monkeypatch):
@@ -50,7 +50,7 @@ def test_an_unsure_local_model_hands_the_part_to_the_remote_model_whose_match_de
     intent = resolution.part_intent(gated.wf, JOKE)
     assert (intent.outcome, intent.command, intent.kind, intent.decided_by) == (
         resolution.MATCH, BY_TITLE, resolution.KIND_PLANNING, resolution.BY_MATCHER)
-    assert not resolution.is_fast_path(intent)                       # a remote match is drafted, as before
+    assert not resolution.is_fast_path(intent, gated.wf)                       # a remote match is drafted, as before
     assert asked == [JOKE]
 
 
@@ -126,7 +126,7 @@ def test_with_no_key_a_local_plan_pick_is_an_ambiguity_never_the_fast_path(gated
     intent = resolution.part_intent(gated.wf, WRITER)
     assert intent.outcome == resolution.AMBIGUOUS and intent.decided_by == resolution.BY_QUESTION
     assert intent.ambiguous[0] == BY_TITLE and len(intent.ambiguous) <= resolution.MAX_ALTERNATIVES
-    assert not resolution.is_fast_path(intent)
+    assert not resolution.is_fast_path(intent, gated.wf)
 
 
 def test_the_remote_model_checks_a_local_plan_pick_and_its_match_stands(gated, monkeypatch):
@@ -134,7 +134,7 @@ def test_the_remote_model_checks_a_local_plan_pick_and_its_match_stands(gated, m
     intent = resolution.part_intent(gated.wf, WRITER)
     assert (intent.outcome, intent.command, intent.kind, intent.decided_by) == (
         resolution.MATCH, AUTHOR, resolution.KIND_PLANNING, resolution.BY_MATCHER)
-    assert not resolution.is_fast_path(intent) and asked == [WRITER]
+    assert not resolution.is_fast_path(intent, gated.wf) and asked == [WRITER]
     # The local answer is kept among the candidates, right after the decided command.
     assert [each.name for each in intent.candidates[:2]] == [AUTHOR, BY_TITLE]
 
@@ -158,13 +158,13 @@ def test_a_failed_remote_check_of_a_local_plan_pick_is_an_ambiguity(gated, monke
     script_matcher(monkeypatch, {})                                  # the call fails
     intent = resolution.part_intent(gated.wf, WRITER)
     assert intent.outcome == resolution.AMBIGUOUS and intent.ambiguous[0] == BY_TITLE
-    assert not resolution.is_fast_path(intent)
+    assert not resolution.is_fast_path(intent, gated.wf)
 
 
 def test_a_confident_local_execution_command_still_decides_alone(gated, monkeypatch):
     asked = script_matcher(monkeypatch, lambda text: pytest.fail("the remote model must not be asked"))
     intent = resolution.part_intent(gated.wf, FIND)
-    assert intent.kind == resolution.KIND_EXECUTION and resolution.is_fast_path(intent) and asked == []
+    assert intent.kind == resolution.KIND_EXECUTION and resolution.is_fast_path(intent, gated.wf) and asked == []
 
 
 # ---- commands that only enter a context are not offered to the remote model (fix-o1lg.2) ---------------------------
@@ -197,7 +197,7 @@ def test_the_remote_model_is_never_offered_a_command_that_only_enters_a_context(
 
 
 def test_an_entry_only_command_is_one_that_always_descends_and_takes_no_required_input(tmp_path):
-    """The marker: ``@descends_to`` with no ``when_parameter``, on a command with no required input. ``open_book`` and
+    """The marker: ``@descends_to`` on a command with no required input. ``open_book`` and
     ``open_member`` descend but need a record id, so they are not entry-only."""
     import os
     import shutil

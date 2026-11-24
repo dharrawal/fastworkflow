@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A step the code runs · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="p-run">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group planning">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="p-run">
+      <div class="prose">
+        <p class="num">02</p>
+        <h3>A step the code runs</h3>
+        <p>A planning command does its work as a list of steps instead of a Python body (see <a href="p-plan.html">a plan in place of a body</a>). Each method of its <code>PlanGenerator</code> class is a <em>phase</em>, and returns that phase's steps. A step is either <code>run("command", ...)</code>, which the framework runs itself, or a plain sentence, which a model carries out. (A plain string that is written exactly like a command step, a command name and <code>key=value</code> pairs, is also run by code, as <code>run()</code> would; only <code>fastworkflow command preview</code> warns about writing it by hand, so write <code>run()</code>.) Reach for <code>run()</code> whenever a step is simply "call this command with these values": code runs it in order, with no model call. Two keyword options cover what a plain call cannot: opening a row by the name a search found (<code>named=</code>) and reading every page of a long list (<code>all_pages=True</code>).</p>
+        <p><code>run("find_member", query=input.member)</code> names an execution command (a command with Python code behind it, see <a href="e-file.html">one file, two classes</a>) and passes values by the names of that command's own <code>Input</code> fields. A value of <code>None</code> is left out of the step. <code>run()</code> writes the step as text, and every reader of that text (the step parser, the code that runs it, the preview and the template) must read the same value back, so a value that has whitespace, a quote, a separator character or a condition word (such as "only", "when" or "if") is written in quotes: <code>find_book query="When Harry Met Sally"</code>. Multi-word values therefore show quoted in previews, in <code>run-code</code> output and in the commands an agent sends. A value that holds both kinds of quote stays unquoted, which is a known limit. A placeholder such as <code>&lt;input.title&gt;</code> is not quoted.</p>
+        <p>Code runs a phase's steps one by one, through the agent's own command tool. It runs a <code>run()</code> step when every required <code>Input</code> field has a value, when it is a <code>named=</code> step whose row code can find (below), or when it leaves out exactly one required uid or <code>from_command_output</code> field (see <a href="e-from.html">a handle's producer</a>) and the command run just before it in this call listed exactly one row with no further page: code takes the value from that <em>only row</em>. If the command lives in another context (a part of the app, such as one open book), code first moves there when that needs no value. A command that exists in several contexts whose <code>Input</code> classes would give different steps is an open step. A sentence that begins with an answer word such as "say" or "report" is about the answer, so code passes over it. Code also passes over a step that opens with such a word and then names a command ("report the result of find_member query=x"), a step in which a negation word (not, no, never, none, without, skip and a few more) comes before the command's name, even inside a condition ("if the member has no fines, list_loans"), and a step that names only a built-in navigation command such as <code>go_up</code>. A <code>run()</code> step writes its command's name first, so the first two do not apply to it.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/note_member.py</figcaption>
+        <pre><code>from fastworkflow.planning import run
+
+class PlanGenerator:
+    def note(self, input):
+        return [run("find_member", query=input.member),   <span class="c"># all values given: code runs it</span>
+                run("open_member", named=input.member),   <span class="c"># code opens the row whose name matches</span>
+                run("add_note", text=input.text),         <span class="c"># runs inside the member just opened</span>
+                "say whose record the note was added to"] <span class="c"># an answer line: code passes over it</span></code></pre>
+      </figure>
+      <div class="prose">
+        <h4>Where code stops: the open step</h4>
+        <p>The first step code cannot run is the <em>open step</em>: a sentence that asks for work ("choose the book the request means"), a <code>run()</code> step still missing a value or whose row code cannot pick, a conditional <code>when()</code> step, a failed command, or a full list past its page cap. Code stops there and never skips ahead.</p>
+        <p>What happens next depends on whether the workflow has an agent model (<code>LLM_AGENT</code> in its env file):</p>
+        <ul>
+          <li>With one, the agent takes over at the open step. It sees what the earlier steps read and does the open step and the rest (for a <code>named=</code> step it chooses the row or asks the user).</li>
+          <li>Without one, the turn ends as completed. Code writes the answer: what ran (each step, its result, the facts recorded), then where it stopped and why; the remaining steps come back as data a client can show (<code>fw_not_run</code>). In a chat a person answers, two open steps become a question instead: a <code>when()</code> step whose inner step code can run (yes or no), and a <code>run()</code> step missing one plain value (the reply is the value).</li>
+        </ul>
+        <p>A command whose steps code runs to the end, with its answer written by <code>__result__</code> (see <a href="p-result.html">the answer, in code</a>), takes no model call at all. To see where code stops, run <code>fastworkflow command run-code &lt;workflow folder&gt; &lt;command&gt; --input '&lt;json&gt;'</code>. It runs the workflow's real commands, so use a copy of the app's data. It is a second implementation of the step runner, not the runtime itself: it reads only the first page of an <code>all_pages</code> step, does not move to the context a step needs first, and takes an only row without checking for a further page, so a plan that needs either behaves differently there; trust a real run for those. A command of an enclosing record runs on that record there, as in a real run.</p>
+
+        <h4 id="p-named">The row a listing named: <code>named=</code></h4>
+        <p>A search lists rows ("find the members called Raj Patel"); the next command needs one row's id, but the user gave a name. <code>run("open_member", named=input.member)</code> opens the row with that name and passes its id. A <em>listing</em> is the <code>Output</code> of a command that returns one list per column, such as <code>member_uids</code> and <code>names</code>, where item <em>i</em> of every list is row <em>i</em>.</p>
+        <ul>
+          <li><strong>The id field.</strong> At load, the framework picks the <code>Input</code> field a row is opened by: the one field that declares <code>from_command_output</code> (here <code>member_uid</code>, from <code>find_member.member_uids</code>), else the one required field whose name is an id (<code>..._uid</code> or <code>..._id</code>). Two fields that declare a producer count as none, and the id-name rule decides. With neither, the load of the command that writes the step fails: "declares no row id input ... declare the producer of its id field with from_command_output, or pass the id input explicitly". A required <code>str</code> field with some other name is not enough.</li>
+          <li><strong>The listing.</strong> Code looks back over this call's commands, in any phase, for the latest one whose arguments hold that same name (<code>find_member query=Raj Patel</code>) and whose <code>Output</code> has the list of ids that fits the field.</li>
+          <li><strong>The row.</strong> Code opens the one row with a cell equal to the name (case, spacing and quotes ignored: "Dune" is not "Dune Messiah"). When no cell equals the name, it opens the listing's only row, even one whose name differs (as "Raj" opens Raj Patel below). When several rows match, or the listing has several rows and none matches, or pages are unread, code does not guess: the step is open.</li>
+        </ul>
+      </div>
+      <figure>
+        <figcaption>fastworkflow command run-code &lt;copy of library&gt; note_member, three inputs</figcaption>
+        <pre><code><span class="c"># "Raj Patel": one row's name equals it</span>
+code runs: find_member query="Raj Patel"
+code runs: open_member member_uid=m2
+now in: Member
+code runs: add_note text="moved address"
+
+<span class="c"># "Raj": no row is named "Raj", but the listing has one row</span>
+code runs: find_member query=Raj
+code runs: open_member member_uid=m2
+
+<span class="c"># "a": three members hold an "a", none is named "a"</span>
+code runs: find_member query=a
+step 2 is open: the agent would run it and the rest</code></pre>
+      </figure>
+      <div class="prose">
+        <p>Picking a row yourself, as in <code>run("open_book", book_uid=find.book_uids[0])</code>, takes the first of several matches without complaint, so two books with similar titles give a confident answer about the wrong one. Use <code>named=</code> (or the only-row rule) whenever the row must be the one the user named.</p>
+        <p>A listing that can only hold one row needs no name: <code>run("open_member")</code> takes the id from the only row. When your code already knows the id, pass it: <code>run("open_member", named=input.member, member_uid=uid)</code> is simply <code>open_member member_uid=...</code>. Without the id, a <code>named=</code> step takes no other keyword; one fails the load. So does a <code>named=</code> step on a command that requires a second input with no default ("... also requires ..., which such a step cannot pass"): pass the row's id and every required input instead.</p>
+
+        <h4 id="p-pages">Every page of a list: <code>all_pages=True</code></h4>
+        <p>Some listing commands return one page at a time. When a plan needs the whole list, to count it or name every row, write <code>run("list_loans", all_pages=True)</code> and code reads every page for you. A command is paged when:</p>
+        <ul>
+          <li>Its <code>Input</code> has a field named exactly <code>start</code>, typed <code>int</code> or <code>Optional[int]</code>: the position of the first row of the page, where empty or 0 means the first page. No other name works: <code>offset</code> or <code>page</code> is an ordinary field.</li>
+          <li>Its <code>Output</code> has <code>total: int</code>, how many rows the whole list has. Every list field of the <code>Output</code> holds one entry per row of this page, so all of them have the same length. The load does not check the lengths: with lists of different lengths code silently reads one page.</li>
+        </ul>
+        <p>The next <code>start</code> is this page's <code>start</code> plus the rows it returned; reading stops at <code>total</code> or at an empty page. While rows remain, the framework ends the response text with a line such as <code>Rows 1-10 of 23; next page: start=10.</code>, but only when the command returns its <code>Output</code> directly: with <code>CommandResponse(output=...)</code> the line is not added, though code still pages by reading the <code>Output</code>. The phase's facts (the typed record a phase hands on, see <a href="p-facts.html">what a phase hands on</a>) hold every row read, in order, and the one <code>total</code>. Without <code>all_pages</code> the step reads the first page; with <code>start=</code> written, just that page. <code>all_pages=True</code> with <code>named=</code> fails the load: one reads every row, the other opens one. <code>all_pages=True</code> on a command that is not paged is accepted and reads once.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Book/list_loans.py</figcaption>
+        <pre><code>class Signature:
+    """List the loans of the open book: each borrower and the due date."""
+
+    class Input(BaseModel):
+        <span class="c"># named start and typed int: this is what makes the command paged</span>
+        start: Optional[int] = Field(default=None, description="the first row of the page")
+
+    class Output(BaseModel):
+        <span class="c"># one entry per row of this page; both lists have the same length</span>
+        borrowers: list[str] = Field(description="each borrower's name, in row order")
+        due_dates: list[str] = Field(description="each loan's due date, in row order")
+        <span class="c"># the size of the WHOLE list, the same on every page</span>
+        total: int = Field(description="how many loans the book has, on every page")
+
+    plain_utterances = [...]
+
+
+class ResponseGenerator:
+    def __call__(self, workflow, command, input: Signature.Input) -&gt; Signature.Output:
+        book = workflow.record
+        loans = book.library.loans_of_book(book.uid)
+        rows = page(loans, input.start)    <span class="c"># the app's own helper: rows[start:start + 10]</span>
+        return Signature.Output(borrowers=[m for m, _ in rows],
+                                due_dates=[d for _, d in rows],
+                                total=len(loans))</code></pre>
+      </figure>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Book/shelf_report.py</figcaption>
+        <pre><code>from fastworkflow.planning import count, count_and_names_read, run
+
+class PlanGenerator:
+    <span class="c"># Shelf: a facts model with fields book and loans (see "what a phase hands on")</span>
+    def shelf(self) -&gt; Shelf:
+        return [run("show_book"), run("list_loans", all_pages=True)]
+
+    def __result__(self, shelf):
+        book, loans = shelf.book, shelf.loans
+        held = f"{book.title} is held at {book.branch}, {count(book.copies, 'copy', 'copies')}"
+        if not loans.borrowers:
+            return f"{held}; none is on loan."
+        <span class="c"># count from loans.total, not len(loans.borrowers): the rows read may be fewer</span>
+        return f"{held}; on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}."</code></pre>
+      </figure>
+      <div class="prose">
+        <p>Code reads at most 20 pages of one step, the first included; <code>FW_CODE_MAX_PAGES</code> in the workflow's <code>fastworkflow.env</code> changes that (a value that is not a positive whole number logs a warning and 20 applies). At the cap with rows left, the step is open and the pages read are kept. The agent is told which page to read next, never page 1 again; if it runs out of steps too, the answer ends with a note such as <code>list_loans: 200 rows read of 230 the command reported.</code> With no agent model, the answer adds a <b>Rows read so far</b> section (the rows read of the total, and the first list field of each page). Either way it says any count above is of a partial read, not of the whole list.</p>
+
+        <h4>Beginner mistakes</h4>
+        <ul>
+          <li><strong>A misspelled keyword.</strong> The framework checks each keyword against the <code>Input</code> at load. <code>run("find_book", title=...)</code>, when the field is <code>query</code>, is a load problem of that planning command: "a step passes title to 'find_book', whose Signature.Input has no such field". <code>fastworkflow run</code>, <code>train</code>, the server and <code>command preview --check</code> report it, and the command does not load.</li>
+          <li><strong>Leaning on the only row.</strong> <code>run("open_book")</code> after <code>find_book</code> works for "Persuasion" but is open for "Dune", which matches two books. When a search can match several rows, use <code>named=</code>.</li>
+          <li><strong>A <code>named=</code> value that differs from the search.</strong> The listing's own search argument must hold the same name. After <code>find_member query=Lee</code>, <code>named="Ann Lee"</code> finds no listing searched for "Ann Lee" and stays open, even though the listing holds only Ann Lee. Pass the same input to both, as <code>note_member</code> does.</li>
+          <li><strong>No <code>total</code> on a paged command.</strong> It fails the load: "Input.start makes Book/list_loans a paged command, but its Output declares no total; declare total: int, how many rows there are on every page, or rename start if it is not a page".</li>
+          <li><strong><code>total</code> set to the page's length.</strong> It loads, but code takes the first page for the last and silently counts one page.</li>
+        </ul>
+        <p class="see">See also <a href="p-plan.html">a plan in place of a body</a>, <a href="e-from.html">a handle's producer</a>, <a href="e-return.html">what it returns</a>, <a href="p-result.html">the answer, in code</a>.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="p-plan.html"><span>Previous</span>A plan in place of a body</a>
+    <a class="next" href="p-facts.html"><span>Next</span>What a phase hands on</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

@@ -85,7 +85,7 @@ def _write_step_stubs(folder) -> None:
     for name in STEP_STUB_NAMES:
         param = STEP_STUB_PARAMS.get(name)
         body = (f'        {param}: str = ""\n' if param else "        pass\n")
-        if name == "find_group":  # the command whose Output a phased fixture types its facts with
+        if name in ("find_group", "find_feed"):  # the commands whose Outputs a phased fixture types its facts with
             body += "\n    class Output(BaseModel):\n        uids: list[str] = []\n"
         (folder / "_commands" / f"{name}.py").write_text(
             "from pydantic import BaseModel\n\n\nclass Signature:\n"
@@ -205,9 +205,10 @@ def test_a_planning_command_without_params_is_read_as_its_fixed_steps(tmp_path):
     # an "@<skill>" line is plain text: skills do not include other skills
     folder = _write(tmp_path, {"leaver": _plain("Someone is leaving. One job per person.",
                                                  ["find {them} [if asked]", "[repeat x]", "@close"]),
-                               "close": _plain("Close an account.", ["close it"])})
+                               # a step "close it" would be this command calling itself: a load error
+                               "close": _plain("Close an account.", ["shut the account"])})
     assert workflow_agent.load_planning_commands(folder) == (
-        ("close", "Close an account.", ("close it",)),
+        ("close", "Close an account.", ("shut the account",)),
         ("leaver", "Someone is leaving. One job per person.", ("find {them} [if asked]", "[repeat x]", "@close")),
     )
     # Both skills are commands too (a call of one runs its steps through the phase runner).
@@ -261,19 +262,24 @@ def test_a_one_element_list_is_its_element_and_a_longer_list_is_not(tmp_path):
         sc.check_arguments(command, {"name": '["Payroll", "Billing"]', "kind": "group"}, "Who is in Payroll?")
 
 
-def test_an_argument_not_in_the_request_fails_a_required_one_and_resets_an_optional_one(tmp_path):
+def test_an_argument_not_in_the_request_fails_the_call_required_or_optional(tmp_path):
+    """A marked value given and not written is refused, required or optional (bd fix-ftdl.6.3: one outcome; an
+    optional one no longer takes its default silently). One the extractor did not give is not checked."""
     command = _command(tmp_path)
     with pytest.raises(sc.PlanningCommandInputError, match="not written in the request"):
         sc.check_arguments(command, {"name": "Billing", "kind": "group"}, "Who is in Payroll?")
-    args, notes = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "person": "Bo Diaz"},
+    with pytest.raises(sc.PlanningCommandInputError, match="person='Bo Diaz' is not written in the request"):
+        sc.check_arguments(command, {"name": "Payroll", "kind": "group", "person": "Bo Diaz"}, "Who is in Payroll?")
+    assert sc.check_arguments(command, {"name": "Payroll", "kind": "group"}, "Who is in Payroll?")[0]["person"] == ""
+
+
+def test_an_optional_argument_repeating_another_one_the_request_writes_once_is_refused(tmp_path):
+    """The one duplicate rule (bd fix-qjne.20): two marked fields holding one value the request writes once; the
+    optional one is left not given WITH a note that says so (not a refusal, and no silent reset to its default)."""
+    args, notes = sc.check_arguments(_command(tmp_path), {"name": "Payroll", "kind": "group", "person": "payroll"},
                                      "Who is in Payroll?")
-    assert args["person"] == "" and "default" in notes[0]
-
-
-def test_an_optional_argument_repeating_another_one_takes_its_default(tmp_path):
-    args, _ = sc.check_arguments(_command(tmp_path), {"name": "Payroll", "kind": "group", "person": "payroll"},
-                                 "Who is in Payroll?")
-    assert args["person"] == ""
+    assert args["name"] == "Payroll" and args["person"] == ""
+    assert notes[-1] == "person left empty: 'Payroll' is written once in your request and is the name."
 
 
 def test_a_dependent_argument_is_reset_by_the_validation_hook(tmp_path):
@@ -282,7 +288,7 @@ def test_a_dependent_argument_is_reset_by_the_validation_hook(tmp_path):
     args, notes = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "owner": "the customer"}, request)
     assert args["owner"] == "the customer"   # the argument check leaves it
     args = sc._validate_arguments(command, args, request, None, notes)
-    assert args["owner"] == "" and notes[-1] == "owner='the customer' -> '' (validate_extracted_parameters)"
+    assert args["owner"] == "" and notes[-1] == "owner='the customer' -> '' (validator)"
     args, _ = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "owner": "the customer",
                                            "include_risk": True}, request)
     assert sc._validate_arguments(command, args, request)["owner"] == "the customer"
@@ -356,7 +362,7 @@ def test_the_typed_signature_has_one_field_per_param_plus_extra_steps(tmp_path):
     signature = sc.typed_signature(_command(tmp_path))
     assert list(signature.output_fields) == ["name", "kind", "person", "include_risk", "count", "owner",
                                              "steps_before", "steps_after"]
-    assert "true only when the request explicitly asks" in signature.output_fields["include_risk"].json_schema_extra["desc"]
+    assert sc.BOOL_SENTENCE.rstrip(".") in signature.output_fields["include_risk"].json_schema_extra["desc"]
     assert "lookup(name: str, kind: group|feed, person: str = \"\"" in signature.instructions
     assert "expands to:" in signature.instructions
 
@@ -586,7 +592,7 @@ class PlanGenerator:
     ("name: str = Field(json_schema_extra={'classifier_confirms': True})", "option classifier_confirms does not apply to field 'name' of type str"),
     ("flag: bool = Field(default=False, json_schema_extra={'record_named_in_command_text': True})", "option record_named_in_command_text does not apply to field 'flag' of type bool"),
     ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "subject: True is removed: write \"record_named_in_command_text\": True"),
-    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", 'verify: "yes" is removed: write'),
+    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", 'verify: "yes" is removed: leave the key out'),
     ("flag: bool = Field(default=False, json_schema_extra={'classifier_confirms': {'meanings': {'true': 'asked'}}})",
      "option classifier_confirms \\(a dict of meanings\\) does not apply to field 'flag' of type bool"),
     ("flag: bool = Field(default=False, json_schema_extra={'means': {'true': 'asked'}})",
@@ -623,7 +629,7 @@ def test_a_dependent_argument_follows_the_checked_value(tmp_path):
     args, notes = sc.check_arguments(command, raw, request, {"include_risk": (False, 0.9)})
     args = sc._validate_arguments(command, args, request, None, notes)
     assert (args["include_risk"], args["owner"]) == (False, "")
-    assert notes[-1] == "owner='the customer' -> '' (validate_extracted_parameters)"
+    assert notes[-1] == "owner='the customer' -> '' (validator)"
 
 
 def test_an_in_request_count_must_be_a_number_the_request_writes(tmp_path):
@@ -691,7 +697,7 @@ def test_the_planner_path_checks_verified_params_with_jev(tmp_path, workflow_env
 
     monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: jev)
     monkeypatch.setattr(sc, "check_verdicts", fake_verdicts)
-    script_extractor(monkeypatch, _arguments(_typed_answer(include_risk=False)))
+    script_extractor(monkeypatch, _arguments(_typed_answer(include_risk=False, count=2)))
     lm = DummyLM([_typed_answer(include_risk=False)])
     _plan_request(ctx, wf, lm, plan_template="TEMPLATE", planning_command=_command(tmp_path, CHECKED))
     assert calls == [(jev, "lookup", REQUEST)]
@@ -940,8 +946,8 @@ def test_check_verdicts_skips_a_subject_check_when_the_request_names_nothing(tmp
 
 def test_load_planning_command_commands_gives_each_command_the_workflow_identifiers(tmp_path):
     folder = _write(tmp_path, {"ask": NAMED})
-    (tmp_path / "_commands" / "_split.py").write_text(
-        "import re\n\n# codes\nidentifier_patterns = [re.compile(r'\\bacct_[0-9]+')]\n")
+    (tmp_path / "_commands" / "_workflow.py").write_text(
+        "import re\n\n\nclass Context:\n    # codes\n    identifier_patterns = [re.compile(r'\\bacct_[0-9]+')]\n")
     command = workflow_agent.load_planning_command_map(folder)["ask"]
     assert [p.pattern for p in command.identifiers] == [r"\bacct_[0-9]+"]
 
@@ -1002,14 +1008,16 @@ def test_command_utterances_never_raises_on_an_unreadable_workflow(tmp_path):
 PHASED_LOOKUP = LOOKUP + '''
 
 from .find_group import Signature as FindGroup
+from .find_feed import Signature as FindFeed
 
 FLAT = PlanGenerator().steps
 
 
 class PlanGenerator:
-    """The same steps as two phases: find (fills find_group's Output), then the rest (reads find)."""
+    """The same steps as two phases: find (fills the Output of find_group or find_feed, whichever the kind runs),
+    then the rest (reads find). A single member would fail the load: for kind=feed the phase never runs find_group."""
 
-    def find(self, input) -> FindGroup.Output:
+    def find(self, input) -> FindGroup.Output | FindFeed.Output:
         return FLAT(input)[:2]
 
     def rest(self, input, find):
@@ -1025,7 +1033,8 @@ ONE_PHASE_LOOKUP = LOOKUP.replace(
 def test_a_planning_command_file_with_plan_loads_and_keeps_its_flat_steps(tmp_path, caplog):
     command = _command(tmp_path, PHASED_LOOKUP)
     assert command.plan_fn is not None
-    assert [m.__name__ for m in command.phase_outputs] == ["Output"]
+    (union,) = command.phase_outputs
+    assert [m.__qualname__ for m in union.__args__] == ["Signature.Output", "Signature.Output"]
     # The template (what matching and the fallback read) is the flat steps, as before.
     assert command.template == _command(tmp_path / "flat", LOOKUP).template
 
@@ -1135,14 +1144,14 @@ def test_input_validators_refuse_a_call_with_a_message_that_says_what_to_fix(tmp
     command = _command(tmp_path, PAIR, "pair")
     args, notes = sc.check_arguments(command, {"first": "Payroll", "second": "payroll", "kind": "group"},
                                      PAIR_REQUEST)
-    with pytest.raises(sc.PlanningCommandInputError, match="^validate_extracted_parameters: first and second are both 'Payroll'; second is the other record") as refused:
+    with pytest.raises(sc.PlanningCommandInputError, match="^first and second are both 'Payroll'; second is the other record") as refused:
         sc._validate_arguments(command, args, PAIR_REQUEST, None, notes)
     assert "Value error" not in str(refused.value)
     assert refused.value.fields == ()
     # the request reaches the validators through the validation context
     request = "Which of the Payroll and Billing feeds is riskier?"
     args, _ = sc.check_arguments(command, {"first": "Payroll", "second": "Billing", "kind": "group"}, request)
-    with pytest.raises(sc.PlanningCommandInputError, match="validate_extracted_parameters: kind='group', but the request says feeds; kind is feed"):
+    with pytest.raises(sc.PlanningCommandInputError, match="kind='group', but the request says feeds; kind is feed"):
         sc._validate_arguments(command, args, request)
     assert sc._validate_arguments(command, {**args, "kind": "feed"}, request)["kind"] == "feed"
     # the template is rendered as before: the placeholders differ and the request is empty
@@ -1221,8 +1230,11 @@ def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(PAIR_REQUEST, unattended=True)  # attended, this refusal is put to the user
+    # The second answer changes only the field the refusal names (``second``): its other fields are not read (the one
+    # second fill answers the refusal and nothing else), so a second answer that writes Payroll for ``second`` again is
+    # the second refusal. (Before that rule this case's second answer moved ``first`` to Billing instead.)
     extractor = script_extractor(monkeypatch, _arguments(_pair_answer(second="Payroll")),
-                                 _arguments(_pair_answer(first="Billing")))
+                                 _arguments(_pair_answer(first="Billing", second="Payroll")))
     lm = DummyLM([_text_answer()])
 
     _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR_REFUSED, "pair"))
@@ -1231,10 +1243,11 @@ def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env
     assert len(extractor.prompts) == 2 and len(lm.history) == 1
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
-    assert "validate_extracted_parameters: first and second are both" in span.attributes["skill_fallback"]
+    assert "first and second are both" in span.attributes["skill_fallback"]
 
 
-def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_env, monkeypatch):
+def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_env, monkeypatch, no_planner_key):
+    # no_planner_key: a live Jev's field-given check would reset the scripted kind on the second pass
     workflow_env()
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)

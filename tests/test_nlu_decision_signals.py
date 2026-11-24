@@ -6,7 +6,7 @@ kinds of proof.
 
 *What is recorded* is checked against real components (testing_rules.mdc): the
 trained ``fastworkflow/examples/hello_world`` workflow drives the real matching
-layers, the real ``find_best_matches`` scores real candidates, and the real
+layers, the real ``intent_clarification.misspelt`` scores real candidates, and the real
 embedding cache is exercised with the real DistilBERT pipeline. The assembling
 functions are pure functions of the capture bag, so most tiers can be covered
 without a model at all — which is the point of building them that way.
@@ -20,7 +20,7 @@ recorder has to read facts to shape a record. What may never happen is a capture
 value. A ``x is None`` presence check cannot express a threshold and is allowed;
 ``<``, ``>``, ``==`` and bare truthiness can, and are not.
 
-The polarity trap has its own test. ``find_best_matches`` returns a normalized
+The polarity trap has its own test. ``intent_clarification.misspelt`` returns a normalized
 Levenshtein DISTANCE where lower is a better match, while architecture §6.6.1
 names the kind ``fuzzy-score``. A consumer that reads the direction off the name
 inverts every curve drawn from it, so the direction is asserted here against real
@@ -66,7 +66,7 @@ from fastworkflow.observability.decision_signals import (
     classifier_confidence,
 )
 from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
-from fastworkflow.utils.fuzzy_match import find_best_matches
+from fastworkflow.intent_clarification import misspelt
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 HELLO_WORLD = str(
@@ -160,18 +160,14 @@ def test_fuzzy_distance_polarity_is_measured_not_assumed():
     """A better match produces a LOWER value, through the real matcher.
 
     The bead's polarity trap: the contract kind is `fuzzy-score` but the number is
-    a distance. Asserting this against real `find_best_matches` output rather than
+    a distance. Asserting this against real `misspelt` output (the name layer's matcher, bd fix-ftdl.9) rather than
     against a hand-written constant is what makes it catch a future inversion at
     the emitter.
     """
     candidates = ["add_two_numbers", "what_can_i_do", "you_misunderstood"]
 
-    exact, exact_distance = find_best_matches(
-        "what_can_i_do", candidates, threshold=_FUZZY_PREMATCH_MAX_DISTANCE
-    )
-    typo, typo_distance = find_best_matches(
-        "what_can_i_du", candidates, threshold=_FUZZY_PREMATCH_MAX_DISTANCE
-    )
+    exact, exact_distance = misspelt("what_can_i_do", candidates)
+    typo, typo_distance = misspelt("what_can_i_du", candidates)
     assert exact == ["what_can_i_do"]
     assert typo == ["what_can_i_do"]
     assert exact_distance < typo_distance, "the better match must score lower"
@@ -194,21 +190,15 @@ def test_fuzzy_distance_polarity_is_measured_not_assumed():
 def test_fuzzy_threshold_is_a_maximum_and_is_recorded_beside_the_distance(hello_ctx):
     """A distance with no threshold beside it cannot be binned.
 
-    Also pins what the threshold means: `find_best_matches` admits a match at or
+    Also pins what the threshold means: `misspelt` admits a match at or
     below it and returns ([], None) above, so it is a maximum on a distance, not a
     minimum on a score.
     """
     candidates = ["add_two_numbers"]
-    _matched, close = find_best_matches(
-        "add_two_number", candidates, threshold=_FUZZY_PREMATCH_MAX_DISTANCE
-    )
+    _matched, close = misspelt("add_two_number", candidates)
     assert close <= _FUZZY_PREMATCH_MAX_DISTANCE
 
-    rejected, distance = find_best_matches(
-        "completely_different_text",
-        candidates,
-        threshold=_FUZZY_PREMATCH_MAX_DISTANCE,
-    )
+    rejected, distance = misspelt("completely_different_text", candidates)
     assert rejected == [] and distance is None
 
     ctx, sink = hello_ctx
@@ -314,7 +304,7 @@ def test_classifier_tier_carries_confidence_and_a_producer_version():
 
 
 def test_unmatched_utterance_records_zero_candidates_and_missing_evidence():
-    """No matcher claimed it. find_best_matches discards the distance above its
+    """No matcher claimed it. misspelt discards the distance above its
     threshold, so the one measurement taken is not recoverable here."""
     uncertainty = command_identity_uncertainty(_trace_for(None))
     assert uncertainty.candidate_count == 0

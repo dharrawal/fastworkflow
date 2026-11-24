@@ -406,7 +406,7 @@ async function main() {
   const other = (kind, extraArtifacts) => paint(waiting('Please confirm.', Object.assign({question_kind: kind},
     extraArtifacts || {})));
   const apv = other('approval', {approval: {command: 'Record/add_note', parameters: {}, origin: 'agent',
-    irreversible: true, can_always: true}});
+    can_always: true}});
   const rev = other('review', {review: {kind: 'plan', title: 't', revision: 0, items: [], changes_data: []}});
   const unk = other('unknown');
   const untagged = paint(waiting('Please confirm.', {}));

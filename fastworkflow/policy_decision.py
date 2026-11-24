@@ -106,11 +106,15 @@ class ContractFacts:
     the workflow says which. Nothing here is a model output, so a row resting
     on these rests on something reproducible.
 
+    ``write_commands`` is filled by the loader from the workflow's ``@writes``
+    marks (``policy_loader.with_workflow_writes``); a table does not list them.
+
     ``id_patterns`` are the shapes of the identifiers this workflow's arguments
     carry. A row checking that an argument was actually read somewhere needs to
     know which arguments are identifiers in the first place. Left empty, the
-    loader fills it from the workflow's ``_commands/_split.py``
-    ``identifier_patterns`` when it declares some.
+    loader fills it from the workflow's ``_commands/_workflow.py``
+    ``identifier_patterns`` when it declares some (the compiled patterns, so their flags are kept). A value
+    looks like an id when one pattern matches it whole.
 
     ``enum_arguments`` maps ``command.argument`` to its accepted values, for the
     arguments whose domain is closed.
@@ -123,7 +127,7 @@ class ContractFacts:
     """
 
     write_commands: frozenset[str] = frozenset()
-    id_patterns: tuple[str, ...] = ()
+    id_patterns: tuple["str | re.Pattern[str]", ...] = ()
     enum_arguments: Mapping[str, frozenset[str]] = field(default_factory=dict)
     #: The operations a user of this workflow can ask for, name -> meaning.
     #: The intent extractor may only answer in these terms, which keeps what

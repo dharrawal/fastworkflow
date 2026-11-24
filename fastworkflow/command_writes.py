@@ -19,8 +19,8 @@ when one of the phase's steps names it:
   (``phase_write_refusal``, called by ``CommandExecutor`` before the approval gate).
 
 Outside a planning command's phase (the turn's agent, a plain goal, a command the user typed) nothing
-changes. The decorator is defined in ``fastworkflow.command_declarations``; the load check here rejects it on a
-planning command.
+changes. The decorator is defined in ``fastworkflow.command_declarations``, whose ``declaration_problems`` fails the
+load of a planning command that carries it.
 """
 from __future__ import annotations
 
@@ -45,51 +45,41 @@ REPEATED_WRITE_REFUSAL = (
     "part of the job as its steps name it. Do not repeat it; go on with the remaining steps.")
 
 
-class WritesDeclarationError(ValueError):
-    """A planning command carries ``@writes``: a planning command writes through its steps, not by declaration."""
+def reached_commands(workflow_folderpath: str) -> dict[str, frozenset[str]]:
+    """For each planning command of *workflow_folderpath*, the qualified names of every command its steps run,
+    directly or through the planning commands they call. The one inheritance rule of the command marks: a planning
+    command writes (``write_commands``) and needs an approval (``approval_annotations.command_approval``) when a
+    command it reaches does. Empty when the planning commands cannot be read."""
+    try:
+        from fastworkflow import planning_commands
 
-
-def check_write_declarations(workflow_folderpath: str, routing) -> None:
-    """Reject ``@writes`` on a planning command when the routing definition loads.
-
-    Raises :class:`WritesDeclarationError` naming the command and its file. Core commands are skipped;
-    a command whose class cannot be read is left to its own load path.
-    """
-    problems: list[str] = []
-    core = set(routing.command_directory.core_command_names)
-    for command_name, metadata in routing.command_directory.map_command_2_metadata.items():
-        if command_name in core or not metadata.is_planning:
-            continue
-        try:
-            command_class = routing.get_command_class(
-                command_name, fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
-        except Exception:  # noqa: BLE001 - an unreadable class is reported by its own load path
-            logger.debug("writes declaration unread for %r", command_name, exc_info=True)
-            continue
-        if command_class is not None and WRITES_ATTRIBUTE in vars(command_class):
-            problems.append(f"{_source_label(metadata, workflow_folderpath)}: {command_name} is a planning "
-                            "command; it cannot carry @writes. It writes when its steps run a command that "
-                            "carries @writes: put the decorator on that execution command")
-    if problems:
-        raise WritesDeclarationError("\n".join(problems))
-
-
-def _source_label(metadata, workflow_folderpath: str) -> str:
-    path = metadata.response_generation_module_path or ""
-    if not path:
-        return workflow_folderpath
-    return os.path.relpath(os.path.abspath(path), os.path.abspath(workflow_folderpath))
+        callees = planning_commands.resolve_field_sources(workflow_folderpath).callees
+    except Exception:  # noqa: BLE001 - planning commands unread: nothing is known to be reached
+        logger.debug("planning commands unread for %r", workflow_folderpath, exc_info=True)
+        return {}
+    reached: dict[str, frozenset[str]] = {}
+    for name in callees:
+        seen: set[str] = set()
+        stack = list(callees[name])
+        while stack:   # a cycle is a load problem of its own; the walk visits each command once
+            called = stack.pop()
+            if called not in seen:
+                seen.add(called)
+                stack.extend(callees.get(called, ()))
+        reached[name] = frozenset(seen)
+    return reached
 
 
 def write_commands(workflow_folderpath: str) -> frozenset[str]:
     """The qualified names of the commands of *workflow_folderpath* that write: each execution command
-    that carries ``@writes``, and each planning command whose steps reach one (through the
-    planning commands they call). Empty when the workflow cannot be read."""
-    try:
-        routing = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
-    except Exception:  # noqa: BLE001 - no routing definition: nothing is known to write
-        logger.debug("routing definition unread for writes of %r", workflow_folderpath, exc_info=True)
+    that carries ``@writes``, and each planning command whose steps reach one (``reached_commands``).
+    Raises what reading the workflow's routing raises (not initialised, does not load): "the commands could not be
+    read" is not "no command writes", and every caller relies on the answer (the policy's write rules, the review's
+    badges and explicit yes, the look-up-only and phase guards). A folder with no ``_commands/`` has no commands, so
+    none of them writes: that is known, not unknown."""
+    if not os.path.isdir(os.path.join(workflow_folderpath, "_commands")):
         return frozenset()
+    routing = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     writes: set[str] = set()
     for command_name, metadata in routing.command_directory.map_command_2_metadata.items():
         if metadata.is_planning:
@@ -103,20 +93,8 @@ def write_commands(workflow_folderpath: str) -> frozenset[str]:
             writes.add(command_name)
     if not writes:
         return frozenset()
-    try:
-        from fastworkflow import planning_commands
-
-        callees = planning_commands.resolve_field_sources(workflow_folderpath).callees
-    except Exception:  # noqa: BLE001 - planning commands unread: only the execution commands are known
-        return frozenset(writes)
-    changed = True
-    while changed:   # a planning command writes when any command its steps call writes
-        changed = False
-        for name, called in callees.items():
-            if name not in writes and called & writes:
-                writes.add(name)
-                changed = True
-    return frozenset(writes)
+    return frozenset(writes | {name for name, reached in reached_commands(workflow_folderpath).items()
+                               if reached & writes})
 
 
 def _host(chat_session: Any) -> Any:

@@ -1,7 +1,8 @@
 import contextlib
+import dataclasses
 import sys
 import re
-from typing import Any, Dict, List, Optional, get_args
+from typing import Any, Callable, Dict, List, Optional, get_args
 
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -19,7 +20,7 @@ from fastworkflow.observability.decision_signals import (
 from fastworkflow import no_agent_mode, parameter_clarification, waiting
 from fastworkflow.parameter_clarification import Extraction, ParameterLoop
 from fastworkflow.parameters import ask, fill, pipeline, read
-from fastworkflow.utils import argument_checks
+from fastworkflow.utils import argument_checks, signatures
 from fastworkflow.utils.signatures import (
     InputForParamExtraction,
     MISSING_INFORMATION_ERRMSG,
@@ -275,7 +276,8 @@ def _llm_guard(request: str, diagnostics: dict):
         if attempt == 1:
             diagnostics["argument_check_refusals"] = found.refusal_texts()
             diagnostics["argument_check_retry"] = True
-        return pipeline.Verdict(pipeline.KIND_REFUSED, "; ".join(found.refusal_texts()), found)
+        return pipeline.Verdict(pipeline.KIND_REFUSED, "; ".join(found.refusal_texts()), found,
+                                open=tuple(found.refused))
 
     def settle(params: BaseModel, verdict: pipeline.Verdict) -> None:
         found = verdict.detail
@@ -284,9 +286,54 @@ def _llm_guard(request: str, diagnostics: dict):
         if found.respelled:
             diagnostics["argument_check_respelled"] = {
                 name: str(spelled) for name, (_, spelled) in found.respelled.items()}
+        if found.not_in_request:   # the advisory: field names only, never the values
+            diagnostics["argument_check_not_in_request"] = list(found.not_in_request)
         found.apply(params)
 
     return check, settle
+
+
+def traced_extraction(command_name: str, extract: Callable[[dict], Any], *, valid: Callable[[Any], bool],
+                      part: Optional[int] = None):
+    """``extract(diagnostics)``'s result, run in ONE ``fw.nlu.param_extraction`` span (D3 as amended). THE writer of
+    that span: the CME's parameter stage (``ParameterExtraction.extract``) and the plan path's extraction for a part's own
+    command (``review_proposals.draft_inputs``, with *part*, the part's 1-based number) both call it.
+
+    *extract* fills the bag it is given as it works (the extraction method, whether this is a NOT_FOUND retry round, the
+    STRUCTURED validation outcome from ``validate_parameters``: missing/invalid fields, the validation hook's facts, the
+    argument checks' refusals and ``argument_check_not_in_request``); *valid* says from its result whether the values
+    are valid. A failed extraction is a conversational state, not a span error: status stays ok and ``parameters_valid``
+    carries the signal; only an exception marks the span error. Emission never affects extraction (no-op without a
+    host). It also carries the §6.6.1 ``DecisionUncertainty`` for the slot-binding decision, assembled by
+    ``slot_binding_uncertainty`` from those same diagnostics, written to the span and read by nothing else (FW-REQ-021
+    P0: representation only)."""
+    host = tracing.current_host()
+    span = tracing.start_span(
+        host,
+        tracing.SPAN_NLU_PARAM_EXTRACTION,
+        command_name=command_name,
+        attributes={"command_name": command_name, **({"part": part} if part is not None else {})},
+    )
+    diagnostics: dict = {}
+    try:
+        output = extract(diagnostics)
+    except BaseException:
+        # No DecisionUncertainty here: the extraction did not complete, so there is no binding decision to
+        # characterise. The raw diagnostics gathered so far still go out.
+        tracing.end_span(host, span, status=tracing.STATUS_ERROR, attributes=diagnostics)
+        raise
+    tracing.end_span(
+        host,
+        span,
+        status=tracing.STATUS_OK,
+        attributes={
+            **diagnostics,
+            "decision_uncertainty": _recorded_slot_binding_uncertainty(span, diagnostics),
+            "parameters_valid": valid(output),
+            **({"part": part} if part is not None else {}),
+        },
+    )
+    return output
 
 
 class ParameterExtraction:
@@ -322,37 +369,7 @@ class ParameterExtraction:
         diagnostics. That record is written to the span and read by nothing else
         (FW-REQ-021 P0: representation only).
         """
-        host = tracing.current_host()
-        span = tracing.start_span(
-            host,
-            tracing.SPAN_NLU_PARAM_EXTRACTION,
-            command_name=self.command_name,
-            attributes={"command_name": self.command_name},
-        )
-        diagnostics: dict = {}
-        try:
-            output = self._extract_impl(diagnostics)
-        except BaseException:
-            # No DecisionUncertainty here: the extraction did not complete, so
-            # there is no binding decision to characterise. The raw diagnostics
-            # gathered so far still go out.
-            tracing.end_span(
-                host, span, status=tracing.STATUS_ERROR, attributes=diagnostics
-            )
-            raise
-        tracing.end_span(
-            host,
-            span,
-            status=tracing.STATUS_OK,
-            attributes={
-                **diagnostics,
-                "decision_uncertainty": _recorded_slot_binding_uncertainty(
-                    span, diagnostics
-                ),
-                "parameters_valid": output.parameters_are_valid,
-            },
-        )
-        return output
+        return traced_extraction(self.command_name, self._extract_impl, valid=lambda out: out.parameters_are_valid)
 
     def _extract_impl(self, diagnostics: dict) -> "ParameterExtraction.Output":
         app_workflow_folderpath = self.app_workflow.folderpath
@@ -390,10 +407,8 @@ class ParameterExtraction:
             diagnostics["retry_round_ordinal"] = round_ordinal_value
         # Agentic mode is "not an assistant-mode command, in an agent session". Computed once: it
         # picks the extraction branch below and gates the parameter_request artifact (fix-weih.2).
-        is_agentic_mode = bool(
-            not waiting.port_of(self.cme_workflow.context).assistant
-            and ask.audience_of(self.app_workflow.context) == ask.AGENT
-        )
+        audience = self._audience()
+        is_agentic_mode = audience == ask.AGENT
         if stored_params is not None:
             new_params = self._extract_and_merge_missing_parameters(stored_params, self.command)
             diagnostics["extraction_method"] = "stored_merge"
@@ -454,7 +469,8 @@ class ParameterExtraction:
             input_for_param_extraction.validate_parameters(
             self.app_workflow, self.command_name, new_params,
             diagnostics=diagnostics,
-            command_text=loop.text() if loop is not None else None
+            command_text=loop.text() if loop is not None else None,
+            audience=audience,
         )
 
         if not is_valid and refusal_names_no_input(diagnostics):
@@ -489,7 +505,7 @@ class ParameterExtraction:
             error_msg = ask.word(
                 form=ask.FORM_FRAME, message=error_msg, refusals=diagnostics.get("argument_check_refusals_final") or (),
                 shown=self._format_parameters_for_display(new_params),
-                audience=ask.audience_of(self.app_workflow.context)).text
+                audience=audience).text
             extraction = extraction_of(new_params, diagnostics)
             if loop is None:
                 loop = ParameterLoop(
@@ -519,6 +535,12 @@ class ParameterExtraction:
         return self.Output(
             parameters_are_valid=True,
             cmd_parameters=new_params)
+
+    def _audience(self) -> str:
+        """Who is replying to this command's questions: the agent for its own tool call, a person for a "/" message
+        (``ask.audience_of``: the one definition), also in an agent session."""
+        assistant = self.cme_workflow is not None and waiting.port_of(self.cme_workflow.context).assistant
+        return ask.audience_of(self.app_workflow.context, assistant=assistant)
 
     def _llm_extract(self, input_for_param_extraction: InputForParamExtraction,
                      command_parameters_class: type[BaseModel], app_workflow_folderpath: str,
@@ -552,7 +574,8 @@ class ParameterExtraction:
                 diagnostics.pop("missing_fields", None)
                 diagnostics.pop("invalid_fields", None)
             result = input_for_param_extraction.validate_parameters(
-                self.app_workflow, self.command_name, params, diagnostics=diagnostics, command_text=None)
+                self.app_workflow, self.command_name, params, diagnostics=diagnostics, command_text=None,
+                audience=self._audience())
             return _validation_verdict(result[0], result[1], diagnostics, result)
 
         guarded = argument_checks.checks_enabled() and \
@@ -562,7 +585,8 @@ class ParameterExtraction:
         check, settle = _llm_guard(fill.without_own_command_word(self.command, self.command_name), diagnostics) if guarded else (None, None)
         extracted = pipeline.extract(
             fill_text, check=check, settle=settle, validate=validated,
-            retry_note=argument_checks.REFUSED_EXTRACTION_NOTE, unparsed=lambda: bool(first_unparsed))
+            retry_note=argument_checks.REFUSED_EXTRACTION_NOTE, unparsed=lambda: bool(first_unparsed),
+            unparsed_refusal=pipeline.unparsed_refusal(command_parameters_class))
         self._validation = extracted.final.detail   # the validators' answer on these very values: read, not asked again
         return extracted.params
 
@@ -801,7 +825,7 @@ def classify_missing_value_reply(question: str, reply: str) -> str:
     MISSING_VALUE_REPLY_THRESHOLD, otherwise "answer". Never raises: no Jev LM or any failure
     means "answer", which is the behaviour before this check.
     """
-    if no_agent_mode._bare(reply) in (read.NO_WORDS | no_agent_mode._YES):
+    if no_agent_mode._bare(reply) in read.YES_NO_VALUES:
         # A bare yes or no is the value the question asked for when its field is a yes/no one, and the reader of the reply
         # decides what it is otherwise (``parameters.read``): never "you misunderstood", and no model call.
         return "answer"
@@ -847,6 +871,13 @@ class ExtractedArguments(BaseModel):
     params: Optional[BaseModel] = None
     extraction: Extraction = Extraction()
     retried: bool = False
+    #: A marked value the ``Input``'s validators rewrote, as the checks accepted it before (name -> value): the value a
+    #: later check of these values reads (a draft's inputs), since the strict check reads the request's value and the
+    #: run's validators write theirs again. ``params`` holds the rewrite.
+    unvalidated: dict = {}
+    #: The duplicate rule's notes of the optional fields it left not given (``ask.left_empty_line``, name -> line): the
+    #: draft shows them on the review item.
+    left_empty: dict = {}
 
     @property
     def valid(self) -> bool:
@@ -904,12 +935,22 @@ def _validation_verdict(valid: bool, message: str, diagnostics: dict, detail) ->
     if valid:
         return pipeline.Verdict(detail=detail)
     missing = list(diagnostics.get("missing_fields") or [])
-    reason = diagnostics.get("argument_refusal")   # a guard's own text, when it is what the message carries
+    reason = diagnostics.get("argument_refusal")   # a guard's own text (the question words it for its reader)
     refusal = (("missing required argument " + ", ".join(missing)) if missing and not
                diagnostics.get("invalid_fields") else
-               reason if reason and reason in (message or "") else (message or "").strip()) or "the arguments are refused"
+               reason if reason else (message or "").strip()) or "the arguments are refused"
     kind = pipeline.KIND_MISSING if missing and not _screen_refused_a_value(diagnostics) else pipeline.KIND_REFUSED
-    return pipeline.Verdict(kind, refusal, detail)
+    return pipeline.Verdict(kind, refusal, detail, open=_open_fields(diagnostics))
+
+
+def _open_fields(diagnostics: dict) -> Optional[tuple]:
+    """The fields a refused validation leaves open (missing, invalid, or a value a screen cleared or the not-given
+    check reset): the only ones the one second fill may change. None when the refusal names no input."""
+    if refusal_names_no_input(diagnostics):
+        return None
+    names = [*(diagnostics.get("missing_fields") or []), *(diagnostics.get("invalid_fields") or []),
+             *(name for key in _SCREENED_VALUE_KEYS for name in (diagnostics.get(key) or {}))]
+    return tuple(dict.fromkeys(names)) or None
 
 
 def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, text: str,
@@ -941,12 +982,21 @@ def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, te
         if attempt == 2:
             diagnostics.pop("missing_fields", None)
             diagnostics.pop("invalid_fields", None)
+        as_extracted = params.model_copy()      # the screens clear a refused value in place: keep what was extracted
         valid, message, _, fields = extractor.validate_parameters(
             app_workflow, command_name, params, diagnostics, checks)
         verdict = _validation_verdict(valid, message, diagnostics, None)
         refusal = verdict.refusal
-        return pipeline.Verdict(verdict.kind, refusal, ExtractedArguments(
-            params=params, extraction=extraction_of(params, {} if valid else diagnostics, "" if valid else refusal)))
+        found = extraction_of(params, {} if valid else diagnostics, "" if valid else refusal)
+        if found.missing:
+            # A value only a pronoun or a word of the workflow's vocabulary reads as missing; its reason goes with it,
+            # so a question that asks for it says why the extracted one was not taken.
+            reasons = signatures.word_screen_reasons(
+                as_extracted, signatures._workflow_vocabulary(app_workflow), command_name)
+            found = dataclasses.replace(found, screened=tuple((n, t) for n, t in reasons if n in found.missing))
+        return dataclasses.replace(verdict, detail=ExtractedArguments(
+            params=params, extraction=found, unvalidated=dict(getattr(extractor, "unvalidated", None) or {}),
+            left_empty=dict(getattr(extractor, "left_empty", None) or {})))
 
     planning = _planning_command_of(app_workflow, command_name) is not None
     guarded = argument_checks.checks_enabled() and not planning
@@ -971,7 +1021,7 @@ def extract_arguments(app_workflow: fastworkflow.Workflow, command_name: str, te
         check, settle = _llm_guard(text, diagnostics) if guarded else (None, None)
         extracted = pipeline.extract(
             fill_text, check=check, settle=settle, validate=validated, unparsed=lambda: bool(first_unparsed),
-            retry_note=argument_checks.REFUSED_EXTRACTION_NOTE)
+            retry_note=argument_checks.REFUSED_EXTRACTION_NOTE, unparsed_refusal=pipeline.unparsed_refusal(params_class))
         result = extracted.final.detail
         result.retried = extracted.retried
         return result

@@ -112,7 +112,7 @@ def test_unknown_marker_from_the_model_is_not_given(extraction):
 
 @pytest.mark.parametrize("marker", ["<UNKNOWN>", "<unknown>", "<<UNKNOWN>>", " < UNKNOWN > "])
 def test_bracketed_unknown_is_a_placeholder_not_a_value(marker):
-    kind, value = classify_bracketed_value(marker, "address")
+    kind, value = classify_bracketed_value(marker)
     assert kind == "placeholder"
     assert value == marker
 
@@ -137,7 +137,7 @@ def test_escaped_unknown_is_the_marker(marker):
     assert signatures.is_unknown_marker(marker)
     assert drop_unknown_markers(marker, NOT_FOUND) == NOT_FOUND
     assert drop_unknown_markers(["sku-1", marker], []) == ["sku-1"]
-    kind, value = classify_bracketed_value(marker, "address")
+    kind, value = classify_bracketed_value(marker)
     assert kind == "placeholder"
     assert value == marker
 
@@ -161,8 +161,8 @@ def test_entities_in_a_real_value_are_left_alone():
     text, and an escaped bracketed real value is unwrapped to its decoded inner text."""
     assert not signatures.is_unknown_marker("AT&amp;T")
     assert drop_unknown_markers("AT&amp;T", NOT_FOUND) == "AT&amp;T"
-    assert classify_bracketed_value("AT&amp;T", "company") == ("unchanged", "AT&amp;T")
-    assert classify_bracketed_value("&lt;9a1b2c3d&gt;", "item_uid") == ("unwrapped", "9a1b2c3d")
-    assert classify_bracketed_value("&lt;item_uid&gt;", "item_uid")[0] == "placeholder"
+    assert classify_bracketed_value("AT&amp;T") == ("unchanged", "AT&amp;T")
+    assert classify_bracketed_value("&lt;9a1b2c3d&gt;") == ("unwrapped", "9a1b2c3d")
+    assert classify_bracketed_value("&lt;item_uid&gt;")[0] == "placeholder"
     assert not signatures.is_unknown_marker("")
     assert drop_unknown_markers("", NOT_FOUND) == ""

@@ -353,7 +353,7 @@ def test_an_evicted_channel_returns_with_its_application_state(
     # node inside root — the application would then navigate one
     # tree while its commands mutated another.
     assert workflow._current_command_context is laundry
-    assert workflow.record is chores
+    assert workflow._command_context_for_response_generation is chores
     assert laundry.parent is chores
     assert chores.parent is manager_obj
 

@@ -36,19 +36,18 @@ declares the planning command exactly as a command's does (docstring, ``Input``,
                 return []                             # no steps: skipped when reached
             return [run("show_book", book_uid=find.book_uids[0])]
 
-        def answer(self, input, book=None):           # None: the book phase was skipped
+        def __result__(self, input, book=None):       # the answer, written by code; book is None when skipped
             if book is None:
-                return [f"say that no book matches {input.title}"]
-            return [f"say that {book.name} is by {book.show.author}; the library owns "
-                    f"{book.show.copies} copies"]
+                return f"No book matches {input.title}."
+            return f"{book.name} is by {book.show.author}; the library owns {book.show.copies} copies."
 
 The rules (the one-page guide: ``docs/planning_command_file_layout.md``)
 -------------------------------------------------------------
 
 1. Each public method of ``PlanGenerator`` is a phase (one executor run), in the order
    written; ``_name`` methods are helpers.
-2. A phase's parameters name what it reads: ``input`` and earlier phases by name (None, its
-   default, when that phase was skipped).
+2. A phase's parameters name what it reads: ``input`` and earlier phases by name (``None`` when
+   that phase was skipped, whatever default the parameter declares).
 3. Its return annotation is what it fills: a command's ``Output`` (``-> FindBook.Output``), or a
    facts model whose fields are typed with a command's ``Output`` or ``Input``. Any other value is a
    property or method of the facts model (copies, ``fact_from`` and ``"from"``, are not read); no
@@ -66,11 +65,11 @@ Optional: ``PlanGenerator.__phases__(self, input)`` returns the phases a call ru
 noun=..., optional=...)`` makes a phase a fan-out (once per item) or optional.
 
 Steps: ``run("command", k=v)`` runs a command when every value is given; ``run("command",
-named=x)`` opens the row a find listed whose label matches ``x``; ``run("command", all_pages=True)``
+named=x)`` opens the row a find listed whose name is ``x`` whole; ``run("command", all_pages=True)``
 reads every page; ``when(...)`` and ``do_not_run(...)`` guard a step. ``count(n, noun, plural=None)`` and
 ``count_and_names_read(names, total, noun)`` write the counted lines. The retired helpers (``pick``,
-``full_list``, ``listed``, ``num``) fail the import, each naming its replacement. ``say that ...`` is an answer line
-code copies word for word; any other line is the agent's to write.
+``full_list``, ``listed``, ``num``) fail the import, each naming its replacement. A last phase made only of ``say that ...`` lines is a load error: return the answer
+text from ``__result__(self, input, ...)``. A line that is not a command step is the agent's to write.
 
 The template (what the planner sees) calls each method once per input with every fact a
 ``planning_phases.Placeholder``: it reads ``<find.total>``, ``<find.book_uids[0]>``; a helper
@@ -85,7 +84,8 @@ import contextvars
 import functools
 import inspect
 import re
-from typing import Any, Callable, Optional
+import types
+from typing import Any, Callable, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -100,6 +100,7 @@ from fastworkflow.planning_phases import (Phase, PhaseError, Placeholder, _templ
                                        is_placeholder, tests_noted)
 
 __all__ = [
+    "ANSWER_BY_MODEL",
     "ConfirmsOptions",
     "CopiedOptions",
     "FieldOptions",
@@ -116,6 +117,30 @@ __all__ = [
     "user_approval_for_execution",
     "when",
 ]
+
+
+class _AnswerByModel:
+    """Sentinel: ``__result__`` returns it to leave the answer to a model.
+
+    A ``__result__`` that returns ``None`` (including one that forgot its ``return``) is a failed call; this is the
+    one explicit way to say "code does not write the answer here".
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "fastworkflow.planning.ANSWER_BY_MODEL"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+ANSWER_BY_MODEL = _AnswerByModel()
 
 
 class StepFormError(ValueError):
@@ -161,6 +186,9 @@ def reserved_input_name_message(input_model: Any, where: str) -> Optional[str]:
 
 #: Key recorded for a ``run(..., named=...)`` step whose command declares no row id input: a load problem.
 _NAMED_UNRESOLVED = "named"
+#: Key recorded for a ``run(..., named=...)`` step whose command requires another input besides its row id: a step
+#: that opens the row by name passes nothing else, so code could never run it (a load problem).
+_NAMED_TAKES_MORE = "named, and more"
 
 #: ``(command name -> [set of Input field names, ...], collected (command, keys) list or None,
 #: command name -> set of row id input names (None where none is declared))``.
@@ -170,16 +198,17 @@ _COMMAND_INPUTS: contextvars.ContextVar[Optional[tuple[
 
 
 def row_id_field(input_model: Any) -> Optional[str]:
-    """The Input field a row is opened by (``run(command, named=...)``): the one field declared with
-    ``from_command_output``, else the one required ``str`` field, else None."""
+    """The Input field a row is opened by (``run(command, named=...)``), by the rule the runtime applies
+    (``planning_phases._uid_parameter``): the one field that declares a producer (``from_command_output`` or
+    ``available_from``), else the one required field named like an id (``..._uid``, ``..._id``), else None."""
+    from fastworkflow.planning_phases import _is_uid_field, _producer_sources
+
     fields = getattr(input_model, "model_fields", None) or {}
-    declared = [name for name, info in fields.items()
-                if isinstance(getattr(info, "json_schema_extra", None), dict)
-                and info.json_schema_extra.get("from_command_output")]
+    declared = [name for name in fields if _producer_sources([input_model], name)]
     if len(declared) == 1:
         return declared[0]
-    required = [name for name, info in fields.items() if info.is_required() and info.annotation is str]
-    return required[0] if len(required) == 1 else None
+    ids = [name for name, info in fields.items() if info.is_required() and _is_uid_field(name)]
+    return ids[0] if len(ids) == 1 else None
 
 
 @contextlib.contextmanager
@@ -191,6 +220,7 @@ def command_inputs_for_steps(signatures: Optional[dict[str, Any]], collect: bool
     """
     fields: Optional[dict[str, list[set[str]]]] = None
     row_ids: dict[str, set[Optional[str]]] = {}
+    others: dict[str, set[str]] = {}    # the required inputs of each command besides its row id
     steps: Optional[list[tuple[str, tuple[str, ...]]]] = [] if collect else None
     if signatures is not None:
         fields = {}
@@ -198,10 +228,13 @@ def command_inputs_for_steps(signatures: Optional[dict[str, Any]], collect: bool
             input_model = getattr(sig, "Input", None)
             names = set(getattr(input_model, "model_fields", {}) or {})
             row_id = row_id_field(input_model)
+            required = frozenset(name for name, info in (getattr(input_model, "model_fields", {}) or {}).items()
+                                 if info.is_required() and name != row_id)
             for name in {key, key.rsplit("/", 1)[-1]}:
                 fields.setdefault(name, []).append(names)
                 row_ids.setdefault(name, set()).add(row_id)
-    token = _COMMAND_INPUTS.set((fields, steps, row_ids) if fields is not None else None)
+                others.setdefault(name, set()).update(required)
+    token = _COMMAND_INPUTS.set((fields, steps, row_ids, others) if fields is not None else None)
     try:
         yield (fields, steps) if collect else fields
     finally:
@@ -212,7 +245,7 @@ def _check_step_keywords(command: str, keys: tuple[str, ...]) -> None:
     state = _COMMAND_INPUTS.get()
     if state is None:
         return
-    fields, steps, _ = state
+    fields, steps = state[0], state[1]
     if steps is not None:
         steps.append((command, keys))
         return
@@ -234,24 +267,24 @@ def _unknown_keys(command: str, keys: tuple[str, ...]) -> list[str]:
     return [k for k in keys if not any(k in f for f in state[0][command])]
 
 
-def _row_id_of(command: str) -> tuple[bool, Optional[str]]:
-    """``(command is known with its signature, its row id input or None)``. Unknown without a
-    signature (a run, outside the load check)."""
+def _row_id_of(command: str) -> tuple[bool, Optional[str], frozenset[str]]:
+    """``(command is known with its signature, its row id input or None, its other required inputs)``. Unknown
+    without a signature (a run, outside the load check)."""
     state = _COMMAND_INPUTS.get()
     if state is None or command not in state[2]:
-        return False, None
+        return False, None, frozenset()
     ids = state[2][command]
-    return True, (next(iter(ids)) if len(ids) == 1 else None)
+    return True, (next(iter(ids)) if len(ids) == 1 else None), frozenset(state[3].get(command, ()))
 
 
-def _named_problem(command: str, message: str, reported: bool) -> None:
+def _named_problem(command: str, message: str, reported: bool, key: str = _NAMED_UNRESOLVED) -> None:
     """A ``run(..., named=...)`` step that cannot open its row: a load error (raised), or, while the
-    load check collects, a problem the check reports. *reported*: an unknown keyword already is the
-    problem, so the row problem is not added."""
+    load check collects, a problem the check reports (*key* says which). *reported*: an unknown keyword already is
+    the problem, so the row problem is not added."""
     state = _COMMAND_INPUTS.get()
     if state is not None and state[1] is not None:
         if not reported:
-            state[1].append((command, (_NAMED_UNRESOLVED,)))
+            state[1].append((command, (key,)))
         return
     raise StepFormError(message)
 
@@ -283,9 +316,9 @@ def run(command: str, *, named: Any = None, all_pages: bool = False, **inputs: A
 
     - ``all_pages=True``: a paged command read through every page (up to ``CODE_MAX_PAGES``, then
       the agent reads on from the next page): ``<command> <k=v ...> (full list)``.
-    - ``named=<name>``: open the row of a listing this call read whose label holds that name (or the
-      only row). Its row id is the input named by ``from_command_output``, else the command's one
-      required ``str`` field. Given a concrete id, the step is ``<command> <id field>=<value>``;
+    - ``named=<name>``: open the row of a listing this call read whose name is that name whole (case, spacing and
+      quotes ignored; "Dune" is not "Dune Messiah"), or the only row. Its row id is the input that declares a producer (``from_command_output``), else the
+      command's one required id-named field (``book_uid``); a command with neither is a load error. Given a concrete id, the step is ``<command> <id field>=<value>``;
       without one it is ``<command> with the uid of the <name> match``, which code runs on the
       matching row.
     """
@@ -300,23 +333,28 @@ def run(command: str, *, named: Any = None, all_pages: bool = False, **inputs: A
         return Step(f"{text} (full list)" if all_pages else text, "run")
     if not str(named).strip():
         raise StepFormError(f"run({command!r}): named= is the name the row is picked by")
-    known, row_id = _row_id_of(command)
+    known, row_id, others = _row_id_of(command)
     if not known:
         # Outside the load check (no signatures): a concrete value is written; none is the row's words.
         if any(not is_placeholder(v) for v in given.values()):
             return Step(_command_text(command, given), "run")
-        return Step(f"{command} with the uid of the {named} match", "run")
+        return Step(f"{command} with the uid of the {_step_value(named)} match", "run")
     if row_id is not None and row_id in given and not is_placeholder(given[row_id]):
         return Step(_command_text(command, given), "run")
     if row_id is None:
         _named_problem(command, f"run({command!r}, named=...): {command} declares no row id input "
-                                "(a field from_command_output, or its one required str field): pass "
-                                "the id input explicitly", typo)
+                                "(declare the producer of its id field with from_command_output, or pass "
+                                "the id input explicitly)", typo)
     elif set(given) - {row_id}:
         _named_problem(command, f"run({command!r}, named=...): with no {row_id} given, the step opens "
                                 "the row by name and takes no other input: pass the row's id, or drop "
                                 "the other input", typo)
-    return Step(f"{command} with the uid of the {named} match", "run")
+    elif others:
+        _named_problem(command, f"run({command!r}, named=...): {command} also requires "
+                                f"{', '.join(sorted(others))}, which a step that opens the row by name cannot "
+                                "pass, so code could never run it: pass the row's id and every required input",
+                       typo, f"{_NAMED_TAKES_MORE}: {', '.join(sorted(others))}")
+    return Step(f"{command} with the uid of the {_step_value(named)} match", "run")
 
 
 def when(condition: str, step: str) -> Step:
@@ -324,8 +362,15 @@ def when(condition: str, step: str) -> Step:
     return Step(f"only when {condition}, {step}", "when")
 
 
+#: Key recorded for a ``do_not_run`` step: its command name is checked at load as a run step's is, and it calls nothing.
+_DO_NOT_RUN = "do not run"
+
+
 def do_not_run(command: str) -> Step:
     """A negated step code passes over, and a guard: ``do not run <command>``."""
+    state = _COMMAND_INPUTS.get()
+    if state is not None and state[1] is not None:
+        state[1].append((command, (_DO_NOT_RUN,)))
     return Step(f"do not run {command}", "do_not_run")
 
 #: ``(phase_name, step_text)`` of each step written while ``steps_by_phase_noted`` is open.
@@ -414,7 +459,8 @@ def phase(**options: Any) -> Callable:
     - ``max_items``, ``noun``, ``until`` (a function whose parameter named after this phase
       gets the items' facts so far; true stops the fan-out), ``bind``;
     - ``optional``: the job goes on when this phase fails;
-    - ``output``: the facts model, when it depends on the input.
+    - ``output``: a function of ``input`` only, giving the facts model when it depends on the input;
+      a phase's fixed facts model is its return annotation.
 
     Any option may be a function of ``input`` alone: it is decided when the call is planned.
     """
@@ -500,6 +546,11 @@ def _output(cls: type, fn: Callable, options: dict, input: Any) -> Any:
                              f"{annotation}: {error}") from None
     if annotation is None or annotation is inspect.Signature.empty:
         return None
+    if get_origin(annotation) in (Union, types.UnionType) and type(None) in get_args(annotation):
+        raise PhaseError(f"phase {fn.__name__!r}: its return annotation {type_text(annotation)} includes None; a "
+                         "phase's return annotation is the facts model it fills, so leave '| None' out (a later "
+                         "phase reads the facts of a phase that did not run as None through a parameter whose "
+                         "default is None)")
     if union_members(annotation) is not None:
         return annotation
     if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
@@ -509,9 +560,21 @@ def _output(cls: type, fn: Callable, options: dict, input: Any) -> Any:
                      "on the input goes in @phase(output=lambda input: ...)")
 
 
+def _is_function_of_input(value: Any) -> bool:
+    """Whether *value* is a function of ``input`` alone: a lambda, a ``def`` or a
+    ``functools.partial`` whose one remaining parameter is named ``input``. A class (a model is
+    callable too), an instance, a string, None and a function with other parameters are not."""
+    if not callable(value) or inspect.isclass(value):
+        return False
+    try:
+        return _parameters(value) == ["input"]
+    except (TypeError, ValueError):
+        return False
+
+
 def _decided(value: Any, input: Any) -> Any:
     """An option given as a function of ``input`` only, decided now; other values as given."""
-    if callable(value) and not inspect.isclass(value) and _parameters(value) == ["input"]:
+    if _is_function_of_input(value):
         return value(input)
     return value
 
@@ -659,6 +722,19 @@ def planned(cls: type) -> Callable[[Any], list[Phase]]:
             raise PhaseError(f"PlanGenerator.{name}: a phase method takes self first, as a "
                              "ResponseGenerator's methods do")
     for name, fn in methods.items():
+        options = getattr(fn, "__phase_options__", {})
+        if "over" not in options and (fan_out_only := [k for k in ("max_items", "bind", "until") if k in options]):
+            raise PhaseError(f"phase {name!r} of {cls.__qualname__}: @phase({', '.join(f'{k}=' for k in fan_out_only)})"
+                             " is for a fan-out phase, which runs once per item: add over=..., or leave "
+                             f"{' and '.join(fan_out_only)} out")
+        if "bind" in options and not isinstance(options["bind"], bool) and not _is_function_of_input(options["bind"]):
+            raise PhaseError(f"phase {name!r} of {cls.__qualname__}: @phase(bind=...) must be True or False, got "
+                             f"{options['bind']!r}")
+        fixed = options.get("output")
+        if "output" in options and not _is_function_of_input(fixed):
+            shown = getattr(fixed, "__qualname__", None) or repr(fixed)
+            raise PhaseError(f"phase {name!r} of {cls.__qualname__}: @phase(output=...) takes a function "
+                             f"of input (lambda input: ...), got {shown}")
         if "output" in getattr(fn, "__phase_options__", {}) and "return" in fn.__annotations__:
             raise PhaseError(f"phase {name!r} of {cls.__qualname__} has both @phase(output=...) and a "
                              "return annotation: use the return annotation when the facts type is "

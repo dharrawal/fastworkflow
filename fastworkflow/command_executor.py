@@ -6,9 +6,9 @@ from contextlib import nullcontext
 import fastworkflow
 from pydantic import BaseModel
 from fastworkflow import tracing
-from fastworkflow import approval_binding, command_writes, waiting
+from fastworkflow import approval_binding, command_writes, intent_loop, waiting
 from fastworkflow.command_interfaces import CommandExecutorInterface
-from fastworkflow.context_navigation import declared_descends_to
+from fastworkflow.command_declarations import declared_descend
 
 from fastworkflow import Action, CommandOutput, ChatSession
 from fastworkflow.observability.execution_recorder import record_execution, recorder_for
@@ -20,6 +20,7 @@ from fastworkflow.command_routing import RoutingDefinition
 from typing import Optional
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.workflow import running_command
 
 
 def _declared_output_model(response_generator_class) -> type | None:
@@ -60,31 +61,31 @@ def paging_line(output, command_parameters) -> str:
     return f"Rows {start + 1}-{after} of {total}; next page: {name}={after}."
 
 
-def _declared_output_message(command_name: str, returned: str) -> str:
+def _declared_output_message(command_name: str, returned: str, returned_by: str | None = None) -> str:
     """The call error for a command that declares Signature.Output and returned something else."""
-    return (f"{command_name} declares an Output but returned {returned}; return the Output, "
+    verb = f"its {returned_by} returned" if returned_by else "returned"
+    return (f"{command_name} declares an Output but {verb} {returned}; return the Output, "
             "or CommandResponse(response=..., output=<Output>)")
 
 
-def frame_command_result(result, *, command_name: str, output_model: type | None,
-                         command_parameters=None) -> CommandOutput:
-    """Wrap what a ``ResponseGenerator.__call__`` returned in a CommandOutput (design 3.14).
+def command_response_of(result, *, command_name: str, output_model: type | None,
+                        returned_by: str | None = None) -> fastworkflow.CommandResponse:
+    """The one rule for what a command may return, as a ``CommandResponse`` (design 3.14).
 
-    The short forms, and only these:
+    Applied to a ``ResponseGenerator.__call__`` (by ``frame_command_result``) and to a planning command's
+    ``__result__`` (``returned_by="__result__"``, which only words the error). The short forms, and only these:
 
-    - the command's own ``Signature.Output``: ``response`` is the Output as JSON and ``output`` the
-      instance;
+    - the command's own ``Signature.Output``, exactly that class: ``response`` is the Output as JSON and
+      ``output`` the instance;
     - a ``str``: the text of the response;
-    - a ``CommandResponse``: a CommandOutput around it (its artifacts and next actions), with
-      ``success`` left to the framework. A ``CommandResponse`` with ``success=False`` is a call error:
-      a refusal is ``raise fastworkflow.Refused(message)``.
+    - a ``CommandResponse``: itself (its artifacts and next actions), with ``success`` left to the framework. A
+      ``CommandResponse`` with ``success=False`` is a call error: a refusal is ``raise fastworkflow.Refused(message)``.
 
     A command that declares ``Signature.Output`` must return it, directly or as
-    ``CommandResponse(response=..., output=<Output>)``. A str, or a CommandResponse without that
-    output, is a call error (fix-3rsq.declared-output-required).
-
-    A hand-built ``CommandOutput``, or any other value, fails the call, naming the command and the
-    type it returned.
+    ``CommandResponse(response=..., output=<Output>)``, and the class is exact in both forms (a subclass instance is
+    another model, as a different model is). A str, or a CommandResponse without that output, is a call error
+    (fix-3rsq.declared-output-required). Anything else, a hand-built ``CommandOutput`` included, fails the call,
+    naming the command and the type it returned. A ``TypeError`` is raised for each.
     """
     if isinstance(result, fastworkflow.CommandResponse):
         if result.success is False:
@@ -92,36 +93,45 @@ def frame_command_result(result, *, command_name: str, output_model: type | None
                 f"{command_name} returned a CommandResponse with success=False: success is the framework's "
                 "to set. Refuse with raise fastworkflow.Refused(message)"
             )
-        if output_model is not None and not isinstance(result.output, output_model):
+        if output_model is not None and type(result.output) is not output_model:
             returned = "CommandResponse without output" if result.output is None else (
                 f"CommandResponse(output={type(result.output).__qualname__})")
-            raise TypeError(_declared_output_message(command_name, returned))
-        return CommandOutput(command_response=result)
+            raise TypeError(_declared_output_message(command_name, returned, returned_by))
+        return result
     if isinstance(result, str):
         if output_model is not None:
-            raise TypeError(_declared_output_message(command_name, "str"))
-        return CommandOutput(command_response=fastworkflow.CommandResponse(response=result))
+            raise TypeError(_declared_output_message(command_name, "str", returned_by))
+        return fastworkflow.CommandResponse(response=result)
     if output_model is not None and type(result) is output_model:
-        text = result.model_dump_json()
-        line = paging_line(result, command_parameters)
-        return CommandOutput(
-            command_response=fastworkflow.CommandResponse(
-                response=f"{text}\n{line}" if line else text, output=result
-            )
-        )
+        return fastworkflow.CommandResponse(response=result.model_dump_json(), output=result)
     # the module as the workflow's name for it (a namespace digest written back to the bare basename)
     returned = legacy_module_names(f"{type(result).__module__}.{type(result).__qualname__}")
-    if output_model is not None and type(result) is not output_model:
-        raise TypeError(_declared_output_message(command_name, type(result).__qualname__))
-    if output_model is None:
-        declared = "its ResponseGenerator declares no Signature.Output"
-    else:
-        declared = f"its Signature.Output is {output_model.__qualname__}"
+    if output_model is not None:
+        raise TypeError(_declared_output_message(command_name, type(result).__qualname__, returned_by))
+    declared = "it declares no Signature.Output" if returned_by else "its ResponseGenerator declares no Signature.Output"
+    source = f"its {returned_by}" if returned_by else "its ResponseGenerator"
     raise TypeError(
-        f"{command_name} returned {returned}, which is not a short form its ResponseGenerator may return "
+        f"{command_name} returned {returned}, which is not a short form {source} may return "
         f"({declared}): return that Output, a str or a CommandResponse (artifacts or next actions), "
         "or raise fastworkflow.Refused(message)"
     )
+
+
+def frame_command_result(result, *, command_name: str, output_model: type | None,
+                         command_parameters=None) -> CommandOutput:
+    """Wrap what a ``ResponseGenerator.__call__`` returned in a CommandOutput (design 3.14).
+
+    What may be returned is judged by ``command_response_of``, the one rule ``__result__`` follows too. What is
+    specific to an execution command is added here: a directly returned Output gets the paging line (``paging_line``)
+    after its JSON.
+    """
+    response = command_response_of(result, command_name=command_name, output_model=output_model)
+    if response is result or not isinstance(result, BaseModel):
+        return CommandOutput(command_response=response)
+    line = paging_line(result, command_parameters)
+    if line:
+        response.response = f"{response.response}\n{line}"
+    return CommandOutput(command_response=response)
 
 
 def _assistant_round(chat_session) -> bool:
@@ -132,6 +142,26 @@ def _assistant_round(chat_session) -> bool:
 def _end_round(chat_session) -> None:
     """The "/" round ends (the one place a command's run clears the mark)."""
     waiting.port_of(chat_session.cme_workflow.context).end_round()
+
+
+#: The refusal of a command that writes while a part the user asked only to look up runs (bd fix-ftdl.4.3).
+LOOK_UP_ONLY_REFUSAL = (
+    "{command} was not run: it changes the application's data, and you asked for this part only to be looked up.")
+
+
+def _look_up_only_refusal(chat_session, workflow_folderpath: str, command_name: str) -> Optional[str]:
+    """The refusal for running *command_name* now, or None: a command that writes (``command_writes.write_commands``),
+    called while the turn's part that runs is marked read-only (``SubTask.read_only``: the user answered the review
+    with "look it up"). Code only, and only as complete as the ``@writes`` marks: a command that writes without the
+    mark is not known to write."""
+    host = command_writes._host(chat_session)
+    running = getattr(host, "_running_part_item", None)
+    item = running() if callable(running) else None
+    if item is None or not getattr(item, "read_only", False):
+        return None
+    if command_name not in command_writes.write_commands(workflow_folderpath):
+        return None
+    return LOOK_UP_ONLY_REFUSAL.format(command=command_name)
 
 
 def _pending_before_cme_reply(workflow) -> dict:
@@ -215,6 +245,8 @@ def _wildcard_command_output(framed: CommandOutput, pending: dict | None = None,
         artifacts["reply_intent"] = route.reply_intent
     if route.parameter_request is not None:
         artifacts["parameter_request"] = route.parameter_request
+        # Tagged as the same kind the waiting record of a parameters question has everywhere (``waiting.TABLE``).
+        artifacts["question_kind"] = waiting.TABLE[waiting.KIND_PARAMETERS].question_kind
     if route.plan_choice:
         # The which-command question, in the one shape every path asks it (`intent_loop.prompt_artifacts`).
         artifacts["question_kind"] = "plan_choice"
@@ -223,7 +255,9 @@ def _wildcard_command_output(framed: CommandOutput, pending: dict | None = None,
     return CommandOutput(
         command_response=fastworkflow.CommandResponse(
             response=route.response + _no_agent_note(route, workflow),
-            success=route.routed,
+            # A which-command question that is out is not a success: nothing ran and the user has still to answer (the
+            # one rule of the plan path's question and of the ambiguous one: ``success`` False, the question as data).
+            success=route.routed and not route.plan_choice,
             artifacts=artifacts,
             output=route.output,
         )
@@ -235,12 +269,24 @@ def call_response_generator(response_generator, workflow, command, command_param
 
     ``command_parameters`` is the filled ``Input``, or None for a command with no ``Input``. A
     ``fastworkflow.Refused`` the call raises is its answer: a failed CommandOutput with the refusal's
-    message. Any other return is framed by ``frame_command_result``.
+    message, and the fields it named as the artifact ``refused_fields`` (``Refused.as_output``; the command ran, so
+    nothing is asked again). Any other return is framed by ``frame_command_result``.
     """
+    before = getattr(workflow, "_current_command_context", None)
+    assignments = getattr(workflow, "_record_assignments", 0)
     try:
-        result = response_generator(workflow, command, command_parameters)
+        with running_command():     # workflow.record is the invoked record while the command runs
+            result = response_generator(workflow, command, command_parameters)
     except fastworkflow.Refused as refusal:
+        _restore_record(workflow, before)
         return refusal.as_output()
+    except Exception:
+        # a command that fails leaves the record where it was; an ask_user suspension (a BaseException) resumes
+        # where the command stood, so it keeps its move
+        _restore_record(workflow, before)
+        raise
+    if (refused_move := _check_move(workflow, response_generator, command_name, before, assignments)) is not None:
+        return refused_move
     framed = frame_command_result(
         result,
         command_name=command_name or type(response_generator).__qualname__,
@@ -275,36 +321,97 @@ def _attach_capability_listing(framed: CommandOutput, workflow) -> None:
 
 logger = logging.getLogger(__name__)
 
-#: (command, target context) pairs already reported, so each undeclared move is logged once per process.
-_UNDECLARED_MOVES_WARNED: set[tuple[str, str]] = set()
+def _restore_record(workflow, before) -> None:
+    """Put *workflow* back on the record it stood on before a command that moved it failed."""
+    if workflow is not None and getattr(workflow, "_current_command_context", before) is not before:
+        workflow.record = before
 
 
-def _warn_undeclared_move(routing, command_name: str, workflow, context_before) -> None:
-    """Warn once when a command moved the workflow into a context its ``@descends_to`` does not name.
+def _check_move(workflow, response_generator, command_name: str, before,
+                assignments: int) -> Optional[CommandOutput]:
+    """The check of a command that moved the session, after it returned: the failed output, or None.
 
-    Design 3.15: the comparison is the one the `now_in` note makes (the current object before and
-    after), made here so assistant mode reports it too. Core commands (go_up, reset_context) are
-    exempt, and nothing here may fail the command.
+    A command moved the session when it assigned ``workflow.record`` (``Workflow._record_assignments`` changed while it
+    ran) and the session no longer stands on the record it stood on before. Setting ``workflow.root`` (the startup
+    command) is a different statement and is no move; a command that declares a move and does not make it has not
+    moved. A move to no record (the global scope) is onto no context. A move onto a record fails the command, and the
+    record is put back, when:
+    - the record's class is no context of the workflow (no ``_commands/<ClassName>/`` folder, no entry of the
+      inheritance file);
+    - the command's ``@descends_to``, read from the generator class that ran, does not name the record's context or a
+      context that context inherits from in ``context_inheritance_model.json`` (a PremiumUser is a User): one rule,
+      "a command may move the session only onto a context it declares";
+    - the workflow has a root, the record is not it, and its context has no ``get_parent``
+      (``Workflow.missing_get_parent``), so the next climb could not go on.
+    The framework's own navigation (go_up, reset_context: the core commands, known by name from the command metadata
+    extraction workflow, ``_core_command_names``) is not an author's move and is not checked against a declaration.
     """
+    if workflow is None or getattr(workflow, "_record_assignments", assignments) == assignments:
+        return None
+    after = getattr(workflow, "_current_command_context", before)
+    if after is before or after is None:
+        return None
+    target = type(after).__name__
+    short = command_name.split("/")[-1] or type(response_generator).__module__.rsplit(".", 1)[-1]
     try:
-        if workflow._current_command_context is context_before:
-            return
-        if command_name in _core_command_names():
-            return
-        target = workflow._current_command_context_name
-        if declared_descends_to(routing, command_name) == target:
-            return
-        key = (command_name, target)
-        if key in _UNDECLARED_MOVES_WARNED:
-            return
-        _UNDECLARED_MOVES_WARNED.add(key)
-        short = command_name.split("/")[-1]
-        logger.warning(
-            f'{short} moved the workflow into {target} but declares no @descends_to; '
-            f'declare @descends_to("{target}") on its ResponseGenerator so plans can reach {target}\'s commands'
-        )
-    except Exception:  # noqa: BLE001 - a warning about navigation must not fail the command
-        logger.debug("undeclared-move check skipped for %r", command_name, exc_info=True)
+        folder = workflow.folderpath
+        model = fastworkflow.CommandContextModel.load(folder)
+        if not workflow.is_context(target, model):
+            problem = (f"{short} moved the workflow onto a {target} record, but {target} is no context of the "
+                       f"workflow: a context is the folder _commands/{target}/, named exactly as the record's class")
+        elif command_name in _core_command_names():
+            return None
+        elif (declared := declared_descend(type(response_generator))) is None:
+            problem = (f'{short} moved the workflow onto a {target} record but declares no @descends_to: a command may '
+                       f'move the session only onto a context it declares. Declare @descends_to("{target}") on its '
+                       f'ResponseGenerator')
+        elif declared != target and declared not in model.inherited_base_contexts(target):
+            problem = (f'{short} moved the workflow onto a {target} record but declares @descends_to("{declared}"), '
+                       f'and {target} is not {declared} nor a context that inherits from it: a command may move the '
+                       f'session only onto a context it declares')
+        elif (missing := workflow.missing_get_parent(after)) is not None:
+            problem = f"{short} moved the workflow onto a {target} record, but {missing}"
+        else:
+            return None
+    except Exception as error:  # noqa: BLE001 - a move that cannot be checked is not taken on trust (fails closed)
+        logger.warning("move check: the contexts of %r could not be read; %r fails", getattr(workflow, "folderpath", None),
+                       command_name, exc_info=True)
+        problem = (f"{short} moved the workflow onto a {target} record, but the move could not be checked: the "
+                   f"workflow's contexts could not be read ({type(error).__name__})")
+    _restore_record(workflow, before)
+    return CommandOutput(command_response=fastworkflow.CommandResponse(
+        response=f"{problem}. The move was undone", success=False))
+
+
+def _owner_record(workflow, command_name: str):
+    """The record a command reached by name runs on: the record of the nearest scope of the lookup path that owns it,
+    the root for a global command, the current position for a framework command (``intent_loop.choose``, the decision a
+    message's chosen command takes). A command no scope of the path has keeps the current position."""
+    chosen = intent_loop.choose(workflow, command_name)
+    return chosen.record if chosen is not None else workflow._current_command_context
+
+
+def _ran_on(workflow, record) -> Optional[tuple[str, str]]:
+    """``(context name, clause)`` of the record a command runs on when it is not the current position, else None: what
+    the CME's walk reports for a message (``wildcard``), so a direct action is filed the same way."""
+    if record is workflow._current_command_context:
+        return None
+    from fastworkflow.context_identity import identity_of
+    from fastworkflow.observation_offloading.labels import context_clause
+
+    name, label = identity_of(workflow, record)
+    return name, (context_clause(name, label) if record is not None else "")
+
+
+def _file_under(command_output: CommandOutput, ran_on: Optional[tuple[str, str]]) -> None:
+    """File a run on an enclosing record (or the root, for a global command) under that record, as the message path
+    does (``_invoke_command_impl``)."""
+    if ran_on is None:
+        return
+    name, clause = ran_on
+    command_output.context = name or "global"
+    command_output.ran_in_context_name = name
+    command_output.ran_in_context_clause = clause
 
 
 def _core_command_names() -> frozenset[str]:
@@ -673,8 +780,11 @@ class CommandExecutor(CommandExecutorInterface):
         )
 
         if command_output.command_handled:       
-            # important to clear the current command mode from the workflow context
-            _end_round(chat_session)
+            # important to clear the current command mode from the workflow context. A handled output
+            # that still holds the CME's question (the nothing-matched which-command question) keeps
+            # the round: the next message is the reply to it, as for the other questions.
+            if intent_loop.waiting_for(chat_session.cme_workflow.context) is None:
+                _end_round(chat_session)
             return command_output
         elif not command_output.success:       
             return command_output
@@ -689,9 +799,10 @@ class CommandExecutor(CommandExecutorInterface):
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow._current_command_context_displayname
 
-        # A command that writes, called inside a planning command's phase whose steps do not name it,
-        # is refused unrun (fix-fixv, command_writes): a read-only planning command changes nothing.
-        refusal = command_writes.phase_write_refusal(chat_session, workflow.folderpath, command_name)
+        # A command that writes is refused unrun while a part the user asked only to look up runs (bd fix-ftdl.4.3), and
+        # inside a planning command's phase whose steps do not name it (fix-fixv, command_writes).
+        refusal = (_look_up_only_refusal(chat_session, workflow.folderpath, command_name)
+                   or command_writes.phase_write_refusal(chat_session, workflow.folderpath, command_name))
         if refusal is not None:
             _end_round(chat_session)
             # Marked so the agent loop neither logs it as an executed action nor lets the policy
@@ -779,7 +890,6 @@ class CommandExecutor(CommandExecutorInterface):
             _end_round(chat_session)
             return blocked
 
-        context_before = workflow._current_command_context
         try:
             # command_parameters is the filled Input, or None for a command with no Input (3.14).
             command_parameters_class = command_routing_definition.get_command_class(
@@ -802,21 +912,20 @@ class CommandExecutor(CommandExecutorInterface):
                 _fw_command_name=command_name,
                 _fw_workflow_name=workflow_name,
                 _fw_context=context,
+                # The command's own code raised (not the framework): the "/" path reports it as the command's failed
+                # output (``WorkflowExecutionContext._process_message``), not as a failed turn.
+                _fw_raised_by_command=True,
             )
             raise
 
-        _warn_undeclared_move(command_routing_definition, command_name, workflow, context_before)
 
         # Set the additional attributes
         command_output.workflow_name = workflow_name
         command_output.context = context
         command_output.command_name = command_name
         command_output.command_parameters = input_obj or None
-        if ran_on_clause is not None:
-            # A command the walk ran on an enclosing record is filed under that record.
-            command_output.context = "global" if not ran_on_name else ran_on_name
-            command_output.ran_in_context_name = ran_on_name or ""
-            command_output.ran_in_context_clause = ran_on_clause
+        # A command the walk ran on an enclosing record is filed under that record.
+        _file_under(command_output, (ran_on_name or "", ran_on_clause) if ran_on_clause is not None else None)
 
         if command_output.success:
             command_writes.record_phase_write(chat_session, workflow.folderpath, command_name)
@@ -831,9 +940,20 @@ class CommandExecutor(CommandExecutorInterface):
         cls,
         workflow: fastworkflow.Workflow,
         action: fastworkflow.Action,
+    ) -> fastworkflow.CommandOutput:
+        # The command runs on the record of the scope that owns it, as a message's does (bd fix-ftdl.3); the current
+        # position does not move. Its validators and its code both read that record as workflow.record.
+        with running_command():
+            return cls._perform_action(workflow, action)
+
+    @classmethod
+    def _perform_action(
+        cls,
+        workflow: fastworkflow.Workflow,
+        action: fastworkflow.Action,
     ) -> fastworkflow.CommandOutput:  # sourcery skip: extract-method
-        workflow._command_context_for_response_generation = \
-            workflow._current_command_context
+        workflow._command_context_for_response_generation = _owner_record(workflow, action.command_name)
+        ran_on = _ran_on(workflow, workflow._command_context_for_response_generation)
 
         # One id per dispatch through this method (arch §12.0 delta 1). It is
         # the outermost id on the direct-action, startup-action and MCP paths,
@@ -914,12 +1034,13 @@ class CommandExecutor(CommandExecutorInterface):
             # Validate that response_generation_object returns a CommandOutput, not a string
             if not isinstance(command_output, CommandOutput):
                 raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")
-                
+
             # Set the additional attributes
             command_output.workflow_name = workflow_name
             command_output.context = context
             command_output.command_name = action.command_name
             command_output.command_call_id = call_id
+            _file_under(command_output, ran_on)
             return command_output
 
         # Always resolve the command's Signature class via create() so
@@ -980,13 +1101,14 @@ class CommandExecutor(CommandExecutorInterface):
         # Validate that response_generation_object returns a CommandOutput, not a string
         if not isinstance(command_output, CommandOutput):
             raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")
-        
+
         # Set the additional attributes
         command_output.workflow_name = workflow_name
         command_output.context = context
         command_output.command_name = action.command_name
         command_output.command_parameters = input_obj or None
         command_output.command_call_id = call_id
+        _file_under(command_output, ran_on)
 
         return command_output
 

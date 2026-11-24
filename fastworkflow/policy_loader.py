@@ -5,7 +5,8 @@ that file has its rules enforced; one without it runs unchanged. There is no
 setting: a table is workflow content, like ``_commands``.
 
 The module exposes ``TABLE`` (a ``DecisionTable``) and optionally ``FACTS``
-(``ContractFacts``).
+(``ContractFacts``). The commands that change data are not a fact the table
+declares: the loader reads them from the ``@writes`` marks (one list).
 
 A table file that exists but cannot be loaded is a HARD ERROR at startup,
 deliberately: rules the developer wrote must not be skipped without a word.
@@ -24,6 +25,7 @@ from fastworkflow.policy_decision import (
     ContractFacts,
     DecisionTable,
     PolicyDecisionPoint,
+    PolicyError,
     PolicyMode,
 )
 from fastworkflow.utils.logging import logger
@@ -92,7 +94,13 @@ def load_policy(
     facts = getattr(module, "FACTS", None) or ContractFacts()
     if not isinstance(facts, ContractFacts):
         raise ValueError(f"Policy table {reference}: FACTS is not ContractFacts")
-    facts = with_workflow_identifiers(facts, workflow_folderpath)
+    if facts.write_commands:
+        raise PolicyError(
+            f"Policy table {reference}: FACTS.write_commands is removed: mark each command that changes data "
+            "with @fastworkflow.writes on its ResponseGenerator; the policy reads the marks "
+            f"(listed here: {', '.join(sorted(facts.write_commands))})"
+        )
+    facts = with_workflow_writes(with_workflow_identifiers(facts, workflow_folderpath), workflow_folderpath)
     logger.info(
         f"Policy: table {table.version} ({len(table.rows)} rows) from {reference}"
     )
@@ -105,18 +113,43 @@ def with_workflow_identifiers(
     """``facts`` with ``id_patterns`` taken from the workflow when it gives none.
 
     A workflow may already declare its identifier formats for the split merge
-    (``identifier_patterns`` in ``_commands/_split.py``); a table need not repeat them.
+    (``identifier_patterns`` in ``_commands/_workflow.py``); a table need not repeat them.
     """
     if facts.id_patterns or not workflow_folderpath:
         return facts
     try:
         from fastworkflow.workflow_agent import identifier_patterns
 
-        patterns = tuple(p.pattern for p in identifier_patterns(workflow_folderpath))
-    except Exception as exc:  # noqa: BLE001 - the split file reports its own errors
+        patterns = tuple(identifier_patterns(workflow_folderpath))   # compiled: their flags are kept
+    except Exception as exc:  # noqa: BLE001 - the workflow settings file reports its own errors
         logger.warning(f"Policy: workflow identifier patterns unavailable: {exc}")
         return facts
     return dataclasses.replace(facts, id_patterns=patterns) if patterns else facts
+
+
+def with_workflow_writes(
+    facts: ContractFacts, workflow_folderpath: Optional[str]
+) -> ContractFacts:
+    """``facts`` with ``write_commands`` read from the workflow's ``@writes`` marks
+    (``command_writes.write_commands``: the marked execution commands and the
+    planning commands whose steps reach one), by qualified and by leaf name, as
+    the agent may call either. A workflow whose commands cannot be read is a ``PolicyError``: with no
+    commands known to write, the table's write rules would silently never fire."""
+    if not workflow_folderpath:
+        return facts
+    from fastworkflow.command_writes import write_commands
+
+    try:
+        names = write_commands(workflow_folderpath)
+    except Exception as exc:  # noqa: BLE001 - any failure to read the commands is the same error here
+        raise PolicyError(
+            f"Policy: the commands of {workflow_folderpath} could not be read ({type(exc).__name__}: {exc}), "
+            "so the commands that change data are unknown and the table's write rules would never fire; "
+            "load the policy after fastworkflow.init, on a workflow whose commands load"
+        ) from exc
+    return dataclasses.replace(
+        facts, write_commands=frozenset(names) | {name.split("/")[-1] for name in names}
+    )
 
 
 def attach_policy(agent, host) -> None:

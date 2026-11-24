@@ -10,10 +10,6 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, record: ChatRoom) -> None:
-        return None
-
-    @classmethod
     def get_state(cls, record: ChatRoom) -> dict[str, Any]:
         """Snapshot the chat room so a session holding it can be evicted.
 

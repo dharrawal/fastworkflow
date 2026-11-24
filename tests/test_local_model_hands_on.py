@@ -24,6 +24,7 @@ from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import CommandRouter, train
+from fastworkflow.workflow import running_command
 from fastworkflow.train import determinism, utterance_cache
 from fastworkflow.train import intent_model_layout as layout
 from fastworkflow.train import workflow_model as wm
@@ -188,15 +189,16 @@ def test_choosing_the_ancestor_command_at_the_question_runs_it_in_the_ancestor_s
     assert asked.routed is False and asked.handled is False
     assert "ambiguous" in asked.response.lower()
     assert "list_branches" in asked.response
-    assert app.record is not library                     # nothing ran: the question is open
+    assert app._command_context_for_response_generation is not library                     # nothing ran: the question is open
     assert intent_loop.waiting_for(cme.context) == intent_loop.WAITING_INTENT
 
-    chosen = wildcard.ResponseGenerator()(cme, "list_branches", None)
+    with running_command():     # as the dispatcher runs the CME's command
+        chosen = wildcard.ResponseGenerator()(cme, "list_branches", None)
 
     assert chosen.routed is True
     assert chosen.command_name == "Library/list_branches"
     assert chosen.ran_on_context_name == "Library"       # bound to the ancestor's record, as a climb would
-    assert app.record is library
+    assert app._command_context_for_response_generation is library
 
 
 @pytest.mark.usefixtures("no_planner_key")

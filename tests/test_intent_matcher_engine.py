@@ -626,7 +626,7 @@ def test_without_the_planner_key_a_scope_with_no_head_has_no_matcher(on_a_book, 
 
 def test_the_span_contract_names_the_matchers_keys():
     contract = tracing.SPAN_CONTRACTS[tracing.SPAN_NLU_INTENT]
-    assert contract.version == 12
+    assert contract.version == 13
     assert {"engine", "engine_fallback", "engine_chain", "matcher", "matcher_layer", "remote_failed"} <= contract.attributes
     assert not {"engine_mode", "jev_tiebreak"} & contract.attributes        # gone with the setting and the tie-break
     assert not {"cache_similarity", "cache_similarity_threshold"} & contract.attributes   # gone with the similarity cache
@@ -644,7 +644,7 @@ def test_the_wildcard_command_routes_an_untrained_workflow_end_to_end(on_a_book,
     artifacts = out.command_response.artifacts
     assert artifacts["command_name"] == "Library/list_branches"
     assert artifacts["ran_on_context_name"] == "Library"
-    assert app.record is library and app._current_command_context is book
+    assert app._command_context_for_response_generation is library and app._current_command_context is book
     assert len(model.calls) == 1
 
 

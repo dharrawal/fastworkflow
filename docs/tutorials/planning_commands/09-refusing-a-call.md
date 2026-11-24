@@ -30,14 +30,14 @@ names again only when the same field also has `classifier_confirms`, and only wh
 is set. Without the key the string check still runs.
 
 The keys are not the whole list: `command_text_after_command_name`, `from_command_output`,
-`converted_from_command_text` and `ui` (presentation hints for the chat client; see the README) are the
+`ui` (presentation hints for the chat client; see the README) are the
 other field keys, and the
 [planning command file layout](../../planning_command_file_layout.md) has them under "Field
 options". A field with no check is cleaned in code: call `strip_words(text, words)` from
 `fastworkflow.planning_commands` in a `field_validator` on that field. A validator's returned value
 is written back, so a validator that cleans a value changes the argument. A validator cannot
 replace "required" or `ignore`: a missing required field fails before any validator runs, and
-`ignore` strips the value before the verbatim match.
+`ignore` strips the value before it is matched against the request.
 
 A field with no key is checked by its type alone, and a key on a type it does not apply to fails
 the load. For each key a field carries, the framework adds a sentence to the field's description
@@ -84,10 +84,12 @@ EVERYONE = {"everyone", "everybody", "all", "all members", "every member"}
   when no answer could fix the call, because the command does not fit the request ("the owner is
   read only for an application"): the request is then planned without the command, and the user
   is not asked. The `fields` of the refusal reach the caller intact, as the `member` above does.
-- **A plain `ValueError`** in a validator is a refusal with no field named, worded as the hook's:
-  `validate_extracted_parameters: <text>`. The extractor is asked once more, and if the call is still
-  refused the planner's typed fill takes over. The note validator on page 2 is one: its refusal names
-  no input.
+- **A plain `ValueError` or `AssertionError`** in a validator is exactly `fastworkflow.Refused(message)` with
+  no field named: the message is the bare text, with no prefix. (Any other exception reads
+  `a validator raised KeyError: <text>`.) No field is named, so the extractor is NOT asked once more and
+  the user is not asked: the call is not made, and the message is what comes back. The note validator on
+  page 2 is one: its refusal names no input. Name the field (`Refused(message, field=...)`) to get the
+  one second fill.
 - **A correction** is an assignment and a return. A validator that sets `self.<field>` and returns
   `self` writes the value back, and the notes of the call record what changed, attributed to the
   validator. Its message says what to fix in the same way.
@@ -120,8 +122,8 @@ step's text, with one exception: when the planner wrote the step, its arguments 
 against the user's request and what the turn's earlier steps found, not the plan's own
 words, so a value the planner made up is refused (page 14).
 
-**Who gets a refusal.** For a typed call, the planner, which fills the call once more with
-the message in front of it; refused again, the call is not made. An attended turn asks the
+**Who gets a refusal.** For a typed call whose refusal names an input, the planner, which fills the call once more with
+the message in front of it; refused again, or refused with no input named, the call is not made. An attended turn asks the
 user when the refusal names an input (a missing argument, a value the request does not
 write, or `Refused(..., field=...)`; see below). Every other refusal, and every refusal in an
 unattended turn, plans the request from the template instead. For a step, the
@@ -165,7 +167,7 @@ A call that names no one member is refused, with the reason the planner reads:
 
 <!-- refusal: member_loans {"member": "everyone"} -->
 ```text
-validate_extracted_parameters: member is 'everyone', which names no one member; this skill reads one member's loans: give that member's name
+member is 'everyone', which names no one member; this skill reads one member's loans: give that member's name
 ```
 
 ## At run time
@@ -173,7 +175,7 @@ validate_extracted_parameters: member is 'everyone', which names no one member; 
 A refused call never reaches the `PlanGenerator`:
 
 ```text
-validate_extracted_parameters: member is 'everyone', which names no one member; this command reports on one member: give that member's name
+member is 'everyone', which names no one member; this command reports on one member: give that member's name
 ```
 
 `member=Ann Lee` passes, and the call runs as on page 6.
@@ -183,11 +185,11 @@ Run offline for Raj Patel, the call passes its check and finds the member:
 <!-- dry-run: member_loans {"member": "Raj Patel"} -->
 ```text
 Phase find
-  1. find_member query=Raj Patel
-  code runs: find_member query=Raj Patel
+  1. find_member query="Raj Patel"
+  code runs: find_member query="Raj Patel"
   facts: Output(member_uids=['m2'], names=['Raj Patel'], total=1)
 Phase member
-  1. list_member_loans with the uid of the Raj Patel match
+  1. list_member_loans with the uid of the "Raj Patel" match
   code runs: list_member_loans member_uid=m2
   facts: Output(titles=['Dune', 'Emma'], due_dates=['2026-10-20', '2026-11-05'], total=2)
 answer written by __result__:

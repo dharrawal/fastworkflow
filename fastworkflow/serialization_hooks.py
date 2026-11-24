@@ -11,8 +11,12 @@ signal*:
 
     no get_state at all        -> pin, and warn once per context class
     get_state -> EPHEMERAL     -> pin, and stay quiet: the author declared it
-    get_state -> dict          -> evictable
+    get_state -> dict          -> evictable (pin and warn when there is no from_state to rebuild it)
     get_state -> None          -> pin AND warn: that is a bug, not a decision
+
+The hooks come in pairs: ``from_state`` without ``get_state``, and one of ``get_locator`` / ``find_by_locator``
+without the other, fail the load (``hook_pair_problems``). ``get_state`` without ``from_state`` cannot be told
+from a class that only ever returns EPHEMERAL until ``get_state`` runs, so it pins at save time and is never saved.
 
 See docs/fastworkflow_serialization_hooks_design.md for the rationale, including
 why these are not `__getstate__`/`__setstate__` on the application class.
@@ -25,15 +29,12 @@ from enum import Enum
 from typing import Any, Optional
 
 import fastworkflow
-from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 
 # The locator of a slot that *is* the anchor. Reserved, so no author locator can
 # collide with it: an author locator is only ever consulted for a slot that
 # differs from the anchor.
 ANCHOR_LOCATOR = "."
-
-SERIALIZATION_MODULE = "_serialization.py"
 
 # Warn once per (workflow, context class). For a workflow that has not
 # implemented the hook, pinned is the steady state, so an unthrottled warning
@@ -116,19 +117,19 @@ def get_context_hooks(workflow: "fastworkflow.Workflow", context_object: Any):
     )
 
 
-def get_serialization_module(workflow: "fastworkflow.Workflow"):
-    """The workflow's optional ``Serialization`` class from ``_commands/_serialization.py``.
+#: The hooks that come in pairs: each is read only with its partner (bd fix-ftdl.7.17).
+_HOOK_PAIRS = (("from_state", "get_state"), ("get_locator", "find_by_locator"), ("find_by_locator", "get_locator"))
 
-    The file is underscore-prefixed, so the command scanner already ignores it
-    and there is no collision with command discovery.
-    """
-    import os
 
-    module_path = os.path.join(workflow.folderpath, "_commands", SERIALIZATION_MODULE)
-    if not os.path.isfile(module_path):
-        return None
-    module = python_utils.get_module(module_path, workflow.folderpath)
-    return getattr(module, "Serialization", None) if module else None
+def hook_pair_problems(context_class: Any) -> list[str]:
+    """Why *context_class*'s state hooks fail the load: a hook whose partner is missing, so it can never be used
+    (``from_state`` with no ``get_state``, one half of the locator pair). Empty when the hooks are fine or absent.
+    ``get_state`` with no ``from_state`` is checked when ``get_state`` runs (``project_command_contexts``)."""
+    if context_class is None:
+        return []
+    return [f"has {hook} but no {partner}; the two hooks come as a pair: write both, or neither"
+            for hook, partner in _HOOK_PAIRS
+            if hasattr(context_class, hook) and not hasattr(context_class, partner)]
 
 
 def project_command_contexts(workflow: "fastworkflow.Workflow") -> ContextProjection:
@@ -140,7 +141,7 @@ def project_command_contexts(workflow: "fastworkflow.Workflow") -> ContextProjec
     """
     root = workflow.root
     current = workflow._current_command_context
-    response = workflow.record
+    response = workflow._command_context_for_response_generation   # the bound record, kept across a question
 
     anchor = root if root is not None else current
     if anchor is None:
@@ -180,6 +181,15 @@ def project_command_contexts(workflow: "fastworkflow.Workflow") -> ContextProjec
             "dict, or fastworkflow.EPHEMERAL to decline deliberately",
         )
 
+    if not hasattr(hooks, "from_state"):
+        # Saved, it would fail at restore and the conversation would start over: it stays in memory instead.
+        return _pinned(
+            ProjectionOutcome.HOOK_ABSENT,
+            context_name,
+            f"context class {context_name!r} has get_state but no from_state hook, so its saved state "
+            "could not be restored",
+        )
+
     locators: dict[str, Optional[str]] = {}
     for slot_name, slot in (("current", current), ("response", response)):
         locator, failure = _locate(hooks, anchor, slot, context_name, slot_name)
@@ -213,10 +223,8 @@ def restore_command_contexts(
     context_name = record["context_name"]
     hooks = _hooks_by_name(workflow, context_name)
     if hooks is None or not hasattr(hooks, "from_state"):
-        raise fastworkflow.UnsupportedStateVersion(
-            int(record.get("state_version") or 1),
-            f"context class {context_name!r} has no from_state hook to restore with",
-        )
+        # Only a snapshot written before from_state was removed: a class without it is never saved.
+        raise LookupError(f"context class {context_name!r} has no from_state hook to restore with")
 
     anchor = hooks.from_state(
         record["state"],
@@ -261,11 +269,16 @@ def warn_if_pinned(workflow: "fastworkflow.Workflow", projection: ContextProject
     _warned.add(key)
 
     name = projection.context_name
+    if projection.outcome in (ProjectionOutcome.LOCATOR_MISSING, ProjectionOutcome.LOCATOR_UNSTABLE):
+        # the anchor is saved; what is missing is the pair that points from it to the other slots
+        advice = (f"Add or fix get_locator/find_by_locator in _commands/{name}/_{name}.py so every "
+                  "record the session is on can be found again from it.")
+    else:
+        advice = (f"Add get_state/from_state to _commands/{name}/_{name}.py, or return "
+                  "fastworkflow.EPHEMERAL to declare this deliberate and silence this warning.")
     logger.warning(
         f"workflow {workflow.folderpath}: {projection.reason}, so sessions holding "
-        f"it are pinned and will never be evicted. Add get_state/from_state to "
-        f"_commands/{name}/_{name}.py, or return fastworkflow.EPHEMERAL to declare "
-        "this deliberate and silence this warning."
+        f"it are pinned and will never be evicted. {advice}"
     )
 
 

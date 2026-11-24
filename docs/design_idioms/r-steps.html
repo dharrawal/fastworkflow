@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planning step helpers · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="r-steps">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="reference-block reference">
+<!-- IDIOM BODY START -->
+    <h3 id="r-steps">Planning step helpers</h3>
+    <p>The functions a planning command's phases use to write their steps, all imported from <code>fastworkflow.planning</code> (see <a href="p-plan.html">a plan in place of a body</a>). A phase returns a list of steps; each helper below writes one step, or a phrase inside the answer. A plain string is a step too: one a model carries out. A plain string written exactly like a command step (a command name and <code>key=value</code> pairs) is run by code as <code>run()</code> would run it; write <code>run()</code> instead.</p>
+    <table class="ref">
+      <thead>
+        <tr><th>Helper</th><th>What it writes</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>run(command, *, named=None, all_pages=False, **inputs)</code></td><td>a step that runs <code>command</code>, which code runs itself when every required value is given (see <a href="p-run.html">a step the code runs</a>)</td><td><code>inputs</code> are the command's own <code>Input</code> field names, checked when the files load; a <code>None</code> value is left out. <code>named=</code> opens the row of a listing with a cell equal to the whole name, else the listing's only row whatever its name (see <a href="p-run.html#p-named">the row a listing named</a>); with a concrete id input also given, <code>named=</code> is dropped and the id is used. <code>all_pages=True</code> reads every page (see <a href="p-run.html#p-pages">every page of a list</a>). The two cannot be combined, and no <code>Input</code> may have a field called <code>named</code> or <code>all_pages</code>.</td></tr>
+        <tr><td><code>when(condition, step)</code></td><td>the step <code>only when &lt;condition&gt;, &lt;step&gt;</code></td><td>Only a model, or a person asked yes or no, decides the condition. A person is asked only on an attended turn of the agent path with no agent model, outside a nested planning call; on a "/" turn, under <code>run-code</code> or with nobody to answer, code stops at the step. When the input or the facts decide it, write an <code>if</code> in the phase instead (see <a href="p-skip.html">a phase that does not run</a>).</td></tr>
+        <tr><td><code>do_not_run(command)</code></td><td>the step <code>do not run &lt;command&gt;</code></td><td>Code passes over it; the agent reads it as an instruction to leave that command alone. The command name is checked when the files load, as a <code>run()</code> step's is: a misspelled one fails the load ("a step names 'find_bok', which is not a command of the workflow").</td></tr>
+        <tr><td><code>@phase(over=, max_items=, noun=, bind=, until=, optional=, output=)</code></td><td>a decorator on a phase method, not a step</td><td><code>over</code> runs the phase once per item, at most <code>max_items</code> (10 by default), with <code>noun</code> naming the items in the cap note, <code>bind</code> saying each item is a record its steps open, and <code>until</code> a function of the facts so far that stops the items (see <a href="p-fan.html">once per item</a>); <code>optional=True</code> lets the job go on when the phase fails; <code>output=</code> is a function of <code>input</code> alone that picks the facts type, in place of a return annotation (a fixed facts type is the return annotation). Any option may be a function of <code>input</code> alone, decided when the call is planned. Any other option name is a <code>TypeError</code>. <code>max_items</code>, <code>bind</code>, <code>until</code> or <code>noun</code> without <code>over</code>, a <code>bind</code> that is not a bool, and an <code>over</code> path that ends on one value fail the load.</td></tr>
+        <tr><td><code>count(number, noun, plural=None)</code></td><td><code>1 copy</code>, <code>3 copies</code>; the plural is <code>noun + "s"</code> unless you give one</td><td>Use it in steps and in <code>__result__</code> rather than your own <code>number == 1</code> test: in the preview every fact is a stand-in, and the helper keeps it readable.</td></tr>
+        <tr><td><code>count_and_names_read(names, total, noun, same=None, plural=None)</code></td><td><code>2 borrowers (Ann Lee, Raj Patel)</code></td><td><code>none (0 borrowers)</code> when the list is empty; <code>3 borrowers, none of them read</code> when no name was read; <code>5 borrowers (Ann Lee, Raj Patel; 2 of 5 shown)</code> when fewer rows were read than <code>total</code>. Pass the command's <code>total</code>, not <code>len(names)</code>. <code>same=("&lt;what&gt;", items)</code> names a list the answer already stated in full: when <code>names</code> holds exactly those items, more than one and all of them read, it writes <code>2 borrowers (the same &lt;what&gt;)</code> instead of repeating them.</td></tr>
+        <tr><td><code>ANSWER_BY_MODEL</code></td><td>a value <code>__result__</code> returns, not a step</td><td>Leaves the answer to a model, exactly as when there is no <code>__result__</code>, on a command that declares no <code>Output</code>; on one that declares an <code>Output</code> it fails the call. With no agent model the call ends as a stop whose answer code writes (see <a href="p-result.html">the answer, in code</a>).</td></tr>
+        <tr><td>a plain string</td><td>a step for the agent, such as <code>"choose the book the request means"</code></td><td>Code stops at it. A line that starts with one of a fixed list of 32 answer words ("say", "report", "compare", "note", "verify", "include" and others) is taken as being about the answer, and code passes over it, so a real instruction that happens to start with one of them is passed over too. A negation word before a command name also makes code pass over the step. A <code>run()</code> value that holds a condition word is written in quotes so it is not read as a condition (see <a href="p-run.html">a step the code runs</a>).</td></tr>
+      </tbody>
+    </table>
+    <p><code>fastworkflow.planning</code> also re-exports the command decorators <code>descends_to</code>, <code>user_approval_for_execution</code> and <code>UserApproval</code> (see <a href="e-object.html#e-move">move onto a record</a>, <a href="e-writes.html#e-approval">ask before it runs</a>), the field option types (<code>FieldOptions</code> and its parts, for type checking a <code>json_schema_extra</code> dict), and <code>run_code</code>, which runs one call with no model as <code>fastworkflow command run-code</code> does. <code>@writes</code> is imported from <code>fastworkflow</code> (see <a href="e-writes.html">a command that changes data</a>).</p>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="r-helpers.html"><span>Previous</span>Helper modules</a>
+    <a class="next" href="removed.html"><span>Next</span>Load errors: one rule, and the removed spellings</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

@@ -13,8 +13,8 @@ class Signature:
     """Acknowledge a control finding so it stops being reported as open."""
 
     class Input(BaseModel):
-        finding_id: str = Field(default="NOT_FOUND", description="Finding to acknowledge")
-        justification: str = Field(default="NOT_FOUND", description="Why it is accepted")
+        finding_id: str = Field(description="Finding to acknowledge")
+        justification: str = Field(description="Why it is accepted")
 
     class Output(BaseModel):
         status: str = Field(description="Whether the acknowledgement succeeded.")

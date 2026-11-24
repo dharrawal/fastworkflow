@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, Type, ClassVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from fastworkflow import ModuleType
 from fastworkflow.entry_declarations import check_retired_entry_declarations
@@ -31,6 +31,8 @@ from fastworkflow.command_directory import (
     UtteranceMetadata,
     compute_commands_source_fingerprint,
     get_cached_command_directory,
+    CommandLoadError,
+    command_load_errors,
 )
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.utils import python_utils
@@ -38,30 +40,36 @@ from fastworkflow.utils.logging import logger
 
 
 
-def check_response_call_arity(response_generation_class, where: str) -> None:
-    """A load error unless ``ResponseGenerator.__call__`` takes exactly three arguments (design 3.14):
-    ``(self, workflow, command, input)``, where ``input`` is None for a command with no ``Input``.
-    A two-argument ``__call__`` is refused, naming the form (fix-3rsq.12.3, decision C).
-    """
+def response_call_arity_problem(response_generation_class) -> str | None:
+    """Why ``ResponseGenerator.__call__`` does not have its one form (design 3.14), or None: three arguments after
+    ``self``, ``(workflow, command, input)``, none with a default, where ``input`` is None for a command with no
+    ``Input``. A two-argument ``__call__`` is refused, naming the form (fix-3rsq.12.3, decision C); so is a defaulted
+    argument, naming it. The command's load error (``planning_commands.resolve_field_sources``)."""
     call = getattr(response_generation_class, "__call__", None)
     if call is None or call is object.__call__:
-        return
+        return None
+    if inspect.iscoroutinefunction(call):
+        return ("ResponseGenerator.__call__ is async def here; it must be a plain def: the framework calls it "
+                "synchronously, so a coroutine would never run")
     try:
         parameters = list(inspect.signature(call).parameters.values())
     except (TypeError, ValueError):
-        return
+        return None
     if parameters and parameters[0].name in ("self", "cls"):
         parameters = parameters[1:]
     positional = [p for p in parameters
                   if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
     varargs = any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters)
-    if len(positional) == 3 and not varargs and all(p.default is inspect.Parameter.empty for p in positional):
-        return
-    raise ValueError(
-        f"{where}: ResponseGenerator.__call__ must take three arguments, (self, workflow, command, input), "
-        f"where input is None for a command with no Input; it takes {len(positional)} here. "
-        "Return the command's Output, a str or a CommandResponse, and refuse with raise fastworkflow.Refused(message)"
-    )
+    form = ("ResponseGenerator.__call__ must take three arguments, (self, workflow, command, input), "
+            "where input is None for a command with no Input")
+    if len(positional) == 3 and not varargs:
+        defaulted = [p.name for p in positional if p.default is not inspect.Parameter.empty]
+        if not defaulted:
+            return None
+        return (f"{form}; {', '.join(defaulted)} has a default here, which it must not have: the framework always "
+                f"passes all three (input is None when the command has no Input), so remove the default")
+    return (f"{form}; it takes {len(positional)}{' and *args' if varargs else ''} here. Return the command's "
+            "Output, a str or a CommandResponse, and refuse with raise fastworkflow.Refused(message)")
 
 class RoutingDefinition(BaseModel):
     """
@@ -87,10 +95,25 @@ class RoutingDefinition(BaseModel):
     # Maps command → contexts (set)
     routing_definition_map: Dict[str, Set[str]] = {}
 
+    # ``not_loading()``, computed once per definition.
+    _not_loading: Optional[frozenset[str]] = PrivateAttr(default=None)
+
     # Single, process-wide cache of imported command classes, keyed by (workflow folder, command key).
     # Keyed by name alone, a second workflow in the same process would get the first one's class for
     # any command name they share (fix-3rsq.phase10-routing-class-cache).
     _GLOBAL_COMMAND_CLASS_CACHE: ClassVar[dict[tuple[str, str], Type[Any]]] = {}
+
+    def not_loading(self) -> frozenset[str]:
+        """The execution commands that are registered (their file was read) but do not load: a check of their
+        classes failed (``command_load_errors``). The one set the run-time command sets leave out (``build``: no exact
+        name, remote candidate or listing reaches such a command) and a trained head's answer is checked against
+        (``intent_detector.ClassifierEngine``: such a label is "not here"). A file that cannot be read at all is not
+        registered, so it is not here either (``CommandDirectory.load_errors``)."""
+        if self._not_loading is None:
+            directory = self.command_directory
+            self._not_loading = frozenset(name for name in directory.get_execution_commands()
+                                          if command_load_errors(directory, name))
+        return self._not_loading
 
     # ------------------------------------------------------------------
     # Command Router functionality
@@ -171,6 +194,9 @@ class RoutingDefinition(BaseModel):
             # This is the expected path for commands in the context model that have no .py file.
             return None
 
+        # every problem found in the command's file fails the load of that command, whichever class is asked for
+        if errors := command_load_errors(self.command_directory, command_name):
+            raise CommandLoadError("; ".join(errors))
         if module_type == ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS:
             module_file_path = command_metadata.parameter_extraction_signature_module_path
             module_class_name = command_metadata.input_for_param_extraction_class
@@ -210,10 +236,8 @@ class RoutingDefinition(BaseModel):
                 option_params(input_model, f"{module_file_path}: {command_name}",
                               planning=bool(command_metadata.is_planning))
                 self._check_paged_output(command_name, input_model, str(module_file_path))
-                if not command_metadata.is_planning:
-                    self._warn_default_not_found(command_name, input_model, str(module_file_path))
-            # the retired db_lookup is a load error naming the hook (fix-3rsq.one-hook); so is the removed
-            # Signature.validate_extracted_parameters (spec 3.1), which names the Input's validator
+            # the retired db_lookup is a load error that names its replacement, a model validator on Input; so is the
+            # removed Signature.validate_extracted_parameters (spec 3.1), which names the same replacement
             from fastworkflow.utils.signatures import reject_retired_db_lookup, removed_validate_hook_message
             reject_retired_db_lookup(
                 cls_obj, input_model if isinstance(input_model, type) else None,
@@ -227,27 +251,8 @@ class RoutingDefinition(BaseModel):
                 if message := reserved_input_name_message(input_model, f"{module_file_path}: {command_name}"):
                     raise ValueError(message)
                 guard_input_validators(input_model, f"{module_file_path}: {command_name}")
-        elif module_type == ModuleType.RESPONSE_GENERATION_INFERENCE and not command_metadata.is_planning:
-            check_response_call_arity(cls_obj, f"{module_file_path}: {command_name}")
         return cls_obj
 
-
-    @staticmethod
-    def _warn_default_not_found(command_name: str, input_model: type, where: str) -> None:
-        """One WARNING per field declared ``default="NOT_FOUND"`` (fix-3rsq.plain-required).
-
-        The marker is the framework's now: a required field is written as a plain field
-        (no default) and the framework supplies NOT_FOUND. The old spelling still works.
-        Planning commands never took NOT_FOUND as a required marker, so they are not checked.
-        """
-        for field_name, info in input_model.model_fields.items():
-            if info.default == "NOT_FOUND":
-                logger.warning(
-                    f"{where}: command {command_name!r} field {field_name!r} is declared with "
-                    f"default=\"NOT_FOUND\", which is deprecated and still works. Remove the default: "
-                    f"write a plain required field (no default), e.g. "
-                    f"`{field_name}: {getattr(info.annotation, '__name__', info.annotation)} = "
-                    f"Field(description=...)`, and the framework asks the user for a missing value.")
 
     def _check_paged_output(self, command_name: str, input_model: type, where: str) -> None:
         """A load error for a paged command (design 2.49, 3.14) whose ``Signature.Output`` does not
@@ -367,10 +372,19 @@ class RoutingDefinition(BaseModel):
         core_commands = command_directory.core_command_names
         logger.debug(f"Core commands: {str(core_commands)}, Workflow folderpath {workflow_folderpath}")
 
+        routing_definition = cls(
+            workflow_folderpath=workflow_folderpath,
+            command_directory=command_directory,
+            context_model=context_model,
+            contexts={},
+        )
+        # An execution command whose file imports but fails a check does not load (``command_load_errors``): it is in
+        # no scope's command set, so no exact name, remote candidate or listing reaches it (``not_loading``).
+        not_loading = routing_definition.not_loading()
         resolved_contexts = {}
         for context_name in context_model._command_contexts:
             # Get commands for this context from the context model
-            context_commands = context_model.commands(context_name)
+            context_commands = [name for name in context_model.commands(context_name) if name not in not_loading]
 
             # Add core commands to every context
             resolved_contexts[context_name] = sorted(set(context_commands) | set(core_commands))
@@ -378,12 +392,7 @@ class RoutingDefinition(BaseModel):
         # Ensure global context '*' also exists with core commands (if not in model)
         if '*' not in resolved_contexts:
             resolved_contexts['*'] = sorted(core_commands)
-        routing_definition = cls(
-            workflow_folderpath=workflow_folderpath,
-            command_directory=command_directory,
-            context_model=context_model,
-            contexts=resolved_contexts,
-        )
+        routing_definition.contexts = resolved_contexts
 
         # ------------------------------------------------------------
         # Eager module pre-import
@@ -463,16 +472,12 @@ class RoutingDefinition(BaseModel):
 
 
 def _check_approval_annotations(workflow_folderpath: str, definition: "RoutingDefinition") -> None:
-    """Reject retired or hand-written command declarations, then validate and snapshot each command's
-    approval annotation and its ``writes`` declaration (imported lazily: approval_annotations imports this
-    module)."""
+    """Snapshot each command's approval annotation (imported lazily: approval_annotations imports this module).
+    A mistake in a command's declarations is that command's load error (``command_declarations
+    .declaration_problems``, read by ``command_load_errors``), so such a command is skipped here."""
     from fastworkflow.approval_annotations import check_approval_annotations
-    from fastworkflow.command_declarations import check_command_spellings
-    from fastworkflow.command_writes import check_write_declarations
 
-    check_command_spellings(workflow_folderpath, definition)
     check_approval_annotations(workflow_folderpath, definition)
-    check_write_declarations(workflow_folderpath, definition)
 
 
 class RoutingRegistry:

@@ -192,7 +192,8 @@ def test_copy_verify_parameter_is_a_reason(tmp_path):
     needs, reasons = planning_command_needs_agent(folder, "Library/count_members_checked")
     assert needs is True
     assert len(reasons) == 1
-    assert reasons[0].startswith("field 'recent' carries verify: a classifier model decides it")
+    assert reasons[0] == ("field 'recent' carries classifier_confirms: a classifier model decides it from the request "
+                          "(a parameter the request states outright, with no classifier option)")
 
 
 # ---------------------------------------------------------------- the refusal text

@@ -5,10 +5,10 @@ the record, the state machine, the cascade, the audit and the redaction rule. Th
 specific to a gated write:
 
 * the binding and its fingerprint (sha256 over canonical JSON; section 6.2);
-* the policy decision point for the gate, which returns a graded outcome: run / ask / queue / refuse
+* the policy decision point for the gate, which returns a graded outcome: run / ask / not asked / refuse
   (ADR section 19.0 condition of approval; deterministic, no model call);
 * the gate itself (``gate``), called from the single execution choke point (``CommandExecutor``);
-* the resolution of a reply: exact "yes", "no" or "always", token, identity class, fingerprint, TTL,
+* the resolution of a reply: a yes (``no_agent_mode.is_yes``), "no" or "always" (read as a yes is), token, identity class, fingerprint, TTL,
   execute-once (sections 8, 10, 11); a reply on a proposal record goes to the review engine;
 * the user's management messages (standing approvals) and the origin contextvars.
 
@@ -88,17 +88,25 @@ logger = logging.getLogger(__name__)
 # Exact user-facing texts (ADR section 10). Framework-rendered only.
 # ----------------------------------------------------------------------
 
-MSG_ASK = ("The agent wants to run {command} with {rendering}. This cannot be undone. "
-           "Reply yes to approve, no to decline, or always to approve this command from now on.")
-MSG_ASK_USER = ("You asked to run {command} with {rendering}. This cannot be undone. "
-                "Reply yes to approve, no to decline, or always to approve this command from now on.")
+# The question states only what the framework knows: who asks, the command and its values, and the replies. Whether
+# the change can be undone is the author's to say, in the command's ``approval_template`` (bd fix-ftdl.7.6).
+MSG_ASK = ("The agent wants to run {command} with {rendering}. "
+           "Reply yes to approve or no to decline. You are asked every time.")
+MSG_ASK_USER = ("You asked to run {command} with {rendering}. "
+                "Reply yes to approve or no to decline. You are asked every time.")
 MSG_ASK_DELEGATABLE = ("The agent wants to run {command} with {rendering}. "
                        "Reply yes to approve, no to decline, or always to approve this command from now on.")
-MSG_UNATTENDED = ("Approval required for {command}; no user is available. The action was not run "
-                  "and is queued until it expires in {ttl}.")
-MSG_BEHIND = ("Approval required for {command}; another approval is awaiting the user. The action "
-              "was not run and is queued until it expires in {ttl}.")
+# A call that needs a yes and cannot be asked now is not run and not kept: one question is out at a time (``waiting``),
+# and a record nobody would ever be asked about is not a question (bd fix-ftdl.7.6).
+MSG_UNATTENDED = ("{command} was not run: it needs your approval, and no one can give it on this turn. "
+                  "Run it again when you can answer.")
+MSG_BEHIND = ("{command} was not run: it needs your approval, and another approval is already waiting for your "
+              "answer. Answer that one first, then run it again.")
 MSG_REPLY = "Reply yes to approve, no to decline, or always to approve this command from now on. The action has not run."
+#: The same question for a ``REQUIRED_ALWAYS`` command: no standing approval exists for it, so ``always`` is not offered.
+MSG_REPLY_EVERY_TIME = ("Reply yes to approve or no to decline. This command asks every time, so there is no "
+                        "always. The action has not run.")
+MSG_GRANT_IGNORED = " (ignored: this command asks every time; revoke it to remove it)"
 MSG_RECORD_FAILED = "The standing approval for {command} could not be recorded, so the action was not run."
 MSG_NO_GRANT = "No standing approval for {command} is recorded for you."
 MSG_ALWAYS_HINT = ("Standing approval recorded. List your standing approvals with /approvals and revoke "
@@ -113,8 +121,14 @@ MSG_NO_LONGER_VALID = "That approval is no longer valid."
 MSG_IDENTITY = ("This action requires a verified user identity, which this server is not configured "
                 "to check.")
 MSG_FAILED = "{command} failed after approval; it was not retried: {error}"
+#: A call the gate cannot check for an approval mark is not run (it fails closed, bd fix-ftdl.8.17).
+MSG_UNCHECKED = ("{command} was not run: the workflow's commands could not be read to check whether it needs your "
+                 "approval.")
+MSG_SEVERAL = ("{command} was not run: that name matches several commands ({names}) and one of them needs your "
+               "approval. Call it by its full name.")
 
-#: The reply that approves, and the one that declines. Exact match only (ADR section 10).
+#: The reply that approves (the card's word; any yes of ``no_agent_mode.is_yes`` approves), and the one that declines
+#: (the whole reply, case and a trailing ``.`` or ``!`` ignored, as a yes is).
 REPLY_YES = "yes"
 REPLY_NO = "no"
 #: Approves this one binding and records a standing auto-approval for the command (owner 2026-11-02).
@@ -188,7 +202,8 @@ def make_binding(*, command: str, params: dict, targets: list, principal: dict,
 class Outcome(str, Enum):
     RUN = "run"
     ASK = "ask"
-    QUEUE = "queue"
+    #: Needs a yes that cannot be asked for now (no person, or another question is out): not run, nothing kept.
+    NOT_ASKED = "not_asked"
     REFUSE = "refuse"
 
 
@@ -204,14 +219,16 @@ def decide(annotation: Optional[str], *, origin: Origin, surface: Surface, unatt
     """The gate's policy: a pure, deterministic function from its inputs to a graded outcome.
 
     ``auto_granted`` is the user's standing approval for this command (approval_grants): an input,
-    so a recorded grant yields ``run`` without a prompt. On a channel surface an unattended turn is
-    checked first and queues whatever the grant says; a verified host surface's per-end-user grant
-    still runs (ADR-EXP-025 amendment 2026-11-02: the grant is the user's delegation). ``consequence`` and
+    so a recorded grant yields ``run`` without a prompt for ``REQUIRED_UNTIL_DELEGATED`` only. On a channel
+    surface an unattended turn is checked first and is not asked, whatever the grant says; a verified host surface's
+    per-end-user grant still runs (ADR-EXP-025 amendment 2026-11-02: the grant is the user's delegation).
+    A ``REQUIRED_ALWAYS`` command is never run on a grant (bd fix-qjne.11): a person confirms every run, so
+    the grant is ignored and the command asks, or is not asked (and not run) when nobody can answer. ``consequence`` and
     ``uncertainty`` are reserved inputs (fix-ajv.11, fix-47a9 delegation): accepted so the decision
     can grow without a new signature, and they never turn an outcome into a boolean.
 
-    A user's own ``delegatable`` instruction runs (owner 2026-11-02 leaves it unchanged). A user's
-    own ``mandatory`` instruction asks, the same as an agent's call (owner amendment 2026-11-02).
+    A user's own ``REQUIRED_UNTIL_DELEGATED`` instruction runs (owner 2026-11-02 leaves it unchanged). A user's
+    own ``REQUIRED_ALWAYS`` instruction asks, the same as an agent's call (owner amendment 2026-11-02).
     """
     del consequence, uncertainty  # reserved; see docstring
     if annotation not in APPROVAL_VALUES:
@@ -223,37 +240,32 @@ def decide(annotation: Optional[str], *, origin: Origin, surface: Surface, unatt
     if unattended and surface.kind != "host":
         # A channel surface's standing grant is the local user's, made at a prompt on an interactive
         # channel; no human is present now, so it never lets an unattended run execute (fix-d6no).
-        return Decision(Outcome.QUEUE, "no human channel")
-    if auto_granted:
+        return Decision(Outcome.NOT_ASKED, "no human channel")
+    if auto_granted and annotation != REQUIRED_ALWAYS:
         return Decision(Outcome.RUN, "standing auto-approval recorded by the user")
     if unattended:
-        return Decision(Outcome.QUEUE, "no human channel")
+        return Decision(Outcome.NOT_ASKED, "no human channel")
     if awaiting_on_channel:
-        return Decision(Outcome.QUEUE, "behind an awaiting approval")
+        return Decision(Outcome.NOT_ASKED, "behind an awaiting approval")
     if annotation == REQUIRED_UNTIL_DELEGATED:
         return Decision(Outcome.ASK, "delegatable asks until delegation exists")
     return Decision(Outcome.ASK, "mandatory")
 
 
 # ----------------------------------------------------------------------
-# Turns and queued records
+# Turns
 # ----------------------------------------------------------------------
 
 
 def on_new_turn(host: Any, workflow: Any, *, unattended: bool) -> None:
-    """A new user turn starts: advance the turn counter, note whether a human can answer this
-    turn (ask_user is off for an unattended turn), and expire queued records by turns or time."""
+    """A new user turn starts: advance the turn counter and note whether a human can answer this
+    turn (ask_user is off for an unattended turn). An open record ages by the replies it reads."""
+    del host  # kept in the signature: the hosts call it with themselves
     store = store_for(workflow)
     if store is None:
         return
     store.turn_seq += 1
     store.unattended = bool(unattended)
-    now = time.time()
-    for record in list(store.records):
-        if record.state in ACTIVE_STATES and (record.time_expired(now) or record.turns_expired(turn_seq=store.turn_seq)):
-            if record.queued:
-                _transition(host, store, record, EXPIRED, reason="queued approval expired",
-                            surface=store.surface)
 
 
 # ----------------------------------------------------------------------
@@ -261,20 +273,32 @@ def on_new_turn(host: Any, workflow: Any, *, unattended: bool) -> None:
 # ----------------------------------------------------------------------
 
 
-def _qualified(workflow, command_name: str) -> Optional[str]:
-    """The qualified name of *command_name* in the workflow's routing, or None."""
-    try:
-        routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-    except Exception:  # noqa: BLE001 - no routing means no annotation to read
-        return None
-    try:
-        directory = routing.command_directory.map_command_2_metadata
-    except AttributeError:  # not a routing definition: no annotation can be read (ADR section 2.2)
-        return None
+def _qualified(workflow, command_name: str) -> tuple[Optional[str], tuple[str, ...]]:
+    """``(qualified, candidates)``: the qualified name of *command_name* in the workflow's routing (None when it names
+    no command or several), and the commands its leaf names when there are several. Raises when the routing cannot be
+    read: the gate then cannot tell whether the call needs approval (bd fix-ftdl.8.17)."""
+    routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    directory = routing.command_directory.map_command_2_metadata
     if command_name in directory:
-        return command_name
-    leaf = [name for name in directory if name.split("/")[-1] == command_name]
-    return leaf[0] if len(leaf) == 1 else None
+        return command_name, ()
+    leaf = sorted(name for name in directory if name.split("/")[-1] == command_name)
+    return (leaf[0], ()) if len(leaf) == 1 else (None, tuple(leaf))
+
+
+def _checked_name(workflow, command_name: str) -> tuple[Optional[str], Optional[str]]:
+    """``(qualified, refusal)``: the qualified name of *command_name* (None when it names no command, which has no mark
+    to read), or the text of the refusal of a call the gate cannot check for an approval mark, which is therefore not
+    run (the gate fails closed, bd fix-ftdl.8.17): the routing or a mark cannot be read, or the name matches several
+    commands one of which carries a mark."""
+    try:
+        qualified, candidates = _qualified(workflow, command_name)
+        marked = [name for name in candidates if command_approval(workflow.folderpath, name) is not None]
+    except Exception:  # noqa: BLE001 - unread routing or mark: the call is not run
+        logger.warning("approval gate: routing unread for %r; the call is not run", command_name, exc_info=True)
+        return None, MSG_UNCHECKED.format(command=command_name)
+    if marked:
+        return None, MSG_SEVERAL.format(command=command_name, names=", ".join(candidates))
+    return qualified, None
 
 
 def _params_of(input_obj: Any) -> dict:
@@ -313,11 +337,42 @@ def _refusal_output(workflow, command: str, text: str):
     return output
 
 
+def _decision(workflow, store: ApprovalStore, qualified: str, annotation: str, origin: Origin, *,
+              awaiting_on_channel: bool) -> tuple[Decision, Optional[dict], Any]:
+    """``(decision, grant, identity)``: the gate's decision for *qualified* now, from the user's standing grant and
+    whether a person can answer this turn. The one computation ``gate`` and ``would_ask`` read."""
+    identity = approval_grants.identity_key(store.surface, store.channel)
+    grant = approval_grants.find(identity, state_paths.workflow_id(workflow.folderpath), qualified)
+    decision = decide(annotation, origin=origin, surface=store.surface, unattended=store.unattended,
+                      awaiting_on_channel=awaiting_on_channel, auto_granted=grant is not None)
+    return decision, grant, identity
+
+
+def would_ask(workflow: Any, qualified: str, origin: Origin) -> bool:
+    """Whether running *qualified* now, called by *origin*, would ask the user for approval (the gate enforces, the
+    command carries an approval mark, and the decision is ASK: no standing grant lets it run, a person can answer).
+    Such a question names the command and its values, so it is the user's yes to it: a command that changes data and
+    that the local model alone chose needs no other confirmation (``intent_loop.unconfirmed_pick``). Another approval
+    already out is not counted: that one is answered first. Never raises (False)."""
+    try:
+        store = store_for(workflow)
+        if store is None or switch_mode() != MODE_ENFORCE:
+            return False
+        annotation = command_approval(workflow.folderpath, qualified)
+        if annotation is None:
+            return False
+        decision, _, _ = _decision(workflow, store, qualified, annotation, origin, awaiting_on_channel=False)
+    except Exception:  # noqa: BLE001 - unreadable: the approval is not counted on, so the other confirmation asks
+        logger.debug("approval decision unread for %r", qualified, exc_info=True)
+        return False
+    return decision.outcome is Outcome.ASK
+
+
 def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, raw_command: str):
     """Decide whether a command call may run now.
 
     Returns None to run; otherwise a CommandOutput the caller returns as the command's result
-    (refuse, queue, or an awaiting output for a non-suspendable caller). For an agent-origin ask
+    (refuse, not asked, or an awaiting output for a non-suspendable caller). For an agent-origin ask
     inside the agent's tool loop, raises ``AskUserSuspend``: the ask_user suspension.
     """
     store = store_for(workflow)
@@ -333,7 +388,9 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
     if mode == MODE_OFF:
         return None
     origin = current_origin()
-    qualified = _qualified(workflow, command_name)
+    qualified, refusal = _checked_name(workflow, command_name)
+    if refusal is not None:
+        return None if mode == MODE_SHADOW else _refusal_output(workflow, command_name, refusal)
     if qualified is None:
         return None
     annotation = command_approval(workflow.folderpath, qualified)
@@ -344,38 +401,39 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
     binding = build_binding(workflow, qualified, params, store.surface, store)
     fp = fingerprint(binding)
     rendering = render(_approval_template(workflow, qualified), params)
-    identity = approval_grants.identity_key(store.surface, store.channel)
-    grant = approval_grants.find(identity, state_paths.workflow_id(workflow.folderpath), qualified)
-    decision = decide(annotation, origin=origin, surface=store.surface, unattended=store.unattended,
-                      awaiting_on_channel=store.active() is not None, auto_granted=grant is not None)
+    decision, grant, identity = _decision(workflow, store, qualified, annotation, origin,
+                                          awaiting_on_channel=store.active() is not None)
     if grant is not None and decision.outcome is Outcome.RUN and mode == MODE_ENFORCE:
         approval_grants.audit(chat_session, grant["id"], command=qualified, annotation=annotation,
                               before=approval_grants.STATE_GRANTED, after="used", reason=decision.reason,
                               identity=identity, channel=store.channel, surface_kind=store.surface.kind,
                               outcome="used")
 
-    def new_record(*, state: str, queued: bool, suspended: bool, text: str) -> PendingAction:
+    def new_record(*, state: str, suspended: bool, text: str) -> PendingAction:
         record = PendingAction(
             id=uuid.uuid4().hex, token_hash="", command=qualified, annotation=annotation,
             raw_command=raw_command, binding=binding, fingerprint=fp, rendering=text,
             rendering_hash=rendering_hash(text), required_identity=store.surface.required_identity,
             created_turn=store.turn_seq, turns_seen=0, ttl_turns=TTL_TURNS,
             ttl_seconds=TTL_SECONDS, created_at=time.time(), state=state, origin=origin.value,
-            suspended_agent=suspended, queued=queued, shadow=(mode == MODE_SHADOW))
+            suspended_agent=suspended, shadow=(mode == MODE_SHADOW))
         store.add(record)
         return record
 
-    if decision.outcome is Outcome.REFUSE:
-        # A refusal creates no record (ADR section 7 defines none for it); it is audited on a
-        # transient record that is never stored.
+    def audited_transient(after: str, text: str) -> None:
+        """A refusal or a call not asked creates no record (nothing waits for an answer); it is audited on a
+        transient record that is never stored."""
         transient = PendingAction(
             id=uuid.uuid4().hex, token_hash="", command=qualified, annotation=annotation,
-            raw_command=raw_command, binding=binding, fingerprint=fp, rendering="",
-            rendering_hash=rendering_hash(""), required_identity=store.surface.required_identity,
+            raw_command=raw_command, binding=binding, fingerprint=fp, rendering=text,
+            rendering_hash=rendering_hash(text), required_identity=store.surface.required_identity,
             created_turn=store.turn_seq, turns_seen=0, ttl_turns=TTL_TURNS, ttl_seconds=TTL_SECONDS,
-            created_at=time.time(), state="refused", origin=origin.value, shadow=(mode == MODE_SHADOW))
-        _audit(chat_session, transient, before="", after="refused", reason=decision.reason,
-               surface=store.surface, mode=mode, outcome="refused")
+            created_at=time.time(), state=after, origin=origin.value, shadow=(mode == MODE_SHADOW))
+        _audit(chat_session, transient, before="", after=after, reason=decision.reason,
+               surface=store.surface, mode=mode, outcome=after)
+
+    if decision.outcome is Outcome.REFUSE:
+        audited_transient("refused", "")
         if mode == MODE_SHADOW:
             return None
         return _refusal_output(workflow, qualified, MSG_IDENTITY)
@@ -383,7 +441,7 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
     if mode == MODE_SHADOW:
         # Shadow records the decision and runs as before: the record is born executed, and its
         # one audit row says what enforcement would have done.
-        record = new_record(state=EXECUTED, queued=False, suspended=False, text="")
+        record = new_record(state=EXECUTED, suspended=False, text="")
         record.outcome = "shadow"
         _audit(chat_session, record, before=EXECUTED, after=EXECUTED,
                reason=f"shadow: would {decision.outcome.value} ({decision.reason}); ran",
@@ -393,13 +451,9 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
     if decision.outcome is Outcome.RUN:
         return None
 
-    ttl = f"{TTL_TURNS} turns or {TTL_SECONDS // 60} minutes"
-    if decision.outcome is Outcome.QUEUE:
-        template = MSG_UNATTENDED if store.unattended else MSG_BEHIND
-        text = template.format(command=qualified, ttl=ttl)
-        record = new_record(state=AWAITING, queued=True, suspended=False, text=text)
-        _audit(chat_session, record, before="", after=AWAITING, reason=decision.reason,
-               surface=store.surface, mode=mode, outcome="queued")
+    if decision.outcome is Outcome.NOT_ASKED:
+        text = (MSG_UNATTENDED if store.unattended else MSG_BEHIND).format(command=qualified)
+        audited_transient(Outcome.NOT_ASKED.value, text)
         return _refusal_output(workflow, qualified, text)
 
     # ASK
@@ -409,7 +463,7 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
         template = MSG_ASK if annotation == REQUIRED_ALWAYS else MSG_ASK_DELEGATABLE
     text = template.format(command=qualified, rendering=rendering)
     suspendable = origin is Origin.AGENT
-    record = new_record(state=AWAITING, queued=False, suspended=suspendable, text=text)
+    record = new_record(state=AWAITING, suspended=suspendable, text=text)
     token = new_token()
     record.token_hash = token_hash(token)
     if store.surface.kind == "host":
@@ -453,10 +507,6 @@ class Resolution:
     value: Any = None
 
 
-def _ttl_text(record: PendingAction) -> str:
-    return f"{record.ttl_turns} turns or {record.ttl_seconds // 60} minutes"
-
-
 def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Resolution]:
     """Resolve the next message on a session that has an open record; None when there is none."""
     store = store_for(workflow)
@@ -477,12 +527,7 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
         propagate(chat_session, store, record, surface=surface)
         return Resolution(True, MSG_EXPIRED.format(command=cmd))
 
-    if record.kind == KIND_ACTION:
-        if record.turns_expired(turn_seq=store.turn_seq) or record.turns_seen >= record.ttl_turns:
-            _transition(chat_session, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
-            propagate(chat_session, store, record, surface=surface)
-            return Resolution(True, MSG_EXPIRED.format(command=cmd))
-    elif record.queued and record.turns_expired(turn_seq=store.turn_seq):
+    if record.kind == KIND_ACTION and record.turns_expired(turn_seq=store.turn_seq):
         _transition(chat_session, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
         propagate(chat_session, store, record, surface=surface)
         return Resolution(True, MSG_EXPIRED.format(command=cmd))
@@ -514,8 +559,9 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
 
     record.turns_seen += 1
     verdict = ActionReplyPolicy().classify(message)
-    if verdict is Verdict.REPROMPT:
-        return Resolution(False, MSG_REPLY)
+    if verdict is Verdict.REPROMPT or (verdict is Verdict.ALWAYS and record.annotation == REQUIRED_ALWAYS):
+        # ``always`` is not an answer to a REQUIRED_ALWAYS question: asked again, nothing recorded.
+        return Resolution(False, MSG_REPLY_EVERY_TIME if record.annotation == REQUIRED_ALWAYS else MSG_REPLY)
 
     if verdict is Verdict.DECLINE:
         _transition(chat_session, store, record, DECLINED, reason="declined", surface=surface,
@@ -561,6 +607,12 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
         return Resolution(True, text, _refusal_output(workflow, cmd, text))
     _transition(chat_session, store, record, EXECUTED, reason="executed", surface=surface,
                 outcome="success" if output.success else "failed")
+    if output.success:
+        # An approved write inside a planning command's phase counts against its step, as a run that was not asked
+        # about does (``CommandExecutor._invoke_command_impl``): a repeat is then refused, not asked again.
+        from fastworkflow import command_writes
+
+        command_writes.record_phase_write(chat_session, workflow.folderpath, cmd)
     text = output.command_response.response or ""
     if verdict is Verdict.ALWAYS:
         # Say how to undo it where the user reads the reply (the rendering hash covers the prompt, not this).
@@ -594,7 +646,7 @@ def _execute_stored(workflow, record: PendingAction):
 
 
 def cancel_all(chat_session: Any, workflow: Any, *, reason: str = "session ended") -> int:
-    """Invalidate every open or queued record: session end, eviction, /cancel_pending (ADR section 11).
+    """Invalidate every open record: session end, eviction, /cancel_pending (ADR section 11).
 
     Returns how many records were cancelled. Nothing executes, and a later reply finds no record.
     """
@@ -614,7 +666,7 @@ def cancel_all(chat_session: Any, workflow: Any, *, reason: str = "session ended
 
 
 def active_approvals(workflow: Any) -> list:
-    """The active approval records (action kind, queued or not) on the session; [] without a workflow."""
+    """The active approval records (action kind) on the session; [] without a workflow."""
     store = store_for(workflow)
     if store is None:
         return []
@@ -709,7 +761,9 @@ def management_reply(chat_session: Any, workflow: Any, message: str) -> Optional
         where, other = _origin_note(store.surface)
         if not grants:
             return " ".join(part for part in (f"No standing approvals are recorded for you{where}.", other) if part)
-        lines = [f"- {grant['command']}" for grant in grants]
+        lines = [f"- {grant['command']}"
+                 + (MSG_GRANT_IGNORED if command_approval(workflow.folderpath, grant['command']) == REQUIRED_ALWAYS else "")
+                 for grant in grants]
         head = f"Standing approvals{where} (revoke one with /revoke_approval <command>)"
         return head + ":\n" + "\n".join(lines) + (f"\n{other}" if other else "")
     if not text.startswith(MANAGE_REVOKE + " ") or not text[len(MANAGE_REVOKE):].strip():

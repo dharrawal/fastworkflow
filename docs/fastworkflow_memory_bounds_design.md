@@ -1157,8 +1157,8 @@ unless the workflow declares it". That was reversed on 2026-08-05 after review, 
 one place where this document's earlier text described a system that was never built. The shipped model,
 specified in full in `docs/fastworkflow_serialization_hooks_design.md`:
 
-- **JSON-native `workflow.context` persists by default.** An author extends or overrides that through
-  an optional `_commands/_serialization.py`.
+- **JSON-native `workflow.context` persists by default.** (An optional `_commands/_serialization.py` to
+  extend or override that was specified, but nothing used it, and it was removed on 2026-11-22.)
 - **A command-context object is serialized by an author-supplied hook**, and that hook is what makes a
   session evictable at all — it is the larger of the hook's two jobs. `get_state`/`from_state` are
   optional classmethods on the `Context` class the author already writes at

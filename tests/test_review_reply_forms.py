@@ -52,6 +52,9 @@ def test_a_text_with_no_hint_falls_back_to_the_hint_the_proposal_would_show():
 def test_a_subtask_review_carries_its_reply_forms_and_an_edit_refreshes_them(gated, monkeypatch):
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda user_query, **kwargs: [EMMA, JOKE])
+    # A workflow with no command that changes data: the ad hoc part (JOKE) then carries no "may change data" badge and
+    # the hint ends the text as it is shown (the sentence a write adds is tested in tests/test_review_write_needs_yes.py).
+    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset())
     out = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     review = _last_artifacts(out)["review"]
     record = review_engine.active_record(gated.wf)

@@ -320,6 +320,11 @@ def test_an_accept_of_a_review_after_an_ambiguous_part_runs_the_bound_plan(reply
     _, record = _ambiguous_review(gated, monkeypatch)
     gated.script.steps = [("finish", {})] * 2
     out = gated.ctx.process_turn(reply)
+    if reply == "looks good":
+        # The ad hoc part (JOKE) may change data (the library has a command that writes, and an agent will plan the
+        # part), so only an explicit yes runs the turn (bd fix-ftdl.8.4): the accept is asked again, then yes runs it.
+        assert out.status is TurnStatus.AWAITING_USER and re_.MAY_CHANGE_DATA_SENTENCE in out.answer
+        out = gated.ctx.process_turn("yes")
     assert out.status is TurnStatus.COMPLETED and record.state == re_.CONFIRMED
     assert review_proposals.accepted_subtask_proposal(gated.wf).items[0].means.name == BY_TITLE
 

@@ -1,7 +1,8 @@
 """Whether a planning command needs the agent, read statically (fix-3rsq.10.8, design 3.4).
 
-Assistant mode has no intent detection: it matches a command by its exact name and nothing else. An
-exactly named planning command runs there only when it is MECHANICAL: its phases are code steps and
+In assistant mode (a "/" message, or ``--assistant``) the command metadata extraction workflow resolves the
+request to a command (its exact name, a close misspelling, or a planning command the local model picked and the
+remote model confirmed or the user chose). A planning command so resolved runs there only when it is MECHANICAL: its phases are code steps and
 mechanical fan-outs, with its arguments from ordinary parameter extraction. A planning command NEEDS
 THE AGENT, and assistant mode refuses it with the 3.4 message extended by the reasons, when any of
 these holds:
@@ -10,7 +11,7 @@ these holds:
 - a phase has a CONDITIONAL step (``when(...)``): the agent decides whether to run it;
 - a phase is DECIDED AT RUN TIME: whether it runs, or what it steps, depends on facts an earlier
   phase filled (a test on a fact, or a callable ``when`` or ``until``);
-- a parameter carries ``verify``: a classifier model decides it from the request;
+- a parameter carries ``classifier_confirms`` (``Param.verify``): a classifier model decides it from the request;
 - the planning command has no ``__result__``: the agent writes the answer from the last phase's facts.
 
 Code steps (``run``, ``run(..., named=...)``, ``run(..., all_pages=True)``, ``do_not_run``), fan-outs over an input or an earlier
@@ -38,7 +39,7 @@ __all__ = [
 PROSE_HINT = "a code step (run, run with named=, or run with all_pages=True) would make it mechanical"
 WHEN_HINT = "a fixed step, or a condition on the input rather than a fact"
 RUN_TIME_HINT = "a step that depends on the input alone, not on what an earlier phase found"
-VERIFY_HINT = "a parameter the request states outright, without verify"
+CLASSIFIER_HINT = "a parameter the request states outright, with no classifier option"
 REASON_RESULT = ("it has no __result__, so the agent writes the answer from the last phase's facts "
                  "(a __result__ that returns the text makes it mechanical)")
 
@@ -125,8 +126,9 @@ def planning_command_needs_agent(workflow_folderpath: str,
 
     for p in command.params:
         if p.verify:
-            reasons[f"field {p.name!r} carries verify: a classifier model decides it from the "
-                    f"request ({VERIFY_HINT})"] = None
+            option = planning_commands.CLASSIFIER_DECIDES if p.alone else planning_commands.CLASSIFIER_CONFIRMS
+            reasons[f"field {p.name!r} carries {option}: a classifier model decides it from the "
+                    f"request ({CLASSIFIER_HINT})"] = None
 
     grid = planning_commands._template_grid(command)
     built = 0

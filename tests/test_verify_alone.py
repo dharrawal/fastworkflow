@@ -61,7 +61,7 @@ def test_another_verify_word_is_still_a_load_error():
     class Bad(BaseModel):
         flag: bool = Field(default=False, description="a flag", json_schema_extra={"verify": "only"})
 
-    with pytest.raises(pc.PlanningCommandFormatError, match='verify: "only" is removed: write'):
+    with pytest.raises(pc.PlanningCommandFormatError, match='verify: "only" is removed: leave the key out'):
         pc.option_params(Bad, "bad")
 
 

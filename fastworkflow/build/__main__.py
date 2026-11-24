@@ -7,6 +7,7 @@ import ast
 import fastworkflow
 from fastworkflow.build.command_file_generator import validate_python_syntax_in_dir, validate_command_file_components_in_dir, verify_commands_against_context_model, validate_command_imports
 from fastworkflow.build import ast_class_extractor
+from fastworkflow.command_directory import declares_signature
 from fastworkflow.build.command_file_generator import generate_command_files as real_generate_command_files
 from fastworkflow.build.context_model_generator import generate_context_model as real_generate_context_model
 from fastworkflow.build.context_folder_generator import ContextFolderGenerator
@@ -173,7 +174,7 @@ def run_validation(args, all_classes, context_model_dict):
         for f in glob.glob(
             os.path.join(commands_dir, '**', '*.py'), recursive=True
         )
-        if not f.endswith('__init__.py') and not os.path.basename(f).startswith('_') and os.path.basename(f) != 'startup.py'
+        if not f.endswith('__init__.py') and not os.path.basename(f).startswith('_') and declares_signature(f)
     ]:
         if syntax_errors := validate_python_syntax_in_dir(commands_dir):
             errors.append(f"Error: {len(syntax_errors)} syntax error(s) found in generated command files.")
@@ -231,16 +232,35 @@ def run_documentation(args):
     else:
         logger.error("Failed to write README.md.")
 
+def generate_startup_action(workflow_folderpath: str) -> bool:
+    """Write ``startup_action.json`` naming the generated ``startup`` command, unless the workflow folder has one: the
+    file every entry point runs first (``fastworkflow.workflow_startup_action``). A startup command has no Signature,
+    so nothing else runs it. An existing file is the author's and is never replaced. Returns False on a write error."""
+    action_path = os.path.join(workflow_folderpath, "startup_action.json")
+    if os.path.exists(action_path):
+        logger.debug(f"Startup action file already exists at {action_path}")
+        return True
+    try:
+        with open(action_path, "w", encoding="utf-8") as f:
+            f.write('{"command_name": "startup"}\n')
+        logger.info(f"Generated startup action file: {action_path}")
+        return True
+    except OSError as e:
+        logger.error(f"Error writing startup action file: {e}")
+        return False
+
+
 def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: bool = False) -> bool:
-    """Generate a startup command file in the _commands directory.
+    """Generate a startup command file in the _commands directory, and the ``startup_action.json`` that runs it
+    (``generate_startup_action``; an existing one is kept).
     
     Args:
         workflow_folderpath: Path to the workflow folder
         app_dir: Path to the application source directory
-        overwrite: Whether to overwrite existing file
+        overwrite: Whether to overwrite an existing startup.py
         
     Returns:
-        bool: True if file was created or already exists, False on error
+        bool: True if the files were created or already exist, False on error
     """
     # Determine file path
     startup_path = os.path.join(workflow_folderpath, "_commands", "startup.py")
@@ -248,7 +268,7 @@ def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: 
     # Check if file already exists and overwrite is False
     if os.path.exists(startup_path) and not overwrite:
         logger.debug(f"Startup file already exists at {startup_path}")
-        return True
+        return generate_startup_action(workflow_folderpath)
 
     # Get the name of the application module (last part of source_dir)
     app_module = os.path.basename(os.path.normpath(app_dir))
@@ -312,7 +332,7 @@ class ResponseGenerator:
         with open(startup_path, 'w') as f:
             f.write(startup_content)
         logger.info(f"Generated startup command file: {startup_path}")
-        return True
+        return generate_startup_action(workflow_folderpath)
     except Exception as e:
         logger.error(f"Error writing startup command file: {e}")
         return False

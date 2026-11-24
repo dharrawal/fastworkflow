@@ -19,7 +19,7 @@ class Signature:
     plain_utterances = ["what has Ann Lee borrowed", "which books does Raj Patel have out"]
 
     class Input(BaseModel):
-        member: str = Field(description="the member's name")
+        member: str = Field(description="the member's name", json_schema_extra={"copied_from_command_text": True})
 
         @model_validator(mode="after")
         def refuse_everyone(self, info):

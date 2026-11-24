@@ -45,7 +45,6 @@ from fastworkflow import tracing
 # template, so this file runs anywhere.
 from tests.test_fastapi_streaming_lifecycle import (  # noqa: F401
     app_module,
-    env_files,
     hello_world_workflow_path,
 )
 

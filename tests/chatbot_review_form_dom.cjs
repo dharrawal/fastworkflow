@@ -69,8 +69,10 @@ const ITEMS = () => [
   sub('Show those loans', [ref('member', 1), val('title', 'Loans')], {kind: 'planning', name: 'show_loans'}),
   sub('Remove the oldest loan', [], undefined, 'The oldest loan is gone'),
 ];
+/* As the server sends it (prompt_payloads): the badges the form draws, and changes_data, which the page does not read. */
 const review = (items, extra) => Object.assign({kind: 'sub_tasks', title: 'Sub-tasks', revision: 0, items,
-  changes_data: items.map((_, i) => i === 2)}, extra || {});
+  changes_data: items.map((_, i) => i === 2), badges: items.map((_, i) => (i === 2 ? 'changes data' : ''))},
+  extra || {});
 const VERBATIM = 'Sub-tasks:\n1. List loans for Ann Lee (member: Ann Lee)\nReply yes to run this.';
 function awaiting(rev, extra, kind, status) {
   return Object.assign({turn_key: 'k' + Math.random().toString(16).slice(2), status: status || 'awaiting_user',
@@ -128,6 +130,7 @@ async function main() {
   assert.equal(text(step(msg1, 3).querySelector('.reviewMeans')), 'built from scratch');
   assert.equal(text(step(msg1, 1).querySelector('.reviewOutcome')), 'Ann\'s loans are listed');
   assert.equal(step(msg1, 2).querySelector('.reviewOutcome'), null, 'an empty outcome is not shown');
+  assert.equal(msg1.querySelectorAll('.reviewNote').length, 0, 'no note without check_notes');
   assert.equal(msg1.querySelectorAll('.reviewBadge').length, 1);
   assert.equal(text(step(msg1, 3).querySelector('.reviewBadge')), 'Changes data');
   const details1 = msg1.querySelector('details.reviewDetails');
@@ -403,6 +406,15 @@ async function main() {
   w.tmDisableLiveForms();
   assert.ok(Array.from(live.querySelectorAll('.reviewForm button, .reviewForm input, .reviewForm textarea')).every((n) => n.disabled));
 
+  /* ---- the duplicate rule's note (SubTask.check_notes) is a plain line under its step ------------------------ */
+  const noted = ITEMS();
+  noted[1].check_notes = {title: "title left empty: 'Loans' is written once in your request and is the member."};
+  const msgNote = paint(awaiting(review(noted)));
+  assert.equal(text(step(msgNote, 2).querySelector('.reviewNote')),
+    "title left empty: 'Loans' is written once in your request and is the member.");
+  assert.equal(step(msgNote, 1).querySelector('.reviewNote'), null);
+  assert.equal(step(msgNote, 2).querySelector('.reviewNote input, .reviewNote textarea'), null, 'not an input');
+
   /* ---- 14. markup stays text ------------------------------------------------------------------------------- */
   const evil = '<img src=x onerror=alert(1)>';
   const markup = paint(awaiting({kind: 'sub_tasks', title: '<b>t</b>', revision: 2, changes_data: [true],
@@ -657,6 +669,15 @@ async function main() {
   assert.equal(noteOf(inputOf(msg18b, 1, 'member').closest('.reviewField')).hidden, false, 'an emptied value is still flagged');
   blur(inputOf(msg18b, 1, 'member'));
   assert.equal(inputOf(msg18b, 1, 'member').value, 'Ann Lee', 'and restored on leaving it');
+
+  /* bd fix-ftdl.4.3: a part the user asked only to look up carries the payload's badge, as the review text words it */
+  const msgLook = paint(awaiting(review(ITEMS(), {changes_data: [false, false, true], badges: ['look up only', '', 'changes data']})));
+  /* The page reads only badges: a payload with changes_data and no badges draws no badge (the old fallback is gone). */
+  const msgNoBadges = paint(awaiting(review(ITEMS(), {changes_data: [true, true, true], badges: undefined})));
+  assert.equal(msgNoBadges.querySelectorAll('.reviewBadge').length, 0);
+  assert.equal(text(step(msgLook, 1).querySelector('.reviewBadge')), 'Look up only');
+  assert.equal(step(msgLook, 2).querySelector('.reviewBadge'), null);
+  assert.equal(text(step(msgLook, 3).querySelector('.reviewBadge')), 'Changes data');
 
   assert.deepEqual(errors, [], 'jsdom reported errors');
 }

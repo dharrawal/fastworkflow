@@ -294,7 +294,7 @@ def test_flat_preview_renders_the_inputs_that_change_the_steps(workflow):
     assert "1. `find_item query=<name>`\n2. `list_parts supplier=<supplier>`\n3. `go_up`" in text
     # a combination the hook refuses is listed, not rendered
     assert "supplier = given, kind" not in text and "kind = kit, supplier" not in text
-    assert "- every other combination: validate_extracted_parameters: a kit is listed" in text
+    assert "- every other combination: a kit is listed" in text
 
 
 def test_fixed_planning_command_preview(workflow):
@@ -1233,8 +1233,11 @@ def test_a_call_cycle_is_a_load_error_for_each_command_on_it_and_preview_check_f
         "a planning command cannot call itself: again -> again"]
     assert not [p for p in res.errors if p.command == "close_out"]
 
+    # every command on a cycle does not load (bd fix-ftdl.2), so the previews cannot be written, and --check fails
     out = str(tmp_path / "loop_previews")
-    command_preview.write_previews(folder, out)
+    with pytest.raises(command_preview.PreviewError, match="cannot call itself"):
+        command_preview.write_previews(folder, out)
+    assert sorted(p.split(": ", 1)[0] for p in command_preview.load_problems(folder)) == ["again", "ping", "pong"]
     assert _run_cli(monkeypatch, "command", "preview", folder, "--out", out, "--check") == 1
     stdout = capsys.readouterr().out
     assert "a planning command cannot call itself, even through others: ping -> pong -> ping" in stdout
@@ -1313,7 +1316,7 @@ class PlanGenerator:
         return [self.find, self.each]
 
     def find(self, input) -> OUTPUT:
-        return [f"find_{input.kind} query={input.name}"]
+        return [FIND_STEP]
 
     @phase(over="OVER")
     def each(self, title):
@@ -1329,7 +1332,8 @@ MEMBER_FIELDS = ("names: list[str] = Field(default_factory=list, description=\"a
                  "        total: int = Field(default=0, description=\"a stub output\")")
 
 
-def _union_workflow(root, over: str = "find.titles", output: str = "FindBook.Output | FindMember.Output") -> str:
+def _union_workflow(root, over: str = "find.titles", output: str = "FindBook.Output | FindMember.Output",
+                    find_step: str = 'f"find_{input.kind} query={input.name}"') -> str:
     # a folder name of its own: the loader imports a workflow's modules by their names, so two
     # fixtures sharing one name in one process would share (and mix up) the classes of the first
     folder = root / f"union_{uuid.uuid4().hex[:8]}"
@@ -1338,7 +1342,7 @@ def _union_workflow(root, over: str = "find.titles", output: str = "FindBook.Out
     (commands / "_Lib.py").write_text(UNION_CONTEXT)
     (commands / "find_book.py").write_text(UNION_STUB.replace("OUTPUT_FIELDS", BOOK_FIELDS))
     (commands / "find_member.py").write_text(UNION_STUB.replace("OUTPUT_FIELDS", MEMBER_FIELDS))
-    text = UNION_FIND.replace("OVER", over).replace("OUTPUT", output)
+    text = UNION_FIND.replace("OVER", over).replace("OUTPUT", output).replace("FIND_STEP", find_step)
     (commands / "find_either.py").write_text(text)
     return str(folder)
 
@@ -1386,12 +1390,26 @@ def test_a_field_in_neither_member_is_reported_as_unresolved(tmp_path):
 @pytest.mark.parametrize("output", [
     "FindBook.Output | None",
     "Optional[FindBook.Output]",
-    "Union[FindBook.Output, FindMember.Output]",
     "Union[FindBook.Output, FindMember.Output, None]",
     "Optional[Union[FindBook.Output, FindMember.Output]]",
 ])
+def test_a_phase_return_annotation_with_none_fails_the_load(tmp_path, output):
+    # '| None' on a phase looked optional and acted as required: it is refused (fix-ftdl.7.15, the load-check sweep);
+    # these four forms rendered their members before
+    step = 'f"find_book query={input.name}"' if "FindMember" not in output else 'f"find_{input.kind} query={input.name}"'
+    with pytest.raises(command_preview.PreviewError) as error:
+        command_preview.render_previews(_union_workflow(tmp_path, output=output, find_step=step))
+    assert "includes None; a phase's return annotation is the facts model it fills" in str(error.value)
+
+
+@pytest.mark.parametrize("output", [
+    "Union[FindBook.Output, FindMember.Output]",
+])
 def test_optional_and_typing_unions_render_their_members(tmp_path, output):
-    text = command_preview.render_previews(_union_workflow(tmp_path, output=output))["Lib/find_either.md"]
+    # a phase that hands on find_book's Output alone must run find_book for every input (else the command does not
+    # load, bd fix-ftdl.2), so the single-member forms run it whatever the kind
+    step = 'f"find_book query={input.name}"' if "FindMember" not in output else 'f"find_{input.kind} query={input.name}"'
+    text = command_preview.render_previews(_union_workflow(tmp_path, output=output, find_step=step))["Lib/find_either.md"]
     assert "### `find` -> `Lib/find_book`'s `Output`" in text
     assert "`Lib/find_book`'s `Output`:\n\n| fact | type | from |" in text
     assert "per item of `find.titles` as `title`" in text
@@ -1432,7 +1450,8 @@ def test_the_library_find_record_preview_renders_both_variants():
     assert "`Library/find_book`'s `Output`:" in text
     assert "`Library/find_member`'s `Output`:" in text
     assert "| `names` | `list[str]` |" in text and "| `titles` | `list[str]` |" in text
-    assert "1. `find_member query=<name>`" in text
+    # the sample value is the input's first declared example (it was the placeholder <name> before the field had one)
+    assert "1. `find_member query=Emma`" in text and "1. `find_book query=Emma`" in text
 
 
 def test_the_library_previews_write_and_check_clean_in_a_tmp_dir(tmp_path, monkeypatch):
@@ -1467,8 +1486,8 @@ class Listing(BaseModel):
         return sorted(self.found.titles) if self.found else []
 
     @property
-    def ranked(self) -> str:
-        return {"first": "1"}[self.found.titles[0]]
+    def ranked(self) -> list[str]:     # a list: over= a single value fails the load (the load-check sweep)
+        return [{"first": "1"}[self.found.titles[0]]]
 
 
 class Signature:
@@ -1638,20 +1657,20 @@ def test_a_command_file_that_does_not_import_is_a_listed_problem_not_a_raise(tmp
 
 
 def test_a_retired_declaration_is_a_listed_problem_not_a_raise(tmp_path, monkeypatch, capsys):
-    """An execution command written with the retired approval spelling fails the routing definition's
-    checks; load_problems lists it as ``<file>: CommandDeclarationError: <command>: <message>``."""
+    """An execution command written with the retired approval spelling fails the load of that command only
+    (bd fix-ftdl.2); load_problems lists it as ``<command>: <file>: <message>``."""
     library = _library_copy(tmp_path, "lib")
     startup = os.path.join(library, "_commands", "startup.py")
     text = open(startup, encoding="utf-8").read()
     text = text.replace("class ResponseGenerator:\n", 'class ResponseGenerator:\n    approval = "mandatory"\n\n', 1)
     open(startup, "w", encoding="utf-8").write(text)
     problems = command_preview.load_problems(library)
-    assert problems == [problem for problem in problems if problem.startswith("_commands/startup.py: "
-                                                                             "CommandDeclarationError: startup: ")]
-    assert len(problems) == 1 and 'approval = "mandatory" is removed' in problems[0], problems
+    # startup does not load, so the workflow's startup_action.json names a command that does not load: two lines
+    assert [p.split(": ", 1)[0] for p in problems] == ["startup", "startup_action.json"], problems
+    assert "_commands/startup.py: approval = \"mandatory\" is removed" in problems[0], problems
     assert _run_cli(monkeypatch, "command", "preview", library, "--check") == 1
     out = capsys.readouterr().out
-    assert "  _commands/startup.py: CommandDeclarationError: startup: approval" in out and "Traceback" not in out
+    assert "_commands/startup.py: approval = \"mandatory\" is removed" in out and "Traceback" not in out
 
 
 def test_a_retired_context_declaration_is_a_listed_problem_not_a_raise(tmp_path):

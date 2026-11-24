@@ -38,6 +38,7 @@ class Signature:
 
     class Input(BaseModel):
         author: str = Field(description="the author's name",
+                            examples=["Frank Herbert", "Jane Austen", "Austen"],
                             json_schema_extra={"copied_from_command_text": True})
 
 
@@ -141,8 +142,8 @@ The preview: `book` fans out once per book the search found.
 
 ```text
 Phase find
-  1. find_book query=Jane Austen
-  code runs: find_book query=Jane Austen
+  1. find_book query="Jane Austen"
+  code runs: find_book query="Jane Austen"
   facts: find_book.Output(book_uids=['b3', 'b4'], titles=['Emma', 'Persuasion'], total=2)
 Phase book (item b3)
   1. open_book book_uid=b3
@@ -173,8 +174,8 @@ Run offline for Jane Austen, `book` runs once for each of the two books:
 <!-- dry-run: author_books {"author": "Jane Austen"} -->
 ```text
 Phase find
-  1. find_book query=Jane Austen
-  code runs: find_book query=Jane Austen
+  1. find_book query="Jane Austen"
+  code runs: find_book query="Jane Austen"
   facts: Output(book_uids=['b3', 'b4'], titles=['Emma', 'Persuasion'], total=2)
 Phase book (item b3)
   1. show_book book_uid=b3

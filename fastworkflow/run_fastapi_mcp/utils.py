@@ -2237,7 +2237,7 @@ class ChannelSessionManager:
             if not eligibility.evictable:
                 skipped_pinned += 1
                 checkpoint.warn_pinned_once(
-                    channel_id, runtime.workflow_path, eligibility.reason
+                    channel_id, runtime.workflow_path, eligibility
                 )
                 continue
 

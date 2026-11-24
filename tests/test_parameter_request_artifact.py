@@ -103,7 +103,12 @@ def test_agent_mode_has_no_parameter_request_and_the_same_text():
     assert agent.parameter_request is None
     assert "ratio" in agent.error_msg and "ids" in agent.error_msg
     human = _extract(_app(PLAIN), RECORD, PARTIAL, ASSISTANT)
-    assert human.error_msg == agent.error_msg
+    # Who replies decides the wording, not the session: a person's "/" message in an agent session is assistant mode
+    # (``ask.audience_of(..., assistant=True)``), so its question is the person's sentence; the agent's own call keeps
+    # the agent's text. (Before: both were the agent's text, "the same text".)
+    assert "ratio" in human.error_msg and "ids" in human.error_msg
+    assert human.error_msg != agent.error_msg
+    assert "Only your answer is read" in human.error_msg and "Only your answer is read" not in agent.error_msg
 
 
 # 3

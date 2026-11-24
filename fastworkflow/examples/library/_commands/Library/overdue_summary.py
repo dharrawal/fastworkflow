@@ -29,6 +29,7 @@ class Signature:
     class Input(BaseModel):
         branch: str = Field(default="", description="the branch asked about, if named (such as Central "
                                                     "or Riverside); empty for all",
+                            examples=["Central", "Riverside", "riverside"],
                             json_schema_extra={"copied_from_command_text": {"ignore": ["the", "branch"]}})
 
         @field_validator("branch")

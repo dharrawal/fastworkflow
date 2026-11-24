@@ -31,6 +31,8 @@ RAW = ["Find the book Dune.", "List the author of Dune.", "List the year of Dune
 MERGED = ["Find the book Dune. List the author of Dune. List the year of Dune.", "Tell Ann a joke."]
 INDEPENDENT_REQUEST = "Find the book Dune. Find the book Emma."
 INDEPENDENT = ["Find the book Dune.", "Find the book Emma."]
+#: The library example has no _workflow.py: the built-in prompt (span contract v61).
+PROMPT = {"prompt_digest": workflow_agent.split_prompt(LIBRARY)["digest"], "prompt_source": "built_in"}
 
 
 def _lm(items: list[str]) -> DummyLM:
@@ -46,7 +48,8 @@ def test_the_recorder_holds_request_raw_merged_and_the_rule_that_changed_the_lis
     with workflow_agent.recording_split() as record:
         out = workflow_agent.split_into_subtasks(REQUEST, planner_lm=_lm(RAW), workflow_folderpath=LIBRARY)
     assert out == MERGED
-    assert record == {"request": REQUEST, "raw": RAW, "merged": MERGED, "attempts": 1, "changed_by": ["group"]}
+    assert record == {"request": REQUEST, "raw": RAW, "merged": MERGED, "attempts": 1, "changed_by": ["group"],
+                      **PROMPT}
 
 
 def test_a_split_no_rule_changes_has_no_changed_by():
@@ -60,7 +63,7 @@ def test_a_single_part_split_is_recorded():
     request = "Tell Ann a joke."
     with workflow_agent.recording_split() as record:
         workflow_agent.split_into_subtasks(request, planner_lm=_lm([request]), workflow_folderpath=LIBRARY)
-    assert record == {"request": request, "raw": [request], "merged": [request], "attempts": 1}
+    assert record == {"request": request, "raw": [request], "merged": [request], "attempts": 1, **PROMPT}
 
 
 def test_nothing_is_recorded_without_a_recorder_or_when_no_split_was_asked():
@@ -113,9 +116,27 @@ def test_a_turn_that_was_not_split_has_no_subtask_split(gated, monkeypatch, no_d
 
 def test_the_attribute_is_part_of_the_turn_contract():
     contract = tracing.SPAN_CONTRACTS[tracing.SPAN_TURN]
-    assert "subtask_split" in contract.attributes and contract.version == 6
+    assert "subtask_split" in contract.attributes and contract.version == 9
     assert tracing.split_record_attribute(None) is None and tracing.split_record_attribute({}) is None
     long_request = "x" * (tracing.MAX_ATTR_BYTES + 10)
     capped = tracing.split_record_attribute(
         {"request": long_request, "raw": [long_request], "merged": ["a"], "attempts": 1})
     assert capped["request"]["truncated"] is True and capped["raw"][0]["truncated"] is True
+
+
+def test_a_split_whose_every_answer_stops_at_the_cap_is_recorded_as_failed(caplog):
+    """The request runs as one part, and the turn says so: ``failed`` on the record (and so on the span) and a log line."""
+    from tests.test_text_planner_and_split import _ECHOED_THEN_CUT, _ScriptedReplies
+
+    lm = _ScriptedReplies([_ECHOED_THEN_CUT, _ECHOED_THEN_CUT])
+    with caplog.at_level("WARNING"), workflow_agent.recording_split() as record:
+        assert workflow_agent.split_into_subtasks("the request", planner_lm=lm) == ["the request"]
+    assert record["failed"] == workflow_agent.SPLIT_FAILED_CUT_OFF and record["merged"] == ["the request"]
+    assert tracing.split_record_attribute(record)["failed"] == "cut_off"
+    assert any("the split failed" in line for line in caplog.messages)
+
+
+def test_a_split_that_answers_has_no_failed_key():
+    with workflow_agent.recording_split() as record:
+        workflow_agent.split_into_subtasks(INDEPENDENT_REQUEST, planner_lm=_lm(INDEPENDENT), workflow_folderpath=LIBRARY)
+    assert "failed" not in record and "failed" not in tracing.split_record_attribute(record)

@@ -157,7 +157,7 @@ def test_simple_workflow_template_round_trip(initialized_fastworkflow):
 
     # Identity, not equality: the slots must be nodes of the restored tree.
     assert restored._current_command_context is bug
-    assert restored.record is task
+    assert restored._command_context_for_response_generation is task
 
     # The links a JSON snapshot cannot carry.
     assert bug.parent is root
@@ -244,7 +244,7 @@ def test_todo_list_workflow_round_trip(initialized_fastworkflow, todo_list_json_
 
     # Identity, not equality: the slots must be nodes of the restored hierarchy.
     assert restored._current_command_context is laundry
-    assert restored.record is kitchen
+    assert restored._command_context_for_response_generation is kitchen
 
     assert laundry.parent is kitchen
     assert kitchen.parent is chores
@@ -321,7 +321,7 @@ def test_messaging_app_4_round_trip(initialized_fastworkflow):
     assert bob is chatroom.users[1]
     assert chatroom.current_user is bob
     assert bob.chatroom is chatroom
-    assert restored.record is chatroom
+    assert restored._command_context_for_response_generation is chatroom
 
     # The subclass decides which commands the context exposes, so it must survive.
     assert type(bob).__name__ == "PremiumUser"
@@ -478,6 +478,22 @@ def test_context_without_get_state_pins_and_warns_once(initialized_fastworkflow,
     assert "fastworkflow.EPHEMERAL" in message
 
 
+@pytest.mark.parametrize("outcome", [ProjectionOutcome.LOCATOR_MISSING, ProjectionOutcome.LOCATOR_UNSTABLE])
+def test_a_locator_pin_advises_the_locator_pair_not_ephemeral(initialized_fastworkflow, tmp_path, outcome):
+    """The root has get_state; what it lacks is a working get_locator/find_by_locator pair. Returning EPHEMERAL would
+    leave a savable root unsaved, so the warning does not advise it."""
+    workflow = make_workflow(write_scratch_workflow(tmp_path))
+    projection = serialization_hooks._pinned(outcome, "Widget", "the current context is not the anchor")
+
+    with captured_warnings() as records:
+        serialization_hooks.warn_if_pinned(workflow, projection)
+
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "Add or fix get_locator/find_by_locator in _commands/Widget/_Widget.py" in message
+    assert "EPHEMERAL" not in message and "get_state" not in message
+
+
 def test_context_declaring_ephemeral_pins_without_warning(initialized_fastworkflow, tmp_path):
     workflow = make_workflow(write_scratch_workflow(tmp_path))
     workflow.root = Gadget()
@@ -496,3 +512,112 @@ def test_context_declaring_ephemeral_pins_without_warning(initialized_fastworkfl
     restored = make_workflow(workflow.folderpath)
     assert serialization_hooks.restore_command_contexts(restored, projection.as_record()) is False
     assert restored.root is None
+
+
+# ---------------------------------------------------------------------------
+# bd fix-ftdl.7.17: hooks come in pairs; a class no object can be needs no hook; a declared choice is not warned
+# ---------------------------------------------------------------------------
+
+class Gizmo:
+    """Anchor whose context class saves state but cannot rebuild it."""
+
+
+SAVES_BUT_CANNOT_REBUILD = '''
+class Context:
+    @classmethod
+    def get_parent(cls, record) -> None:
+        return None
+
+    @classmethod
+    def get_state(cls, record):
+        return {"saved": True}
+'''
+
+NOT_OCCUPIABLE = '''
+class Context:
+    """A base no object ever is."""
+    occupiable = False
+'''
+
+
+def _library_copy(tmp_path: Path, context_edits: dict[str, str]) -> Path:
+    """A copy of the library example with *context_edits* appended to the named context class files (the methods are
+    written at class level, four spaces in)."""
+    import shutil
+
+    folder = tmp_path / "library_hooks"
+    shutil.copytree(EXAMPLES / "library", folder, ignore=shutil.ignore_patterns(
+        "___command_info", "___workflow_contexts", "___convo_info", "__pycache__"), symlinks=True)
+    for context, text in context_edits.items():
+        path = folder / "_commands" / context / f"_{context}.py"
+        path.write_text(path.read_text() + text)
+    return folder
+
+
+def test_a_saved_state_that_nothing_can_rebuild_pins_and_names_the_missing_hook(initialized_fastworkflow, tmp_path):
+    # It used to be saved, then fail at restore with a misnamed UnsupportedStateVersion, losing the conversation.
+    folderpath = write_scratch_workflow(tmp_path)
+    folder = folderpath / "_commands" / "Gizmo"
+    folder.mkdir()
+    (folder / "_Gizmo.py").write_text(SAVES_BUT_CANNOT_REBUILD)
+    (folder / "poke.py").write_text(POKE_COMMAND)
+    workflow = make_workflow(folderpath)
+    workflow.root = Gizmo()
+
+    projection = serialization_hooks.project_command_contexts(workflow)
+    assert projection.outcome is ProjectionOutcome.HOOK_ABSENT
+    assert not projection.is_checkpointable
+    assert projection.reason == "context class 'Gizmo' has get_state but no from_state hook, so its saved state " \
+                                "could not be restored"
+
+
+def test_a_half_locator_pair_or_a_lone_from_state_is_a_load_problem(initialized_fastworkflow, tmp_path):
+    from fastworkflow.command_preview import load_problems
+
+    folder = _library_copy(tmp_path, {
+        "Member": "\n    @classmethod\n    def get_locator(cls, record):\n        return record.uid\n",
+        "Book": "\n    @classmethod\n    def find_by_locator(cls, anchor, locator):\n        return None\n",
+    })
+    problems = load_problems(str(folder))
+    assert ("Member: has get_locator but no find_by_locator; the two hooks come as a pair: write both, or "
+            "neither") in problems
+    assert ("Book: has find_by_locator but no get_locator; the two hooks come as a pair: write both, or "
+            "neither") in problems
+    assert not any(problem.startswith(("Library:", "Record:")) for problem in problems)
+
+    class RebuildsButNeverSaves:
+        @classmethod
+        def from_state(cls, state, workflow, *, state_version):
+            return None
+
+    assert serialization_hooks.hook_pair_problems(RebuildsButNeverSaves) == [
+        "has from_state but no get_state; the two hooks come as a pair: write both, or neither"]
+
+
+def test_the_startup_list_leaves_out_a_class_no_object_can_be(initialized_fastworkflow, tmp_path):
+    # Record is occupiable = False: no object is a plain Record, so it never needs a hook (one declaration, not two).
+    from fastworkflow.run_fastapi_mcp import checkpoint
+
+    folderpath = write_scratch_workflow(tmp_path)
+    folder = folderpath / "_commands" / "Mixin"
+    folder.mkdir()
+    (folder / "_Mixin.py").write_text(NOT_OCCUPIABLE)
+    (folder / "poke.py").write_text(POKE_COMMAND)
+    assert checkpoint.contexts_without_state_hook(str(folderpath)) == ["Widget"]
+
+
+def test_a_session_declared_ephemeral_is_not_warned_about(initialized_fastworkflow, tmp_path):
+    from fastworkflow.run_fastapi_mcp import checkpoint
+
+    checkpoint.reset_warnings()
+    workflow = make_workflow(write_scratch_workflow(tmp_path))
+    declared = checkpoint.Eligibility(False, "Gadget declared its state ephemeral",
+                                      serialization_hooks.ContextProjection(ProjectionOutcome.DECLARED_EPHEMERAL))
+    pinned = checkpoint.Eligibility(False, "context class 'Widget' has no get_state hook",
+                                    serialization_hooks.ContextProjection(ProjectionOutcome.HOOK_ABSENT))
+    with captured_warnings() as records:
+        checkpoint.warn_pinned_once("c1", workflow.folderpath, declared)
+        checkpoint.warn_pinned_once("c2", workflow.folderpath, pinned)
+    assert [r.getMessage() for r in records] == [
+        "Channel c2 cannot be checkpointed and will not be evicted: context class 'Widget' has no get_state hook"]
+    checkpoint.reset_warnings()

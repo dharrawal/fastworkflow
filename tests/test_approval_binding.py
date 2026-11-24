@@ -260,8 +260,8 @@ def test_token_is_256_bits_and_only_its_hash_is_compared():
     (REQUIRED_UNTIL_DELEGATED, Origin.USER, Surface(), False, False, Outcome.RUN),              # user's own instruction
     (REQUIRED_ALWAYS, Origin.AGENT, Surface(), False, False, Outcome.ASK),
     (REQUIRED_UNTIL_DELEGATED, Origin.AGENT, Surface(), False, False, Outcome.ASK),              # asks until delegation exists
-    (REQUIRED_ALWAYS, Origin.AGENT, Surface(), True, False, Outcome.QUEUE),              # no human channel
-    (REQUIRED_ALWAYS, Origin.AGENT, Surface(), False, True, Outcome.QUEUE),              # behind another ask
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface(), True, False, Outcome.NOT_ASKED),              # no human channel
+    (REQUIRED_ALWAYS, Origin.AGENT, Surface(), False, True, Outcome.NOT_ASKED),              # behind another ask
     (REQUIRED_ALWAYS, Origin.AGENT_DIRECT, Surface(), False, False, Outcome.ASK),        # MCP is agent-originated
     (REQUIRED_ALWAYS, Origin.AGENT, Surface("host", verified=False, uid="u"), False, False, Outcome.REFUSE),
     (REQUIRED_ALWAYS, Origin.AGENT, Surface("host", verified=True, uid=None), False, False, Outcome.REFUSE),
@@ -275,18 +275,41 @@ def test_the_policy_decision_point_returns_graded_outcomes(annotation, origin, s
 
 
 def test_a_recorded_standing_approval_runs_without_a_prompt_on_any_surface():
-    # The grant is an input: it yields run, and it satisfies delegatable as well as mandatory.
+    # The grant is an input: it yields run for a delegatable command (bd fix-qjne.11: only for that one;
+    # the REQUIRED_ALWAYS counterpart is the test below, it was moved here from "both annotations").
     # (Edited by fix-d6no: the channel cells no longer pass unattended=True; an unattended channel run
     # queues whatever the grant says, see the test below. The host cell is added and is unchanged.)
-    for annotation in (REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED):
-        for origin in (Origin.AGENT, Origin.AGENT_DIRECT, Origin.USER):
-            decision = ab.decide(annotation, origin=origin, surface=Surface(), unattended=False,
-                                 awaiting_on_channel=True, auto_granted=True)
-            assert decision.outcome is Outcome.RUN
-            host = ab.decide(annotation, origin=origin, surface=Surface("host", verified=True, uid="u"),
-                             unattended=True, awaiting_on_channel=True, auto_granted=True)
-            assert host.outcome is Outcome.RUN        # a verified host's per-end-user grant: unchanged
+    annotation = REQUIRED_UNTIL_DELEGATED
+    for origin in (Origin.AGENT, Origin.AGENT_DIRECT, Origin.USER):
+        decision = ab.decide(annotation, origin=origin, surface=Surface(), unattended=False,
+                             awaiting_on_channel=True, auto_granted=True)
+        assert decision.outcome is Outcome.RUN
+        host = ab.decide(annotation, origin=origin, surface=Surface("host", verified=True, uid="u"),
+                         unattended=True, awaiting_on_channel=True, auto_granted=True)
+        assert host.outcome is Outcome.RUN        # a verified host's per-end-user grant: unchanged
     # ...but an unverifiable host still has no identity to grant to, so it is refused first.
+    refused = ab.decide(annotation, origin=Origin.AGENT, surface=Surface("host", verified=False, uid="u"),
+                        unattended=False, awaiting_on_channel=False, auto_granted=True)
+    assert refused.outcome is Outcome.REFUSE
+
+
+def test_a_recorded_standing_approval_never_runs_a_required_always_command_on_any_surface():
+    # bd fix-qjne.11: a person confirms every run. The grant is ignored on every surface and attendance.
+    host = Surface("host", verified=True, uid="u")
+    for origin in (Origin.AGENT, Origin.AGENT_DIRECT, Origin.USER):
+        for surface in (Surface(), Surface(kind="channel", origin="chat"), host):
+            attended = ab.decide(REQUIRED_ALWAYS, origin=origin, surface=surface, unattended=False,
+                                 awaiting_on_channel=False, auto_granted=True)
+            assert attended.outcome is Outcome.ASK
+            behind = ab.decide(REQUIRED_ALWAYS, origin=origin, surface=surface, unattended=False,
+                               awaiting_on_channel=True, auto_granted=True)
+            assert behind.outcome is Outcome.NOT_ASKED
+            unattended = ab.decide(REQUIRED_ALWAYS, origin=origin, surface=surface, unattended=True,
+                                   awaiting_on_channel=False, auto_granted=True)
+            assert unattended.outcome is Outcome.NOT_ASKED
+            # the same answer with no grant: a grant changes nothing for this annotation
+            assert ab.decide(REQUIRED_ALWAYS, origin=origin, surface=surface, unattended=False,
+                             awaiting_on_channel=False).outcome is attended.outcome
     refused = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=Surface("host", verified=False, uid="u"),
                         unattended=False, awaiting_on_channel=False, auto_granted=True)
     assert refused.outcome is Outcome.REFUSE
@@ -317,21 +340,18 @@ def test_the_store_keeps_at_most_one_awaiting_record_and_bounds_its_history():
     record = _record("awaiting")
     store.add(record)
     assert store.active() is record
-    queued = _record("awaiting", queued=True)
-    store.add(queued)
-    assert store.active() is record                  # queued records are not the awaiting one
     for _ in range(ab.MAX_HISTORY + 5):
         store.add(_record("declined"))
     assert len([r for r in store.records if r.state != "awaiting"]) <= ab.MAX_HISTORY
 
 
-def _record(state, queued=False):
+def _record(state):
     return ab.PendingAction(
         id=ab.uuid.uuid4().hex, token_hash="h", command="TodoList/set_properties", annotation=REQUIRED_ALWAYS,
         raw_command="set_properties", binding=_binding(), fingerprint=ab.fingerprint(_binding()),
         rendering="assign_to=Ann", rendering_hash="r", required_identity="channel", created_turn=1,
         turns_seen=0, ttl_turns=ab.TTL_TURNS, ttl_seconds=ab.TTL_SECONDS, created_at=time.time(),
-        state=state, origin="agent", queued=queued)
+        state=state, origin="agent")
 
 
 def test_a_record_survives_a_state_round_trip_and_still_resolves_its_fingerprint():
@@ -392,8 +412,10 @@ def test_an_unverified_host_cannot_satisfy_the_end_user_class_and_nothing_runs(t
 def test_an_agent_call_suspends_on_the_prompt_and_a_yes_runs_the_stored_binding_once(todo, annotated_library):
     out = _ask(todo, "add_note <text>Ann</text>", steps=_finish())
     assert out.status is TurnStatus.AWAITING_USER
-    assert out.answer == ("The agent wants to run Record/add_note with text=Ann. This cannot be undone. Reply yes to approve, "
-                          "no to decline, or always to approve this command from now on.")
+    # bd fix-ftdl.7.6: the default question says nothing about undoing; an author who wants that writes it in
+    # the command's approval_template.
+    assert out.answer == ("The agent wants to run Record/add_note with text=Ann. Reply yes to approve "
+                          "or no to decline. You are asked every time.")
     record = todo.store.active()
     assert record is not None and record.suspended_agent and record.state == "awaiting"
     assert _added(todo.chores, todo.base) == []                       # nothing ran yet
@@ -470,19 +492,30 @@ def test_the_record_expires_by_wall_clock(todo, annotated_library):
     assert _added(todo.chores, todo.base) == []
 
 
-def test_an_unattended_turn_refuses_now_queues_visibly_and_never_auto_resolves(todo, annotated_library):
+def test_an_unattended_call_is_not_run_and_nothing_waits_for_an_answer(todo, annotated_library):
+    # bd fix-ftdl.7.6: it used to be "queued until it expires": a record that was never asked about and that made the
+    # session report an approval pending that nobody could answer. One thing is waited on at a time (waiting.py), and
+    # a call that cannot be asked now is not run and not kept: the caller is told why, at once.
     out = _ask(todo, "add_note <text>Ann</text>", steps=_finish(), unattended=True)
     assert _added(todo.chores, todo.base) == []
-    queued = [r for r in todo.store.records if r.queued]
-    assert len(queued) == 1 and queued[0].state == "awaiting"
     assert out.status is TurnStatus.COMPLETED                  # the caller was told at once
-    # Two more turns: the queued record expires, and nothing ran.
+    assert ab.active_approvals(todo.wf) == []
+    assert todo.ctx.has_pending_state() is False
+    assert len(_approval_spans(todo, "not_asked")) == 1
+    # The next turns find nothing to answer and nothing runs on its own.
     todo.script.steps = _finish()
-    todo.ctx.process_turn("next")
-    todo.script.steps = _finish()
-    todo.ctx.process_turn("next again")
-    assert queued[0].state == "expired"
+    todo.ctx.process_turn("yes")
     assert _added(todo.chores, todo.base) == []
+
+
+def test_an_unattended_call_says_plainly_that_it_was_not_run_and_why(todo, annotated_library):
+    todo.store.unattended = True
+    result = CommandExecutor.perform_mcp_tool_call(
+        todo.wf, fastworkflow.MCPToolCall(name=MANDATORY, arguments={"text": "Ann"}))
+    assert result.content[0].text == ab.MSG_UNATTENDED.format(command=MANDATORY)
+    assert result.content[0].text == ("Record/add_note was not run: it needs your approval, and no one can give it "
+                                      "on this turn. Run it again when you can answer.")
+    assert ab.active_approvals(todo.wf) == [] and _added(todo.chores, todo.base) == []
 
 
 def test_a_delegatable_command_asks_with_the_framework_text(todo, annotated_library):
@@ -512,8 +545,7 @@ def test_an_mcp_tool_call_to_an_annotated_command_is_agent_originated_and_asks(t
         todo.wf, fastworkflow.MCPToolCall(name=MANDATORY, arguments={"text": "Ann"}))
     text = result.content[0].text
     assert text == ("The agent wants to run Record/add_note with text=Ann. "
-                    "This cannot be undone. Reply yes to approve, no to decline, or always to approve "
-                    "this command from now on.")
+                    "Reply yes to approve or no to decline. You are asked every time.")
     assert _added(todo.chores, todo.base) == []
     record = todo.store.active()
     assert record is not None and record.origin == Origin.AGENT_DIRECT.value
@@ -626,18 +658,20 @@ def test_cancel_pending_method_clears_an_mcp_approval(todo, annotated_library):
     assert record.state == "invalidated"
 
 
-def test_a_second_gated_call_while_one_awaits_is_queued_behind_it(todo, annotated_library):
+def test_a_second_gated_call_while_one_awaits_is_not_run_and_not_kept(todo, annotated_library):
+    # bd fix-ftdl.7.6: one question at a time. The second call is not run and not kept as a record nobody asks
+    # about: the caller is told to answer the first, then run it again.
     first = CommandExecutor.perform_mcp_tool_call(
         todo.wf, fastworkflow.MCPToolCall(name=MANDATORY, arguments={"text": "Ann"}))
     assert "Reply yes" in first.content[0].text
     second = CommandExecutor.perform_mcp_tool_call(
         todo.wf, fastworkflow.MCPToolCall(name=MANDATORY, arguments={"text": "Bob"}))
-    assert "another approval is awaiting the user" in second.content[0].text
-    queued = [r for r in todo.store.records if r.queued]
-    assert len(queued) == 1 and queued[0].binding["params"]["text"] == "Bob"
-    assert todo.store.active() is not None and todo.store.active().binding["params"]["text"] == "Ann"
+    assert second.content[0].text == ("Record/add_note was not run: it needs your approval, and another approval is "
+                                      "already waiting for your answer. Answer that one first, then run it again.")
+    assert [r.binding["params"]["text"] for r in ab.active_approvals(todo.wf)] == ["Ann"]
     todo.ctx.process_turn("yes")
-    assert _added(todo.chores, todo.base) == ["Ann"]           # the queued one never ran on its own
+    assert _added(todo.chores, todo.base) == ["Ann"]           # the second one never ran on its own
+    assert ab.active_approvals(todo.wf) == []
 
 
 # ----------------------------------------------------------------------
@@ -658,27 +692,79 @@ def _approval_spans(todo, outcome: str):
 
 
 def test_always_records_a_standing_approval_that_later_runs_without_a_prompt(todo, annotated_library, grant_root):
-    _ask(todo, "add_note <text>Ann</text>", steps=_finish())
+    # bd fix-qjne.11: the mechanism is proved on the delegatable command (it was the mandatory one before).
+    _ask(todo, "show_notes", steps=_finish())
     todo.ctx.process_turn("always")
-    assert _added(todo.chores, todo.base) == ["Ann"]           # this binding ran on the user's reply
+    assert todo.store.records[-1].state == "executed"          # this binding ran on the user's reply
     assert len(_approval_spans(todo, "recorded")) == 1
 
-    _ask_out = _ask(todo, "add_note <text>Bob</text>", steps=_finish())
+    _ask_out = _ask(todo, "show_notes", steps=_finish())
     assert _ask_out.status is TurnStatus.COMPLETED  # no prompt: the standing approval ran it
-    assert _added(todo.chores, todo.base) == ["Ann", "Bob"]     # Ann's binding ran on the reply; Bob's by the grant
     assert len(_approval_spans(todo, "used")) == 1
 
 
+def test_a_required_always_command_asks_every_time_and_an_always_reply_records_nothing(todo, annotated_library,
+                                                                                    grant_root):
+    first = _ask(todo, "add_note <text>Ann</text>", steps=_finish())
+    assert first.status is TurnStatus.AWAITING_USER
+    assert "always" not in first.answer.lower().replace("asked every time", "")
+    typed = todo.ctx.process_turn("always")
+    assert "always" in typed.answer and "asks every time" in typed.answer     # the question again, no promise
+    assert "standing" not in typed.answer and "from now on" not in typed.answer
+    assert typed.status is TurnStatus.AWAITING_USER
+    assert _added(todo.chores, todo.base) == []                               # not read as yes
+    assert todo.store.active() is not None and todo.store.active().state == "awaiting"
+    assert _approval_spans(todo, "recorded") == []
+    todo.ctx.process_turn("yes")
+    assert _added(todo.chores, todo.base) == ["Ann"]
+    assert _approval_spans(todo, "recorded") == []
+
+    second = _ask(todo, "add_note <text>Bob</text>", steps=_finish())
+    assert second.status is TurnStatus.AWAITING_USER                          # asked again: no grant exists
+    assert _added(todo.chores, todo.base) == ["Ann"]
+    assert _approval_spans(todo, "used") == []
+
+
+def test_an_existing_grant_for_a_required_always_command_is_ignored_listed_and_revocable(todo, annotated_library,
+                                                                                       grant_root):
+    from fastworkflow import approval_grants as ag
+    ag.record(f"channel:{ag.local_user()}", state_paths_workflow_id(todo), "Record/add_note", REQUIRED_ALWAYS)
+    out = _ask(todo, "add_note <text>Ann</text>", steps=_finish())
+    assert out.status is TurnStatus.AWAITING_USER and _added(todo.chores, todo.base) == []
+    assert _approval_spans(todo, "used") == []
+    todo.ctx.process_turn("no")
+    listing = todo.ctx.process_turn("/approvals").answer           # still listed, marked as not applying
+    assert "Record/add_note" in listing and "ignored" in listing
+    assert "is revoked" in todo.ctx.process_turn("/revoke_approval add_note").answer
+    assert "Record/add_note" not in todo.ctx.process_turn("/approvals").answer
+    assert ag.find(f"channel:{ag.local_user()}", state_paths_workflow_id(todo), "Record/add_note") is None
+
+
+def test_the_approval_payload_offers_always_only_for_a_delegatable_command(todo, annotated_library, grant_root):
+    mandatory = _ask(todo, "add_note <text>Ann</text>", steps=_finish())
+    assert mandatory.status is TurnStatus.AWAITING_USER
+    assert _pending_can_always(todo) is False
+    todo.ctx.process_turn("no")
+    delegatable = _ask(todo, "show_notes", steps=_finish())
+    assert delegatable.status is TurnStatus.AWAITING_USER
+    assert _pending_can_always(todo) is True
+
+
+def _pending_can_always(todo):
+    from fastworkflow import prompt_payloads
+    return prompt_payloads.payload_of(todo.ctx, todo.ctx._waiting)[1]["approval"]["can_always"]
+
+
 def test_a_standing_approval_is_revocable_and_the_next_call_asks_again(todo, annotated_library, grant_root):
-    _ask(todo, "add_note <text>Ann</text>", steps=_finish())
+    _ask(todo, "show_notes", steps=_finish())
     todo.ctx.process_turn("always")
     listing = todo.ctx.process_turn("/approvals")
-    assert "Record/add_note" in listing.answer
-    revoked = todo.ctx.process_turn("/revoke_approval add_note")
+    assert "Record/show_notes" in listing.answer and "ignored" not in listing.answer
+    revoked = todo.ctx.process_turn("/revoke_approval show_notes")
     assert "is revoked" in revoked.answer
     assert len(_approval_spans(todo, "revoked")) == 1
 
-    out = _ask(todo, "add_note <text>Cy</text>", steps=_finish())
+    out = _ask(todo, "show_notes", steps=_finish())
     assert out.status is TurnStatus.AWAITING_USER    # asks again
     assert todo.store.active() is not None
 
@@ -747,9 +833,9 @@ def test_the_host_token_appears_in_no_persisted_bytes_on_the_real_store_or_sessi
 def test_a_planning_step_that_calls_an_annotated_command_gates_at_that_step_and_runs_once(todo, annotated_library):
     # note_member (a planning command of the library) runs find_member, open_member, add_note. add_note is
     # annotated mandatory, so the step gates; the reply runs it exactly once, and the phase goes on.
-    from fastworkflow.approval_annotations import planning_steps_needing_approval
+    from fastworkflow.approval_annotations import command_approval
     folder = str(annotated_library)
-    assert ("Record/add_note", REQUIRED_ALWAYS) in planning_steps_needing_approval(folder, "Library/note_member")
+    assert command_approval(folder, "Library/note_member") == REQUIRED_ALWAYS    # derived from its steps
     todo.wf.record = todo.library        # a planning command of the root library
     member = todo.library.members["m1"]
     before = list(member.notes)
@@ -802,17 +888,17 @@ def test_an_approved_planning_step_run_is_seen_by_the_finish_check(todo, annotat
     assert all(note is None for note in notes), notes
 
 
-def test_a_standing_approval_does_not_run_a_mandatory_command_on_an_unattended_turn(todo, annotated_library, grant_root):
+def test_a_standing_approval_does_not_run_a_delegatable_command_on_an_unattended_turn(todo, annotated_library, grant_root):
     # fix-d6no (owner 2026-11-13): this test used to assert the opposite (the grant ran the command with no human).
-    # An unattended run never uses a channel-surface standing grant: it queues, as the ADR documents.
-    _ask(todo, "add_note <text>Ann</text>", steps=_finish())
+    # An unattended run never uses a channel-surface standing grant: it is not run and not asked (bd fix-ftdl.7.6).
+    # (fix-qjne.11: proved on the delegatable command, the only one a grant applies to.)
+    _ask(todo, "show_notes", steps=_finish())
     todo.ctx.process_turn("always")
-    out = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), unattended=True)
-    assert _added(todo.chores, todo.base) == ["Ann"]            # Bob's did not run
-    queued = [r for r in todo.store.records if r.queued and r.state == ab.AWAITING]
-    assert len(queued) == 1 and queued[0].command == "Record/add_note"
+    out = _ask(todo, "show_notes", steps=_finish(), unattended=True)
+    assert ab.active_approvals(todo.wf) == []                  # not run, and not kept (bd fix-ftdl.7.6)
     assert _approval_spans(todo, "used") == []
-    assert len(_approval_spans(todo, "queued")) == 1
+    not_asked = _approval_spans(todo, "not_asked")
+    assert len(not_asked) == 1 and not_asked[0]["approval_command"] == "Record/show_notes"
     assert out is not None
 
 
@@ -824,40 +910,41 @@ CHAT = Surface(kind="channel", origin="chat")
 CLI = Surface()          # the interactive CLI's default surface: the legacy key
 
 
-def _always_on(todo, surface, text="Ann"):
-    """Ask, then answer "always", both on *surface*; the binding runs once and the grant is recorded."""
-    out = _ask(todo, f"add_note <text>{text}</text>", steps=_finish(), approval_surface=surface)
+def _always_on(todo, surface):
+    """Ask the delegatable command, then answer "always", both on *surface*; the binding runs once and the
+    grant is recorded (bd fix-qjne.11: only a delegatable command takes an ``always``)."""
+    out = _ask(todo, "show_notes", steps=_finish(), approval_surface=surface)
     assert out.status is TurnStatus.AWAITING_USER
     return todo.ctx.process_turn("always", approval_surface=surface)
 
 
 @pytest.mark.parametrize("surface", [CLI, CHAT], ids=["cli", "chat"])
-def test_a_channel_grant_runs_attended_and_queues_unattended(todo, annotated_library, grant_root, surface):
+def test_a_channel_grant_runs_attended_and_is_not_asked_unattended(todo, annotated_library, grant_root, surface):
     _always_on(todo, surface)
-    attended = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), approval_surface=surface)
+    attended = _ask(todo, "show_notes", steps=_finish(), approval_surface=surface)
     assert attended.status is TurnStatus.COMPLETED               # attended: no prompt, the grant ran it
-    assert _added(todo.chores, todo.base) == ["Ann", "Bob"]
-    unattended = _ask(todo, "add_note <text>Cy</text>", steps=_finish(), unattended=True,
+    unattended = _ask(todo, "show_notes", steps=_finish(), unattended=True,
                       approval_surface=surface)
-    assert _added(todo.chores, todo.base) == ["Ann", "Bob"]      # unattended: queued, not run
-    assert any(r.queued and r.state == ab.AWAITING for r in todo.store.records)
+    assert len(_approval_spans(todo, "not_asked")) == 1           # not run, and not kept (bd fix-ftdl.7.6)
+    assert ab.active_approvals(todo.wf) == []
     assert len(_approval_spans(todo, "used")) == 1               # only the attended call used the grant
     assert unattended is not None
 
 
 def test_the_unattended_policy_cells_for_a_channel_surface_and_a_verified_host():
+    # Delegatable (the grant's mechanism); the REQUIRED_ALWAYS cells are in the test of that name above (fix-qjne.11).
     for origin_surface in (Surface(), Surface(kind="channel", origin="chat")):
-        granted = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=origin_surface, unattended=True,
+        granted = ab.decide(REQUIRED_UNTIL_DELEGATED, origin=Origin.AGENT, surface=origin_surface, unattended=True,
                             awaiting_on_channel=False, auto_granted=True)
-        assert granted.outcome is Outcome.QUEUE and granted.reason == "no human channel"
-        attended = ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=origin_surface, unattended=False,
+        assert granted.outcome is Outcome.NOT_ASKED and granted.reason == "no human channel"
+        attended = ab.decide(REQUIRED_UNTIL_DELEGATED, origin=Origin.AGENT, surface=origin_surface, unattended=False,
                              awaiting_on_channel=False, auto_granted=True)
         assert attended.outcome is Outcome.RUN
     host = Surface("host", verified=True, uid="u")
-    assert ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=host, unattended=True,
+    assert ab.decide(REQUIRED_UNTIL_DELEGATED, origin=Origin.AGENT, surface=host, unattended=True,
                      awaiting_on_channel=False, auto_granted=True).outcome is Outcome.RUN
-    assert ab.decide(REQUIRED_ALWAYS, origin=Origin.AGENT, surface=host, unattended=True,
-                     awaiting_on_channel=False).outcome is Outcome.QUEUE
+    assert ab.decide(REQUIRED_UNTIL_DELEGATED, origin=Origin.AGENT, surface=host, unattended=True,
+                     awaiting_on_channel=False).outcome is Outcome.NOT_ASKED
 
 
 def test_the_channel_identity_names_the_origin_and_the_cli_keeps_the_legacy_key(grant_root):
@@ -872,10 +959,8 @@ def test_the_channel_identity_names_the_origin_and_the_cli_keeps_the_legacy_key(
 def test_a_grant_made_in_one_origin_does_not_approve_in_the_other(todo, annotated_library, grant_root, made_on,
                                                                    used_on):
     _always_on(todo, made_on)
-    assert _added(todo.chores, todo.base) == ["Ann"]
-    out = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), approval_surface=used_on)
+    out = _ask(todo, "show_notes", steps=_finish(), approval_surface=used_on)
     assert out.status is TurnStatus.AWAITING_USER                # asks: the other origin's grant does not apply
-    assert _added(todo.chores, todo.base) == ["Ann"]
     assert todo.store.active() is not None
 
 
@@ -883,12 +968,12 @@ def test_a_legacy_channel_grant_still_approves_on_the_cli_and_not_on_the_chat_or
                                                                                     grant_root):
     from fastworkflow import approval_grants as ag
     # A grant stored before origins existed: identity channel:<user>, nothing else about it.
-    ag.record(f"channel:{ag.local_user()}", state_paths_workflow_id(todo), "Record/add_note", REQUIRED_ALWAYS)
-    chat = _ask(todo, "add_note <text>Bob</text>", steps=_finish(), approval_surface=CHAT)
-    assert chat.status is TurnStatus.AWAITING_USER and _added(todo.chores, todo.base) == []
+    ag.record(f"channel:{ag.local_user()}", state_paths_workflow_id(todo), "Record/show_notes", REQUIRED_UNTIL_DELEGATED)
+    chat = _ask(todo, "show_notes", steps=_finish(), approval_surface=CHAT)
+    assert chat.status is TurnStatus.AWAITING_USER
     todo.ctx.process_turn("no", approval_surface=CHAT)
-    cli = _ask(todo, "add_note <text>Cy</text>", steps=_finish(), approval_surface=CLI)
-    assert cli.status is TurnStatus.COMPLETED and _added(todo.chores, todo.base) == ["Cy"]
+    cli = _ask(todo, "show_notes", steps=_finish(), approval_surface=CLI)
+    assert cli.status is TurnStatus.COMPLETED
 
 
 def state_paths_workflow_id(todo) -> str:
@@ -897,21 +982,21 @@ def state_paths_workflow_id(todo) -> str:
 
 
 def test_listing_and_revoking_see_only_the_callers_own_origin(todo, annotated_library, grant_root):
-    _always_on(todo, CHAT, "Ann")
+    _always_on(todo, CHAT)
     todo.script.steps = []
     on_chat = todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
-    assert "Record/add_note" in on_chat and "on this channel" in on_chat
+    assert "Record/show_notes" in on_chat and "on this channel" in on_chat
     assert "another channel are not shown" in on_chat
     on_cli = todo.ctx.process_turn("/approvals", approval_surface=CLI).answer
-    assert "Record/add_note" not in on_cli and "No standing approvals" in on_cli
+    assert "Record/show_notes" not in on_cli and "No standing approvals" in on_cli
     assert "another channel are not shown" in on_cli
     # The CLI cannot revoke the chat's grant; the chat can.
-    refused = todo.ctx.process_turn("/revoke_approval add_note", approval_surface=CLI).answer
-    assert "No standing approval for add_note" in refused
-    assert "Record/add_note" in todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
-    done = todo.ctx.process_turn("/revoke_approval add_note", approval_surface=CHAT).answer
+    refused = todo.ctx.process_turn("/revoke_approval show_notes", approval_surface=CLI).answer
+    assert "No standing approval for show_notes" in refused
+    assert "Record/show_notes" in todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
+    done = todo.ctx.process_turn("/revoke_approval show_notes", approval_surface=CHAT).answer
     assert "is revoked" in done
-    assert "Record/add_note" not in todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
+    assert "Record/show_notes" not in todo.ctx.process_turn("/approvals", approval_surface=CHAT).answer
 
 
 @pytest.mark.parametrize("surface", [CLI, CHAT], ids=["cli", "chat"])
@@ -919,4 +1004,4 @@ def test_the_reply_to_always_says_how_to_list_and_revoke_the_grant(todo, annotat
     out = _always_on(todo, surface)
     shown = "\n".join(o.command_response.response or "" for o in out.command_outputs)
     assert "/approvals" in shown and "/revoke_approval" in shown       # in the command's reply the user reads
-    assert _added(todo.chores, todo.base) == ["Ann"]                  # the command still ran once
+    assert todo.store.records[-1].state == "executed"                 # the command still ran once

@@ -176,6 +176,29 @@ class CommandDirectory(BaseModel):
     # Fingerprint of the command sources this snapshot was built from. Used to
     # invalidate the persisted cache when commands are added/removed/renamed/edited.
     source_fingerprint: Optional[str] = None
+    # The command files that could not be read, by command name: the file does not parse, defines both generator
+    # classes, or does not import. Such a command is not registered (not routable, not trained, not listed); its
+    # message names the file and is listed by ``command_preview.load_problems``. A mistake found later, by the checks
+    # that need the imported classes, is the command's load error too (``command_load_errors``).
+    load_errors: dict[str, str] = Field(default_factory=dict)
+
+    def record_load_error(self, command_name: str, command_file_path: str | Path, error: BaseException) -> None:
+        """Record that *command_name*'s file cannot be read and unregister the command: the rest of the workflow
+        still loads. The message names the file (relative to the workflow folder)."""
+        path = str(command_file_path)
+        shown = os.path.relpath(path, self.workflow_folderpath) if os.path.isabs(path) else path
+        if isinstance(error, ImportError) and error.__cause__ is not None:
+            error = error.__cause__     # python_utils.get_module wraps the import's own error
+        text = str(error)
+        if text.startswith(path):
+            text = text[len(path):].lstrip(": ")
+        if not isinstance(error, CommandFileError):
+            text = f"{type(error).__name__}: {text}"
+        if self.workflow_folderpath:
+            text += raised_in_helper(error, path, self.workflow_folderpath)
+        self.load_errors[command_name] = f"{shown}: {text}"
+        self.map_command_2_metadata.pop(command_name, None)
+        self.map_command_2_utterance_metadata.pop(command_name, None)
 
     def register_command_metadata(self, command_name: str, metadata: CommandMetadata):
         if not (command_name and metadata):
@@ -185,6 +208,12 @@ class CommandDirectory(BaseModel):
     def get_commands(self) -> list[str]:
         """Retrieve all command keys registered in the command directory."""
         return list(self.map_command_2_metadata.keys())
+
+    def runs_only_as_action(self, command_name: str) -> bool:
+        """Whether *command_name* is a command with no ``Signature`` (``declares_signature``), which runs only as an
+        action: never by name, by words or from a listing. False for a name the directory does not hold."""
+        metadata = self.map_command_2_metadata.get(command_name)
+        return metadata is not None and not declares_signature(metadata.response_generation_module_path)
 
     def get_execution_commands(self) -> list[str]:
         """Command names that are not planning commands (routing, training, catalogs)."""
@@ -286,8 +315,15 @@ class CommandDirectory(BaseModel):
 
         # Step 5: Populate utterance metadata when available (optional; defers imports)
         if hydrate_utterances:
-            for command_key in command_directory.map_command_2_metadata:
-                if utterance_metadata := command_directory.get_utterance_metadata(command_key):
+            for command_key in list(command_directory.map_command_2_metadata):
+                try:
+                    utterance_metadata = command_directory.get_utterance_metadata(command_key)
+                except Exception as error:  # noqa: BLE001 - a file that does not import costs that command only
+                    metadata = command_directory.map_command_2_metadata[command_key]
+                    command_directory.record_load_error(
+                        command_key, metadata.response_generation_module_path, error)
+                    continue
+                if utterance_metadata:
                     command_directory.register_utterance_metadata(command_key, utterance_metadata)
 
         # Step 6: Register core commands (processed last, lowest precedence)
@@ -350,37 +386,34 @@ class CommandDirectory(BaseModel):
         for item_path in commands_root_folder.glob("*.py"):
             if item_path.is_file() and not item_path.name.startswith("_") and item_path.name != "__init__.py":
                 command_name = item_path.stem
-                cls._register_command(command_directory, command_name, item_path, path)
+                cls._register_command_file(command_directory, command_name, item_path, path)
         
-        # Process subdirectories (contexts) and their commands
+        # Process subdirectories (contexts) and their commands. Every such folder is a context, whether or not it
+        # holds a command file of its own (a context whose commands are all inherited holds only its context class
+        # file); the context model refuses a folder that holds no command file and inherits none.
         for context_dir in commands_root_folder.iterdir():
             if context_dir.is_dir() and not context_dir.name.startswith("_"):
                 context_name = context_dir.name
-                
-                # Check if this context directory contains any command files
-                # (execution or planning — a planning-only context is not empty)
-                has_commands = False
-                
                 for command_file in context_dir.glob("*.py"):
                     if not command_file.name.startswith("_") and command_file.name != "__init__.py":
-                        has_commands = True
-                        command_name = command_file.stem
                         # Use qualified name format: "ContextName/command_name"
-                        qualified_command_name = f"{context_name}/{command_name}"
-                        cls._register_command(command_directory, qualified_command_name, command_file, path)
-                
-                # For the current workflow (not base workflows), enforce the no-empty-contexts rule
-                if not has_commands and path == command_directory.workflow_folderpath:
-                    # This is an empty context folder in the main workflow - flag as error
-                    raise ValueError(
-                        f"Context folder '{context_name}' exists but contains no command files. "
-                        f"Empty context folders are not allowed in the main workflow."
-                    )
-                
-                # After processing commands, attempt to register context class implementation if present
-                if has_commands:  # Only register context classes if there are actual commands
-                    cls._register_context_class(command_directory, context_name, context_dir, path)
+                        qualified_command_name = f"{context_name}/{command_file.stem}"
+                        cls._register_command_file(command_directory, qualified_command_name, command_file, path)
+                cls._register_context_class(command_directory, context_name, context_dir, path)
     
+    @classmethod
+    def _register_command_file(cls, command_directory: "CommandDirectory", command_name: str,
+                               command_file_path: Path, workflow_folderpath: str) -> None:
+        """Register one command file; a file that cannot be read (it does not parse, or it defines both generator
+        classes) is that command's load error, not the workflow's."""
+        try:
+            cls._register_command(command_directory, command_name, command_file_path, workflow_folderpath)
+        except (SyntaxError, ValueError) as error:
+            command_directory.record_load_error(command_name, command_file_path, error)
+            return
+        # a later workflow's file of the same name replaces a base's, broken or not
+        command_directory.load_errors.pop(command_name, None)
+
     @staticmethod
     def check_planning_command_path(name: str, path: str) -> None:
         """Validate a planning command's file name before load: its stem is a Python identifier.
@@ -624,17 +657,19 @@ class CommandDirectory(BaseModel):
 
     @classmethod
     def _register_context_class(cls, command_directory: "CommandDirectory", context_name: str, context_dir: Path, workflow_folderpath: str):
-        """Register a context callback implementation if a file named '_<ContextName>.py' (or without .py) exists."""
+        """Register a context callback implementation if a file named '_<ContextName>.py' exists.
 
-        # Primary expected filename with .py extension
-        candidate_with_ext = context_dir / f"_{context_name}.py"
-        candidate_no_ext = context_dir / f"_{context_name}"
+        An extensionless '_<ContextName>' (a spelling this loader once accepted) fails the load and names the
+        replacement."""
 
-        context_file_path: Optional[Path] = None
-        if candidate_with_ext.is_file():
-            context_file_path = candidate_with_ext
-        elif candidate_no_ext.is_file():
-            context_file_path = candidate_no_ext
+        context_file_path = context_dir / f"_{context_name}.py"
+        _check_context_class_file_name(context_name, context_dir)
+        if not context_file_path.is_file():
+            if (context_dir / f"_{context_name}").is_file():
+                raise ValueError(
+                    f"{context_dir / f'_{context_name}'}: the context class file is _{context_name}.py: "
+                    f"rename _{context_name} to _{context_name}.py")
+            context_file_path = None
 
         if context_file_path is None:
             # No context callback implementation available – silently ignore
@@ -769,24 +804,37 @@ def _handle_command_field_source_errors(
     *,
     workflow_folderpath: str | None = None,
 ) -> bool:
-    """Policy for a command whose ``Signature`` has ``from_`` / ``available_from`` errors.
-
-    Applies to execution and planning commands alike: log each problem once per process
-    (keyed by workflow folder and command name), leave the offending field's
-    ``available_from`` edge unwritten, and keep the command loadable (routable for
-    execution commands; matchable for planning commands). Preview ``--check`` still
-    fails on the reported errors.
-
-    Returns ``True`` to keep hydrating or loading the command, or ``False`` to skip it.
-    Kept in one place so the policy can be switched cleanly.
-    """
+    """Log a command's load errors (``command_load_errors``) once per process, keyed by workflow folder and
+    command name. Logging is all it does: the errors themselves make the command fail to load. Returns True."""
     if errs:
         wf_abs = os.path.abspath(workflow_folderpath) if workflow_folderpath else ""
         log_key = (wf_abs, command_name)
         if log_key not in _LOGGED_FIELD_SOURCE_COMMAND_ERRORS:
             _LOGGED_FIELD_SOURCE_COMMAND_ERRORS.add(log_key)
-            logger.error(f"command {command_name!r}: " + "; ".join(errs))
+            logger.error(f"command {command_name!r}: does not load: " + "; ".join(errs))
     return True
+
+
+def command_load_errors(directory: CommandDirectory, command_name: str) -> list[str]:
+    """Why *command_name* does not load, from the checks that read its imported classes
+    (``planning_commands.resolve_field_sources``): a ``from_command_output`` that does not resolve, a call
+    cycle, a facts field or a ``ui`` hint that is not valid, a retired or hand-written declaration, a
+    ``@descends_to`` target that is no context, a ``__call__`` that does not take three arguments, an
+    ``approval_template`` that cannot be filled, each as ``<file>: <message>``. Empty for a command of the
+    framework's own workflows and for one with none. A file that cannot be read at all is not here: it is not
+    registered (``CommandDirectory.load_errors``)."""
+    metadata = directory.map_command_2_metadata.get(command_name)
+    if metadata is None or not _is_subject_workflow_command(command_name, metadata, directory):
+        return []
+    wf_folder = directory.workflow_folderpath or metadata.workflow_folderpath
+    if not wf_folder:
+        return []
+    from fastworkflow import planning_commands  # circular import: planning_commands -> command_context_model -> command_directory
+
+    wf_abs = os.path.abspath(wf_folder)
+    if wf_abs in _RESOLVING_FIELD_SOURCES_WORKFLOWS:
+        return []
+    return planning_commands.resolve_field_sources(wf_abs).errors_for(command_name)
 
 
 def _ensure_workflow_field_sources_resolved(
@@ -839,15 +887,8 @@ def _ensure_workflow_field_sources_resolved(
     errs = resolution.errors_for(command_name) or [
         p.format() for p in cmd_problems if p.severity == "error"
     ]
-    # ``skipped_commands`` lists commands with a field-source error, not unloadable ones.
-    if errs or command_name in resolution.skipped_commands:
-        if not _handle_command_field_source_errors(
-            command_name, errs, workflow_folderpath=wf_abs
-        ):
-            metadata.parameter_extraction_signature_module_path = None
-            metadata.input_for_param_extraction_class = None
-            metadata.command_parameters_class = None
-            return False
+    # Logged here; the errors make every class fetch of the command fail (``command_load_errors``).
+    _handle_command_field_source_errors(command_name, errs, workflow_folderpath=wf_abs)
     return True
 
 
@@ -912,6 +953,58 @@ def check_no_planning_commands_folder(workflow_folderpath: str) -> None:
         raise ValueError(PLANNING_COMMANDS_FOLDER_RETIRED)
 
 
+class CommandLoadError(ValueError):
+    """Raised when a class of a command that does not load is asked for; the message is the command's load errors
+    (``command_load_errors``), each naming the file and what to write instead."""
+
+
+class CommandFileError(ValueError):
+    """A command file the loader cannot classify (it defines both generator classes): that command's load error."""
+
+
+def raised_in_helper(error: BaseException, command_file: str, workflow_folder: str) -> str:
+    """`` (in <helper file>, line N)`` when *error*, raised while a command file was imported, comes from a helper
+    module of the workflow (a file of ``_commands/`` other than the command's own), else "": the command's line then
+    names the file to fix as well as the command it breaks."""
+    import traceback
+
+    while isinstance(error, ImportError) and error.__cause__ is not None:
+        error = error.__cause__     # python_utils.get_module wraps the import's own error
+    commands = os.path.join(os.path.abspath(workflow_folder), "_commands") + os.sep
+    own = os.path.abspath(command_file)
+    frames = [frame for frame in traceback.extract_tb(error.__traceback__)
+              if os.path.abspath(frame.filename).startswith(commands) and os.path.abspath(frame.filename) != own]
+    if isinstance(error, SyntaxError) and error.filename and os.path.abspath(error.filename).startswith(commands) \
+            and os.path.abspath(error.filename) != own:
+        return f" (in {os.path.relpath(error.filename, workflow_folder)}, line {error.lineno})"
+    if not frames:
+        return ""
+    frame = frames[-1]
+    return f" (in {os.path.relpath(frame.filename, workflow_folder)}, line {frame.lineno})"
+
+
+def _check_context_class_file_name(context_name: str, context_dir: Path) -> None:
+    """Raise ValueError when a ``_*.py`` of the context folder other than ``_<Context>.py`` defines a top-level
+    ``class Context``: the loader reads the callbacks from ``_<Context>.py`` only, so they would be silently ignored."""
+    for path in sorted(context_dir.glob("_*.py")):
+        # _workflow.py is the workflow's own settings file: one in a context folder is reported, as never read, by
+        # workflow_agent.split_file_problems
+        if path.name in (f"_{context_name}.py", "_workflow.py"):
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+            if "class Context" not in source:
+                continue
+            tree = ast.parse(source, filename=str(path))
+        except (OSError, SyntaxError, ValueError):
+            continue    # a helper that cannot be read fails where it is imported
+        if any(isinstance(node, ast.ClassDef) and node.name == "Context" for node in tree.body):
+            fix = (f"rename {path.name} to _{context_name}.py" if not (context_dir / f"_{context_name}.py").is_file()
+                   else f"move the class to _{context_name}.py")
+            raise ValueError(f"{path}: defines class Context, but the context class file of {context_name} is "
+                             f"_{context_name}.py: {fix}")
+
+
 def _command_kind_from_ast(command_file_path: Path) -> tuple[str, bool]:
     """Return ``(response_generation_class_name, is_planning)`` without importing the module."""
     try:
@@ -930,12 +1023,84 @@ def _command_kind_from_ast(command_file_path: Path) -> tuple[str, bool]:
             elif node.name == "PlanGenerator":
                 has_plan_generator = True
     if has_response_generator and has_plan_generator:
-        raise ValueError(
-            f"{command_file_path}: defines both ResponseGenerator and PlanGenerator"
+        raise CommandFileError(
+            f"{command_file_path}: defines both ResponseGenerator and PlanGenerator; a command file holds one of "
+            "them: ResponseGenerator for a command that runs code, PlanGenerator for a planning command. Move the "
+            "other command to its own file"
         )
     if has_plan_generator:
         return "PlanGenerator", True
     return "ResponseGenerator", False
+
+
+def _top_level_names(tree: ast.Module) -> set[str]:
+    """The names a module's top level binds: classes, functions, assignments and imports (``as`` names included)."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return names
+
+
+@functools.lru_cache(maxsize=None)
+def _file_top_level_names(path: str, _mtime_ns: int) -> frozenset[str]:
+    try:
+        return frozenset(_top_level_names(ast.parse(Path(path).read_text(encoding="utf-8"))))
+    except (OSError, SyntaxError, ValueError):
+        return frozenset()
+
+
+def declares_signature(command_file_path: str | Path) -> bool:
+    """Whether a command file declares ``Signature`` (its top level binds the name: a class, or an import of one).
+
+    The one test of an action-only command (bd fix-apjz.9): a command with no ``Signature``, such as a startup command,
+    runs only as an action (the workflow's startup action, a direct action). No typed name, fuzzy name, local model or
+    remote model reaches it, and no listing names it; its name does not matter. Read from the file, no import; cached
+    per file and modification time. A file that cannot be read declares nothing."""
+    path = str(command_file_path)
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        return False
+    return "Signature" in _file_top_level_names(path, mtime)
+
+
+def missing_generator_problem(command_file_path: str | Path) -> str | None:
+    """Why a command file has no generator class, or None.
+
+    One rule, the one the scanner classifies by (``_command_kind_from_ast``): a generator is a CLASS named
+    ``ResponseGenerator`` or ``PlanGenerator`` defined at the file's top level (it may inherit a shared base from a
+    ``_`` module). So a file whose generator name is imported or assigned is refused, naming the class to define; a
+    file that binds ``Signature`` and defines no generator has a misspelled or missing one; and a file that defines
+    neither a ``Signature`` nor a generator is no command at all: a helper module, whose name starts with ``_``
+    (the scanner skips those before this is asked). A file with a generator and no ``Signature`` (a startup
+    command) is a command and is not reported.
+    """
+    try:
+        tree = ast.parse(Path(command_file_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return None     # a file that cannot be read or parsed fails its own load, with its own message
+    names = _top_level_names(tree)
+    defined = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    generators = {"ResponseGenerator", "PlanGenerator"}
+    if defined & generators:
+        return None
+    if bound := sorted((names & generators) - defined):
+        return (f"{command_file_path}: {bound[0]} is imported or assigned here, not defined; a generator is a class "
+                f"defined in the command file: write class {bound[0]}(<base>) in this file (it may inherit a base "
+                "from a _ helper module)")
+    if "Signature" not in names:
+        return (f"{command_file_path}: is not a command: it defines no Signature, ResponseGenerator or "
+                "PlanGenerator. A file in _commands/ is a command; name a helper module with a leading underscore "
+                f"(_{Path(command_file_path).name})")
+    return (f"{command_file_path}: has a Signature but no ResponseGenerator or PlanGenerator; the class name must be "
+            "exactly ResponseGenerator (a command that runs code) or PlanGenerator (a planning command); "
+            "check its spelling and case")
 
 
 def _command_source_roots(workflow_folderpath: str) -> list[Path]:
@@ -961,6 +1126,25 @@ def _command_source_roots(workflow_folderpath: str) -> list[Path]:
     return roots
 
 
+#: Per resolved workflow folder, what its last full scan saw: the stat of ``workflow_inheritance_model.json`` (which
+#: decides the roots), the stat of every directory under the roots (and of each root), and the source files found.
+#: The fingerprint is read on every direct action (``intent_loop.choose`` -> ``planning_commands.resolve_field_sources``);
+#: while no directory changed (nothing was added, removed or renamed) the files are only stat-ed again.
+_SOURCE_SCANS: dict[str, tuple] = {}
+
+
+def _stat_key(path) -> Optional[tuple[int, int]]:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def _source_digest(entries: list[tuple[str, int, int]]) -> str:
+    return hashlib.sha256(repr(sorted(entries)).encode("utf-8")).hexdigest()
+
+
 def compute_commands_source_fingerprint(workflow_folderpath: str) -> str:
     """Fingerprint the command sources a snapshot is derived from.
 
@@ -968,14 +1152,39 @@ def compute_commands_source_fingerprint(workflow_folderpath: str) -> str:
     `(size, mtime_ns)`. Unlike a "newest mtime" comparison, this detects
     additions, deletions, renames, and edits uniformly, which is required to
     safely invalidate `command_directory.json` and `routing_definition.json`.
+
+    Always exact, never a time window: when the inheritance file and every directory of the last scan are as they
+    were (no file was added, removed or renamed), the files that scan found are stat-ed again and hashed; otherwise
+    the roots are scanned again (``_SOURCE_SCANS``). An edit in place changes the file's own stat.
     """
     workflow_folderpath = str(Path(workflow_folderpath).resolve())
-    entries: list[tuple[str, int, int]] = []
+    inheritance = os.path.join(workflow_folderpath, "workflow_inheritance_model.json")
+    scan = _SOURCE_SCANS.get(workflow_folderpath)
+    if scan is not None:
+        inheritance_key, directories, files = scan
+        if _stat_key(inheritance) == inheritance_key and all(
+                _stat_key(directory) == key for directory, key in directories.items()):
+            entries: list[tuple[str, int, int]] = []
+            for path in files:
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    break           # gone without its directory changing (a race): scan again below
+                entries.append((path, st.st_size, st.st_mtime_ns))
+            else:
+                return _source_digest(entries)
 
+    inheritance_key = _stat_key(inheritance)
+    directories: dict[str, Optional[tuple[int, int]]] = {}
+    entries = []
     for root in _command_source_roots(workflow_folderpath):
+        directories[str(root)] = _stat_key(root)      # a root that appears later is a change too
         if not root.is_dir():
             continue
         for p in root.rglob("*"):
+            if p.is_dir():
+                directories[str(p)] = _stat_key(p)
+                continue
             if not p.is_file():
                 continue
             if p.suffix == ".py" or p.name in _CONTEXT_MODEL_BASENAMES:
@@ -985,7 +1194,8 @@ def compute_commands_source_fingerprint(workflow_folderpath: str) -> str:
     # No hierarchy file is fingerprinted: parents come from the live chain, and a leftover
     # context_hierarchy_model.json is ignored (see CommandContextModel.load).
 
-    return hashlib.sha256(repr(sorted(entries)).encode("utf-8")).hexdigest()
+    _SOURCE_SCANS[workflow_folderpath] = (inheritance_key, directories, [path for path, _, _ in entries])
+    return _source_digest(entries)
 
 
 def _recorded_modules_exist(directory: "CommandDirectory") -> bool:

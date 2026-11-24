@@ -168,7 +168,7 @@ def test_a_star_base_is_valid_when_the_star_context_is_not_in_the_model():
         "User": {"base": ["*"], "/": ["User/send_message"]},
     })
     assert model.commands("User") == ["User/send_message"]
-    with pytest.raises(CommandContextModelValidationError, match="Context 'NoSuchBase' not found"):
+    with pytest.raises(CommandContextModelValidationError, match="context 'User' declares the base 'NoSuchBase', which is no context"):
         CommandContextModel(_workflow_path="unused", _command_contexts={
             "User": {"base": ["NoSuchBase"], "/": ["User/send_message"]},
         }).commands("User")

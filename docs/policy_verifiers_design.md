@@ -34,8 +34,9 @@ When it holds, the step is not taken and the agent reads the rule's text instead
 - **Rewrite, do not refuse.** The rewrite becomes the step's observation. A refusal costs an
   iteration and is usually re-proposed; a rewrite says what to do instead.
 - **Facts are declared.** `ContractFacts`, supplied with the table, says:
-  - which commands write;
-  - the identifier shapes (defaulting to the workflow's `_commands/_split.py`
+  - which commands write (the loader fills this from the workflow's `@fastworkflow.writes` marks; a table
+    that lists them itself fails to load);
+  - the identifier shapes (defaulting to the workflow's `_commands/_workflow.py`
     `identifier_patterns`);
   - the closed argument domains;
   - the operation vocabulary;

@@ -13,7 +13,7 @@ Depth: 2 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `title` | str | required | `<title>` |  | yes | the book's title |
+| `title` | str | required | `Dune` |  | yes | the book's title |
 
 - `title` must be written in the command text (`copied_from_command_text`).
 
@@ -65,7 +65,7 @@ For the sample inputs; no input changes them.
 
 Reads no earlier facts. Output: `Output`.
 
-1. `book_by_title title=<title>`
+1. `book_by_title title=Dune`
 
 Answer: written by the model (step 1 needs judgement).
 

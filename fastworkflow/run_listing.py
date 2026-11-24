@@ -47,8 +47,10 @@ def _routing_registry():
 
 #: A listing whose full text is at most this many characters is given whole (production policy). Set from the
 #: offline measurement of Phase 10 step 4 (10.7): the library's full listing (6,516 characters from its Library
-#: context) is whole, the no-hints tutorial's (6,353) too, and the app's (82,055) is shortlisted.
-FULL_LISTING_MAX_CHARS = 7000
+#: context) is whole, the no-hints tutorial's (6,353) too, and the app's (82,055) is shortlisted. Raised from 7000 to
+#: 8000 on 2026-11-22 (fix-xj0x): the bundled library example with declared input examples is about 7,700 characters
+#: (Output-field examples are no longer rendered in the listing), and it stays whole.
+FULL_LISTING_MAX_CHARS = 8000
 
 #: A planning command's unsure candidate: a probability at least this, below the match threshold. PROVISIONAL
 #: (offline); the 10.7 measurement used this value.
@@ -443,11 +445,10 @@ def _global_line(crd, holding: set[str]) -> str:
     every context by name, so the run must see that they exist). Empty when the global scope is holding, or has none."""
     if "*" in holding:
         return ""
-    # startup is not a command a sub-task's run calls: production's full listing never shows it, and the trainer
-    # never labels it (model_pipeline_training.STARTUP_COMMAND). Only the global commands the agent can call are named.
-    from fastworkflow.model_pipeline_training import STARTUP_COMMAND
-
-    names = sorted({name for name in _context_names(crd, "*") if "/" not in name and name != STARTUP_COMMAND})
+    # A command with no Signature (a startup command) is not one a sub-task's run calls: it runs only as an action
+    # (``CommandDirectory.runs_only_as_action``). Only the global commands the agent can call are named.
+    names = sorted({name for name in _context_names(crd, "*")
+                    if "/" not in name and not crd.command_directory.runs_only_as_action(name)})
     if not names:
         return ""
     return ("Global commands (callable from anywhere by name, no navigation): "

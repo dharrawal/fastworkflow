@@ -75,7 +75,7 @@ PLAN_COMMANDS = {
         code: str = Field(default="", description="a shelf code", examples=["XY-12"], json_schema_extra={"copied_from_command_text": True})''',
                            'f"label {input.name} {input.code}"'),
     "drift_converted": _command("drift_converted", "Set a due date.", '''        name: str = Field(default="", description="a person's name", json_schema_extra={"copied_from_command_text": True})
-        due: str = Field(default="", description="the due date, YYYY-MM-DD", examples=["2024-05-20"], json_schema_extra={"converted_from_command_text": True})''',
+        due: str = Field(default="", description="the due date, YYYY-MM-DD", examples=["2024-05-20"])''',
                            'f"set the due date of {input.name} to {input.due}"'),
     "drift_shelf": '''
 from pydantic import BaseModel, Field
@@ -143,13 +143,12 @@ class PlanGenerator:
 class ExecStr(BaseModel):
     """An execution ``Input`` with every ``str`` shape the execution guard reads."""
 
-    name: str = Field(description="a person's name")
-    nick: Optional[str] = Field(default=None, description="a nickname")
-    code: str = Field(default="", description="a code", examples=["XY-12"])
-    conv: str = Field(default="", description="a converted value", examples=["2024-05-20"],
-                      json_schema_extra={"converted_from_command_text": True})
+    name: str = Field(description="a person's name", json_schema_extra={"copied_from_command_text": True})
+    nick: Optional[str] = Field(default=None, description="a nickname", json_schema_extra={"copied_from_command_text": True})
+    code: str = Field(default="", description="a code", examples=["XY-12"], json_schema_extra={"copied_from_command_text": True})
+    conv: str = Field(default="", description="an unmarked value", examples=["2024-05-20"])
     shelf: str = Field(default="", description="a shelf", examples=["#S1"], pattern=r"^#S[0-9]+$")
-    enum_s: str = Field(default="book", description="a kind", json_schema_extra={"enum": ["book", "Member", "branch"]})
+    enum_s: Literal["book", "Member", "branch"] = Field(default="book", description="a kind")
     one_of: str = Field(default="red", description="a colour. One of: red, Green, blue")
     prose: str = Field(default="", description="a text. One of the many things; not a list")
 
@@ -157,11 +156,11 @@ class ExecStr(BaseModel):
 class ExecNum(BaseModel):
     """An execution ``Input`` with the numbers, and the types the guard leaves alone."""
 
-    count: int = Field(default=0, description="how many")
-    size: int = Field(default=5, description="a size")
+    count: int = Field(default=0, description="how many", json_schema_extra={"copied_from_command_text": True})
+    size: int = Field(default=5, description="a size", json_schema_extra={"copied_from_command_text": True})
     opt_count: Optional[int] = Field(default=None, description="an optional count")
-    conv_count: int = Field(default=0, description="converted", json_schema_extra={"converted_from_command_text": True})
-    title: str = Field(default="", description="a title")
+    conv_count: int = Field(default=0, description="an unmarked count")
+    title: str = Field(default="", description="a title", json_schema_extra={"copied_from_command_text": True})
     ratio: float = Field(default=1.0, description="a ratio")
     flag: bool = Field(default=False, description="a flag")
     tags: list[str] = Field(default_factory=list, description="tags")
@@ -180,8 +179,7 @@ class ExecOptions(BaseModel):
 
 
 class ChoiceText(BaseModel):
-    kind_text: str = Field(default="book", description="the kind of record",
-                           json_schema_extra={"enum": ["book", "member", "branch"]})
+    kind_text: Literal["book", "member", "branch"] = Field(default="book", description="the kind of record")
 
 
 EXEC_MODELS = {"ExecStr": ExecStr, "ExecNum": ExecNum, "ExecOptions": ExecOptions, "ChoiceText": ChoiceText}

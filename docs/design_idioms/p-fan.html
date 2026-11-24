@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Once per item · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="p-fan">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group planning">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="p-fan">
+      <div class="prose">
+        <p class="num">06</p>
+        <h3>Once per item</h3>
+        <p>Use this when a request needs the same small job done for each thing an earlier step found: "open each book by this author and tell me its copies". You write the job once, for one item, and mark the method with <code>@phase(over=...)</code>. The framework runs it once per item and hands you the results as a list.</p>
+        <p>A few words first. A <em>planning command</em> is a command whose file lists steps for the framework to carry out instead of running its own code (see <a href="p-plan.html">A plan in place of a body</a>). Its <code>PlanGenerator</code> class splits the job into <em>phases</em>: each public method is one phase, run in the order written, and returns its steps as a list. A phase's return annotation is the <em>facts</em> it hands on, the typed <code>Output</code> of a command it runs (see <a href="p-facts.html">What a phase hands on</a>). A later method reads them through a parameter with the phase's name.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/author_books.py</figcaption>
+        <pre><code>from pydantic import BaseModel, Field
+
+from fastworkflow.planning import phase, run
+
+from ._wording import copies
+from .find_book import Signature as FindBook
+from .open_book import Signature as OpenBook
+
+
+class Signature:
+    """Name each book by an author, with how many copies the library owns."""
+
+    plain_utterances = [
+        "what do you have by Frank Herbert, and how many copies of each",
+        <span class="c"># ... seven more phrasings</span>
+    ]
+
+    class Input(BaseModel):
+        author: str = Field(description="the author's name",
+                            json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input) -&gt; FindBook.Output:
+        return [run("find_book", query=input.author)]
+
+    <span class="c"># once per uid in find's book_uids, at most five</span>
+    @phase(over="find.book_uids", max_items=5, noun="books")
+    def book(self, uid) -&gt; OpenBook.Output:     <span class="c"># uid: one item</span>
+        return [run("open_book", book_uid=uid)]
+
+    def __result__(self, input, book):            <span class="c"># book: a list, one Output per item</span>
+        if not book:
+            return f"No book by {input.author} was found."
+        each = "; ".join(f"{b.title} ({copies(b.copies)})" for b in book)
+        return f"The books by {input.author}: {each}."</code></pre>
+      </figure>
+      <div class="prose">
+        <p>What each part does:</p>
+        <ul>
+          <li><code>over="find.book_uids"</code> names the list: the phase <code>find</code>, then a field (or property) of its facts. Every name of the path is checked when the workflow loads, except the names after a property with no return annotation (<code>-&gt; list[str]</code>), which are checked when the phase runs. A path that ends on one value rather than a list fails the load ("reads one value ..., not a list, so the fan-out would run once"). Empty values and repeats are dropped, order is kept. <code>over</code> may also be a list, or a function of <code>input</code> that returns one.</li>
+          <li>The method's one parameter that is neither <code>input</code> nor the name of a phase receives the item, here <code>uid</code>. A parameter named after a later phase is excluded too, and a parameter with a default counts as a second item. With no such parameter, or with two, the command fails to load, naming the phase (the load reports <code>plan() fails on placeholder inputs</code>).</li>
+          <li><code>max_items</code> caps the items run (10 when you leave it out). When the list was longer, the answer ends with "Note: only the first 5 of 7 books were covered." <code>noun</code> is the word that note uses, "items" without it. <code>until=</code>, a function whose parameter named after the phase gets the items' facts so far, stops the fan-out when it returns true; a phase with <code>until</code> writes no cap note. <code>max_items</code>, <code>bind</code> and <code>until</code> on a phase with no <code>over=</code> fail the load ("is for a fan-out phase, which runs once per item: add over=..., or leave ... out"), and so does <code>noun</code>.</li>
+          <li><code>bind</code> (default <code>True</code>) says each item is a record its steps open, like the book <code>open_book</code> opens. Write <code>bind=False</code> when the items are not records, for example names or uids you only look up. A <code>bind</code> that is not <code>True</code> or <code>False</code> (or a function of <code>input</code>) fails the load.</li>
+          <li>Like <code>over</code>, every other option (<code>max_items</code>, <code>noun</code>, <code>bind</code>, <code>optional</code>, <code>until</code>) may be a function of <code>input</code> alone, decided when the call is planned.</li>
+          <li>Any parameter named after the phase (in <code>__result__</code>, as here, or in a later phase) gets the LIST of the items' facts, typed, in item order. It is empty when the list was empty; the phase then runs nothing.</li>
+        </ul>
+        <p>At run time each item is its own small run: the framework writes that item's steps by calling <code>book(uid)</code>, and code runs the steps it can (see <a href="p-run.html">A step the code runs</a>) before a model takes any step. Each item gets a fresh budget of 15 model steps (when the fan-out is the command's only phase, each item gets the agent's own step cap instead). The count of writes resets too: a command marked <code>@writes</code> (see <a href="e-writes.html">A command that changes data</a>) that an item's steps name once may run once for each item, never twice for one. Nothing moves the workflow back between items, so the second item starts where the first ended; a step whose command belongs to an enclosing context, such as <code>open_book</code> on the library, still runs there. Inside a planning command that another planning command called, the turn-wide limit <code>FW_TURN_MAX_STEPS</code> (default 400) also stops the remaining items once it is spent.</p>
+        <p>When one item's step is left open (code cannot write it in full), the agent's model does the rest of that item's steps, and the next item starts again with code. With no agent model configured (<code>LLM_AGENT</code> unset), the command stops at that step instead, and the answer says what ran; a yes-or-no step, or a step missing one plain value, asks the user first when someone is there to answer. When an item cannot be filled, the whole command stops: later items and phases do not run, and the answer shows the facts gathered so far and a line that starts "This job stopped at its part 'book', which failed: item b3: ..." naming the phase and the item. Mark the phase <code>@phase(over=..., optional=True)</code> when the answer can do without it: a failed item then makes the phase count as not run (the items that did succeed are dropped too, and <code>__result__</code> gets <code>None</code> for it), and the next phase runs.</p>
+        <p>The beginner's mistake: keeping <code>bind=True</code> over items whose steps never open a record. When the phase has a return annotation (facts), each item then fails with "item b3 was never opened: no command ran on a record that names it"; with no annotation the item does not fail, and the agent's run is only told to open the record. <code>fastworkflow command run-code &lt;workflow folder&gt; author_books --input '{"author": "Jane Austen"}'</code> prints one "Phase book (item b3)" block per item; each item's <code>open_book</code>, a Library command, runs on the library although the workflow stands on the previous book, as in a real run. run-code does not check <code>bind</code> (it fills an item that was never opened, which a real run fails), does not evaluate <code>until</code>, prints no cap note, and exits 1 on a failed item where <code>optional=True</code> would drop the phase.</p>
+        <p class="see">See also <a href="p-result.html">The answer, in code</a> for <code>__result__</code>, and <a href="e-object.html#e-move">Move onto a record</a> for opening a record.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="p-result.html"><span>Previous</span>The answer, in code</a>
+    <a class="next" href="p-call.html"><span>Next</span>Calling a planning command</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

@@ -85,6 +85,12 @@ class Extraction:
     invalid: tuple[tuple[str, str], ...] = ()
     earlier: tuple[str, ...] = ()
     reason: str = ""
+    #: For a missing name whose value the guards refused as not given (a pronoun, a vocabulary word, a placeholder): the
+    #: value with the reason, as the question says it (``Gap.screened``). Wording only: it does not change what is open.
+    screened: tuple[tuple[str, str], ...] = field(default=(), compare=False)
+    #: The duplicate rule's notes of the optional fields it left not given (``ask.left_empty_line``), one line each: said
+    #: before a question about these values. Wording only: such a field is not open.
+    left_empty: tuple[str, ...] = field(default=(), compare=False)
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -118,7 +124,9 @@ class Extraction:
         moved = tuple(name for name in self.names if name in names)
         return Extraction(values=self.values, missing=tuple(n for n in self.missing if n not in names),
                           invalid=tuple((n, why) for n, why in self.invalid if n not in names),
-                          earlier=tuple(dict.fromkeys([*self.earlier, *moved])), reason=self.reason)
+                          earlier=tuple(dict.fromkeys([*self.earlier, *moved])), reason=self.reason,
+                          screened=tuple((n, text) for n, text in self.screened if n not in names),
+                          left_empty=self.left_empty)
 
     def request(self, command: str, *, stringify: bool = True) -> Optional[dict]:
         """The open parameters as data for a client that renders a form (``parameter_request``: ``command``, ``missing``,
@@ -130,7 +138,6 @@ class Extraction:
                 "values": {name: str(value) if stringify else value for name, value in self.values.items()}}
 
 
-_ACCEPT = read.ACCEPT_WORDS
 _PARAMETER_LINE = read.PARAMETER_LINE
 
 
@@ -321,6 +328,12 @@ def waited_of(held) -> int:
     return int(held.payload.get("waited") or 0) if held is not None else 0
 
 
+def wait_question(question: str) -> str:
+    """What a reply that asks for a moment gets, for every question that reads it (a plan part's values, the CME's
+    parameter question, a plan's decision step): one line, then the same question as it was (bd fix-ftdl.7.8, D9)."""
+    return f"{replies.WAIT_TEXT}\n\n{question}"
+
+
 def store(context: dict, loop: ParameterLoop, after: str = AFTER_RUN_COMMAND, waited: int = 0) -> None:
     """Make *loop* the turn's one pending question: the parameter loop replaces whatever question the CME held (the port
     holds one record at a time). *after* says what follows the answer (``AFTER_RUN_COMMAND``, ``AFTER_EDIT_SLOT``)."""
@@ -388,11 +401,12 @@ def record_round(loop: ParameterLoop, extraction: Extraction, question: str) -> 
 
 
 def open_loop(command, gaps, *, request_text: str, origin: Optional[int] = None, confirm: bool = False,
-              description: str = "", refusal=None,
-              values: Optional[dict] = None) -> tuple[ParameterLoop, Outcome]:
-    """A new loop for planning command *command* and its first question. *gaps* is what the call lacks
-    (``planning_commands.argument_gaps``); its checked values, and *values* when given, are the values kept."""
-    loop = ParameterLoop(command=command.name, kind=KIND_PLANNING, request_text=str(request_text or ""), origin=origin,
+              description: str = "", refusal=None, values: Optional[dict] = None,
+              kind: str = KIND_PLANNING) -> tuple[ParameterLoop, Outcome]:
+    """A new loop for *command* (a planning command, or an execution command as ``planning_commands.execution_command``
+    states it: *kind*) and its first question. *gaps* is what the call lacks (``planning_commands.argument_gaps``); its
+    checked values, and *values* when given, are the values kept."""
+    loop = ParameterLoop(command=command.name, kind=kind, request_text=str(request_text or ""), origin=origin,
                          confirm=confirm,
                          values={name: str(value) for name, value in (values or {}).items() if value is not None})
     _take_gaps(loop, gaps)
@@ -455,7 +469,7 @@ def advance(loop: ParameterLoop, reply: str, command, *,
     if kind == REPLY_DECLINE:
         return Outcome(DECLINED, missing=tuple(loop.open), reply_kind=kind)
     if kind == replies.WAIT and not waited:
-        return Outcome(WAIT, question=f"{replies.WAIT_TEXT}\n\n{loop.question}", request=loop.request,
+        return Outcome(WAIT, question=wait_question(loop.question), request=loop.request,
                        missing=tuple(loop.open), reply_kind=kind, waited=1)
     if kind in (replies.MISUNDERSTOOD, replies.DIFFERENT):
         return Outcome(kind, missing=tuple(loop.open), reply_kind=kind)

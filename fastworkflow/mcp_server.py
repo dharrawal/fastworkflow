@@ -129,8 +129,6 @@ class FastWorkflowMCPServer:
         Returns:
             List of tool definitions in MCP format
         """
-        from fastworkflow.utils.signatures import NOT_FOUND
-
         # Get available commands from workflow
         workflow = self._active_workflow()
         workflow_folderpath = workflow.folderpath
@@ -184,7 +182,7 @@ class FastWorkflowMCPServer:
                     field_descriptions.append(desc)
                 else:
                     field_descriptions.append(field_name)
-                if param.get("required") or param.get("default") == NOT_FOUND:
+                if param.get("required"):
                     input_schema["required"].append(field_name)
                 input_schema["properties"][field_name] = prop
 

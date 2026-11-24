@@ -161,9 +161,11 @@ def _script(*values):
 
 
 def _refuse_text(*bad):
-    """A stage that refuses the values in *bad* with the value as the refusal."""
+    """A stage that refuses the values in *bad* with the value as the refusal, naming the field it refused (a refusal
+    that names none is not read again: ``test_a_refusal_that_names_no_field_gets_no_second_fill``)."""
     def stage(value, attempt):
-        return pipeline.Verdict(pipeline.KIND_REFUSED, str(value), value) if value in bad else pipeline.Verdict(detail=value)
+        return (pipeline.Verdict(pipeline.KIND_REFUSED, str(value), value, open=("value",)) if value in bad
+                else pipeline.Verdict(detail=value))
     return stage
 
 
@@ -269,7 +271,7 @@ def _failing_second(retry):
 
     def stage(value, attempt):
         judged.append(attempt)
-        return pipeline.Verdict(pipeline.KIND_REFUSED, "bad")
+        return pipeline.Verdict(pipeline.KIND_REFUSED, "bad", open=("value",))
 
     return fill_text, stage, judged, calls
 
@@ -356,20 +358,22 @@ def test_the_retry_of_the_plan_paths_and_the_execution_path_is_one_rule(environm
 # ---------------------------------------------------------------- 6. a parse failure is a refusal (bd fix-qoyz step 6, item 1)
 
 def _unparsed_case(site: str, command: str, text: str, bad: dict, good: dict, **more) -> dict:
-    """A case whose first three extractor answers (every attempt of the first fill) are outside the field's Literal
-    and so cannot be parsed, then one good answer for the second fill."""
+    """A case whose first extractor answer is outside the field's Literal (read as text: the guard refuses that one
+    field, every other field of the answer keeps its value), then one good answer for the second fill. A text
+    ``Literal`` no longer fails a whole answer; the whole-answer retry is covered in ``test_one_spelling_fields``."""
     return {"id": f"unparsed-{site}-{command}", "site": site, "command": command, "text": text,
-            "answers": [bad, bad, bad, good], **more}
+            "answers": [bad, good], **more}
 
 
 def test_every_attempt_failing_to_parse_gets_the_one_second_pass_on_the_execution_path(environment):
     case = _unparsed_case("impl", "lend_book", "place a hold on Dune for Ann Lee",
                           corpus.LEND(kind="borrow"), corpus.LEND(kind="hold"))
     out = corpus.run_case(environment, case)
-    assert out["model_calls"] == 4
+    assert out["model_calls"] == 2
     assert out["output"]["valid"] is True and out["output"]["params"]["kind"] == "hold"
-    # the second pass carries the reason, in the refusal note
-    assert "did not fit the allowed values" in out["prompts"][3]
+    # the second pass carries the one refused field and its allowed values, in the refusal note
+    assert "kind='borrow' is not one of loan, hold" in out["prompts"][1]
+    assert out["output"]["params"]["member"] == "Ann Lee"
 
 
 def test_a_missing_value_still_gets_no_second_pass_on_the_execution_path(environment):
@@ -386,8 +390,11 @@ def test_every_attempt_failing_to_parse_gets_the_one_second_pass_on_the_planning
         if site == "typed":
             case["planner"] = [corpus.A(steps_before=[], steps_after=[])]
         out = corpus.run_case(environment, case)
-        assert out["model_calls"] == 4, (site, out)
-        assert "did not fit the allowed values" in out["prompts"][3], site
+        assert out["model_calls"] == 2, (site, out)
+        # the refusal's words differ by where it is found (the guard: "is not one of ..."; the validator's list of
+        # "Valid values"), and either names the field and every allowed value
+        note = out["prompts"][1].split("(A first extraction", 1)[1]
+        assert "entity_type" in note and "identity" in note and "account" in note, site
 
 
 # ---------------------------------------------------------------- 7. a refusal that names no input is not a question
@@ -401,6 +408,26 @@ def test_a_refusal_naming_no_input_ends_the_execution_command_with_no_pending_lo
     assert out["output"]["error_msg"] == "this does not fit the request"
     assert "parameter_loop" not in out["cme_context"]
     assert out["output"]["parameter_request"] is None
+
+
+@pytest.mark.parametrize("mode", ["assist", "agent", "slash"])
+def test_a_refusal_naming_no_input_is_not_read_again_so_a_rewritten_answer_does_not_run(environment, mode):
+    """bd fix-ftdl.9: the second answer would pass the validator, but nobody asked for it: one model call, and the
+    command ends with the validator's message."""
+    case = {"id": "nf2", "site": "impl", "command": "shelf_code", "text": "label the shelf NOFIELD", "mode": mode,
+            "answers": [corpus.A(code="NOFIELD", floor=0), corpus.A(code="GOOD", floor=0)]}
+    out = corpus.run_case(environment, case)
+    assert out["model_calls"] == 1
+    assert out["output"]["valid"] is False and out["output"]["error_msg"] == "this does not fit the request"
+
+
+def test_a_planning_refusal_naming_no_input_is_not_read_again(environment):
+    """The same rule on a planning command's arguments: no second fill, the refusal stands."""
+    case = {"id": "nf3", "site": "args", "command": "ledger_pc", "text": "write a line for Nobody and Ann Lee",
+            "answers": [corpus.LEDGER(owner="Nobody"), corpus.LEDGER(owner="Ann Lee")]}
+    out = corpus.run_case(environment, case)
+    assert out["model_calls"] == 1
+    assert out["result"]["valid"] is False, out
 
 
 def test_a_refusal_naming_a_field_is_still_asked(environment):
@@ -484,3 +511,100 @@ def test_a_planning_validator_sees_the_request_as_it_was_given_which_is_the_loop
             "answers": [corpus.A(owner="Ann Lee", count=3, code="")]}
     corpus.run_case(environment, case)
     assert set(seen) - {""} == {text}   # the empty text is the template builder's own probe
+
+
+# ---------------------------------------------------------------- 9. the second fill answers the refusal and nothing else
+
+def test_the_second_fill_does_not_replace_a_value_the_first_verdict_did_not_name():
+    fill_text, asked = _script({"name": "Ann Lee", "code": "BAD"}, {"name": "Ann_Lee", "code": "OK"})
+
+    def validate(values, attempt):
+        if values["code"] == "BAD":
+            return pipeline.Verdict(pipeline.KIND_REFUSED, "code='BAD' is closed", values, open=("code",))
+        return pipeline.Verdict(detail=values)
+
+    done = pipeline.extract(fill_text, validate=validate, retry_note=RETRY)
+    assert len(asked) == 2 and done.final.ok and done.retried_at == "validate"
+    assert done.params == {"name": "Ann Lee", "code": "OK"}
+
+
+def test_the_second_fill_is_merged_into_the_answer_as_the_model_gave_it_not_as_a_stage_wrote_it():
+    """A stage that writes on the values (a respelling, a cleared field) does not leave its writes in the merged
+    answer: the stages judge the merged answer again and write what they write again."""
+    fill_text, _ = _script({"name": "ann lee", "code": "BAD"}, {"name": "x", "code": "OK"})
+
+    def validate(values, attempt):
+        values["name"] = values["name"].title()        # a stage writing in place
+        if values["code"] == "BAD":
+            return pipeline.Verdict(pipeline.KIND_REFUSED, "closed", values, open=("code",))
+        return pipeline.Verdict(detail=values)
+
+    done = pipeline.extract(fill_text, validate=validate, retry_note=RETRY)
+    assert done.params == {"name": "Ann Lee", "code": "OK"}
+
+
+def test_a_refusal_that_names_no_field_gets_no_second_fill():
+    """bd fix-ftdl.9: a refusal that names no field is not read again (its second answer used to be taken whole, so the
+    command could run with values the model rewrote and nobody was asked); the first answer and its refusal stand, for
+    the caller to end the command (execution) or hand the call on (plan)."""
+    fill_text, asked = _script({"name": "Ann Lee", "code": "BAD"}, {"name": "Bob", "code": "OK"})
+    for check in (None, lambda v, a: pipeline.Verdict(pipeline.KIND_REFUSED, "no fit", v)):
+        asked.clear()
+        done = pipeline.extract(
+            fill_text, retry_note=RETRY, check=check,
+            validate=lambda v, a: pipeline.Verdict(pipeline.KIND_REFUSED, "no fit", v) if v["code"] == "BAD"
+            else pipeline.Verdict(detail=v))
+        assert len(asked) == 1 and not done.retried and not done.final.ok
+        assert done.params == {"name": "Ann Lee", "code": "BAD"} and done.final.refusal == "no fit"
+
+
+def test_an_unparsed_first_answer_takes_the_second_answer_whole():
+    fill_text, _ = _script({"name": None, "code": None}, {"name": "Ann Lee", "code": "OK"})
+    done = pipeline.extract(
+        fill_text, retry_note=RETRY, unparsed=lambda: True,
+        validate=lambda v, a: pipeline.Verdict(pipeline.KIND_REFUSED, "bad", v, open=("code",)) if v["code"] != "OK"
+        else pipeline.Verdict(detail=v))
+    assert done.params == {"name": "Ann Lee", "code": "OK"}
+
+
+def test_answered_merges_a_model_by_field():
+    class _M(BaseModel):
+        name: str
+        code: str
+
+    merged = pipeline.answered(_M(name="Ann Lee", code="BAD"), _M(name="Ann_Lee", code="OK"), ("code",))
+    assert (merged.name, merged.code) == ("Ann Lee", "OK")
+    assert pipeline.answered("a", "b", ("code",)) == "b"
+
+
+def test_a_marked_value_the_first_fill_had_right_survives_a_second_fill_for_another_field_on_the_execution_path(
+        environment):
+    """The guard refuses the placeholder note; the second fill writes the member with an underscore. Only the note is
+    taken from it: the member the first fill had right stands, and the command's values are valid."""
+    case = {"id": "x", "site": "impl", "command": "lend_book", "text": "lend Dune to Ann Lee",
+            "answers": [corpus.LEND(note="<note>"), corpus.LEND(member="Ann_Lee", note=None)]}
+    out = corpus.run_case(environment, case)
+    assert out["model_calls"] == 2
+    assert out["output"]["valid"] is True and out["output"]["params"]["member"] == "Ann Lee"
+
+
+@pytest.mark.parametrize("site", ["typed", "args"])
+def test_a_marked_value_the_first_fill_had_right_survives_a_second_fill_for_another_field_on_the_planning_paths(
+        environment, site):
+    case = {"id": "x", "site": site, "command": "ledger_pc", "text": "write a line for Ann Lee with code BAD",
+            "answers": [corpus.LEDGER(code="BAD"), corpus.LEDGER(owner="Ann_Lee", code="OK")],
+            "planner": [corpus.A(steps_before=[], steps_after=[])]}
+    out = corpus.run_case(environment, case)
+    assert out["model_calls"] == 2
+    values = out["call"]["args"] if site == "typed" else out["result"]["params"]
+    assert (values["owner"], values["code"]) == ("Ann Lee", "OK")
+
+
+def test_the_guards_corrections_of_other_fields_are_kept_when_one_field_is_refused(environment):
+    """The count is refused (the request writes 3); the guard's respelling of the owner to the request's spelling is
+    still applied, as when every guard passes."""
+    case = {"id": "x", "site": "args", "command": "ledger_pc", "text": "write a line for Ann Lee, 3 items",
+            "answers": [corpus.LEDGER(owner="ann lee", count=8)] * 2}
+    out = corpus.run_case(environment, case)
+    assert out["result"]["valid"] is False and out["result"]["params"]["owner"] == "Ann Lee"
+    assert out["result"]["extraction"]["values"].get("owner") == "Ann Lee"

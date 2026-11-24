@@ -1,10 +1,11 @@
-# observability.sqlite3 — the read contract
+# observability.sqlite3: the read contract
 
 Reference for `debug-workflow-conversations` (see SKILL.md for the triage
-method). The current source uses `SCHEMA_VERSION = 10` in `observability/store.py`.
-Readers check compatibility; older evidence is not migrated by this version. Preserve it and
-use its writer's framework version. Inspect `PRAGMA user_version` read-only when diagnosing a
-mismatch, rather than forcing a version number or adding columns.
+method). The current source uses `SCHEMA_VERSION = 10` in `observability/store.py` and span
+contract 56 (`tracing.SPAN_CONTRACT_VERSION`; every span carries its `span_contract_version`, and
+`tracing.SPAN_CONTRACTS` lists each span's keys). A database at another schema version is refused,
+never migrated: read it with the framework version that wrote it. Inspect `PRAGMA user_version`
+read-only when diagnosing a mismatch, rather than forcing a version number or adding columns.
 
 ## Location and safe access
 
@@ -18,7 +19,7 @@ store = ReadOnlyObservabilityStore(db_path)   # mode=ro; cannot create/migrate/w
 
 Raw SQL: open read-only (`sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)`
 or `sqlite3 "file:...?mode=ro"`). The database is WAL-mode and safe to read
-while the workflow runs. **Never** open it writable to inspect it —
+while the workflow runs. **Never** open it writable to inspect it:
 `ObservabilityStore` (no `ReadOnly` prefix) is the writer and creates/probes
 the file on construction.
 
@@ -54,36 +55,44 @@ are replaced by `{"truncated": true, "original_length", "sha256", "value"}`.
 One per logical turn; stays open across ask_user suspensions
 (`status: awaiting_user`, `end_ns` NULL) and closes at terminal finalize.
 Attributes: `turn_key`, `channel_id`, `conversation_id`, `user_message`,
-`status`, `success`, `failure_reason`, `suspended_ms`, and
-**`context_mutations`** — a shallow diff of the app workflow's context across
-the turn: `{"added": {key: value_repr}, "changed": {key: {"from", "to"}},
-"removed": [keys]}`, or `null` when nothing changed (also `null` after a
-cross-process resume — the baseline is not serialized).
+`unattended` (the turn ran with no ask_user tool), `status`, `success`, `failure_reason`,
+`suspended_ms`, and:
+
+- **`context_mutations`**: a shallow diff of the app workflow's context across
+  the turn: `{"added": {key: value_repr}, "changed": {key: {"from", "to"}},
+  "removed": [keys]}`, or `null` when nothing changed (also `null` after a
+  cross-process resume; the baseline is not serialized).
+- **`subtask_split`**: for a turn whose request the model was asked to split (never with
+  `use_plan`), `{request, raw, merged, attempts, changed_by}`: the text the splitter saw, the
+  model's parts, the parts the turn ran after the code rules, the model calls made (1 or 2),
+  and the code rules that changed the list (absent when none did), plus `prompt_digest` and
+  `prompt_source` (`built_in`, or `built_in+workflow` when `_workflow.py` declares `split_examples`;
+  spans recorded before the replacement prompt was retired may say `workflow`): which splitter prompt produced it
+  (`workflow_agent.split_prompt`). `null` when not split.
+- **`subtask_plan_ambiguity`**: one `{subtask, means, alternatives}` per part whose command
+  was asked (the which-command question); `null` when none was.
+- **`subtask_review`**: `fast_path` (no review needed), `open` (the review is out),
+  `reviewed`, `declined`, `expired`, `not_reviewed` (no one could answer; the draft ran) or
+  `not_applicable`.
+- **`subtask_bindings`**: per bound part, the values the review showed and the arguments it
+  ran with (`shown`, `ran`, `match`, `deviation`).
 
 ### `fw.planner.plan` / `fw.planner.replan` (kind `llm`)
-Around the agent's task-planner calls. Attributes: `model`, the plan text
-(capped) and, on replans, `replan_trigger`: `parameter_extraction_error` or
-`ask_user_response`. Since contract v2 (aggregate span contract 8) also
-`plan_source` — `structured` (historical structured planner),
-`text` (the plain-text planner),
-`text_fallback` (the structured call failed to parse or returned no steps, so
-the plain-text planner ran), or `none` (no plan) — and `subjects`, the
-structured plan's subject names, credential-scrubbed (`[]` for a
-text plan and for continuation replans). With `plan_source: structured` the
-plan text is a numbered list whose steps may carry `(optional)` /
-`(needs the user)` flags. Spans written before v2 lack both keys.
-Structured planning is disabled since 2026-09-28: new spans carry only
-`plan_source` `text` or `none` and `subjects` `[]`; `structured` and
-`text_fallback` appear only in records written before then.
+Around the planner calls. Attributes: `model`, `plan` (capped) and
+`replan_trigger` (`parameter_extraction_error`, `ask_user_response`, or a progress check's
+trigger; null on a first plan). `plan_source`: `skill_call` (a planning command's typed call
+filled its arguments and code expanded its steps), `text` (the text planner) or `none`. For a
+planning command: `skill` (its name), `skill_args`, `skill_notes` (what the argument guards
+changed), `skill_fallback` (why the typed call fell back to the text planner) and
+`skill_refusal_asked` (its missing or refused arguments were asked of the user).
 
-### `fw.agent.execute` (kind `internal`) — the ReAct loop as a phase
+### `fw.agent.execute` (kind `internal`): the ReAct loop as a phase
 Sibling of `fw.planner.plan` under the turn; NOT `fw.command.execute` (that is
-one command inside a tool call — this is the whole loop). Attributes include
+one command inside a tool call; this is the whole loop). Attributes include
 `agent_input`, `resumed`, `attempts`, `suspended`, `final_answer`.
 
-### `fw.skill.phase` (kind `internal`) — one phase of a phased skill call
-Added in aggregate span contract 16. A phased skill call (its `PlanGenerator`'s
-phases) runs each phase as its own executor run, so a turn has one
+### `fw.skill.phase` (kind `internal`): one phase run of a planning command
+A planning command runs each phase as its own run, so a turn has one
 `fw.skill.phase` span per phase run, each the parent of that run's
 `fw.agent.execute`. Opened with `skill`, `phase`, `phase_index` (0-based) of
 `phase_count`, `step_budget`, `first_step` and `resumed` (a run resumed after
@@ -92,17 +101,25 @@ ask_user opens a new span); closed with `steps` (the phase's numbered plan),
 `"<Context> <label>"` its output was filled on) and `facts` (the filled output,
 `null` for a phase with none). A failed phase has status `error` and
 `facts_error`: its steps could not be built, or a required fact had no source
-run; no later phase of that call ran.
+run; no later phase of that call ran. Code runs a phase's mechanical steps before any model:
+`steps_by_code` counts them and `code_stop` says why code stopped (`done`, `open step N`,
+`step N failed`, `no path for step N`, `stopped`, `off`); each such `fw.agent.step` has
+`by_code: true`. Also `answer_only` / `answer_by_code` (an answer-only phase, written by code
+when true), `skipped` (its `when` was false), and for a fan-out item `item`, `item_index`,
+`item_count`, `items_total`, `record_issues`.
 
-### `fw.agent.step` (kind `internal`) — one reasoning step
+`fw.skill.answer` is the one model call that writes a planning command's answer when its
+`__result__` gives none.
+
+### `fw.agent.step` (kind `internal`): one reasoning step
 Child of `fw.agent.execute`; the step's reasoning `fw.llm.call` and its
 `fw.agent.tool_call` nest under it. Attributes: `step_index`, `thought`,
 `tool_name`, `tool_args`, `observation`; on failures `error_type`/`tool_error`
 and `recovered`; on suspension `clarification` (status `awaiting_user`);
 `folded_command` when the model passed parameters as tool arguments beside
 `command` and the tool folded them into the command text (`tool_args` keeps
-what was sent; the observation ends with a "(Ran as: ...)" note);
-`finish_check_note` (historical whitelist key; no longer set on new spans).
+what was sent; the observation ends with a "(Ran as: ...)" note); `by_code` on a
+step code ran.
 On a step a policy verifier rule rewrote (the workflow's `_policy/table.py`; see the
 `distill-policy-verifiers` skill), these are added:
 - `policy_source`: the rule's id.
@@ -124,43 +141,59 @@ added at close.
 
 ### `fw.command.execute` (kind `tool`)
 Wraps command resolution + execution. Attributes: `raw_command` (what was
-asked), `parameters` (the extracted dict), `response_text`, `success`; columns
+asked), `parameters` (the extracted dict), `response_text`, `success`, `error_type`,
+`command_call_id` (the same id is on the command output in `record_json`),
+`context_before` / `context_after` (context type names); columns
 `command_name` and `context` hold what actually ran and where. Comparing
 `raw_command` to `command_name` is the first routing check.
 
-### `fw.nlu.intent` (kind `internal`) — one per prediction attempt
-The wildcard pipeline may predict several times per command (walking up the
-context chain), so read ALL of a trace's intent spans in `start_ns` order.
+### `fw.nlu.intent` (kind `internal`): one intent decision
+One span per request: `intent_loop.resolve` decides the whole context walk at once. A reply to
+the which-command question is a span of its own. The turn's resolution of a request writes one per part's
+decision too, from the same writer (span contract v58), carrying `part`, the part's 1-based number (absent on the
+`/` path).
 
 | Attribute | Meaning |
 |---|---|
-| `context`, `stage`, `utterance` | Where/when the attempt ran (`stage` ∈ INTENT_DETECTION, INTENT_AMBIGUITY_CLARIFICATION, INTENT_MISUNDERSTANDING_CLARIFICATION) |
-| `matcher_layer` | Which layer decided: `exact_prefix`, `fuzzy_prematch`, `classifier`, `clarification_default` (a span recorded by an earlier version may say `embedding_cache`) |
-| `classifier` | Present when the classifier ran: `{model_tier: tiny\|large, confidence, ambiguous_threshold, confident, top_label, topk_labels}` |
-| `ambiguous` + `candidates` | Low-confidence prediction: the candidate list shown to the user/agent |
-| `escalation_labels_discarded` | Escalation labels ranked in top-k but suppressed from the prompt |
-| `fuzzy_prematch_tie` | Commands that tied at the fuzzy layer (deferred to the classifier) |
-| `command_name`, `resolved`, `is_cme_command` | The outcome; `resolved: false` means no local prediction — the caller walks to the parent context |
+| `context`, `stage`, `utterance` | `context` is the scope the decision settled in (the current one when nothing was decided). `stage` is `INTENT_DETECTION` for a request, `INTENT_AMBIGUITY_CLARIFICATION` or `INTENT_MISUNDERSTANDING_CLARIFICATION` for a reply |
+| `matcher_layer` | Which layer decided: `exact_prefix`, `known_name_foreign_context` (with `known_name_owner_contexts` and `known_name_foreign_context_hint`), `fuzzy_prematch` (`fuzzy_distance`, `fuzzy_threshold`), `classifier`, `matcher`, or `question_reply` for a reply. Older spans may carry other values; show them as recorded |
+| `engine`, `engine_chain` | Who decided: `classifier` (the local model), `matcher` (the remote model), `question` (no link was confident) or `user` (a reply); the links asked, in order |
+| `classifier` | The local model's facts: `{model_tier (embedding, large or tiny), confidence, ambiguous_threshold, threshold_source, confident, top_label, topk_labels, topk_scores, p_in, p_out, outside_labels, outside_scores, handed_on, head_version}` (keys vary by layout) |
+| `matcher` | The remote model's facts when it was asked: `{confident, top_label, confidence, topk_labels, topk_scores, none_score, threshold (accept), decline_threshold, unsure_threshold, scope_path, model, latency_ms, calls, error}` |
+| `remote_failed` | `{error_class, status_code}`: the remote call failed and the local answer or the question stood in |
+| `part` | The 1-based part of the turn this decision is for (plan path only; span contract v58) |
+| `ambiguous` + `candidates` | The candidates put to the user or the agent |
+| `chosen_command_elsewhere` | On a reply: the picked command lives in another scope of the path and runs there |
+| `escalation_labels_discarded` | Escalation labels ranked among the candidates but not shown |
+| `fuzzy_prematch_tie` | Names that matched equally well (not a match; the chain decided) |
+| `command_name`, `resolved`, `is_cme_command` | The outcome; `resolved: false` means no command (a misunderstanding, or a routing hint) |
 
 ### `fw.nlu.param_extraction` (kind `internal`)
-Wraps parameter extraction + validation for the resolved command.
+Wraps parameter extraction + validation for the resolved command. The plan path writes it too, for the extraction
+of a part's own command (the draft), from the same writer, with `part`, the part's 1-based number (span contract v58;
+absent on the `/` path and on a nested step command's span).
 
 | Attribute | Meaning |
 |---|---|
-| `command_name`, `extraction_method` | `xml_regex` (agent format), `llm` (DSPy), `stored_merge` (a NOT_FOUND retry round merging user corrections) |
+| `command_name`, `extraction_method` | `xml_regex` (read in code from the command text), `llm` (the model fill), `stored_merge` (a reply to the parameter question merged into the values kept) |
 | `deterministic_form` | With `xml_regex`: `key_value` (`name=value` pairs) or `positional` (`command value`) when one of those code parsers bound the parameters; absent for XML tags |
 | `unbound_value` | A lone value (`command value`) that bound to no parameter and was refused instead of running with defaults |
-| `retry_round` | true when this turn continues a parameter-correction loop |
+| `retry_round`, `retry_round_ordinal` | true when this extraction reads a reply to the parameter question; which round it is |
 | `parameters_valid` | The overall verdict (span `status` stays `ok`; only exceptions mark `error`) |
 | `missing_fields` / `invalid_fields` | Structured field lists (no prose parsing needed) |
-| `validation_hook` | `{ran, is_valid, message, raised?, changed_fields, refused_fields}` from the command's `Input` model validators (always emitted; `ran: false` when the Input declares none). `changed_fields` lists the fields the hook corrected in place; `refused_fields` lists the fields a `fastworkflow.Refused(..., field=...)` reset to missing. `raised` is set only when the hook crashed with a non-`Refused` exception. There is no `db_lookup` key on a span recorded at version 8 or later |
+| `argument_check_refusals`, `argument_check_retry`, `argument_check_refusals_final`, `argument_check_respelled` | The guards: values the model produced that a guard refused (a placeholder; on a field marked `copied_from_command_text`, a value the request does not write), the one second fill, what stayed refused (treated as not given), and values respelled to the request's or the declared spelling |
+| `argument_check_not_in_request` | Advisory (span contract v57; `fw.nlu.param_extraction` v13, `fw.planner.plan` / `fw.planner.replan` v10): the field names, sorted, of UNMARKED `str` / `int` fields whose extracted value the request does not write; never the values; nothing was refused. Absent on an extraction span when empty, null on a planner span |
+| `part` | The 1-based part of the turn this extraction is for (plan path only; span contract v58) |
+| `argument_refusal` | A refusal of the call as a whole that names no input; it is not asked, the command ends as a failed output |
+| `fields_reset_not_given`, `placeholder_values`, `word_screen_values`, `command_name_values`, `out_of_range_values` | Values the screens treated as not given or refused |
+| `validation_hook` | `{ran, is_valid, message, raised?, changed_fields, refused_fields}` from the command's `Input` model validators (always emitted; `ran: false` when the Input declares none). `changed_fields` lists the fields the hook corrected in place; `refused_fields` lists the fields a `fastworkflow.Refused(..., field=...)` reset to missing. `raised` is set only when the hook crashed with a non-`Refused` exception |
 
 ### `fw.ask_user` (kind `human_wait`)
 One per clarifying question (deterministic per-attempt span ids). Attributes:
-`agent_query`, `user_response`, `attempt`, `human_wait_ms`; the wall-clock
-wait also equals `end_ns - start_ns`.
+`agent_query`, `user_response` (the final reply), `user_responses` (every reply, in
+order), `attempt`, `human_wait_ms`; the wall-clock wait also equals `end_ns - start_ns`.
 
-### `fw.llm.call` (kind `llm`) — one per DSPy LM invocation
+### `fw.llm.call` (kind `llm`): one per DSPy LM invocation
 Emitted by a DSPy callback, so it appears under whichever stage made the call
 (planner, LLM parameter extraction, summarization…).
 
@@ -169,11 +202,16 @@ Emitted by a DSPy callback, so it appears under whichever stage made the call
 | `module`, `module_chain`, `module_input` | Which DSPy module ran and with what inputs |
 | `model`, `messages`, `prompt`, `call_kwargs` | The exact request sent to the LM. `messages` over 16 KB is a cut envelope (`truncated`, `original_length`, `sha256`, `value`); when the span also has `prompt_slots_ref` the envelope's `value` is empty and the whole prompt is rebuilt from `prompt_slots` by `ObservabilityStore.prompt_as_sent(turn_key, span_id)` (`/api/prompt/<turn_key>/<span_id>`) |
 | `output`, `provider_response`, `reasoning` | What came back (incl. provider-native reasoning when present) |
-| `usage`, `cost`, `cache_hit`, `response_model`, `history_uuid`, `capture_source` | Cost accounting; **`cache_hit: true` means the completion came from the DSPy cache** — the classic "stale/frozen LLM output" tell; a hit records `cost` 0 and empty `usage` (nothing was billed) |
+| `usage`, `cost`, `cache_hit`, `response_model`, `history_uuid`, `capture_source` | Cost accounting; **`cache_hit: true` means the completion came from the DSPy cache**: the classic "stale/frozen LLM output" tell; a hit records `cost` 0 and empty `usage` (nothing was billed) |
 | `usage_capture` | Present when usage was unavailable: the LM's result never reached the capture hook and DSPy history was off (spans recorded before fix-sgsp all carry it) |
-| `exception` | The LM call failed (span `status: error`) — auth errors, timeouts |
+| `role`, `timeout_s`, `num_retries` | The model role (`LLM_PARAM_EXTRACTION`, `LLM_AGENT`, ...), the per-attempt timeout and the retries configured (attempts made are not recorded) |
+| `outcome`, `timed_out`, `exception`, `exception_type` | `ok`, `timeout` or `error` (span `status: error`): auth errors, timeouts |
 
-Reserved, not yet emitted: `fw.train.*`.
+### Other spans
+`fw.approval` (one per approval transition: state before/after, outcome; hashes, never the
+token or raw parameters), `fw.compose` (one per `run_chatbot` answer card or question form
+compose call: counts, outcome, model; never user text), `fw.distillation.pass` (a teacher or
+student pass; its subtree carries `fw.pass`). Reserved, not yet emitted: `fw.train.*`.
 
 ## record_json (turns.record_json)
 
@@ -194,16 +232,26 @@ The full internal `TurnResult`, post-redaction:
   "started_at", "completed_at", "suspended_ms", "continuation_of" }
 ```
 
+- **What the turn waits on**: while `status` is `awaiting_user`, the last command output's
+  `artifacts` carry `question_kind` (`agent`, `plan_choice`, `planning_parameter`,
+  `phase_step`, `review`, `approval`) and that question's payload (`plan_choice`,
+  `parameter_request`, `phase_step`, `review`, `approval`). The question itself is the turn's
+  one waiting record (`fastworkflow/waiting.py`), saved with the session, not in this store.
+- **Parts not run** (no agent model): `artifacts.fw_not_run` lists one stop per part
+  (`kind`, `command`, `phase`, `open_step` `{number, text, kind, reason}`, `done`, `facts`,
+  `remaining`, `suggested_plan`, `means`, `sub_task`, and when present `results`,
+  `partial_read`, `available_plans`, `request`). `fw_sub_tasks` lists a split turn's parts and
+  where each one's answer sits in the answer text.
 - **ask_user entries invert roles**: when `command_name == "ask_user"`,
   `command_parameters` is the agent's QUESTION and the response is the user's
   ANSWER (`success: false` = still unanswered).
 - Artifact values over `FW_OBS_INLINE_ARTIFACT_BYTES` (256 KiB) are replaced by
   `{"__fw_artifact_ref__": <artifact_id>, "size", "content_type",
-  "content_encoding", "error"}` — fetch the content from the `artifacts` table
+  "content_encoding", "error"}`: fetch the content from the `artifacts` table
   by id.
 - The sketch above shows the diagnosis-relevant fields; rows may carry further
   additive fields (e.g. `workflow_name`, `next_actions`, `recommendations` on
-  responses) — treat unknown keys as informational.
+  responses): treat unknown keys as informational.
 - Non-JSON values become `{"__fw_unserializable__": <type>, "repr": ...}`.
 - Tracebacks are persisted only when the run had `FW_OBS_CAPTURE_TRACEBACKS=1`;
   otherwise the artifact holds a suppression notice.
@@ -214,7 +262,7 @@ The full internal `TurnResult`, post-redaction:
 |---|---|
 | `list_turns(channel_id=, conversation_id=, status=, success=, command_name=, context=, experiment_id=, task_id=, attempt=, limit=, offset=)` | Turn rows newest-first, without `record_json` (`context` is a substring match; `command_name` matches via spans) |
 | `get_turn(turn_key)` | The full row incl. `record_json` (parse it yourself) |
-| `get_spans(...)` | Span rows for one turn, ordered by `start_ns` (`attributes` is a JSON string). Pass the turn key POSITIONALLY — the parameter is named `trace_id` |
+| `get_spans(...)` | Span rows for one turn, ordered by `start_ns` (`attributes` is a JSON string). Pass the turn key POSITIONALLY: the parameter is named `trace_id` |
 | `list_conversations(channel_id=, limit=, offset=)` / `list_channels()` | Navigation |
 | `get_artifact(artifact_id)` | Offloaded artifact row (`inline_value` is bytes) |
 | `list_train_runs(limit=)` | Training-run metrics rows, newest first (`metrics_json`) |
@@ -222,13 +270,12 @@ The full internal `TurnResult`, post-redaction:
 | `list_task_feedback(experiment_id=, task_id=)` | Every note about one task, across attempts and turns, plus notes whose frozen pair anchor names it |
 | `get_experiment(experiment_id)` / `experiment_attempt_rows(experiment_id, task_id=)` | Pin/configuration and attempt records; attempt `runtime_snapshot` is decoded or null |
 | `store_identity()` | Evidence source identity |
-| `writer_health(incarnation_id=None)` | A writer's drop/error counters — read this before trusting span completeness. Each writer process has its own row; with no id, every row folded together |
+| `writer_health(incarnation_id=None)` | A writer's drop/error counters: read this before trusting span completeness. Each writer process has its own row; with no id, every row folded together |
 | `db_size_bytes()` | File + WAL size |
 
-Additional conversation-memory reads exist (`get_memory_window`,
+Conversation-memory reads also exist (`get_memory_window`,
 `count_usable_turns`, `conversation_summaries`, `list_conversation_summaries`,
-`dump_all_conversations`) — Phase-7 consolidation surface, usable but not
-needed for failure diagnosis. Note `ReadOnlyObservabilityStore` inherits the
+`dump_all_conversations`); they are not needed for failure diagnosis. Note `ReadOnlyObservabilityStore` inherits the
 writer's method NAMES too; any accidental write raises on the `mode=ro`
 connection rather than mutating anything.
 
@@ -241,13 +288,18 @@ SELECT s.trace_id, json_extract(s.attributes,'$.raw_command') AS asked,
 FROM spans s WHERE s.name='fw.command.execute'
 ORDER BY s.start_ns DESC LIMIT 20;
 
--- Ambiguity hot spots per context, with the classifier's numbers
+-- Requests no link was confident about, per context, with the local model's numbers
 SELECT s.context,
        json_extract(s.attributes,'$.classifier.confidence')  AS conf,
        json_extract(s.attributes,'$.classifier.ambiguous_threshold') AS thr,
+       json_extract(s.attributes,'$.engine_chain') AS chain,
        json_extract(s.attributes,'$.candidates') AS candidates
 FROM spans s
-WHERE s.name='fw.nlu.intent' AND json_extract(s.attributes,'$.ambiguous');
+WHERE s.name='fw.nlu.intent' AND json_extract(s.attributes,'$.engine')='question';
+
+-- How each split turn's request was split
+SELECT trace_id, json_extract(attributes,'$.subtask_split') FROM spans
+WHERE name='fw.turn' AND json_extract(attributes,'$.subtask_split') IS NOT NULL;
 
 -- Parameter-correction loops (users stuck re-entering values)
 SELECT trace_id, COUNT(*) AS rounds FROM spans
@@ -287,11 +339,24 @@ WHERE name='fw.turn' AND trace_id=:turn_key AND end_ns IS NOT NULL;
 
 - All persisted text passed the redaction pass (credential shapes + loaded
   secret env values become `[REDACTED]`).
-- Turn records are near-lossless; spans are best-effort under load — check
+- Turn records are near-lossless; spans are best-effort under load: check
   `writer_health()` (`spans_dropped`, `records_dropped`, `write_errors`)
   before reading absence as evidence.
 - `--generate_insights` CLI turns contain teacher AND student passes in one
-  trace (duplicate-looking tool calls are expected there).
+  trace, each under its own `fw.distillation.pass` span.
+
+## Intent-learning store
+
+Separate from the observability database: `<workflow>/___convo_info/intent_learning.sqlite3`
+(`fastworkflow/intent_learning.py`), one row per settled part: the request, context, the
+resolved command, `how` (`local`, `remote`, `name`, `user_choice`, `agent_choice`,
+`review_accept`, `review_switch`), `confirmed`, the head's facts at decision time
+(`head_version`, top label, `p_in`, `p_out`, threshold), the remote model's top label and
+score, and `rejected_label` (the answer a reply replaced). Only confirmed rows teach a refit
+(`fastworkflow learn`, or the background refit every `INTENT_LEARNING_REFIT_EVERY` new rows).
+Read it with `fastworkflow learned list <workflow> [--confirmed]` and `learned stats`; delete
+wrong confirmations with `fastworkflow learned remove <workflow> <ids>` before the next refit.
+A refit head's version manifest names `refit_of`, `lineage` and `learned_rows`.
 
 ## Human feedback
 

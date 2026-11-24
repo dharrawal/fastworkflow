@@ -35,7 +35,7 @@ This enhances usability by enabling natural language interactions that autonomou
   - GenAI post-processing phase (from build_postprocessing_using_dspy.md) generates artifacts like `workflow_description.json`, command docstrings, and field metadata.
   - Existing fastWorkflow components: `ChatSession`, `CommandExecutor`, core commands (e.g., "what_can_i_do", "go_up", "reset_context", "current_context").
 - **Assumptions**:
-  - Workflows are built with `_commands` directory structure, Pydantic-based Signatures, and context hierarchies defined in `context_inheritance_model.json` and `context_containment_model.json` (if available).
+  - Workflows are built with `_commands` directory structure, Pydantic-based Signatures, and context hierarchies defined in `context_inheritance_model.json`.
   - Environment variables (e.g., `LLM_AGENT`, API keys) are set for DSPy in agent mode.
   - Agent mode requires a trained workflow (checked via `tiny_ambiguous_threshold.json` as in run_agent).
   - Semantic matching uses embeddings (e.g., Sentence Transformers) for dynamic descriptions.

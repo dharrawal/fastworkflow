@@ -36,6 +36,7 @@ package's neighbours, so the import cannot be at the top).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
@@ -45,10 +46,17 @@ HUMAN = "human"
 AGENT = "agent"
 
 
-def audience_of(context: Any) -> str:
+def audience_of(context: Any, *, assistant: bool = False) -> str:
     """Who reads a question of the session whose workflow *context* this is: an agent when ``run_as_agent`` is truthy
-    (the VALUE decides, never the key's presence: a context that holds ``run_as_agent=False`` is a person's)."""
+    (the VALUE decides, never the key's presence: a context that holds ``run_as_agent=False`` is a person's).
+
+    ``assistant`` is the turn's "/" round flag (``waiting.port_of(cme_context).assistant``): a person typed the message,
+    so the audience is a person and the replier is the person even in an agent session. This is the ONE definition of
+    "the replier is the agent"; every caller that has the round at hand passes it."""
+    if assistant:
+        return HUMAN
     return AGENT if isinstance(context, Mapping) and context.get("run_as_agent") else HUMAN
+
 
 FORM_REFUSAL = "refusal"
 FORM_GAPS = "gaps"
@@ -123,20 +131,24 @@ def word(extraction: Any = None, *, form: str = FORM_REFUSAL, audience: str = HU
         return Question(_frame_text(message, refusals, shown, audience))
     if form == FORM_LEAD:
         return Question(f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n{message}")
+    # the duplicate rule's notes of these values (an optional field it left not given), said before the question
+    left_empty = tuple(getattr(extraction, "left_empty", ()) or getattr(getattr(refusal, "gaps", None), "left_empty", ())
+                       or ())
     if form == FORM_ARGUMENT:
-        return Question(_argument_text(command, name))
+        return Question(with_left_empty(
+            _argument_text(command, name, dict(getattr(extraction, "screened", ())).get(name, "")), left_empty))
     if form == FORM_GAPS:
-        return Question(_gaps_text(command, extraction))
+        return Question(with_left_empty(_gaps_text(command, extraction), left_empty))
     if confirm:
         text, request = _presented(command, values or {}, extraction, description, retry)
-        return Question(text, request)
+        return Question(with_left_empty(text, left_empty), request)
     from fastworkflow import planning_commands
 
     if refusal is None:
         from fastworkflow import parameter_clarification
 
         refusal = parameter_clarification.refusal_from_gaps(extraction, values or {})
-    text = f"{retry}{_refusal_text(command, refusal)}"
+    text = with_left_empty(f"{retry}{_refusal_text(command, refusal)}", left_empty)
     return Question(text, planning_commands.refusal_gaps(command, refusal).request(command.name))
 
 
@@ -146,10 +158,12 @@ def _label(name: str) -> str:
     return name.replace("_", " ")
 
 
-def _argument_text(command: Any, name: str) -> str:
+def _argument_text(command: Any, name: str, screened: str = "") -> str:
+    """*screened*: the value that was given and not taken, with why (``Gap.screened``), said before the question."""
     task = _label(command.name)
     label = _label(name)
-    return (f"I can't run {task} yet: your request does not say which {label} to use. "
+    why = f" ({label} {screened})" if screened else ""
+    return (f"I can't run {task} yet: your request does not say which {label} to use{why}. "
             f"Which {label} should I use?")
 
 
@@ -159,13 +173,14 @@ def _joined(names: Sequence[str]) -> str:
 
 
 def _sentence(task: str, missing: Sequence[str], invalid: Sequence[tuple[str, str]],
-              explanations: Sequence[str] = ()) -> str:
+              explanations: Sequence[str] = (), screened: Sequence[tuple[str, str]] = ()) -> str:
     """THE words a person is told for the values a command lacks or refuses, on both kinds of command: what is wrong
     (the request does not give the missing ones; each refused one with why, or the validators' own *explanations* when
     they gave them) and what to answer (one value, or name: value lines for several)."""
     problems = []
     if missing:
         problems.append(f"your request does not give the {_joined(missing)}")
+        problems.extend(f"the {_label(name)} {text}" for name, text in screened if name in missing)
     if invalid:
         problems.extend(explanations or [f"the {_label(name)} {why}" for name, why in invalid])
     names = list(dict.fromkeys([*missing, *(name for name, _ in invalid)]))
@@ -179,7 +194,7 @@ def _sentence(task: str, missing: Sequence[str], invalid: Sequence[tuple[str, st
 
 
 def _gaps_text(command: Any, gaps: Any) -> str:
-    return _sentence(_label(command.name), gaps.missing, gaps.invalid)
+    return _sentence(_label(command.name), gaps.missing, gaps.invalid, screened=gaps.screened)
 
 
 def _refusal_text(command: Any, refusal: Any) -> str:
@@ -200,27 +215,53 @@ def _refusal_text(command: Any, refusal: Any) -> str:
     param = next((p for p in command.params if gap is not None and gap.name == p.name), None)
     if param is not None:
         if gap.state == "missing":
-            return _argument_text(command, param.name)
+            return _argument_text(command, param.name, dict(gaps.screened).get(param.name, ""))
         label = _label(param.name)
-        value, why = repr(gap.value), gap.why
-        if why.startswith("is also the value of "):
-            other = _label(why.removeprefix("is also the value of "))
-            return (f"I can't run {task} yet: {value} is the {other} in your request, not the {label}. "
-                    f"Which {label} should I use?")
-        if why.startswith("is not written in the request"):
-            wrong = f"the {label} {value} is not in your request"
-        elif why.startswith("names no record of the request"):
-            wrong = f"{value} does not match anything in your request"
-        elif why.startswith("is not one of "):
-            wrong = f"the {label} must be one of: {', '.join(param.values)}"
-        elif why.startswith("is not an integer"):
-            wrong = f"the {label} must be a whole number"
-        elif why.startswith("is not true or false"):
-            wrong = f"the {label} must be yes or no"
-        else:
-            wrong = f"the {label} {value} is not valid"
-        return f"I can't run {task} yet: {wrong}. Which {label} should I use?"
+        return f"I can't run {task} yet: {refused_clause(gap, param.values)}. Which {label} should I use?"
     return f"I can't run {task} yet: {detail}. What should I change?"
+
+
+def refused_clause(gap: Any, allowed: Sequence[str] = ()) -> str:
+    """What is wrong with the value one guard refused (a ``check.Gap``), in the words a person reads, the same on both
+    kinds of command: "the title 'Dune' is not in your request", "'Ann Lee' is the member in your request, not the
+    branch". *allowed*: the values of a choice, for a value outside them."""
+    label, value, why = _label(gap.name), repr(gap.value), gap.why
+    if why.startswith("is also the value of "):
+        return f"{value} is the {_label(why.removeprefix('is also the value of '))} in your request, not the {label}"
+    if why.startswith("is not written in the request"):
+        return f"the {label} {value} is not in your request"
+    if why.startswith("names no record of the request"):
+        return f"{value} does not match anything in your request"
+    if why.startswith("is not one of ") and allowed:
+        return f"the {label} must be one of: {', '.join(allowed)}"
+    if why.startswith("is not an integer"):
+        return f"the {label} must be a whole number"
+    if why.startswith("is not true or false"):
+        return f"the {label} must be yes or no"
+    return f"the {label} {value} is not valid"
+
+
+#: The start of a note the duplicate rule writes (``left_empty_line``): the field's name, then this.
+_LEFT_EMPTY = " left empty: "
+_LEFT_EMPTY_NOTE = re.compile(r"^([A-Za-z_]\w*)" + re.escape(_LEFT_EMPTY))
+
+
+def left_empty_line(name: str, value: str, times: int, holder: str) -> str:
+    """The note of an optional field the duplicate rule left not given (``check._duplicate_rule``), one plain line on the
+    span's notes, the review item and a question: "connected_name left empty: 'X' is written once in your request and is
+    the name." Not a refusal: the call runs without it."""
+    written = {0: "nowhere", 1: "once", 2: "twice"}.get(times, f"{times} times")
+    return f"{name}{_LEFT_EMPTY}{value!r} is written {written} in your request and is the {_label(holder)}."
+
+
+def left_empty_lines(notes: Sequence[str]) -> dict[str, str]:
+    """``{field: line}`` of the duplicate rule's notes among a check's *notes* (``left_empty_line``), in order."""
+    return {match.group(1): str(note) for note in notes or () if (match := _LEFT_EMPTY_NOTE.match(str(note)))}
+
+
+def with_left_empty(text: str, lines: Sequence[str]) -> str:
+    """*text*, a question, with the duplicate rule's notes of the same values before it, one line each."""
+    return "\n".join([*lines, text]) if lines else text
 
 
 def _presented(command: Any, values: dict, gaps: Any, description: str, retry: str) -> tuple[str, dict]:

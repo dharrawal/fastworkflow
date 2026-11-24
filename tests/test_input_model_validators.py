@@ -119,7 +119,7 @@ def test_refused_without_a_field_refuses_the_call_with_no_field(tmp_path):
         pc.check_input(command, {"name": "x", "note": ""}, "x", None)
     except pc.PlanningCommandInputError as refusal:
         assert refusal.fields == ()
-        assert str(refusal) == "validate_extracted_parameters: this command does not fit the request"
+        assert str(refusal) == "this command does not fit the request"
     else:
         raise AssertionError("expected a refusal")
 
@@ -135,7 +135,7 @@ def test_a_plain_value_error_is_a_refusal_with_no_field(tmp_path):
         pc.check_input(command, {"name": "x", "note": ""}, "x", None)
     except pc.PlanningCommandInputError as refusal:
         assert refusal.fields == ()
-        assert str(refusal) == "validate_extracted_parameters: name and note are one record"
+        assert str(refusal) == "name and note are one record"
     else:
         raise AssertionError("expected a refusal")
 
@@ -150,7 +150,7 @@ def test_a_correction_is_written_back_with_a_note_attributed_to_the_validator(tm
     notes: list[str] = []
     args = pc._validate_arguments(command, {"name": "ann", "note": ""}, "show ann", None, notes)
     assert args["name"] == "ANN"
-    assert notes == ["name='ann' -> 'ANN' (validate_extracted_parameters)"]
+    assert notes == ["name='ann' -> 'ANN' (validator)"]
 
 
 def test_a_placeholder_combination_a_validator_refuses_is_left_out_of_the_template_and_preview(tmp_path):
@@ -262,7 +262,7 @@ def test_a_validator_reading_the_removed_request_key_fails_through_check_input_n
     with pytest.raises(pc.PlanningCommandCallError) as raised:
         pc.check_input(command, {"name": "Ann", "note": ""}, "show Ann", None)
     assert raised.value.raised == "KeyError"
-    assert str(raised.value) == f"validate_extracted_parameters raised KeyError: \"{REMOVED}\""
+    assert str(raised.value) == f"a validator raised KeyError: \"{REMOVED}\""
 
 
 def test_a_validator_calling_get_on_the_removed_request_key_fails_the_same_way(tmp_path):
@@ -288,7 +288,7 @@ def test_a_different_missing_key_is_a_plain_key_error(tmp_path):
     with pytest.raises(pc.PlanningCommandCallError) as raised:
         pc.check_input(command, {"name": "Ann", "note": ""}, "show Ann", None)
     assert raised.value.raised == "KeyError"
-    assert str(raised.value) == "validate_extracted_parameters raised KeyError: 'nope'"
+    assert str(raised.value) == "a validator raised KeyError: 'nope'"
 
 
 def test_validation_context_is_a_dict_except_for_the_removed_key():
@@ -312,9 +312,9 @@ def test_validation_context_is_a_dict_except_for_the_removed_key():
         context.get("request")
 
 
-def test_a_refusal_with_no_field_is_put_in_the_hook_words_and_does_not_ask_the_user(tmp_path):
-    """The replan case: a validator's Refused naming no input is "validate_extracted_parameters: <message>"
-    (HEAD's hook words), so it is not read as an argument refusal ("name=... is ...") and no question names an
+def test_a_refusal_with_no_field_is_its_bare_message_and_does_not_ask_the_user(tmp_path):
+    """The replan case: a validator's Refused naming no input is its bare
+    message, so it is not read as an argument refusal ("name=... is ...") and no question names an
     argument; the planner plans the call instead (refusal_names_an_input is False)."""
     command = _command(tmp_path, "record_fact", PLANNING.format(name="record_fact", body='''
         @model_validator(mode="after")
@@ -326,7 +326,7 @@ def test_a_refusal_with_no_field_is_put_in_the_hook_words_and_does_not_ask_the_u
     with pytest.raises(pc.PlanningCommandInputError) as refused:
         pc.check_input(command, {"name": "GitLab", "note": ""}, "record owner of GitLab", None)
     text = str(refused.value)
-    assert text == ("validate_extracted_parameters: fact='owner' does not fit kind='person': "
+    assert text == ("fact='owner' does not fit kind='person': "
                     "owner is read only with kind='application'")
     assert refused.value.fields == ()
     assert pc.refusal_names_an_input(command, refused.value) is False

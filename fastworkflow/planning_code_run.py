@@ -60,16 +60,13 @@ def _open_session(folder: str):
     """A real ``Workflow`` on *folder*, started as ``fastworkflow run`` starts one with its startup
     action: the workflow's ``startup_action.json`` when it has one. No env file, no model."""
     import fastworkflow
-    from fastworkflow import Action
     from fastworkflow.command_executor import CommandExecutor
 
     if fastworkflow.RoutingRegistry is None:   # init sets the registries; {} is enough: no model is read
         fastworkflow.init({})
     workflow = fastworkflow.Workflow.create(folder, workflow_id_str=f"run-code-{uuid.uuid4().hex}")
-    startup = os.path.join(folder, "startup_action.json")
-    if os.path.isfile(startup):
-        with open(startup, encoding="utf-8") as fh:
-            action = Action(**json.load(fh))
+    action = fastworkflow.workflow_startup_action(folder)
+    if action is not None:
         try:
             CommandExecutor.perform_action(workflow, action)
         except Exception as error:  # noqa: BLE001 - reported with the command that failed
@@ -326,8 +323,7 @@ class _Walk:
     def run_nested(self, key: str, args: dict, indent: int, stack: tuple[str, ...]):
         command = self.planning_map[key]
         full = {p.name: p.default for p in command.params if not p.required} | args
-        self.validate(command, full)
-        return self.run_planning(key, full, indent, stack)
+        return self.run_planning(key, self.validate(command, full), indent, stack)
 
     def fill(self, phase, runs, text, nested):
         """The phase's facts: the Output of the planning command call its steps made, when it has one that fits
@@ -354,10 +350,14 @@ class _Walk:
                                                 commands=self.commands, core_commands=CORE,
                                                 ended_on=ended_on or None))
 
-    def validate(self, command, args: dict) -> None:
+    def validate(self, command, args: dict) -> dict:
+        """*args* through the ``Input``'s validators as the runtime runs them: with the session's workflow in their
+        context (there is no request text here), the validators' corrections written back. A refusal, or a validator
+        that raises, is a run error."""
+        pc = self.planning_commands
         try:
-            self.planning_commands._validate_arguments(command, args, "")
-        except self.planning_commands.PlanningCommandInputError as error:
+            return pc._validate_arguments(command, args, "", self.wf)
+        except (pc.PlanningCommandInputError, pc.PlanningCommandCallError) as error:
             raise RunCodeError(str(error)) from error
 
     def result(self, key, command, args, outputs, phases, indent):
@@ -366,18 +366,15 @@ class _Walk:
 
         sp = self.sp
 
-        def call():
-            result_fn = sp._result_fn_on_class(command.plan_cls)
-            kwargs = sp.bound_result_arguments(
-                result_fn, pc.input_instance(command, args), sp.typed_phase_outputs(outputs, phases),
-                phase_names=frozenset(pc._phase_names_for_command(command)))
-            return result_fn(command.plan_cls(), **kwargs)
-
-        raw = self.hook(f"the hook __result__() of {key}", call)
-        if isinstance(raw, str):
-            answer, output = raw, None
-        else:
-            answer, output = raw.response, getattr(raw, "output", None)
+        # The runtime's own judgment (planning_phases.call_result): a failing __result__ stops the run here.
+        response = self.hook(f"the hook __result__() of {key}", lambda: sp.call_result(
+            command.plan_cls, pc.input_instance(command, args), sp.typed_phase_outputs(outputs, phases),
+            phase_names=frozenset(pc._phase_names_for_command(command)), output_model=command.output_model,
+            command_name=key))
+        if response is None:
+            self.emit(indent, "no answer written by code: __result__ returned ANSWER_BY_MODEL, so a model writes it")
+            return "", None
+        answer, output = response.response, response.output
         self.emit(indent, "answer written by __result__:")
         for line in str(answer).splitlines():
             self.emit(indent + 2, line)
@@ -419,12 +416,14 @@ def run_code(workflow_folder: str, command: str, input: Optional[dict] = None,
 def _planning_run(walk: _Walk, key: str, given: dict) -> CodeRun:
     command = walk.planning_map[key]
     if "/" in key:
+        from fastworkflow.workflow_agent import planning_scopes
+
         context = key.split("/")[0]
-        if walk.context_name() != context:
+        if context not in planning_scopes(walk.wf):    # the lookup path: the record, its bases, the records above it
             raise RunCodeError(f"{key} is a {context} command: the workflow must be on a {context} record "
-                               f"first; give --start-with (e.g. open_book book_uid=b1)")
+                               f"first, or on a record inside one; give --start-with (e.g. open_book book_uid=b1)")
     args = {p.name: p.default for p in command.params if not p.required} | given
-    walk.validate(command, args)
+    args = walk.validate(command, args)
     result = walk.run_planning(key, args, 0, ())
     if result is None:
         return CodeRun(text=walk.text(), facts=walk.top_facts, open_step=walk.open_step)

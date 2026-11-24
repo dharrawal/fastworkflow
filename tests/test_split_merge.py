@@ -482,10 +482,48 @@ def test_a_subtask_putting_another_sentences_record_in_a_job_is_dropped():
     split = ["Audit BuildOps admin rights wherever they appear, including the system that publishes it.",
              "Audit Field Sales wherever it appears, including the system that publishes it.",
              "Walk Field Sales end to end: every identity on the roster."]
-    assert merge_subtasks(q, split) == [
+    # fix-ftdl.12: the model's part carries "BuildOps", which the sentence it comes from does not write as a
+    # subject, so the sentence no longer replaces it (a rewrite keeps every subject the part carried): the part
+    # stays as the model wrote it and the doubt is recorded; rule 6 still puts the sentence back, cut per record
+    doubts: list[dict] = []
+    assert merge_subtasks(q, split, doubts=doubts) == [
+        "Audit BuildOps admin rights wherever they appear, including the system that publishes it.",
+        "Audit Field Sales wherever it appears, including the system that publishes it. "
+        "Walk Field Sales end to end: every identity on the roster.",
         "Audit BuildOps_Release Manager wherever they appear, each with the system that publishes it.",
-        "Audit BuildOps_Backup Administrator wherever they appear, each with the system that publishes it.",
-        "Walk Field Sales end to end: every identity on the roster."]
+        "Audit BuildOps_Backup Administrator wherever they appear, each with the system that publishes it."]
+    assert doubts == [{"part": split[0],
+                       "missing": ["BuildOps_Backup Administrator", "BuildOps_Release Manager"]}]
+
+
+def test_a_part_carrying_a_name_of_another_sentence_is_not_replaced_by_a_sentence_lacking_it():
+    q = ("Northwind Ltd recertification. Give me the full recertification: owner, members, the Night_Shift group "
+         "with its members, and the risk. Then list the loans Cid Moss never returned, with their count.")
+    split = ["Northwind Ltd recertification: its owner, its members, its group with that group's members, and its risk.",
+             "List the loans Cid Moss never returned, with their count."]
+    doubts: list[dict] = []
+    merged = merge_subtasks(q, split, doubts=doubts)
+    # the part keeps "Northwind Ltd" (the sentence it would have become never names it); rule 6 puts back the
+    # sentence naming Night_Shift, which no part names, beside it
+    assert merged == [split[0],
+                      "Give me the full recertification: owner, members, the Night_Shift group with its members, "
+                      "and the risk.",
+                      split[1]]
+    assert doubts == [{"part": split[0], "missing": ["Night_Shift"]}]
+
+
+def test_a_part_carrying_no_subject_of_its_own_is_still_restored_with_no_doubt():
+    q = ("Feed review. List the logins nobody owns on NORTHFEED and on SOUTHFEED, with a count for each. "
+         "Confirm whether the HR feed carries any logins at all. "
+         "Then open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips.")
+    split = ["List the logins nobody owns on NORTHFEED, with a count for each.",
+             "Confirm whether the HR feed carries any logins at all.",
+             "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
+    doubts: list[dict] = []
+    assert merge_subtasks(q, split, doubts=doubts)[:2] == [
+        "List the logins nobody owns on NORTHFEED, with a count for each.",
+        "List the logins nobody owns on SOUTHFEED, with a count for each."]
+    assert doubts == []
 
 
 def test_an_asked_job_whose_record_only_other_jobs_name_is_put_back():

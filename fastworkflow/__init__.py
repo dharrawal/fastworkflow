@@ -18,7 +18,7 @@ import mmh3
 
 class Action(BaseModel):
     command_name: str
-    command: str = ""   # only use is to display autocomplete item in the UI
+    command: str = ""   # the request text: the command text the checks and the ResponseGenerator are given
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}
     workflow_id: Optional[int] = None    # when creating a new action, this is set by the workflow
 
@@ -43,6 +43,48 @@ def load_startup_action(value: str) -> "Action":
             ) from None
     return Action(**data)
 
+_STARTUP_ACTION_FILE = "startup_action.json"
+
+
+def workflow_startup_action(workflow_folder: str) -> Optional["Action"]:
+    """The startup Action in ``<workflow_folder>/startup_action.json``, or None when the folder has no such file.
+
+    A file that exists but is not a JSON object holding a valid Action is a ValueError naming the file: it is
+    never skipped silently. The one reader of the workflow's own startup file, for every entry point.
+    """
+    path = os.path.join(workflow_folder, _STARTUP_ACTION_FILE)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if not isinstance(data, dict):
+            raise ValueError("it must hold one JSON object")
+        if unknown := sorted(set(data) - set(Action.model_fields)):
+            import difflib
+
+            close = difflib.get_close_matches(unknown[0], list(Action.model_fields), n=1)
+            raise ValueError(f"unknown key {unknown[0]!r}{f'; did you mean {close[0]!r}?' if close else ''} (its "
+                             f"keys: {', '.join(Action.model_fields)})")
+        return Action(**data)
+    except (ValueError, TypeError) as error:   # json errors and pydantic's ValidationError are ValueErrors
+        raise ValueError(f"startup action file {path!r} is not valid: {error}") from None
+
+
+def resolve_startup_action(
+    workflow_folder: str, startup_command: Optional[str], startup_action: Optional[str]
+) -> Optional["Action"]:
+    """The startup Action a process starts with: the ``--startup_action`` value when given, nothing when only
+    ``--startup_command`` was given, else the workflow folder's ``startup_action.json`` when it has one.
+    Used by the entry points (``run``, the server); a caller that builds a session directly gets no startup.
+    """
+    if startup_action:
+        return load_startup_action(startup_action)
+    if startup_command:
+        return None
+    return workflow_startup_action(workflow_folder)
+
+
 class Recommendation(BaseModel):
     summary: str
     suggested_actions: list[Action] = []
@@ -55,8 +97,8 @@ class CommandResponse(BaseModel):
     recommendations: list[Recommendation] = []
     #: The command's ``Signature.Output`` instance, when the command built one.
     #: Optional and appended (arch §12.2): a command that does not set it behaves
-    #: exactly as before. It never reaches the agent's prompt -- the agent reads
-    #: ``response`` -- but the observation archive stores it as JSON beside the
+    #: exactly as before. The agent reads ``response``, which for an ``Output`` the command
+    #: returns directly is that Output as JSON; the observation archive also stores it as JSON beside the
     #: text (``RuntimeHandleArchive.command_runs``), so later code can read exact
     #: ids, labels and counts without parsing ``response``. A pydantic model in
     #: memory; a dict once a record has been dumped and read back.
@@ -106,8 +148,9 @@ class Refused(ValueError):
     missing, keeps the others, and asks the user for those fields again, with the message
     (the targeted re-ask a ``db_lookup`` rejection gave before it was retired). Raised from
     a model validator of the command's ``Input`` (``@model_validator``), it is a refusal of the arguments; raised from
-    a ``ResponseGenerator.__call__``, it is the call's answer. A ``ValueError``, so code
-    that caught ``ValueError`` around a command's helpers keeps catching it.
+    a ``ResponseGenerator.__call__`` or a planning command's ``__result__``, it is the call's answer: the command has
+    run, so nothing is asked again, and ``field`` is named on the failed answer as its artifact ``refused_fields``
+    (``as_output``). A ``ValueError``, so code that caught ``ValueError`` around a command's helpers keeps catching it.
     """
 
     def __init__(self, message: str = "", field=None):
@@ -123,7 +166,10 @@ class Refused(ValueError):
         self.fields: tuple[str, ...] = names
 
     def as_output(self) -> "CommandOutput":
-        return CommandOutput(command_response=CommandResponse(response=str(self), success=False))
+        """The failed answer of a call that refused from its body: the message, and the fields it named as the
+        artifact ``refused_fields`` (none named: no artifact)."""
+        artifacts = {"refused_fields": list(self.fields)} if self.fields else {}
+        return CommandOutput(command_response=CommandResponse(response=str(self), success=False, artifacts=artifacts))
 
 
 class CommandOutput(BaseModel):

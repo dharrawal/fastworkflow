@@ -17,6 +17,7 @@ import pytest
 import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.workflow import running_command
 from fastworkflow.observability.decision_signals import SLOT_BINDING_SOURCES, SIGNAL_CONTRACT_VERSION
 from fastworkflow.observability.decision_signals import slot_binding_source  # noqa: F401 - the vocabulary
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import slot_binding_uncertainty
@@ -312,13 +313,20 @@ def test_the_output_return_is_the_response_and_the_framework_sets_success(initia
 # ---------------------------------------------------------------- messaging_app_4: the lookup moved into its hook
 
 
+@pytest.fixture
+def in_dispatch():
+    """The validators run inside the command's dispatch, where workflow.record is the record the command runs on."""
+    with running_command():
+        yield
+
+
 def test_messaging_app_4_set_current_user_corrects_a_near_name_and_refuses_one_it_cannot_place(
-        messaging_on_a_user):
+        messaging_on_a_user, in_dispatch):
     app, _cme, root, _user = messaging_on_a_user
     from fastworkflow.examples.messaging_app_4.application.user import User
 
     root.add_user(User(root, "fred"))
-    # the NLU path binds the record the command runs on (the chat room) before the hook runs
+    # the NLU path binds the record the command runs on (the chat room) before the hook runs, inside the dispatch
     app._command_context_for_response_generation = root
     command = "ChatRoom/set_current_user"
     params_cls = fastworkflow.RoutingRegistry.get_definition(app.folderpath).get_command_class(
@@ -345,7 +353,8 @@ def test_messaging_app_4_set_current_user_corrects_a_near_name_and_refuses_one_i
     assert unknown.user_name == "qzxv"
 
 
-def test_messaging_app_4_set_current_user_refuses_a_near_tie_with_field_and_both_names(messaging_on_a_user):
+def test_messaging_app_4_set_current_user_refuses_a_near_tie_with_field_and_both_names(messaging_on_a_user,
+                                                                                      in_dispatch):
     """fix-jd9o.10: 'Sarah Coen' is near both users, so the hook refuses by field with both names and
     sets nothing; the field is then asked again rather than silently taking one of them."""
     app, _cme, root, _user = messaging_on_a_user

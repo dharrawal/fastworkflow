@@ -252,7 +252,7 @@ say which books Mia Chen has on loan, and that the note was added
 `member_report` leaves the workflow on Mia Chen (page 5), so `add_note` runs on her record.
 
 **A larger workflow is shortlisted.** The planner is shown every command of the workflow, each planning
-command with its template, while the full list is 7000 characters or less. A larger workflow that has trained
+command with its template, while the full list is 8000 characters or less. A larger workflow that has trained
 heads is shown a shortlist instead, built like this for a request:
 
 1. **The commands that match**, in every scope on the path and in every context the library can
@@ -305,6 +305,6 @@ the planner fills its inputs, code checks them and writes its steps, and the pla
 steps the request asks for beyond it; a value the request leaves out is asked for in an
 attended turn. When the call fails, the planner adapts the command's template. Without the key,
 or for a part no planning command covers, the planner plans from the list of commands, which
-shows each planning command with its template. The planner is shown the full list of commands up to 7000
+shows each planning command with its template. The planner is shown the full list of commands up to 8000
 characters; above that, the shortlist of a large workflow, which your producer `from_command_output` and `@descends_to`
 declarations complete.

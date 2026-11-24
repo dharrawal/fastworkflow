@@ -378,7 +378,7 @@ def test_a_confident_global_command_wins_and_runs_on_the_root(on_a_book):
     assert result.asked == ("*",)
     assert result.answer.command_name == "library_hours"
     assert result.scope == Scope("*", library)
-    assert app.record is library               # the command runs on the root record
+    assert app._command_context_for_response_generation is library               # the command runs on the root record
     assert app._current_command_context is book   # and the position did not move
 
 
@@ -414,7 +414,7 @@ def test_a_decline_moves_to_the_enclosing_scope_which_is_bound_when_asked(on_a_b
     bound_when_asked = {}
 
     def step(context_name):
-        bound_when_asked[context_name] = app.record
+        bound_when_asked[context_name] = app._command_context_for_response_generation
         return (Output(command_name="Library/find_book") if context_name == "Library"
                 else Output(command_name=None))
 
@@ -424,7 +424,7 @@ def test_a_decline_moves_to_the_enclosing_scope_which_is_bound_when_asked(on_a_b
     assert result.scope == Scope("Library", library)
     # Each enclosing scope is the workflow's record while it is asked, and stays so when it answers.
     assert bound_when_asked["Library"] is library
-    assert app.record is library
+    assert app._command_context_for_response_generation is library
     assert app._current_command_context is book
 
 

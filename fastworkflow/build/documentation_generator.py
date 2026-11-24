@@ -207,14 +207,17 @@ def generate_readme_content(
     readme.append("## Available Commands\n")
 
     # Add global commands first if they exist
+    from fastworkflow.command_directory import declares_signature
+
     global_commands = []
     for meta in command_metadata:
         # Check if it's a file directly in _commands and not a special file
         parts = meta['file_path'].split(os.path.sep)
         if "_commands" in parts:
             cmd_idx = parts.index("_commands")
+            # a command with no Signature (a startup command) runs only as an action: it is not listed
             if cmd_idx + 1 < len(parts) and parts[cmd_idx + 1].endswith(".py") and (not os.path.basename(meta['file_path']).startswith("_") and \
-                               os.path.basename(meta['file_path']) != "startup.py" and \
+                               declares_signature(meta['file_path']) and \
                                os.path.basename(meta['file_path']) != "__init__.py"):
                 global_commands.append(meta)
 

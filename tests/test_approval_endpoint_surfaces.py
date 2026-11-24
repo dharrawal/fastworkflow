@@ -147,7 +147,7 @@ def _decision(data: dict) -> str:
         return "ASK+token"
     if ab.MSG_IDENTITY[:40] in data["answer"]:
         return "REFUSE"
-    assert "run" in data["answer"] and "cannot be undone" in data["answer"], data["answer"]
+    assert "run" in data["answer"] and "Reply yes to approve" in data["answer"], data["answer"]
     return "ASK"
 
 

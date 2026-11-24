@@ -83,15 +83,19 @@ def _unsure_phrasing(app, heads=("*", "Book")) -> str:
                 f"{', '.join(heads)} on this copy: nothing to route")
 
 
-#: Natural phrasings for the global command set_root_context (messaging_app_4), probed, not trusted.
-ROOT_PHRASINGS = [
-    "set the root context",
-    "set root context",
-    "set up the root context",
-    "make the root context",
-    "set the root",
-    "change the root context",
-]
+
+ROOM_STATUS = '''"""room_status: say which record a global command was bound to (test copy only)."""
+import fastworkflow
+
+
+class Signature:
+    """Say how the chat room stands."""
+
+
+class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> str:
+        return f"room_status bound to {type(workflow.record).__name__}"
+'''
 
 
 @pytest.fixture
@@ -116,6 +120,9 @@ def messaging_on_a_user(tmp_path, initialized_fastworkflow, monkeypatch):
     if app.root is None:
         app.root = ChatRoom()
     root = app.root
+    # The copy's only global command, set_root_context, is its startup command: it has no Signature, so it runs only
+    # as the startup action and no name reaches it (bd fix-ftdl.7.5). A global command with a Signature, test copy only.
+    (folder / "_commands" / "room_status.py").write_text(ROOM_STATUS, encoding="utf-8")
     user = User(root, "alice")
     root.add_user(user)
     app.record = user
@@ -205,14 +212,14 @@ def test_a_global_command_is_run_from_a_user_record_bound_to_the_root_when_the_g
     app, cme, root, user = messaging_on_a_user
     asked = _heads_asked(monkeypatch)
 
-    out = _route(cme, ROOT_PHRASINGS[0])
+    out = _route(cme, "room status")
 
-    # "set the root context" is a misspelling of the global command's name within the fuzzy bound: it is decided by
-    # name, in the global scope, before any head is asked (the intent loop's name layers come first).
+    # "room status" is the global command's name in words, within the fuzzy bound: it is decided by name, in the
+    # global scope, before any head is asked (the intent loop's name layers come first).
     assert asked == []
     artifacts = out.command_response.artifacts
-    assert artifacts["command_name"].split("/")[-1] == "set_root_context"
-    assert app.record is root
+    assert artifacts["command_name"].split("/")[-1] == "room_status"
+    assert app._command_context_for_response_generation is root
     assert artifacts["ran_on_context_name"] == "ChatRoom"
     assert app._current_command_context is user
     assert app.root is root
@@ -295,7 +302,7 @@ def test_an_exact_name_from_the_book_is_answered_nearest_first_and_skips_the_glo
     out = _route(cme, "list_branches")
     assert out.command_response.artifacts["command_name"] == "Library/list_branches"
     assert out.command_response.artifacts["ran_on_context_name"] == "Library"
-    assert app.record is library
+    assert app._command_context_for_response_generation is library
     # A name typed exactly is decided by name (3.9), with no head asked at all.
     assert asked == []
 

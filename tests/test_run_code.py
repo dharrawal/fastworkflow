@@ -185,6 +185,31 @@ def test_a_hook_that_raises_exits_1_naming_it(library, no_model):
     assert "__result__" in cli.stderr and "Library/book_loans" in cli.stderr
 
 
+# ------------------------------------------------------------------ the Input's validators, as the runtime runs them
+
+def test_a_validator_gets_the_workflow_and_its_correction_is_kept(library, no_model):
+    """run-code validates a planning call's arguments as the runtime does: the validator's context holds the session's
+    workflow (not None), and what the validator writes is the argument the call runs with."""
+    path = os.path.join(library, "_commands", "Library", "count_books.py")
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+    marker = '                           json_schema_extra={"copied_from_command_text": True})\n'
+    assert source.count(marker) == 1
+    source = source.replace("from pydantic import BaseModel, Field",
+                            "from pydantic import BaseModel, Field, ValidationInfo, model_validator")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(source.replace(marker, marker + """
+        @model_validator(mode="after")
+        def tidy(self, info: ValidationInfo):
+            workflow = (info.context or {}).get("workflow")   # None only while the plan is rendered unrun
+            if workflow is not None and workflow.folderpath:
+                self.query = self.query.strip()
+            return self
+"""))
+    result = run_code(library, "count_books", {"query": "  Emma  "})
+    assert result.answer.startswith("Emma matches "), result.text
+
+
 # ------------------------------------------------------------------ a command file that does not load
 
 def _break_a_command_file(folder: str) -> None:

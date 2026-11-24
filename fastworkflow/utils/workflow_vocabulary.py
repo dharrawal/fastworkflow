@@ -19,24 +19,22 @@ Two layers:
   metadata and never writes into ``___command_info``. That fallback is what serves every
   workflow that has not been trained since this file was introduced.
 
-Kind selectors. A ``str`` field that names the kinds it accepts (``resource_type``: "Which kind
-of thing access is being asked about. One of: application, group, permission, repository,
-resource") may take a kind word as its value; the kind-word screen does not refuse one of the
-field's listed options. A field is a kind selector when its description lists kind words (an
-enumeration "One of: a, b, c" / "e.g. x, y", or at least two kind words it names), or when its
-labeled training examples (``<command>_param_labeled.json``) use kind words as its value. The
-options are those listed words and example values. Kind words are the workflow's context names
-(the record kinds its commands are grouped under), not the wider vocabulary (command-name parts
-such as "find" and "list") nor the declared choice values (such as "add" or "login").
+Kind selectors. A ``str`` field whose labeled training examples (``<command>_param_labeled.json``) use kind words as
+its value may take those kind words; the kind-word screen does not refuse them. A field's DESCRIPTION exempts nothing
+(bd fix-ftdl.6.1): "One of: a, b" or a description that names kind words is prose, and a fixed set of allowed values
+is a ``Literal`` (never screened; ``command preview --check`` warns about a ``str`` whose description lists kind words,
+``description_kind_options``). Kind words are the workflow's context names (the record kinds its commands are grouped
+under), not the wider vocabulary (command-name parts such as "find" and "list") nor the declared choice values (such
+as "add" or "login").
 
 Fingerprint: the stored file is fresh only while the command source fingerprint and a digest
 of the labeled-example files both match; the labeled files are rewritten by train, so they are
 re-checked on each load rather than trusted.
 
-The stored file (``FORMAT_VERSION`` 2)::
+The stored file (``FORMAT_VERSION`` 3; a file of another format is stale and the vocabulary is derived in memory)::
 
     {
-      "format": 2,
+      "format": 3,
       "source_fingerprint": "<compute_commands_source_fingerprint>",
       "labeled_fingerprint": "<digest of the *_param_labeled.json files>",
       "words": ["author", "book", "book_name", "book_uid", ...],   # sorted, lowercase
@@ -60,7 +58,8 @@ from fastworkflow.command_directory import CommandDirectory, compute_commands_so
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 
-FORMAT_VERSION = 2
+#: 3 since a description no longer makes a kind selector (bd fix-ftdl.6.1): a format-2 file may hold such selectors.
+FORMAT_VERSION = 3
 VOCABULARY_FILENAME = "workflow_vocabulary.json"
 COMMAND_INFO_FOLDERNAME = "___command_info"
 LABELED_SUFFIX = "_param_labeled.json"
@@ -93,8 +92,6 @@ class WorkflowMetadata:
     context_names: frozenset[str]
     field_names: frozenset[str]     # input fields of every command and planning command
     choice_values: frozenset[str]   # declared Literal / Enum values of those fields
-    #: ``(command, field, description)`` for each input field of a command or planning command.
-    field_descriptions: frozenset[tuple[str, str, str]] = frozenset()
     #: ``(command, field, value)`` for each string value a labeled example gives an input field.
     labeled_values: frozenset[tuple[str, str, str]] = frozenset()
 
@@ -139,7 +136,8 @@ def is_kind_word(text: str, field_name: str, vocabulary: WorkflowVocabulary | No
 
 
 def description_kind_options(description: str, kind_words: frozenset[str]) -> frozenset[str]:
-    """The kind-selector options a field description lists; empty when it lists none.
+    """The kind words a field description lists; empty when it lists none. Read only by ``command preview --check``'s
+    warning that such a set is better typed as a ``Literal``: a description exempts nothing from the screens.
 
     An explicit enumeration ("One of: a, b, c", "e.g. x, y") lists its items. Without one, the
     description lists the kind words it names, when it names at least two of them.
@@ -164,18 +162,12 @@ def kind_words_of(metadata: WorkflowMetadata) -> frozenset[str]:
 
 
 def derive_kind_selectors(metadata: WorkflowMetadata) -> dict[str, dict[str, frozenset[str]]]:
-    """``{command: {field: options}}`` for the workflow's kind-selector fields.
-
-    Source (1): the field's description lists kind words (``description_kind_options``).
-    Source (2): the field's labeled examples give kind words as its value (those values).
-    Both sources contribute options to the same field; a field with neither is not listed.
+    """``{command: {field: options}}`` for the workflow's kind-selector fields: the kind words a field's labeled
+    examples give as its value. A field's description is not read (bd fix-ftdl.6.1); a field with no such example is
+    not listed.
     """
     kinds = kind_words_of(metadata)
     options: dict[tuple[str, str], set[str]] = {}
-    for command, field_name, description in metadata.field_descriptions:
-        listed = description_kind_options(description, kinds)
-        if listed:
-            options.setdefault((command, field_name), set()).update(listed)
     for command, field_name, value in metadata.labeled_values:
         word = value.strip().lower()
         if word in kinds:
@@ -290,7 +282,6 @@ def gather_metadata(workflow_folderpath: str) -> WorkflowMetadata:
     contexts: set[str] = set()
     fields: set[str] = set()
     choices: set[str] = set()
-    descriptions: set[tuple[str, str, str]] = set()
     labeled: set[tuple[str, str, str]] = set()
     for name in directory.map_command_2_metadata:
         if name in core:
@@ -300,10 +291,9 @@ def gather_metadata(workflow_folderpath: str) -> WorkflowMetadata:
         if context:
             contexts.add(context)
         inputs = _input_fields(directory, name)
-        for field, (annotation, description) in inputs.items():
+        for field, (annotation, _) in inputs.items():
             fields.add(field)
             choices |= _choices(annotation)
-            descriptions.add((name, field, description))
         for example in _labeled_examples(folder, name):
             for field, value in example.items():
                 if field in inputs and isinstance(value, str):
@@ -313,7 +303,6 @@ def gather_metadata(workflow_folderpath: str) -> WorkflowMetadata:
         context_names=frozenset(contexts),
         field_names=frozenset(fields),
         choice_values=frozenset(choices),
-        field_descriptions=frozenset(descriptions),
         labeled_values=frozenset(labeled),
     )
 

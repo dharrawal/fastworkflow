@@ -180,8 +180,9 @@ def test_the_typed_call_declares_the_list_float_and_bool_fields_with_their_types
     assert fields["titles"].annotation == list[str]
     assert fields["ratio"].annotation is float
     assert fields["checked"].annotation is bool
-    assert pc._field_desc(command.param("checked")) == (
-        "also report the titles checked. false only when the request explicitly asks against this; otherwise true")
+    # the sentence of the bool type, the extractor's own (bd fix-ftdl.6.5)
+    assert fields["checked"].json_schema_extra["desc"] == (
+        f"also report the titles checked. {pc.BOOL_TRUE_SENTENCE.rstrip('.')} (default true)")
 
 
 def test_the_cme_signature_of_a_list_and_a_float_field_carries_their_types(tmp_path):
@@ -399,7 +400,8 @@ def test_an_execution_command_str_with_in_request_refuses_a_value_the_request_do
     assert not is_valid
     # the guard names its argument, so it is asked like any refused value (the standard question, the guard's reason in it)
     assert fields == ["name"]
-    assert "name='Billing' is not written in the request" in message and "Which name should I use?" in message
+    # a person reads the plan path's words for the refused value (``ask.refused_clause``)
+    assert "the name 'Billing' is not in your request" in message and "Which name should I use?" in message
 
 
 def test_the_same_execution_command_str_without_the_option_accepts_the_value():
@@ -414,14 +416,11 @@ def test_the_same_execution_command_str_without_the_option_accepts_the_value():
 def test_a_planning_command_str_with_in_request_refuses_and_the_same_str_without_it_accepts(tmp_path):
     with_option = _command(tmp_path / "a", _module('name: str = Field(description="n", json_schema_extra={"copied_from_command_text": True})'),
                            name="weigh")
-    # one rule: a str with no option is grounded too; only a field that opts out (converted) accepts an unwritten value
+    # bd fix-qjne.21: a str with no option is not checked against the request; only the marked field is
     plain = _command(tmp_path / "c", _module('name: str = Field(description="n")'), name="weigh")
-    without = _command(tmp_path / "b", _module('name: str = Field(description="n", json_schema_extra={"converted_from_command_text": True})'), name="weigh")
     with pytest.raises(PlanningCommandInputError, match="name='Billing' is not written in the request"):
         pc.check_arguments(with_option, {"name": "Billing"}, "Show the Payroll group")
-    with pytest.raises(PlanningCommandInputError, match="name='Billing' is not written in the request"):
-        pc.check_arguments(plain, {"name": "Billing"}, "Show the Payroll group")
-    args, _ = pc.check_arguments(without, {"name": "Billing"}, "Show the Payroll group")
+    args, _ = pc.check_arguments(plain, {"name": "Billing"}, "Show the Payroll group")
     assert args["name"] == "Billing"
 
 
@@ -494,7 +493,7 @@ def test_an_input_validator_runs_once_after_the_option_checks_for_an_execution_c
     is_valid, message, *_ = InputForParamExtraction(command="Show the Payroll group",
                                                     input_for_param_extraction_class=None).validate_parameters(
         None, "Library/show_group", refused)
-    assert not is_valid and "not written in the request" in message
+    assert not is_valid and "the name 'Billing' is not in your request" in message
     assert calls == []                                 # a refused value never reaches the validator
 
 
@@ -588,7 +587,7 @@ def test_the_extractor_reads_the_options_sentences_for_both_kinds_and_none_for_a
         "name": (pc.IN_REQUEST_STR_SENTENCE,),
         "count": (pc.IN_REQUEST_INT_SENTENCE,),
         "titles": (pc.IN_REQUEST_LIST_SENTENCE,),
-        "checked": (pc.VERIFY_BOOL_SENTENCE,),
+        "checked": (pc.BOOL_SENTENCE,),   # the bool type's sentence, whether or not the field carries an option
     }
     assert "plain" not in pc.option_sentences(GroupInput) and "ratio" not in pc.option_sentences(GroupInput)
 
@@ -630,9 +629,9 @@ TUTORIAL_WORKFLOW = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath
                                  "tests", "planning_tutorial_workflow")
 
 
-def test_the_tutorial_workflows_fields_refuse_an_unwritten_value_with_or_without_an_option():
+def test_the_tutorial_workflows_marked_fields_refuse_an_unwritten_value():
     # book_by_title's title carries in_request (tutorial pages 4 and 12): a title the request does not write is refused.
-    # member_loans' member carries no option, and is grounded all the same (one rule for every str).
+    # member_loans' member carries copied_from_command_text too (the strict check; an unmarked str is not checked).
     commands = workflow_agent.load_planning_command_map(TUTORIAL_WORKFLOW)
 
     with pytest.raises(PlanningCommandInputError, match="title='Emma' is not written in the request"):
@@ -712,7 +711,7 @@ def test_in_request_subject_on_a_non_str_is_a_load_error_and_on_a_str_is_the_sub
 def test_in_request_on_a_planning_command_read_as_true_or_false_or_subject_only(tmp_path):
     error = _load_error(_write(tmp_path, {"bad": _module(
         'name: str = Field(description="n", json_schema_extra={"in_request": "yes"})')}))
-    assert 'in_request: "yes" is removed: write' in error
+    assert 'in_request: "yes" is removed: leave the key out' in error
 
 
 def test_a_verify_dict_is_the_check_and_its_meanings_are_the_sentences_the_check_reads(tmp_path):
@@ -874,11 +873,48 @@ def test_a_refusing_validator_still_refuses_on_either_kind_and_a_model_validator
     refused = Rewrites.model_construct(name="refuse")
     is_valid, message, *_ = InputForParamExtraction(command="Show refuse", input_for_param_extraction_class=None
                                                     ).validate_parameters(None, "Library/show_group", refused)
-    assert not is_valid and message == "validate_extracted_parameters: refused by the validator"
+    assert not is_valid and message == "refused by the validator"
 
     # a planning command: the same validator writes back into the arguments, and a refusal refuses
     option = pc.option_command(Rewrites, "Library/show_group")
     assert pc.check_input(option, {"name": "Payroll"}, "Show the Payroll group") == {"name": "PAYROLL"}
-    with pytest.raises(PlanningCommandInputError, match="^validate_extracted_parameters: "
+    with pytest.raises(PlanningCommandInputError, match="^"
                                                         "refused by the validator$"):
         pc.check_input(option, {"name": "refuse"}, "Show the Payroll group")
+
+
+def test_a_pattern_mismatch_lists_the_field_once_and_an_empty_example_is_not_printed():
+    class Coded(BaseModel):
+        code: str = Field(description="a code", pattern=r"^#S[0-9]+$")
+        shelf: str = Field(description="a shelf", pattern=r"^#S[0-9]+$", examples=["#S1"])
+
+    asker = InputForParamExtraction(command="Show #bad and #worse", input_for_param_extraction_class=None)
+    diagnostics: dict = {}
+    instance = Coded.model_construct(code="#bad", shelf="#worse")
+    is_valid, message, suggestions, *_ = asker.validate_parameters(None, "Library/show_code", instance,
+                                                                   diagnostics=diagnostics)
+    assert not is_valid
+    invalid = diagnostics.get("invalid_fields") or []
+    assert len(invalid) == len(set(invalid)) == 2, invalid
+    # the one pattern refusal (``rules.pattern_refusal``, bd fix-ftdl.6.4) is the question's own words
+    assert "code '#bad' does not match the pattern ^#S[0-9]+$;" in message
+    assert "shelf '#worse' does not match the pattern ^#S[0-9]+$ (e.g., #S1)" in message
+    assert "(e.g., )" not in message and suggestions == {}
+
+
+# ---------------------------------------------------------------- a value that is the default is not given
+
+class _Count(BaseModel):
+    owner: str = Field(description="the owner", json_schema_extra={"copied_from_command_text": True})
+    count: int = Field(default=0, description="how many", json_schema_extra={"copied_from_command_text": True})
+    note: str = Field(default="", description="a note")
+
+
+def test_a_marked_int_at_its_default_is_neither_kept_nor_refused_when_another_argument_is_refused():
+    """A request that gives no number: the count's default written as text (how a review input holds every value) is
+    not a value the strict check refuses, so a later check of the inputs does not ask for it."""
+    command = pc.option_command(_Count, "count_line", ())
+    request = "write a line for Ann Lee"
+    assert pc.argument_gaps(command, {"owner": "Bob", "count": 0, "note": ""}, request).names == ("owner",)
+    assert not pc.argument_gaps(command, {"owner": "Ann Lee", "count": "0", "note": ""}, request).names
+    assert pc.check_arguments(command, {"owner": "Ann Lee", "count": "0"}, request)[0]["count"] == 0

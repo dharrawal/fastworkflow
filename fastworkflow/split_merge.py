@@ -62,7 +62,7 @@ Fewer than two sub-tasks left means the request is one job: ``[user_query]``.
 
 Subjects are found without any catalog: back-ticked and quoted spans,
 uids, the identifiers the workflow declares (``identifiers``: compiled patterns, e.g. from
-``identifier_patterns`` of its ``_commands/_split.py``), and capitalised name spans (common words that open a
+``identifier_patterns`` of its ``_commands/_workflow.py``), and capitalised name spans (common words that open a
 sentence, weekdays and months are not names). "X and Y Ltd", "X and Sons":
 a chain of names joined by "and" or commas whose last word is a company
 suffix is one name (a business unit). A sub-task mentions a subject when it
@@ -482,7 +482,8 @@ def _collapse_stutter(text: str, user_query: str, known: list[str]) -> str:
 
 
 def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
-                          identifiers: tuple[re.Pattern, ...], wrong_records_only: bool = False) -> list[str]:
+                          identifiers: tuple[re.Pattern, ...], wrong_records_only: bool = False,
+                          doubts: list[dict] | None = None) -> list[str]:
     """Rule 6a: the sub-tasks taken from a job sentence carry all of that sentence's subjects.
 
     "List the logins nobody owns on NORTHFEED and on SOUTHFEED" cut to "... on NORTHFEED" loses the
@@ -498,6 +499,12 @@ def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
     Payroll_Clerk", Billing named in another sentence): it is the sentence verbatim when the other
     sub-tasks taken from it leave some of its subjects out, else it is dropped. ``wrong_records_only``
     does only this (rule 3b, before rule 3 can join such a sub-task to the one naming its record).
+
+    Invariant of both branches: the sentence replaces the sub-tasks taken from it only when it names every
+    subject they carried (``subjects_in``). The sentence can lack a name the model rightly put in a sub-task
+    (stated in another sentence of the request); then nothing is rewritten or dropped, the sub-tasks stay as
+    the model wrote them, and ``doubts`` (optional) receives ``{"part", "missing"}`` for the first of them:
+    its text and the sentence's subjects that none of them names, as the request spells them.
     """
     sentences = _sentences(user_query)
     subj = [subjects_in(t, known, identifiers) for t in texts]
@@ -526,13 +533,27 @@ def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
                     and not any(_contains(texts[i], a) for i in kept)}
         text = _LEADING_LINK.sub("", sentence.strip())
         text = text[:1].upper() + text[1:]
+
+        def keeps_subjects() -> bool:
+            # a rewrite never drops a subject the sub-tasks it replaces carried; else it is a doubt, not a repair
+            if frozenset().union(*(subj[i] for i in taken)) <= own:
+                return True
+            if doubts is not None and not any(d["part"] == texts[taken[0]] for d in doubts):
+                doubts.append({"part": texts[taken[0]],
+                               "missing": [k for k in known if _norm(k) in missing]})
+            return False
+
         if strays:
             if missing:             # the sentence takes the place of all the sub-tasks taken from it
+                if not keeps_subjects():
+                    continue
                 replace[taken[0]] = text
                 strays = taken[1:]
             drop |= set(strays)
             continue
         if wrong_records_only or not missing or not all(_content(texts[i]) <= _content(sentence) for i in taken):
+            continue
+        if not keeps_subjects():
             continue
         replace[taken[0]] = text
         drop |= set(taken[1:])
@@ -540,7 +561,7 @@ def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
 
 
 def _restore_dropped(user_query: str, texts: list[str], known: list[str],
-                     identifiers: tuple[re.Pattern, ...]) -> list[str]:
+                     identifiers: tuple[re.Pattern, ...], doubts: list[dict] | None = None) -> list[str]:
     """Rule 6: a request sentence naming a subject that no sub-task names is a job the model dropped.
 
     It is put back, verbatim, after the last sub-task that comes from an earlier sentence. A limit
@@ -551,7 +572,7 @@ def _restore_dropped(user_query: str, texts: list[str], known: list[str],
     by other jobs' sub-tasks (``_carried_job``): "Audit the right X across the systems it appears in"
     is not done by "Confirm whether Ann Lee holds X".
     """
-    texts = _restore_cut_subjects(user_query, texts, known, identifiers)
+    texts = _restore_cut_subjects(user_query, texts, known, identifiers, doubts=doubts)
     named = set().union(*(subjects_in(t, known, identifiers) for t in texts))
     sentences = _sentences(user_query)
     out = list(texts)
@@ -1119,7 +1140,7 @@ SameJob = Callable[[str, str], Optional[bool]]
 def merge_subtasks(user_query: str, subtasks: list[str],
                    identifiers: tuple[re.Pattern, ...] = (),
                    same_job: SameJob | None = None, context: str = "",
-                   applied: list[str] | None = None) -> list[str]:
+                   applied: list[str] | None = None, doubts: list[dict] | None = None) -> list[str]:
     """``subtasks`` with the parts that are not independent jobs joined; ``[user_query]`` when one job is left.
 
     Pure: no model and no I/O of its own. Fewer than two sub-tasks are returned unchanged. ``identifiers``
@@ -1134,6 +1155,9 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     ``stutter``, ``invented_or_meta`` (rule 1), ``contained``, ``attach_context`` (3a), ``restore_cut_subjects`` (3b),
     ``group`` (3), ``comparison`` (4), ``restore_dropped`` (6), ``one_per_record`` (7), ``carry_limits`` (5). It never
     changes what is returned.
+    ``doubts`` (optional, recording only) receives ``{"part", "missing"}`` for each sub-task the subject restore
+    (3b, 6) left as the model wrote it because the request sentence it comes from lacks a subject the sub-task
+    carries: the sub-task's text then, and the sentence's subjects it does not name. It never changes what is returned.
     """
 
     def mark(rule: str, before: list, after: list) -> None:
@@ -1173,7 +1197,7 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     mark("attach_context", before, items)
     # rule 3b: a sub-task that put another sentence's record into a sentence's job is not a job
     before = items
-    items = _restore_cut_subjects(user_query, items, known, identifiers, wrong_records_only=True)
+    items = _restore_cut_subjects(user_query, items, known, identifiers, wrong_records_only=True, doubts=doubts)
     mark("restore_cut_subjects", before, items)
 
     # rule 3: no new subject, no new sub-task (a name extending one of the group's names, with a
@@ -1225,7 +1249,7 @@ def merge_subtasks(user_query: str, subtasks: list[str],
         return [user_query]
     # rule 6: a job sentence of the request whose record no sub-task names is put back
     before = [t for t, _ in out]
-    texts = _restore_dropped(user_query, before, known, identifiers)
+    texts = _restore_dropped(user_query, before, known, identifiers, doubts)
     mark("restore_dropped", before, texts)
     # rule 7: the same thing asked of each record of a list is one sub-task per record
     before = texts

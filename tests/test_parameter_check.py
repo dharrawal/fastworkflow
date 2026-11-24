@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from typing import Literal
 import subprocess
 import sys
 from pathlib import Path
@@ -58,12 +59,25 @@ def test_the_module_imports_no_model_stack():
     assert done.stdout.strip() == ""
 
 
-@pytest.mark.parametrize("exempt, expected", [
-    (False, True),    # a plain value: grounded, on every kind of command
-    (True, False),    # converted or patterned: the field opts out
+@pytest.mark.parametrize("extra, expected", [
+    ({"copied_from_command_text": True}, True),
+    ({"copied_from_command_text": {"ignore": ["the"]}}, True),
+    ({"record_named_in_command_text": True}, True),
+    ({"classifier_confirms": True}, False),       # another option: not the strict check
+    ({}, False),                                  # no option: the extractor's value stands
 ])
-def test_must_ground(exempt, expected):
-    assert check.must_ground(exempt=exempt) is expected
+def test_is_marked(extra, expected):
+    class Model(BaseModel):
+        value: str = Field(default="", json_schema_extra=extra)
+
+    assert check.is_marked(Model.model_fields["value"]) is expected
+
+
+def test_a_pattern_does_not_mark_a_field():
+    class Model(BaseModel):
+        value: str = Field(default="", pattern=r"^#W\d+$")
+
+    assert check.is_marked(Model.model_fields["value"]) is False
 
 
 def test_is_given_value_reads_only_what_the_extractor_gave():
@@ -76,7 +90,7 @@ def test_is_given_value_reads_only_what_the_extractor_gave():
 
 @pytest.mark.parametrize("number, numbers, expected", [
     (3, {3, 4}, ("ok", None)),                                  # written
-    (9, set(), ("ok", None)),                                   # the request writes no number
+    (9, set(), ("refuse", "is not a number the request writes")),   # a marked int: refused when no number is written too
     (9, {3}, ("refuse", check.numbers_why({3}))),               # never replaced by the one number written
     (9, {3, 4}, ("refuse", check.numbers_why({3, 4}))),
 ])
@@ -84,21 +98,17 @@ def test_number_rule(number, numbers, expected):
     assert check.number_rule(number, numbers) == expected
 
 
-def test_example_rule():
-    class Model(BaseModel):
-        code: str = Field(default="", examples=["XY-12"])
-
-    info = Model.model_fields["code"]
-    assert check.example_rule(info, "xy-12") is True
-    assert check.example_rule(info, "QQ-1") is False
+def test_there_is_no_example_rule():
+    """The examples are not shown to the model any more, so a value equal to one is not refused (bd fix-qjne.21)."""
+    assert not hasattr(check, "example_rule") and not hasattr(check, "EXAMPLE_WHY")
 
 
 def test_allowed_placeholder_and_ground_rules():
-    assert check.allowed_rule(("book", "Member"), "member") == ("Member", "")
-    member, why = check.allowed_rule(("book", "Member"), "author")
-    assert member is None and why == "is not one of book, Member"
-    assert check.placeholder_rule("{name}", "find ann") == check.PLACEHOLDER_WHY
-    assert check.placeholder_rule("Dune", "find dune") is None
+    from fastworkflow.parameters import rules
+
+    # the one template-token verdict lives in ``rules`` (read through ``signatures.classify_bracketed_value``)
+    assert not hasattr(check, "placeholder_rule")
+    assert rules.placeholder_like("{name}") and not rules.placeholder_like("Dune")
     request = "Find Ann‑Lee now"
     folded = check.fold(request).lower()
     assert check.ground_rule("ann-lee", folded, request) == "Ann‑Lee"
@@ -115,30 +125,31 @@ def test_state_of_why_reads_a_placeholder_pronoun_or_kind_word_as_missing():
 
 
 class _Row(BaseModel):
-    name: str = Field(description="a name")
-    count: int = Field(default=0, description="how many")
+    # name and count are marked: the strict check; note is not (its value stands)
+    name: str = Field(description="a name", json_schema_extra={"copied_from_command_text": True})
+    count: int = Field(default=0, description="how many", json_schema_extra={"copied_from_command_text": True})
     note: str = Field(default="", description="a note")
 
 
-def test_check_execution_refuses_an_unwritten_value_and_an_unwritten_number():
+def test_the_one_guard_of_marked_execution_fields_refuses_an_unwritten_value_and_an_unwritten_number():
+    """The strict check of a marked execution field is ``check_plan``'s, through ``option_command`` (bd fix-ftdl.6.3):
+    ``check_execution`` (the check stage) no longer makes it."""
     values = {"name": "Bob", "count": 8, "note": ""}
     request = "find Ann Lee, 7 rows"
-    execution = check.check_execution(_Row, values, request)
-    assert [(g.name, g.code, g.why) for g in execution.gaps] == [
-        ("name", "not_written", check.NOT_WRITTEN_WHY),
-        ("count", "number", check.numbers_why({7}))]
-    assert execution.stop is execution.gaps[0] and execution.respelled == {}
+    assert check.check_execution(_Row, values, request).gaps == []
+    gaps = pc.argument_gaps(pc.option_command(_Row, "app/find"), values, request)
+    assert gaps.invalid == (("name", check.NOT_WRITTEN_WHY), ("count", check.numbers_why({7})))
     assert check.check_execution(_Row, values, "  ").gaps == []
 
 
-def test_check_execution_gap_records_carry_the_value_and_message():
-    (gap,) = check.check_execution(_Row, {"name": "Bob", "count": 0, "note": ""}, "find Ann").gaps
-    assert gap == check.Gap("name", check.INVALID, "not_written", check.NOT_WRITTEN_WHY, "Bob",
-                            "name='Bob' is not written in the request")
+def test_the_one_guard_of_a_marked_execution_field_carries_the_value_and_message():
+    checked = check.check_plan(pc.option_command(_Row, "app/find"), {"name": "Bob", "count": 0, "note": ""}, "find Ann")
+    assert checked.stop == check.Gap("name", check.INVALID, "not_written", check.NOT_WRITTEN_WHY, "Bob",
+                                     "name='Bob' is not written in the request")
 
 
-def test_check_plan_grounds_a_value_with_no_copy_option(commands):
-    command = commands["book_details"]               # title carries no copy option: grounded all the same
+def test_check_plan_grounds_a_marked_value(commands):
+    command = commands["book_details"]               # title carries copied_from_command_text: the strict check
     checked = check.check_plan(command, {"title": "Dune Messiah"}, "who has Foundation on loan", None, None)
     assert checked.stop.message == f"title='Dune Messiah' {check.NOT_WRITTEN_WHY}"
     assert checked.stop.state == check.INVALID and checked.stop.call is False
@@ -161,6 +172,29 @@ def test_checked_extraction_reads_the_gaps(commands):
                                "Move Ann Lee's loan", None, None)
     extraction = checked.extraction
     assert extraction.missing == ("branch",) and extraction.invalid == ()
+
+
+def test_a_planning_literal_argument_and_an_execution_literal_field_follow_one_rule(commands):
+    """``allowed_member`` is the one rule: a member takes its declared spelling (case and whitespace ignored), a value
+    outside refuses THAT argument only, with the allowed values in the reason."""
+    from pydantic import BaseModel
+
+    plan = commands["transfer_loan"]
+    ok = check.check_plan(plan, {"member": "Ann Lee", "branch": "Main", "entity_type": " ACCOUNT "},
+                          "Move Ann Lee's loan to Main", None, None)
+    assert ok.values["entity_type"] == "account" and ok.stop is None
+    refused = check.check_plan(plan, {"member": "Ann Lee", "branch": "Main", "entity_type": "savings"},
+                               "Move Ann Lee's loan to Main", None, None).stop
+    assert (refused.name, refused.state, refused.why) == ("entity_type", check.INVALID, "is not one of identity, account")
+
+    class Input(BaseModel):
+        member: str
+        entity_type: Literal["identity", "account"] = "identity"
+
+    executed = check.check_execution(Input, {"member": "Ann Lee", "entity_type": " ACCOUNT "}, "Move Ann Lee's loan")
+    assert executed.respelled == {"entity_type": (" ACCOUNT ", "account")} and executed.gaps == []
+    outside = check.check_execution(Input, {"member": "Ann Lee", "entity_type": "savings"}, "Move Ann Lee's loan")
+    assert [(g.name, g.why) for g in outside.gaps] == [("entity_type", refused.why)]
 
 
 # ---------------------------------------------------------------- 2. the equivalence table
@@ -192,7 +226,11 @@ def test_the_captured_outputs_hold_every_kind_of_outcome(table):
     assert any(v["check_arguments"].get("notes") for v in plan)
     assert any(len(v["argument_gaps"]["missing"]) + len(v["argument_gaps"]["invalid"]) > 1 for v in plan)
     executed = [v for v in expected.values() if "refused" in v]
-    assert sum(bool(v["refused"]) for v in executed) >= 20 and sum(bool(v["respelled"]) for v in executed) >= 10
+    # the check stage of an execution command screens; the strict check of its marked fields is the one guard's
+    # (``check_plan``, the plan cases of this table: bd fix-ftdl.6.3), so it refuses fewer values than it did
+    # (and respells only a Literal's member; a marked value takes the request's spelling from the one guard, a note)
+    assert sum(bool(v["refused"]) for v in executed) >= 15 and sum(bool(v["respelled"]) for v in executed) >= 3
+    assert sum(any("->" in n for n in v["check_arguments"].get("notes", [])) for v in plan) >= 10
     types = {v["check_arguments"]["error"]["type"] for v in plan if "error" in v["check_arguments"]}
     assert types == {"PlanningCommandInputError"}   # the call-level error is covered directly, see test_check_plan_stop_kinds
 

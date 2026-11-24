@@ -14,13 +14,14 @@ The answer is memoised for the turn (``turn_cache``): the gate, the draft and th
 remote model is called at most once per part per turn (its own call is memoised there too).
 
 The callers keep their jobs: ``is_fast_path`` says which part runs with no review (one part, an exact name or a
-confident local model), ``draft_choice`` what a draft binds (a confident match always; the best candidate of an
-ambiguity only where somebody reviews the draft), and ``PartIntent.planning_scores`` orders the plans an ad hoc part
-lists ("closest" first).
+confident local model, never a data change only a model chose), ``draft_choice`` what a draft binds (a confident match
+always; the best candidate of an ambiguity only where somebody reviews the draft), and ``PartIntent.planning_scores``
+orders the plans an ad hoc part lists ("closest" first).
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field, fields
 from typing import Any, Iterable, Optional
 
@@ -34,7 +35,7 @@ PartIntent = intent_loop.Intent
 
 
 def part_intent(workflow, text: str, *, pinned: Optional[str] = None,
-                exclude: Iterable[str] = ()) -> PartIntent:
+                exclude: Iterable[str] = (), part: Optional[int] = None) -> PartIntent:
     """Which command or plan the part *text* gets, from where *workflow* stands (see the module docstring).
 
     *pinned* is a plan the client chose (``use_plan``): it is the answer and nothing is detected. *exclude* leaves
@@ -42,13 +43,18 @@ def part_intent(workflow, text: str, *, pinned: Optional[str] = None,
     one of them becomes an ambiguity among the rest, or none. The decision is the intent loop's with no core command (a
     plan does not run them). Memoised for the turn. Never raises for a model that
     cannot be reached: the chain then stands on the local model.
+
+    The decision is written in ONE ``fw.nlu.intent`` span, by the writer the CME's intent stage uses
+    (``intent_detection.traced_decision``), when it is made (a memo miss), never on a memo read; *part* is the part's
+    1-based number in the turn, recorded on the span when the caller knows it. A pinned plan is not detected, so it
+    writes none.
     """
     if pinned:
         planning, _ = intent_loop._kinds(workflow)
         kind = KIND_PLANNING if pinned in planning else KIND_EXECUTION
         return PartIntent(MATCH, pinned, kind, (Ranked(pinned, kind, 1.0),), BY_PINNED)
     key = ("part_intent", workflow.folderpath, workflow._current_command_context_name, text)
-    intent = turn_cache.memo(key, lambda: intent_loop.resolve(workflow, text, core=False))
+    intent = turn_cache.memo(key, lambda: _decided(workflow, text, part))
     excluded = set(exclude)
     if not excluded:
         return intent
@@ -62,6 +68,13 @@ def part_intent(workflow, text: str, *, pinned: Optional[str] = None,
     return PartIntent(NONE, candidates=rest, decided_by=intent.decided_by)
 
 
+def _decided(workflow, text: str, part: Optional[int]) -> PartIntent:
+    """The intent loop's decision for *text* (no core command), in its span: the CME's writer, called from here."""
+    from fastworkflow._workflows.command_metadata_extraction import intent_detection
+
+    return intent_detection.traced_decision(workflow, text, core=False, part=part)[0]
+
+
 how_settled = intent_loop.how_settled
 
 
@@ -71,11 +84,18 @@ def record_part(workflow, text: str, command: str, how: str, evidence: Optional[
     intent_loop.record(workflow, text, command, how, evidence, rejected)
 
 
-def is_fast_path(intent: PartIntent) -> bool:
+def is_fast_path(intent: PartIntent, workflow) -> bool:
     """Whether a turn's ONLY part runs with no review: it names a command, or the local model is confident of an
-    execution command. A planning command the local model alone chose is never a fast path (``_second_opinion``)."""
+    execution command that does not change data. A planning command the local model alone chose is never a fast path
+    (``_second_opinion``), and neither is a command that changes data the local model alone chose
+    or carries an approval mark (``intent_loop.unconfirmed_pick``), unless its approval question will be asked anyway:
+    that question is its yes.
+    The part runs through the agent's command tool, so the approval is read for an agent's call."""
+    from fastworkflow.approval_binding import Origin
+
     return (intent.outcome == MATCH and intent.decided_by in FAST_PATH_DECIDERS
-            and (intent.decided_by == BY_EXACT_NAME or intent.kind != KIND_PLANNING))
+            and (intent.decided_by == BY_EXACT_NAME or intent.kind != KIND_PLANNING)
+            and not intent_loop.unconfirmed_pick(workflow, intent, Origin.AGENT))
 
 
 def draft_choice(intent: PartIntent) -> tuple[Optional[str], Optional[str]]:
@@ -155,7 +175,7 @@ def prompt(held) -> tuple[str, dict]:
 @dataclass(frozen=True)
 class Turn:
     """What the stage logic needs from the turn: the workflow, whether an agent model is set, whether anybody can
-    answer a question now (attended, no blocking queue), the planner's LM for drafting a picked command's
+    answer a question now (attended: ``waiting.can_ask``), the planner's LM for drafting a picked command's
     inputs, and the port of the turn's waiting record (where a question is put and taken from)."""
 
     workflow: Any
@@ -169,7 +189,7 @@ def start(workflow, subtasks: list[str], *, pinned: Optional[str] = None) -> Pla
     """A resolution of *subtasks*, each part's decision read from ``part_intent`` (memoised for the turn)."""
     parts = []
     for text in subtasks:
-        intent = part_intent(workflow, str(text), pinned=pinned)
+        intent = part_intent(workflow, str(text), pinned=pinned, part=len(parts) + 1)
         parts.append({"text": str(text), "outcome": intent.outcome, "ambiguous": list(intent.ambiguous),
                       "planning_scores": intent.planning_scores(), "state": PART_OPEN, "chosen": False,
                       "decided_by": intent.decided_by, "evidence": dict(intent.evidence)})
@@ -243,19 +263,34 @@ def _bind_only_candidate(resolution: PlanResolution, plan, turn: Turn):
     return _bind(plan, resolution.index, name, intent_loop._kind_of(name, planning), turn)
 
 
+def _values_command(turn: Turn, item):
+    """``(command, kind)`` the values of a part bound to *item*'s means are asked through, or None: a planning command,
+    or (with no agent model, where nothing else would find a value the user did not give) an execution command stated as
+    a command with parameters (``planning_commands.execution_command``). With an agent model the agent finds an
+    execution command's missing value."""
+    from fastworkflow import parameter_clarification as loops, planning_commands, review_proposals
+
+    if item.means.kind == review_proposals.MEANS_PLANNING:
+        return planning_commands.planning_command(turn.workflow.folderpath, item.means.name), loops.KIND_PLANNING
+    if item.means.kind == review_proposals.MEANS_PLAIN and turn.no_agent:
+        return planning_commands.execution_command(turn.workflow.folderpath, item.means.name), loops.KIND_EXECUTION
+    return None, loops.KIND_PLANNING
+
+
 def _values_question(resolution: PlanResolution, plan, turn: Turn) -> Optional[str]:
     """The parameter question of the part at ``index``, or None when it lacks nothing (or nobody asks).
 
-    Only a part bound to a planning command is asked about, and only for the arguments it lacks
-    (``planning_commands.argument_gaps`` on its drafted values; the ones an earlier part produces are never open). A
-    pinned plan is always asked (every parameter shown, ``yes`` runs). With an agent model, a part whose inputs were not
-    drafted (``FW_DRAFT_ARGUMENTS`` off) is not asked: the run reads its values."""
+    A part bound to a planning command is asked about, and only for the arguments it lacks
+    (``planning_commands.argument_gaps`` on its drafted values; the ones an earlier part produces are never open). So is a
+    part bound to an execution command when no agent model is set (``_values_command``): the same loop, the same
+    reader, the same asking rule. A pinned plan is always asked (every parameter shown, ``yes`` runs). With an agent model,
+    a part whose inputs were not drafted (``FW_DRAFT_ARGUMENTS`` off) is not asked: the run reads its values."""
     from fastworkflow import parameter_clarification as loops, planning_commands, review_proposals
 
     item = plan.items[resolution.index]
-    if not turn.can_ask or item.means.kind != review_proposals.MEANS_PLANNING:
+    if not turn.can_ask:
         return None
-    command = planning_commands.planning_command(turn.workflow.folderpath, item.means.name)
+    command, kind = _values_command(turn, item)
     if command is None or not command.params:
         return None
     confirm = bool(resolution.pinned)
@@ -263,16 +298,33 @@ def _values_question(resolution: PlanResolution, plan, turn: Turn) -> Optional[s
         return None
     raw = {p.name: next((each.value for each in item.inputs if each.name == p.name and each.value is not None), None)
            for p in command.params}
-    gaps = planning_commands.argument_gaps(command, raw, item.goal).from_earlier(_from_earlier_parts(item))
+    with intent_loop.on_owner_record(turn.workflow, command.name):   # its validators read the record it will run on
+        gaps = planning_commands.argument_gaps(command, raw, item.goal).from_earlier(_from_earlier_parts(item))
+    if item.check_screened and not gaps.screened:
+        # the draft refused an extracted value as not given (a pronoun, a word of the workflow's vocabulary): the question
+        # says why, as the `/` question does
+        gaps = dataclasses.replace(gaps, screened=tuple(
+            (name, text) for name, text in item.check_screened.items() if name in gaps.missing))
+    if item.check_notes and not gaps.left_empty:
+        # the draft left an optional value out by the duplicate rule: the question says so, as the review item does
+        gaps = dataclasses.replace(gaps, left_empty=tuple(item.check_notes.values()))
     if not gaps.names and not confirm:
         return None
     description = review_proposals.planning_descriptions(turn.workflow.folderpath).get(command.name, "") if confirm else ""
     shown = {name: value for name, value in raw.items() if value is not None and name not in gaps.names}
     loop, outcome = loops.open_loop(
         command, gaps, request_text=item.goal, origin=resolution.index, confirm=confirm, description=description,
-        values=shown if confirm else None)
+        values=shown if confirm else None, kind=kind)
     turn.port.put(loops.waiting_record(loop, loops.AFTER_RESOLVE_NEXT, resolution.index))
     return outcome.question
+
+
+def _refused_without_field(resolution: PlanResolution, plan, turn: Turn) -> Optional[str]:
+    """The refusal of the draft of the part at ``index`` when it names no argument (``SubTask.refused_without_field``), or
+    None: a plan the client pinned shows every parameter and is read as it always was."""
+    if resolution.pinned or not turn.can_ask:
+        return None
+    return plan.items[resolution.index].refused_without_field or None
 
 
 def step(resolution: PlanResolution, plan, turn: Turn):
@@ -288,7 +340,14 @@ def step(resolution: PlanResolution, plan, turn: Turn):
             if (question := _intent_question(resolution, plan, turn)) is not None:
                 return plan, question
             resolution.stage = STAGE_VALUES
-        if (question := _values_question(resolution, plan, turn)) is not None:
+        if (refusal := _refused_without_field(resolution, plan, turn)) is not None:
+            # A refusal that names no argument is not asked (nothing is missing to give). With no agent model the part
+            # ends as not run, saying why; with one the run hands it to the text planner or the agent.
+            if turn.no_agent:
+                plan = _drop(resolution, plan, (f"it cannot run as drafted ({refusal}), and the agent model that would "
+                                                "take over is not set (LLM_AGENT)"))
+                continue
+        elif (question := _values_question(resolution, plan, turn)) is not None:
             return plan, question
         part["state"] = PART_RESOLVED
         resolution.index, resolution.stage = resolution.index + 1, STAGE_INTENT
@@ -309,8 +368,9 @@ def _drop(resolution: PlanResolution, plan, reason: str):
     return plan
 
 
-def _overlay(plan, index: int, given: dict):
-    """The values the user's replies gave put on the part's item, as its inputs: the user's own (not drafted)."""
+def _overlay(plan, index: int, given: dict, workflow):
+    """The values the user's replies gave put on the part's item, as its inputs: the user's own (not drafted). Its check
+    is worked out again from the inputs (``review_proposals.rechecked``), so the review shows what they now earn."""
     from fastworkflow import review_proposals
 
     if not given:
@@ -319,7 +379,7 @@ def _overlay(plan, index: int, given: dict):
     inputs = [*(each for each in item.inputs if each.name not in given),
               *(review_proposals.SubTaskInput(name=name, value=str(value), drafted=False)
                 for name, value in given.items())]
-    return _with_item(plan, index, item.model_copy(update={"inputs": inputs}))
+    return _with_item(plan, index, review_proposals.rechecked(workflow, item.model_copy(update={"inputs": inputs})))
 
 
 def _bind(plan, index: int, name: str, kind: str, turn: Turn):
@@ -330,21 +390,23 @@ def _bind(plan, index: int, name: str, kind: str, turn: Turn):
     means = review_proposals.Means(kind=review_proposals.MEANS_PLANNING if kind == KIND_PLANNING
                                    else review_proposals.MEANS_PLAIN, name=name)
     bound = review_proposals.drafted_item(turn.workflow, review_proposals.SubTask(goal=item.goal, means=means),
-                                          item.goal, list(plan.items[:index]), planner_lm=turn.planner_lm)
+                                          item.goal, list(plan.items[:index]), planner_lm=turn.planner_lm, part=index + 1)
     if item.parts:
         bound = bound.model_copy(update={"parts": list(item.parts), "parts_fingerprint": ""})
     return _with_item(plan, index, bound)
 
 
 def _take_choice(resolution: PlanResolution, held, reply: str, plan, turn: Turn):
-    """The reply to the which-command question, read by the intent loop's one reader (``intent_loop.answer``). A pick made
-    by the reply's first word carries the rest of the reply (``Answer.rest``): this path does not read it, the part's
-    values are asked for after (the CME uses it as the command's parameter text)."""
+    """The reply to the which-command question, read by the intent loop's one reader (``intent_loop.answer``). Only the
+    pick is read (words after a picked name are not its values, on this path and the CME's): the part's values are drafted
+    from its own text and asked for after."""
     from fastworkflow import planning_commands
 
     record = held.payload["record"]
     names = [each["name"] for each in record["choices"]]
-    reply_read = intent_loop.answer(record, reply)
+    # The phrases of "you misunderstood" (none of these) and "abort" (cancel) read as on the CME (one source); the
+    # listing of commands (``what_can_i_do``) is the CME's alone.
+    reply_read = intent_loop.answer(record, reply, aliases=intent_loop.core_aliases(listing=False))
     if reply_read.kind == intent_loop.ASK_AGAIN:
         _put_choice(turn, resolution, record)
         return plan, reply_read.question
@@ -359,7 +421,9 @@ def _take_choice(resolution: PlanResolution, held, reply: str, plan, turn: Turn)
     if kind == intent_loop.ABORT:
         what = "command" if ambiguous else "planning command"
         return _drop(resolution, plan, f"it was declined when asked which {what} should run it"), None
-    part["chosen"] = True
+    # Only a pick settles the part's command: after ``none`` or two unreadable replies it stays ad hoc and unchosen, so
+    # a one-part turn is reviewed like any ad hoc part (or comes back not run, with no agent model).
+    part["chosen"] = kind == intent_loop.PICK
     if kind == intent_loop.PICK:
         planning = set(planning_commands.resolve_field_sources(turn.workflow.folderpath).planning_commands)
         plan = _bind(plan, resolution.index, name, KIND_PLANNING if name in planning else KIND_EXECUTION, turn)
@@ -375,7 +439,7 @@ DIFFERENT_REQUEST_REASON = ("the reply to its question asked for something else;
 def ask_misunderstood(resolution: PlanResolution, plan, turn: Turn):
     """The reply said the command was not the one meant: the part goes back to the which-command question (every command
     of the part's scope the plan can run, the intent loop's misunderstanding question). The part is bound to nothing
-    until the user picks; ``none`` leaves it ad hoc, as on the deterministic path."""
+    until the user picks; ``none`` leaves it ad hoc and unchosen (the deterministic path aborts instead)."""
     from fastworkflow import review_proposals
 
     part = resolution.parts[resolution.index]
@@ -411,15 +475,18 @@ def _take_values(resolution: PlanResolution, held, reply: str, plan, turn: Turn)
 
     loop = loops.ParameterLoop.from_state(held.payload["loop"])
     item = plan.items[resolution.index]
-    command = planning_commands.planning_command(turn.workflow.folderpath, loop.command)
+    command = (planning_commands.execution_command(turn.workflow.folderpath, loop.command)
+               if loop.kind == loops.KIND_EXECUTION
+               else planning_commands.planning_command(turn.workflow.folderpath, loop.command))
     if command is None:
         return plan, None
     extract = (None if loop.confirm else
                (lambda text: planning_commands.extracted_arguments(command, text, turn.workflow)))
     description = (review_proposals.planning_descriptions(turn.workflow.folderpath).get(command.name, "")
                    if loop.confirm else "")
-    outcome = loops.advance(loop, reply, command, extract=extract, description=description,
-                            not_asked=_from_earlier_parts(item), live=True, waited=loops.waited_of(held))
+    with intent_loop.on_owner_record(turn.workflow, command.name):   # its validators read the record it will run on
+        outcome = loops.advance(loop, reply, command, extract=extract, description=description,
+                                not_asked=_from_earlier_parts(item), live=True, waited=loops.waited_of(held))
     if outcome.kind in (loops.ASK_AGAIN, loops.WAIT):
         # The asking rule (``parameter_clarification``): asked again while each reply makes progress, and once more after
         # one that does not; in every session. The first reply in a row that asked for a moment leaves the question out
@@ -450,7 +517,7 @@ def _take_values(resolution: PlanResolution, held, reply: str, plan, turn: Turn)
     # Run with what was given: the complete loop, or (the one hand-over, with an agent model) the stop after the second
     # reply in a row with no progress, which leaves the rest to the agent as the refused call did.
     resolution.parts[resolution.index]["state"] = PART_RESOLVED
-    plan = _overlay(plan, resolution.index, loop.given_values())
+    plan = _overlay(plan, resolution.index, loop.given_values(), turn.workflow)
     resolution.index, resolution.stage = resolution.index + 1, STAGE_INTENT
     return plan, None
 
@@ -495,7 +562,8 @@ def finish(resolution: PlanResolution, plan, subtasks: list):
 
 
 def single_part_chosen(resolution: PlanResolution) -> bool:
-    """Whether the turn is one part whose command the user settled by answering which one it is: like a named command,
-    that part runs with no review."""
+    """Whether the turn is one part whose command the user settled by answering which one it is, or that the gate's fast
+    path took (``fast_path``: it names a command, or the local model is sure of it) and whose values were then asked for:
+    like a named command, that part runs with no review."""
     kept = [part for part in resolution.parts if part["state"] != PART_DROPPED]
-    return len(kept) == 1 and bool(kept[0]["chosen"])
+    return len(kept) == 1 and bool(kept[0]["chosen"] or kept[0].get("fast_path"))

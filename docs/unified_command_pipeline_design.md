@@ -307,7 +307,7 @@ No full suite run at any point: the files a step touches and the regression set 
   failed call, the part is an ambiguity (asked); it is never the unreviewed fast path, unless the
   part names the plan exactly. A keyword could carry the local model to a multi-step plan the
   request did not ask for. (b) Commands that only enter a context (`@descends_to` with no
-  `when_parameter` and no required input; `context_navigation.context_entry_commands`) are not
+  required input; `context_navigation.context_entry_commands`) are not
   offered to the remote model, so a request that names a workspace by its subject is not sent to
   the command that enters it. On the library plan benchmark (137 parts) the plan parts decided by
   the unreviewed local fast path went from 52 to 0 in the plan group and from 26 to 6 in the

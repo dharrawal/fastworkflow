@@ -9,12 +9,18 @@ class Signature:
     """Say when the library's branches are open, or one branch's hours."""
 
     class Input(BaseModel):
-        branch: str = Field(default="", description="one branch's name; empty for every branch")
+        branch: str = Field(default="", description="one branch's name; empty for every branch",
+                            examples=["Central", "Riverside", "riverside"])
 
     class Output(BaseModel):
         branches: list[str] = Field(description="each branch named, in row order",
+                                    examples=[["Central", "Riverside"], ["Central"]],
                                     json_schema_extra={"ui": {"table": "hours"}})
-        hours: list[str] = Field(description="each branch's opening hours, in row order",
+        hours: list[str] = Field(description="each branch's opening hours as text such as "
+                                             "'9:00-18:00, Monday to Saturday', in row order",
+                                 examples=[["9:00-18:00, Monday to Saturday",
+                                            "10:00-16:00, Tuesday to Saturday"],
+                                           ["10:00-16:00, Tuesday to Saturday"]],
                                  json_schema_extra={"ui": {"table": "hours"}})
 
     plain_utterances = [

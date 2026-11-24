@@ -375,7 +375,7 @@ def test_normal_and_suspended_checkpoint_round_trip_epoch(
     assert generation == 1
     assert runtime["experiment_claim"]["epoch"] == claim.epoch
     assert PROTOCOL_VERSION == 2
-    assert PENDING_SCHEMA_VERSION == 4
+    assert PENDING_SCHEMA_VERSION == 8
 
 
 def test_registered_reissue_refused_but_ordinary_runtime_is_unchanged(controller):

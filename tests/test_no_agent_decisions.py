@@ -198,7 +198,7 @@ def test_no_skips_the_inner_step_and_the_command_completes(library_env, monkeypa
     assert library_env.model.asked == []
 
 
-@pytest.mark.parametrize("reply", ["y", "Yes", "TRUE", "yes."])
+@pytest.mark.parametrize("reply", ["ok", "Yes", "TRUE", "yes.", "agreed"])   # the one yes reader; "y" is no yes
 def test_the_accepted_yes_replies(reply, library_env, monkeypatch):
     library_env.planning_command = _build_planning_command(Conditional)
     _plan(monkeypatch, library_env)
@@ -374,7 +374,7 @@ def test_a_missing_required_value_asks_for_it_and_runs_the_step_with_the_reply(l
 
     result = library_env.ctx.process_turn("the cover is torn")
     assert result.status == TurnStatus.COMPLETED
-    assert "add_note text=the cover is torn" in _sent(library_env)
+    assert 'add_note text="the cover is torn"' in _sent(library_env)
     assert list(book.notes) == [*before, "the cover is torn"]
     assert "Dune noted" in result.answer and _stops(result) is None
 
@@ -412,7 +412,7 @@ def test_a_missing_value_reply_written_as_field_value_gives_the_value_not_the_la
 
     result = library_env.ctx.process_turn("text: the cover is torn")
     assert result.status == TurnStatus.COMPLETED
-    assert "add_note text=the cover is torn" in _sent(library_env)
+    assert 'add_note text="the cover is torn"' in _sent(library_env)
     assert list(book.notes) == [*before, "the cover is torn"]
 
 # ---------------------------------------------------------------- everything else stays free work
@@ -608,8 +608,10 @@ def test_with_the_agent_model_set_the_conditional_step_is_the_agents_and_no_ques
 # ---------------------------------------------------------------- the readers, on their own
 
 @pytest.mark.parametrize("reply, expected", [
-    ("yes", True), ("Y", True), (" true ", True), ("yes!", True), ("no", False), ("N", False), ("False.", False),
-    ("yes please", None), ("go", None), ("no changes", None), ("ok", None), ("", None), ("maybe", None)])
+    ("yes", True), ("go", True), (" true ", True), ("yes!", True), ("ok", True), ("Agreed.", True), ("accept", True),
+    ("no", False), ("N", False), ("False.", False),
+    ("Y", None), ("run it", None), ("yes please", None), ("go ahead", None), ("no changes", None), ("", None),
+    ("maybe", None)])
 def test_the_yes_no_reader_is_strict(reply, expected):
     assert no_agent_mode.read_yes_no(reply) is expected
 
@@ -623,7 +625,7 @@ def test_the_decline_reader_is_whole_reply_only(reply, expected):
 def test_a_value_is_written_into_a_step_before_its_note():
     from fastworkflow import planning_phases
 
-    assert planning_phases.step_with_value("add_note", "text", "the cover is torn") == "add_note text=the cover is torn"
+    assert planning_phases.step_with_value("add_note", "text", "the cover is torn") == 'add_note text="the cover is torn"'
     assert planning_phases.step_with_value("set_due loan_uid=l1 (for the loan)", "days", "5") == \
         "set_due loan_uid=l1 days=5 (for the loan)"
     assert planning_phases.step_with_value("add_note", "text", "a (b); c") == 'add_note text="a (b); c"'

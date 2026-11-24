@@ -20,7 +20,7 @@ class Signature:
     plain_utterances = ["tell me about Dune and who has it", "do you have Emma at all"]
 
     class Input(BaseModel):
-        title: str = Field(description="the book's title")
+        title: str = Field(description="the book's title", json_schema_extra={"copied_from_command_text": True})
         loans: bool = Field(default=False,
                             description="the request asks who has the book on loan")
         brief: bool = Field(default=False,

@@ -864,9 +864,11 @@ function tmRenderParameterForm(bubbleMsg, out) {
   var last = tmLastPromptArtifacts(out);
   var req = last && last.artifacts.parameter_request;
   if (!tmIsPlainObject(req) || typeof req.command !== "string" || !req.command) { return null; }
-  /* A tagged prompt (an agent's planning refusal) is another part's; this form
-     is for a human's failed "/" command, whose output has no question_kind. */
-  if (tmHas(last.artifacts, "question_kind")) { return null; }
+  /* A prompt of a turn that waits (an agent turn's planning refusal) is another
+     part's, drawn by the question form in 259; this form is for a human's failed
+     "/" command, a completed turn whose output carries the same question_kind
+     ("planning_parameter") beside its parameter_request. */
+  if (tmHas(last.artifacts, "question_kind") && out && out.status === "awaiting_user") { return null; }
   var schema = tmCommandSchema(req.command);
   var input = schema && schema.input;
   if (!tmIsPlainObject(input) || !tmIsPlainObject(input.properties) ||

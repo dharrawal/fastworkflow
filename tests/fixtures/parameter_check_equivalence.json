@@ -5479,10 +5479,13 @@
   "corpus:invented-example": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
-    "missing": [
-     "author"
+    "invalid": [
+     [
+      "author",
+      "is not written in the request"
+     ]
     ],
+    "missing": [],
     "names": [
      "author"
     ],
@@ -5493,7 +5496,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='John Doe' is a placeholder, not a value",
+     "message": "author='John Doe' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    },
@@ -5501,7 +5504,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='John Doe' is a placeholder, not a value",
+     "message": "author='John Doe' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    }
@@ -5632,10 +5635,13 @@
   "corpus:name-number": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
-    "missing": [
-     "author"
+    "invalid": [
+     [
+      "author",
+      "is not written in the request"
+     ]
     ],
+    "missing": [],
     "names": [
      "author"
     ],
@@ -5646,7 +5652,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='NAME_1' is a placeholder, not a value",
+     "message": "author='NAME_1' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    },
@@ -5654,7 +5660,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='NAME_1' is a placeholder, not a value",
+     "message": "author='NAME_1' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    }
@@ -5899,11 +5905,12 @@
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "branch='Ann Lee' is also the value of member",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "branch": "Ann Lee",
+     "entity_type": "identity",
+     "member": "Ann Lee",
+     "note": ""
     }
    }
   },
@@ -5929,11 +5936,12 @@
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "member='Ann Lee' is also the value of branch",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "branch": "Ann Lee",
+     "entity_type": "identity",
+     "member": "Ann Lee",
+     "note": ""
     }
    }
   },
@@ -6083,10 +6091,13 @@
   "corpus:unspecified": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
-    "missing": [
-     "author"
+    "invalid": [
+     [
+      "author",
+      "is not written in the request"
+     ]
     ],
+    "missing": [],
     "names": [
      "author"
     ],
@@ -6097,7 +6108,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='unspecified_right' is a placeholder, not a value",
+     "message": "author='unspecified_right' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    },
@@ -6105,7 +6116,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='unspecified_right' is a placeholder, not a value",
+     "message": "author='unspecified_right' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    }
@@ -6143,7 +6154,7 @@
     "count": null,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6179,7 +6190,7 @@
     "count": null,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6215,7 +6226,7 @@
     "count": -9223372036854775807,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6253,7 +6264,7 @@
     "count": null,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6289,7 +6300,7 @@
     "count": 0,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6326,7 +6337,7 @@
    "applied": {
     "author": "NOT_FOUND"
    },
-   "note": "(A first extraction from this command was refused: author='<entity_name>' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: author='<entity_name>' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "author": [
      "'<entity_name>'",
@@ -6378,7 +6389,7 @@
     "loans": true,
     "title": "Dune"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6419,7 +6430,7 @@
    "applied": {
     "author": "NOT_FOUND"
    },
-   "note": "(A first extraction from this command was refused: author='{AUTHOR_PLACEHOLDER}' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: author='{AUTHOR_PLACEHOLDER}' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "author": [
      "'{AUTHOR_PLACEHOLDER}'",
@@ -6469,7 +6480,7 @@
    "applied": {
     "kind_text": "member"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {
@@ -6514,7 +6525,7 @@
    "applied": {
     "kind_text": "member"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6552,7 +6563,7 @@
    "applied": {
     "kind_text": "book"
    },
-   "note": "(A first extraction from this command was refused: kind_text='price dropped elsewhere' is not one of book, member, branch. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: kind_text='price dropped elsewhere' is not one of book, member, branch. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "kind_text": [
      "'price dropped elsewhere'",
@@ -6610,7 +6621,7 @@
     "member": "loan",
     "note": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6655,7 +6666,7 @@
     "due": "2024-05-20",
     "name": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6691,20 +6702,13 @@
   "drift:dash-variant:exec": {
    "applied": {
     "code": "",
-    "name": "Ann Lee\u2013Smith"
+    "name": "Ann Lee-Smith"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "'Ann Lee-Smith'",
-     "'Ann Lee\u2013Smith'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "drift:dash-variant:plan": {
@@ -6744,7 +6748,7 @@
     "member": "Ann Lee",
     "note": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6788,7 +6792,7 @@
    "applied": {
     "title": "this book"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6821,53 +6825,48 @@
   },
   "drift:description-example-copied:exec": {
    "applied": {
-    "code": "",
+    "code": "XY-12",
     "name": "Ann Lee"
    },
-   "note": "(A first extraction from this command was refused: code='XY-12' is an example from the field's description, not a value the request writes. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "code": [
-     "'XY-12'",
-     "is an example from the field's description, not a value the request writes"
-    ]
-   },
-   "refused_order": [
-    "code"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "code='XY-12' is an example from the field's description, not a value the request writes"
-   ]
+   "texts": []
   },
   "drift:description-example-copied:plan": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
+    "invalid": [
+     [
+      "code",
+      "is not written in the request"
+     ]
+    ],
     "missing": [],
-    "names": [],
+    "names": [
+     "code"
+    ],
     "reason": "",
     "values": {
-     "code": "",
      "name": "Ann Lee"
     }
    },
    "check_arguments": {
-    "notes": [
-     "code='XY-12' is an example from the field's description, not a value the request writes: default"
-    ],
-    "ok": {
-     "code": "",
-     "name": "Ann Lee"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "code='XY-12' is not written in the request",
+     "type": "PlanningCommandInputError"
     }
    },
    "checked_arguments": {
-    "notes": [
-     "code='XY-12' is an example from the field's description, not a value the request writes: default"
-    ],
-    "ok": {
-     "code": "",
-     "name": "Ann Lee"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "code='XY-12' is not written in the request",
+     "type": "PlanningCommandInputError"
     }
    }
   },
@@ -6876,7 +6875,7 @@
     "code": "XY-12",
     "name": "Ann Lee"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6915,7 +6914,7 @@
     "count": 7,
     "title": "Doyle and Sons 1"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6925,27 +6924,35 @@
   "drift:digits-inside-a-str:plan": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
+    "invalid": [
+     [
+      "count",
+      "is not a number the request writes"
+     ]
+    ],
     "missing": [],
-    "names": [],
+    "names": [
+     "count"
+    ],
     "reason": "",
     "values": {
-     "count": 7,
      "title": "Doyle and Sons 1"
     }
    },
    "check_arguments": {
-    "notes": [],
-    "ok": {
-     "count": 7,
-     "title": "Doyle and Sons 1"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "count=7 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    },
    "checked_arguments": {
-    "notes": [],
-    "ok": {
-     "count": 7,
-     "title": "Doyle and Sons 1"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "count=7 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    }
   },
@@ -6954,7 +6961,7 @@
     "kind": "member",
     "name": "Lee"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -6993,7 +7000,7 @@
     "due": "&lt;UNKNOWN&gt;",
     "name": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7029,7 +7036,7 @@
     "due": "",
     "name": ""
    },
-   "note": "(A first extraction from this command was refused: due='{due_date}' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: due='{due_date}' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "due": [
      "'{due_date}'",
@@ -7079,7 +7086,7 @@
    "applied": {
     "query": "title"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7120,7 +7127,7 @@
    "applied": {
     "title": "acct_44"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7164,7 +7171,7 @@
    "applied": {
     "title": "acct_4421"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7200,7 +7207,7 @@
     "due": "2026-11-09",
     "name": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7238,7 +7245,7 @@
     "count": 20,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7248,49 +7255,47 @@
   "drift:int-agree-no-number:plan": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
+    "invalid": [
+     [
+      "count",
+      "is not a number the request writes"
+     ]
+    ],
     "missing": [],
-    "names": [],
+    "names": [
+     "count"
+    ],
     "reason": "",
-    "values": {
-     "count": 20
-    }
+    "values": {}
    },
    "check_arguments": {
-    "notes": [],
-    "ok": {
-     "count": 20,
-     "title": ""
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "count=20 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    },
    "checked_arguments": {
-    "notes": [],
-    "ok": {
-     "count": 20,
-     "title": ""
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "count=20 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    }
   },
   "drift:int-agree-two-numbers:exec": {
    "applied": {
-    "count": 0,
+    "count": 7,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: count=7 is not a number the request writes (2, 3). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "count": [
-     "7",
-     "is not a number the request writes (2, 3)"
-    ]
-   },
-   "refused_order": [
-    "count"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "count=7 is not a number the request writes (2, 3)"
-   ]
+   "texts": []
   },
   "drift:int-agree-two-numbers:plan": {
    "argument_gaps": {
@@ -7329,7 +7334,7 @@
    "applied": {
     "size": 5
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7364,7 +7369,7 @@
    "applied": {
     "size": 5
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7397,23 +7402,14 @@
   },
   "drift:int-not-written-default-written:exec": {
    "applied": {
-    "size": 5
+    "size": 6
    },
-   "note": "(A first extraction from this command was refused: size=6 is not a number the request writes (5, 8). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "size": [
-     "6",
-     "is not a number the request writes (5, 8)"
-    ]
-   },
-   "refused_order": [
-    "size"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "size=6 is not a number the request writes (5, 8)"
-   ]
+   "texts": []
   },
   "drift:int-not-written-default-written:plan": {
    "argument_gaps": {
@@ -7450,24 +7446,15 @@
   },
   "drift:int-not-written:exec": {
    "applied": {
-    "count": 0,
+    "count": 20,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: count=20 is not a number the request writes (10). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "count": [
-     "20",
-     "is not a number the request writes (10)"
-    ]
-   },
-   "refused_order": [
-    "count"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "count=20 is not a number the request writes (10)"
-   ]
+   "texts": []
   },
   "drift:int-not-written:plan": {
    "argument_gaps": {
@@ -7507,7 +7494,7 @@
     "count": 10,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7542,31 +7529,25 @@
   },
   "drift:invented-example:exec": {
    "applied": {
-    "author": "NOT_FOUND"
+    "author": "John Doe"
    },
-   "note": "(A first extraction from this command was refused: author='John Doe' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "author": [
-     "'John Doe'",
-     "is a placeholder, not a value"
-    ]
-   },
-   "refused_order": [
-    "author"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "author='John Doe' is a placeholder, not a value"
-   ]
+   "texts": []
   },
   "drift:invented-example:plan": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
-    "missing": [
-     "author"
+    "invalid": [
+     [
+      "author",
+      "is not written in the request"
+     ]
     ],
+    "missing": [],
     "names": [
      "author"
     ],
@@ -7577,7 +7558,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='John Doe' is a placeholder, not a value",
+     "message": "author='John Doe' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    },
@@ -7585,7 +7566,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='John Doe' is a placeholder, not a value",
+     "message": "author='John Doe' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    }
@@ -7593,23 +7574,14 @@
   "drift:invented-name:exec": {
    "applied": {
     "code": "",
-    "name": "NOT_FOUND"
+    "name": "Bob Jones"
    },
-   "note": "(A first extraction from this command was refused: name='Bob Jones' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Bob Jones'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Bob Jones' is not written in the request"
-   ]
+   "texts": []
   },
   "drift:invented-name:plan": {
    "argument_gaps": {
@@ -7646,23 +7618,14 @@
   },
   "drift:invented-subject:exec": {
    "applied": {
-    "author": "NOT_FOUND"
+    "author": "Stephen King"
    },
-   "note": "(A first extraction from this command was refused: author='Stephen King' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "author": [
-     "'Stephen King'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "author"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "author='Stephen King' is not written in the request"
-   ]
+   "texts": []
   },
   "drift:invented-subject:plan": {
    "argument_gaps": {
@@ -7701,7 +7664,7 @@
    "applied": {
     "author": "it"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7742,7 +7705,7 @@
    "applied": {
     "query": "book"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7783,7 +7746,7 @@
    "applied": {
     "author": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -7822,31 +7785,25 @@
   },
   "drift:name-number:exec": {
    "applied": {
-    "author": "NOT_FOUND"
+    "author": "NAME_1"
    },
-   "note": "(A first extraction from this command was refused: author='NAME_1' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "author": [
-     "'NAME_1'",
-     "is a placeholder, not a value"
-    ]
-   },
-   "refused_order": [
-    "author"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "author='NAME_1' is a placeholder, not a value"
-   ]
+   "texts": []
   },
   "drift:name-number:plan": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
-    "missing": [
-     "author"
+    "invalid": [
+     [
+      "author",
+      "is not written in the request"
+     ]
     ],
+    "missing": [],
     "names": [
      "author"
     ],
@@ -7857,7 +7814,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='NAME_1' is a placeholder, not a value",
+     "message": "author='NAME_1' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    },
@@ -7865,7 +7822,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='NAME_1' is a placeholder, not a value",
+     "message": "author='NAME_1' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    }
@@ -7873,23 +7830,14 @@
   "drift:near-miss-name:exec": {
    "applied": {
     "code": "",
-    "name": "NOT_FOUND"
+    "name": "Ann Leigh"
    },
-   "note": "(A first extraction from this command was refused: name='Ann Leigh' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Leigh'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Leigh' is not written in the request"
-   ]
+   "texts": []
   },
   "drift:near-miss-name:plan": {
    "argument_gaps": {
@@ -7926,15 +7874,24 @@
   },
   "drift:not-an-enum-value:exec": {
    "applied": {
-    "kind": "author",
+    "kind": "book",
     "name": "Lee"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {},
-   "refused_order": [],
+   "note": "(A first extraction from this command was refused: kind='author' is not one of book, member. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {
+    "kind": [
+     "'author'",
+     "is not one of book, member"
+    ]
+   },
+   "refused_order": [
+    "kind"
+   ],
    "respelled": {},
    "respelled_order": [],
-   "texts": []
+   "texts": [
+    "kind='author' is not one of book, member"
+   ]
   },
   "drift:not-an-enum-value:plan": {
    "argument_gaps": {
@@ -7975,7 +7932,7 @@
    "applied": {
     "title": "NOT_FOUND"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8014,23 +7971,14 @@
   },
   "drift:not-in-request:exec": {
    "applied": {
-    "title": "NOT_FOUND"
+    "title": "Dune Messiah"
    },
-   "note": "(A first extraction from this command was refused: title='Dune Messiah' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "title": [
-     "'Dune Messiah'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "title"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "title='Dune Messiah' is not written in the request"
-   ]
+   "texts": []
   },
   "drift:not-in-request:plan": {
    "argument_gaps": {
@@ -8067,24 +8015,15 @@
   },
   "drift:number-word-not-written:exec": {
    "applied": {
-    "count": 0,
+    "count": 9,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: count=9 is not a number the request writes (8). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "count": [
-     "9",
-     "is not a number the request writes (8)"
-    ]
-   },
-   "refused_order": [
-    "count"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "count=9 is not a number the request writes (8)"
-   ]
+   "texts": []
   },
   "drift:number-word-not-written:plan": {
    "argument_gaps": {
@@ -8124,7 +8063,7 @@
     "count": 8,
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8162,7 +8101,7 @@
     "kind": "book",
     "kind_prose": "branch"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8178,44 +8117,39 @@
     "reason": "",
     "values": {
      "kind": "book",
-     "kind_prose": "branch"
+     "kind_prose": "book"
     }
    },
    "check_arguments": {
-    "notes": [],
+    "notes": [
+     "kind_prose='branch' is a kind word of this workflow, not a value: default"
+    ],
     "ok": {
      "kind": "book",
-     "kind_prose": "branch"
+     "kind_prose": "book"
     }
    },
    "checked_arguments": {
-    "notes": [],
+    "notes": [
+     "kind_prose='branch' is a kind word of this workflow, not a value: default"
+    ],
     "ok": {
      "kind": "book",
-     "kind_prose": "branch"
+     "kind_prose": "book"
     }
    }
   },
   "drift:one-of-outside:exec": {
    "applied": {
     "kind": "book",
-    "kind_prose": "book"
+    "kind_prose": "magazine"
    },
-   "note": "(A first extraction from this command was refused: kind_prose='magazine' is not one of book, member, branch. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "kind_prose": [
-     "'magazine'",
-     "is not one of book, member, branch"
-    ]
-   },
-   "refused_order": [
-    "kind_prose"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "kind_prose='magazine' is not one of book, member, branch"
-   ]
+   "texts": []
   },
   "drift:one-of-outside:plan": {
    "argument_gaps": {
@@ -8226,45 +8160,34 @@
     "reason": "",
     "values": {
      "kind": "book",
-     "kind_prose": "book"
+     "kind_prose": "magazine"
     }
    },
    "check_arguments": {
-    "notes": [
-     "kind_prose='magazine' is not one of book, member, branch: default"
-    ],
+    "notes": [],
     "ok": {
      "kind": "book",
-     "kind_prose": "book"
+     "kind_prose": "magazine"
     }
    },
    "checked_arguments": {
-    "notes": [
-     "kind_prose='magazine' is not one of book, member, branch: default"
-    ],
+    "notes": [],
     "ok": {
      "kind": "book",
-     "kind_prose": "book"
+     "kind_prose": "magazine"
     }
    }
   },
   "drift:one-of-spelling:exec": {
    "applied": {
     "kind": "book",
-    "kind_prose": "member"
+    "kind_prose": "Member"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "kind_prose": [
-     "'Member'",
-     "'member'"
-    ]
-   },
-   "respelled_order": [
-    "kind_prose"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "drift:one-of-spelling:plan": {
@@ -8276,25 +8199,25 @@
     "reason": "",
     "values": {
      "kind": "book",
-     "kind_prose": "member"
+     "kind_prose": "book"
     }
    },
    "check_arguments": {
     "notes": [
-     "kind_prose='Member' -> 'member' (a declared value)"
+     "kind_prose='Member' is a kind word of this workflow, not a value: default"
     ],
     "ok": {
      "kind": "book",
-     "kind_prose": "member"
+     "kind_prose": "book"
     }
    },
    "checked_arguments": {
     "notes": [
-     "kind_prose='Member' -> 'member' (a declared value)"
+     "kind_prose='Member' is a kind word of this workflow, not a value: default"
     ],
     "ok": {
      "kind": "book",
-     "kind_prose": "member"
+     "kind_prose": "book"
     }
    }
   },
@@ -8305,7 +8228,7 @@
     "member": "Ann Lee",
     "note": ""
    },
-   "note": "(A first extraction from this command was refused: note='<entity_name>' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: note='<entity_name>' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "note": [
      "'<entity_name>'",
@@ -8363,7 +8286,7 @@
     "code": "Ann Lee",
     "name": "Ann Lee"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8378,13 +8301,12 @@
     "names": [],
     "reason": "",
     "values": {
-     "code": "",
      "name": "Ann Lee"
     }
    },
    "check_arguments": {
     "notes": [
-     "code='Ann Lee' repeats another argument: default"
+     "code left empty: 'Ann Lee' is written once in your request and is the name."
     ],
     "ok": {
      "code": "",
@@ -8393,7 +8315,7 @@
    },
    "checked_arguments": {
     "notes": [
-     "code='Ann Lee' repeats another argument: default"
+     "code left empty: 'Ann Lee' is written once in your request and is the name."
     ],
     "ok": {
      "code": "",
@@ -8405,7 +8327,7 @@
    "applied": {
     "author": "author"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8446,7 +8368,7 @@
    "applied": {
     "shelf": "#S3"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8481,7 +8403,7 @@
    "applied": {
     "shelf": "#S1"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8516,7 +8438,7 @@
    "applied": {
     "author": "Frank Herbert"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8551,7 +8473,7 @@
    "applied": {
     "author": "it"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8593,7 +8515,7 @@
     "code": "",
     "name": "NOT_FOUND"
    },
-   "note": "(A first extraction from this command was refused: name='...' is punctuation, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: name='...' is punctuation, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "name": [
      "'...'",
@@ -8645,20 +8567,13 @@
   "drift:request-spelling:exec": {
    "applied": {
     "code": "",
-    "name": "Ann Lee"
+    "name": "ann lee."
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "'ann lee.'",
-     "'Ann Lee'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "drift:request-spelling:plan": {
@@ -8698,7 +8613,7 @@
     "member": "Ann Lee",
     "note": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8728,11 +8643,12 @@
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "member='Ann Lee' is also the value of branch",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "branch": "Ann Lee",
+     "entity_type": "identity",
+     "member": "Ann Lee",
+     "note": ""
     }
    }
   },
@@ -8743,7 +8659,7 @@
     "member": "Ann Lee",
     "note": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8773,11 +8689,12 @@
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "branch='Ann Lee' is also the value of member",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "branch": "Ann Lee",
+     "entity_type": "identity",
+     "member": "Ann Lee",
+     "note": ""
     }
    }
   },
@@ -8785,7 +8702,7 @@
    "applied": {
     "name": "Ann Lee"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8820,7 +8737,7 @@
    "applied": {
     "name": "Ann"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8859,7 +8776,7 @@
    "applied": {
     "author": "that one"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8898,20 +8815,13 @@
   },
   "drift:title-case:exec": {
    "applied": {
-    "title": "Dune Messiah"
+    "title": "dune messiah"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "title": [
-     "'dune messiah'",
-     "'Dune Messiah'"
-    ]
-   },
-   "respelled_order": [
-    "title"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "drift:title-case:plan": {
@@ -8946,7 +8856,7 @@
    "applied": {
     "title": "Dune"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -8984,7 +8894,7 @@
     "member": "Ann Lee",
     "note": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -9028,7 +8938,7 @@
     "code": "",
     "name": "<UNKNOWN>"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -9069,7 +8979,7 @@
    "applied": {
     "title": "<UNKNOWN>"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -9108,82 +9018,60 @@
   },
   "drift:unoptioned-str-invented:exec": {
    "applied": {
-    "branch": "NOT_FOUND",
+    "branch": "North",
     "entity_type": "identity",
     "member": "Ann Lee",
     "note": ""
    },
-   "note": "(A first extraction from this command was refused: branch='North' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "branch": [
-     "'North'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "branch"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "branch='North' is not written in the request"
-   ]
+   "texts": []
   },
   "drift:unoptioned-str-invented:plan": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [
-     [
-      "branch",
-      "is not written in the request"
-     ]
-    ],
+    "invalid": [],
     "missing": [],
-    "names": [
-     "branch"
-    ],
+    "names": [],
     "reason": "",
     "values": {
+     "branch": "North",
      "entity_type": "identity",
      "member": "Ann Lee"
     }
    },
    "check_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "branch='North' is not written in the request",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "branch": "North",
+     "entity_type": "identity",
+     "member": "Ann Lee",
+     "note": ""
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "branch='North' is not written in the request",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "branch": "North",
+     "entity_type": "identity",
+     "member": "Ann Lee",
+     "note": ""
     }
    }
   },
   "drift:unoptioned-str-not-written:exec": {
    "applied": {
-    "title": "NOT_FOUND"
+    "title": "Dune Messiah"
    },
-   "note": "(A first extraction from this command was refused: title='Dune Messiah' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "title": [
-     "'Dune Messiah'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "title"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "title='Dune Messiah' is not written in the request"
-   ]
+   "texts": []
   },
   "drift:unoptioned-str-not-written:plan": {
    "argument_gaps": {
@@ -9222,7 +9110,7 @@
    "applied": {
     "title": "NOT_FOUND"
    },
-   "note": "(A first extraction from this command was refused: title='<title>' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: title='<title>' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "title": [
      "'<title>'",
@@ -9272,7 +9160,7 @@
    "applied": {
     "title": "Dune"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -9305,31 +9193,25 @@
   },
   "drift:unspecified:exec": {
    "applied": {
-    "author": "NOT_FOUND"
+    "author": "unspecified_right"
    },
-   "note": "(A first extraction from this command was refused: author='unspecified_right' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "author": [
-     "'unspecified_right'",
-     "is a placeholder, not a value"
-    ]
-   },
-   "refused_order": [
-    "author"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "author='unspecified_right' is a placeholder, not a value"
-   ]
+   "texts": []
   },
   "drift:unspecified:plan": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
-    "missing": [
-     "author"
+    "invalid": [
+     [
+      "author",
+      "is not written in the request"
+     ]
     ],
+    "missing": [],
     "names": [
      "author"
     ],
@@ -9340,7 +9222,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='unspecified_right' is a placeholder, not a value",
+     "message": "author='unspecified_right' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    },
@@ -9348,7 +9230,7 @@
     "error": {
      "fields": [],
      "gaps": null,
-     "message": "author='unspecified_right' is a placeholder, not a value",
+     "message": "author='unspecified_right' is not written in the request",
      "type": "PlanningCommandInputError"
     }
    }
@@ -9358,7 +9240,7 @@
     "kind": "book",
     "name": "Lee"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -9397,7 +9279,7 @@
     "kind": "book",
     "name": "Lee"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -9439,7 +9321,7 @@
    "applied": {
     "title": "4421"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -9826,17 +9708,15 @@
     "names": [],
     "reason": "",
     "values": {
-     "colour": "Green",
+     "colour": "green",
      "label": "Red Box",
      "req": "x"
     }
    },
    "check_arguments": {
-    "notes": [
-     "colour='green' -> 'Green' (a declared value)"
-    ],
+    "notes": [],
     "ok": {
-     "colour": "Green",
+     "colour": "green",
      "flag": false,
      "flag_on": true,
      "label": "Red Box",
@@ -9848,11 +9728,9 @@
     }
    },
    "checked_arguments": {
-    "notes": [
-     "colour='green' -> 'Green' (a declared value)"
-    ],
+    "notes": [],
     "ok": {
-     "colour": "Green",
+     "colour": "green",
      "flag": false,
      "flag_on": true,
      "label": "Red Box",
@@ -9872,17 +9750,15 @@
     "names": [],
     "reason": "",
     "values": {
-     "colour": "",
+     "colour": "purple",
      "label": "Red Box",
      "req": "x"
     }
    },
    "check_arguments": {
-    "notes": [
-     "colour='purple' is not one of red, Green, blue: default"
-    ],
+    "notes": [],
     "ok": {
-     "colour": "",
+     "colour": "purple",
      "flag": false,
      "flag_on": true,
      "label": "Red Box",
@@ -9894,11 +9770,9 @@
     }
    },
    "checked_arguments": {
-    "notes": [
-     "colour='purple' is not one of red, Green, blue: default"
-    ],
+    "notes": [],
     "ok": {
-     "colour": "",
+     "colour": "purple",
      "flag": false,
      "flag_on": true,
      "label": "Red Box",
@@ -9918,17 +9792,15 @@
     "names": [],
     "reason": "",
     "values": {
-     "colour": "blue",
+     "colour": "BLUE",
      "label": "Red Box",
      "req": "x"
     }
    },
    "check_arguments": {
-    "notes": [
-     "colour='BLUE' -> 'blue' (a declared value)"
-    ],
+    "notes": [],
     "ok": {
-     "colour": "blue",
+     "colour": "BLUE",
      "flag": false,
      "flag_on": true,
      "label": "Red Box",
@@ -9940,11 +9812,9 @@
     }
    },
    "checked_arguments": {
-    "notes": [
-     "colour='BLUE' -> 'blue' (a declared value)"
-    ],
+    "notes": [],
     "ok": {
-     "colour": "blue",
+     "colour": "BLUE",
      "flag": false,
      "flag_on": true,
      "label": "Red Box",
@@ -10142,21 +10012,25 @@
     "names": [],
     "reason": "",
     "values": {
-     "kind_prose": "member"
+     "kind_prose": "book"
     }
    },
    "check_arguments": {
-    "notes": [],
+    "notes": [
+     "kind_prose='member' is a kind word of this workflow, not a value: default"
+    ],
     "ok": {
      "kind": "book",
-     "kind_prose": "member"
+     "kind_prose": "book"
     }
    },
    "checked_arguments": {
-    "notes": [],
+    "notes": [
+     "kind_prose='member' is a kind word of this workflow, not a value: default"
+    ],
     "ok": {
      "kind": "book",
-     "kind_prose": "member"
+     "kind_prose": "book"
     }
    }
   },
@@ -10288,7 +10162,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -10306,7 +10180,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -10314,33 +10188,6 @@
    "texts": []
   },
   "extra:e-code-example-copied": {
-   "applied": {
-    "code": "",
-    "conv": "",
-    "enum_s": "book",
-    "name": "Ann Lee",
-    "nick": null,
-    "one_of": "red",
-    "prose": "",
-    "shelf": ""
-   },
-   "note": "(A first extraction from this command was refused: code='XY-12' is an example from the field's description, not a value the request writes. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "code": [
-     "'XY-12'",
-     "is an example from the field's description, not a value the request writes"
-    ]
-   },
-   "refused_order": [
-    "code"
-   ],
-   "respelled": {},
-   "respelled_order": [],
-   "texts": [
-    "code='XY-12' is an example from the field's description, not a value the request writes"
-   ]
-  },
-  "extra:e-code-example-written": {
    "applied": {
     "code": "XY-12",
     "conv": "",
@@ -10351,21 +10198,50 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "code": [
-     "'xy-12'",
-     "'XY-12'"
-    ]
+   "respelled": {},
+   "respelled_order": [],
+   "texts": []
+  },
+  "extra:e-code-example-written": {
+   "applied": {
+    "code": "xy-12",
+    "conv": "",
+    "enum_s": "book",
+    "name": "Ann Lee",
+    "nick": null,
+    "one_of": "red",
+    "prose": "",
+    "shelf": ""
    },
-   "respelled_order": [
-    "code"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-code-invented": {
+   "applied": {
+    "code": "QQ-1",
+    "conv": "",
+    "enum_s": "book",
+    "name": "Ann Lee",
+    "nick": null,
+    "one_of": "red",
+    "prose": "",
+    "shelf": ""
+   },
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
+   "respelled": {},
+   "respelled_order": [],
+   "texts": []
+  },
+  "extra:e-conv-bracket": {
    "applied": {
     "code": "",
     "conv": "",
@@ -10376,39 +10252,21 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: code='QQ-1' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: conv='<date>' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
-    "code": [
-     "'QQ-1'",
-     "is not written in the request"
+    "conv": [
+     "'<date>'",
+     "is a placeholder, not a value"
     ]
    },
    "refused_order": [
-    "code"
+    "conv"
    ],
    "respelled": {},
    "respelled_order": [],
    "texts": [
-    "code='QQ-1' is not written in the request"
+    "conv='<date>' is a placeholder, not a value"
    ]
-  },
-  "extra:e-conv-bracket": {
-   "applied": {
-    "code": "",
-    "conv": "<date>",
-    "enum_s": "book",
-    "name": "Ann Lee",
-    "nick": null,
-    "one_of": "red",
-    "prose": "",
-    "shelf": ""
-   },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {},
-   "refused_order": [],
-   "respelled": {},
-   "respelled_order": [],
-   "texts": []
   },
   "extra:e-conv-converted": {
    "applied": {
@@ -10421,7 +10279,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -10439,7 +10297,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -10457,7 +10315,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: conv='{date}' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: conv='{date}' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "conv": [
      "'{date}'",
@@ -10478,49 +10336,33 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-enum-member-case": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "Member",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {
     "enum_s": [
      "'member'",
@@ -10530,216 +10372,27 @@
    "respelled_order": [
     "enum_s"
    ],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-enum-member-exact": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "Member",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-enum-outside": {
-   "applied": {
-    "code": "",
-    "conv": "",
-    "enum_s": "book",
-    "name": "NOT_FOUND",
-    "nick": null,
-    "one_of": "red",
-    "prose": "",
-    "shelf": ""
-   },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request; enum_s='author' is not one of book, Member, branch. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "enum_s": [
-     "'author'",
-     "is not one of book, Member, branch"
-    ],
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name",
-    "enum_s"
-   ],
-   "respelled": {},
-   "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request",
-    "enum_s='author' is not one of book, Member, branch"
-   ]
-  },
-  "extra:e-enum-placeholder": {
-   "applied": {
-    "code": "",
-    "conv": "",
-    "enum_s": "book",
-    "name": "NOT_FOUND",
-    "nick": null,
-    "one_of": "red",
-    "prose": "",
-    "shelf": ""
-   },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request; enum_s='<kind>' is not one of book, Member, branch. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "enum_s": [
-     "'<kind>'",
-     "is not one of book, Member, branch"
-    ],
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name",
-    "enum_s"
-   ],
-   "respelled": {},
-   "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request",
-    "enum_s='<kind>' is not one of book, Member, branch"
-   ]
-  },
-  "extra:e-enum-quoted": {
-   "applied": {
-    "code": "",
-    "conv": "",
-    "enum_s": "branch",
-    "name": "NOT_FOUND",
-    "nick": null,
-    "one_of": "red",
-    "prose": "",
-    "shelf": ""
-   },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
-   "respelled": {
-    "enum_s": [
-     "\"'BRANCH'\"",
-     "'branch'"
-    ]
-   },
-   "respelled_order": [
-    "enum_s"
-   ],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
-  },
-  "extra:e-multi-refusals": {
-   "applied": {
-    "code": "",
-    "conv": "",
-    "enum_s": "book",
-    "name": "NOT_FOUND",
-    "nick": null,
-    "one_of": "red",
-    "prose": "",
-    "shelf": ""
-   },
-   "note": "(A first extraction from this command was refused: name='Bob' is not written in the request; code='QQ-1' is not written in the request; one_of='mauve' is not one of red, Green, blue. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "code": [
-     "'QQ-1'",
-     "is not written in the request"
-    ],
-    "name": [
-     "'Bob'",
-     "is not written in the request"
-    ],
-    "one_of": [
-     "'mauve'",
-     "is not one of red, Green, blue"
-    ]
-   },
-   "refused_order": [
-    "name",
-    "code",
-    "one_of"
-   ],
-   "respelled": {},
-   "respelled_order": [],
-   "texts": [
-    "name='Bob' is not written in the request",
-    "code='QQ-1' is not written in the request",
-    "one_of='mauve' is not one of red, Green, blue"
-   ]
-  },
-  "extra:e-multi-respell-and-refuse": {
-   "applied": {
-    "code": "",
-    "conv": "",
-    "enum_s": "Member",
-    "name": "ann lee",
-    "nick": null,
-    "one_of": "red",
-    "prose": "",
-    "shelf": ""
-   },
-   "note": "(A first extraction from this command was refused: prose='Cat' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "prose": [
-     "'Cat'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "prose"
-   ],
-   "respelled": {
-    "enum_s": [
-     "'MEMBER'",
-     "'Member'"
-    ],
-    "name": [
-     "'Ann Lee'",
-     "'ann lee'"
-    ]
-   },
-   "respelled_order": [
-    "name",
-    "enum_s"
-   ],
-   "texts": [
-    "prose='Cat' is not written in the request"
-   ]
-  },
-  "extra:e-name-bracket": {
    "applied": {
     "code": "",
     "conv": "",
@@ -10750,18 +10403,135 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: enum_s='author' is not one of book, Member, branch. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {
+    "enum_s": [
+     "'author'",
+     "is not one of book, Member, branch"
+    ]
+   },
+   "refused_order": [
+    "enum_s"
+   ],
+   "respelled": {},
+   "respelled_order": [],
+   "texts": [
+    "enum_s='author' is not one of book, Member, branch"
+   ]
+  },
+  "extra:e-enum-placeholder": {
+   "applied": {
+    "code": "",
+    "conv": "",
+    "enum_s": "book",
+    "name": "Ann Lee",
+    "nick": null,
+    "one_of": "red",
+    "prose": "",
+    "shelf": ""
+   },
+   "note": "(A first extraction from this command was refused: enum_s='<kind>' is not one of book, Member, branch. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {
+    "enum_s": [
+     "'<kind>'",
+     "is not one of book, Member, branch"
+    ]
+   },
+   "refused_order": [
+    "enum_s"
+   ],
+   "respelled": {},
+   "respelled_order": [],
+   "texts": [
+    "enum_s='<kind>' is not one of book, Member, branch"
+   ]
+  },
+  "extra:e-enum-quoted": {
+   "applied": {
+    "code": "",
+    "conv": "",
+    "enum_s": "book",
+    "name": "Ann Lee",
+    "nick": null,
+    "one_of": "red",
+    "prose": "",
+    "shelf": ""
+   },
+   "note": "(A first extraction from this command was refused: enum_s=\"'BRANCH'\" is not one of book, Member, branch. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {
+    "enum_s": [
+     "\"'BRANCH'\"",
+     "is not one of book, Member, branch"
+    ]
+   },
+   "refused_order": [
+    "enum_s"
+   ],
+   "respelled": {},
+   "respelled_order": [],
+   "texts": [
+    "enum_s=\"'BRANCH'\" is not one of book, Member, branch"
+   ]
+  },
+  "extra:e-multi-refusals": {
+   "applied": {
+    "code": "QQ-1",
+    "conv": "",
+    "enum_s": "book",
+    "name": "Bob",
+    "nick": null,
+    "one_of": "mauve",
+    "prose": "",
+    "shelf": ""
+   },
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
+   "respelled": {},
+   "respelled_order": [],
+   "texts": []
+  },
+  "extra:e-multi-respell-and-refuse": {
+   "applied": {
+    "code": "",
+    "conv": "",
+    "enum_s": "Member",
+    "name": "Ann Lee",
+    "nick": null,
+    "one_of": "red",
+    "prose": "Cat",
+    "shelf": ""
+   },
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {
-    "name": [
-     "'<Ann Lee>'",
-     "'Ann Lee'"
+    "enum_s": [
+     "'MEMBER'",
+     "'Member'"
     ]
    },
    "respelled_order": [
-    "name"
+    "enum_s"
    ],
+   "texts": []
+  },
+  "extra:e-name-bracket": {
+   "applied": {
+    "code": "",
+    "conv": "",
+    "enum_s": "book",
+    "name": "<Ann Lee>",
+    "nick": null,
+    "one_of": "red",
+    "prose": "",
+    "shelf": ""
+   },
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-name-bracket-placeholder": {
@@ -10775,7 +10545,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='<name>' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: name='<name>' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "name": [
      "'<name>'",
@@ -10796,24 +10566,17 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "Ann\u2011Lee",
+    "name": "Ann-Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "'Ann-Lee'",
-     "'Ann\u2011Lee'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-name-empty-quotes": {
@@ -10827,7 +10590,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='\"\"' is punctuation, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: name='\"\"' is punctuation, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "name": [
      "'\"\"'",
@@ -10848,27 +10611,18 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "John Doe",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='John Doe' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'John Doe'",
-     "is a placeholder, not a value"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='John Doe' is a placeholder, not a value"
-   ]
+   "texts": []
   },
   "extra:e-name-john-doe-written": {
    "applied": {
@@ -10881,7 +10635,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -10893,24 +10647,17 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "Ann Lee",
+    "name": "[\"Ann Lee\"]",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "'[\"Ann Lee\"]'",
-     "'Ann Lee'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-name-list-one": {
@@ -10918,24 +10665,19 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "Ann Lee",
+    "name": [
+     "Ann Lee"
+    ],
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "['Ann Lee']",
-     "'Ann Lee'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-name-none-text": {
@@ -10949,7 +10691,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -10967,7 +10709,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -10979,54 +10721,36 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Bob",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Bob' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Bob'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Bob' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-name-placeholder-token": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "NAME_1",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='NAME_1' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'NAME_1'",
-     "is a placeholder, not a value"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='NAME_1' is a placeholder, not a value"
-   ]
+   "texts": []
   },
   "extra:e-name-punct": {
    "applied": {
@@ -11039,7 +10763,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='...' is punctuation, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: name='...' is punctuation, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
     "name": [
      "'...'",
@@ -11060,24 +10784,17 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "Ann Lee",
+    "name": "\"Ann Lee\"",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "'\"Ann Lee\"'",
-     "'Ann Lee'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-name-respelled": {
@@ -11085,24 +10802,17 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "Ann Lee",
+    "name": "ann lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "'ann lee'",
-     "'Ann Lee'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-name-trailing": {
@@ -11110,24 +10820,17 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "Ann Lee",
+    "name": "Ann Lee;",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "name": [
-     "'Ann Lee;'",
-     "'Ann Lee'"
-    ]
-   },
-   "respelled_order": [
-    "name"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-name-two-list": {
@@ -11144,7 +10847,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -11162,7 +10865,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -11180,7 +10883,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -11198,7 +10901,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -11216,7 +10919,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -11234,7 +10937,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -11247,26 +10950,17 @@
     "conv": "",
     "enum_s": "book",
     "name": "Ann Lee",
-    "nick": null,
+    "nick": "Annie",
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: nick='Annie' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "nick": [
-     "'Annie'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "nick"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "nick='Annie' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-nick-written": {
    "applied": {
@@ -11274,23 +10968,16 @@
     "conv": "",
     "enum_s": "book",
     "name": "Ann Lee",
-    "nick": "Annie",
+    "nick": "annie",
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
-   "respelled": {
-    "nick": [
-     "'annie'",
-     "'Annie'"
-    ]
-   },
-   "respelled_order": [
-    "nick"
-   ],
+   "respelled": {},
+   "respelled_order": [],
    "texts": []
   },
   "extra:e-no-request": {
@@ -11304,7 +10991,7 @@
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -11316,246 +11003,151 @@
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-oneof-member": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
-    "one_of": "Green",
+    "one_of": "green",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
-   "respelled": {
-    "one_of": [
-     "'green'",
-     "'Green'"
-    ]
-   },
-   "respelled_order": [
-    "one_of"
-   ],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
+   "respelled": {},
+   "respelled_order": [],
+   "texts": []
   },
   "extra:e-oneof-outside": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
-    "one_of": "red",
+    "one_of": "mauve",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request; one_of='mauve' is not one of red, Green, blue. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ],
-    "one_of": [
-     "'mauve'",
-     "is not one of red, Green, blue"
-    ]
-   },
-   "refused_order": [
-    "name",
-    "one_of"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request",
-    "one_of='mauve' is not one of red, Green, blue"
-   ]
+   "texts": []
   },
   "extra:e-prose-not-a-list": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
-    "prose": "",
+    "prose": "Zebra",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request; prose='Zebra' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ],
-    "prose": [
-     "'Zebra'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name",
-    "prose"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request",
-    "prose='Zebra' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-prose-written": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
-    "prose": "Zebra",
+    "prose": "zebra",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
-   "respelled": {
-    "prose": [
-     "'zebra'",
-     "'Zebra'"
-    ]
-   },
-   "respelled_order": [
-    "prose"
-   ],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
+   "respelled": {},
+   "respelled_order": [],
+   "texts": []
   },
   "extra:e-shelf-pattern": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": "#S3"
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-shelf-pattern-example": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": "#S1"
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "name"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "name='Ann Lee' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:e-shelf-placeholder": {
    "applied": {
     "code": "",
     "conv": "",
     "enum_s": "book",
-    "name": "NOT_FOUND",
+    "name": "Ann Lee",
     "nick": null,
     "one_of": "red",
     "prose": "",
     "shelf": ""
    },
-   "note": "(A first extraction from this command was refused: name='Ann Lee' is not written in the request; shelf='<shelf>' is a placeholder, not a value. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: shelf='<shelf>' is a placeholder, not a value. Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {
-    "name": [
-     "'Ann Lee'",
-     "is not written in the request"
-    ],
     "shelf": [
      "'<shelf>'",
      "is a placeholder, not a value"
     ]
    },
    "refused_order": [
-    "name",
     "shelf"
    ],
    "respelled": {},
    "respelled_order": [],
    "texts": [
-    "name='Ann Lee' is not written in the request",
     "shelf='<shelf>' is a placeholder, not a value"
    ]
   },
@@ -11621,7 +11213,7 @@
     ],
     "reason": "",
     "values": {
-     "colour": ""
+     "colour": "mauve"
     }
    },
    "check_arguments": {
@@ -11746,9 +11338,11 @@
    },
    "checked_arguments": {
     "error": {
-     "fields": [],
+     "fields": [
+      "shelf"
+     ],
      "gaps": null,
-     "message": "the arguments break a rule of drift_shelf: shelf: String should match pattern '^#S[0-9]+$'",
+     "message": "shelf 'shelf 3' does not match the pattern ^#S[0-9]+$ (e.g., #S1)",
      "type": "PlanningCommandInputError"
     }
    }
@@ -11808,7 +11402,7 @@
     ],
     "reason": "",
     "values": {
-     "colour": ""
+     "colour": "mauve"
     }
    },
    "check_arguments": {
@@ -11835,16 +11429,19 @@
      [
       "name",
       "is not written in the request"
+     ],
+     [
+      "code",
+      "is not written in the request"
      ]
     ],
     "missing": [],
     "names": [
-     "name"
+     "name",
+     "code"
     ],
     "reason": "",
-    "values": {
-     "code": ""
-    }
+    "values": {}
    },
    "check_arguments": {
     "error": {
@@ -12397,21 +11994,17 @@
   "extra:label-pronoun": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [
-     [
-      "req",
-      "is not written in the request"
-     ]
-    ],
+    "invalid": [],
     "missing": [
      "label"
     ],
     "names": [
-     "label",
-     "req"
+     "label"
     ],
     "reason": "",
-    "values": {}
+    "values": {
+     "req": "x"
+    }
    },
    "check_arguments": {
     "error": {
@@ -12788,7 +12381,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12807,7 +12400,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12826,7 +12419,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12845,7 +12438,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12855,7 +12448,7 @@
   "extra:n-count-not-written": {
    "applied": {
     "conv_count": 0,
-    "count": 0,
+    "count": 8,
     "flag": false,
     "kind": "book",
     "opt_count": null,
@@ -12864,21 +12457,12 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: count=8 is not a number the request writes (7). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "count": [
-     "8",
-     "is not a number the request writes (7)"
-    ]
-   },
-   "refused_order": [
-    "count"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "count=8 is not a number the request writes (7)"
-   ]
+   "texts": []
   },
   "extra:n-count-written": {
    "applied": {
@@ -12892,7 +12476,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12911,7 +12495,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12930,7 +12514,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12949,7 +12533,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12968,7 +12552,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -12981,27 +12565,18 @@
     "count": 0,
     "flag": false,
     "kind": "book",
-    "opt_count": null,
+    "opt_count": 9,
     "ratio": 1.0,
     "size": 5,
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: opt_count=9 is not a number the request writes (7, 8). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "opt_count": [
-     "9",
-     "is not a number the request writes (7, 8)"
-    ]
-   },
-   "refused_order": [
-    "opt_count"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "opt_count=9 is not a number the request writes (7, 8)"
-   ]
+   "texts": []
   },
   "extra:n-opt-sentinel": {
    "applied": {
@@ -13015,7 +12590,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13034,7 +12609,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13055,7 +12630,7 @@
     ],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13074,7 +12649,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13093,7 +12668,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13108,30 +12683,21 @@
     "kind": "book",
     "opt_count": null,
     "ratio": 1.0,
-    "size": 5,
+    "size": 6,
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: size=6 is not a number the request writes (7, 8). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "size": [
-     "6",
-     "is not a number the request writes (7, 8)"
-    ]
-   },
-   "refused_order": [
-    "size"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "size=6 is not a number the request writes (7, 8)"
-   ]
+   "texts": []
   },
   "extra:n-str-number-excluded": {
    "applied": {
     "conv_count": 0,
-    "count": 0,
+    "count": 1,
     "flag": false,
     "kind": "book",
     "opt_count": null,
@@ -13140,21 +12706,12 @@
     "tags": [],
     "title": "Doyle and Sons 1"
    },
-   "note": "(A first extraction from this command was refused: count=1 is not a number the request writes (4). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "count": [
-     "1",
-     "is not a number the request writes (4)"
-    ]
-   },
-   "refused_order": [
-    "count"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "count=1 is not a number the request writes (4)"
-   ]
+   "texts": []
   },
   "extra:n-str-number-excluded-ok": {
    "applied": {
@@ -13168,7 +12725,7 @@
     "tags": [],
     "title": "Doyle and Sons 1"
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13187,7 +12744,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13206,7 +12763,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13225,7 +12782,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13242,57 +12799,33 @@
     "ratio": 1.0,
     "size": 5,
     "tags": [],
-    "title": ""
+    "title": "Dune"
    },
-   "note": "(A first extraction from this command was refused: title='Dune' is not written in the request. Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "title": [
-     "'Dune'",
-     "is not written in the request"
-    ]
-   },
-   "refused_order": [
-    "title"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "title='Dune' is not written in the request"
-   ]
+   "texts": []
   },
   "extra:n-two-refusals": {
    "applied": {
     "conv_count": 0,
-    "count": 0,
+    "count": 8,
     "flag": false,
     "kind": "book",
     "opt_count": null,
     "ratio": 1.0,
-    "size": 5,
+    "size": 9,
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: count=8 is not a number the request writes (7); size=9 is not a number the request writes (7). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "count": [
-     "8",
-     "is not a number the request writes (7)"
-    ],
-    "size": [
-     "9",
-     "is not a number the request writes (7)"
-    ]
-   },
-   "refused_order": [
-    "count",
-    "size"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "count=8 is not a number the request writes (7)",
-    "size=9 is not a number the request writes (7)"
-   ]
+   "texts": []
   },
   "extra:n-word": {
    "applied": {
@@ -13306,7 +12839,7 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
    "refused": {},
    "refused_order": [],
    "respelled": {},
@@ -13316,7 +12849,7 @@
   "extra:n-word-wrong": {
    "applied": {
     "conv_count": 0,
-    "count": 0,
+    "count": 11,
     "flag": false,
     "kind": "book",
     "opt_count": null,
@@ -13325,21 +12858,12 @@
     "tags": [],
     "title": ""
    },
-   "note": "(A first extraction from this command was refused: count=11 is not a number the request writes (12). Extract the values again from the command above, correcting that: copy each value exactly as the command writes it, and answer NOT_FOUND for a value the command does not give.)",
-   "refused": {
-    "count": [
-     "11",
-     "is not a number the request writes (12)"
-    ]
-   },
-   "refused_order": [
-    "count"
-   ],
+   "note": "(A first extraction from this command was refused: . Extract the values again from the command above, correcting that, and answer NOT_FOUND for a value the command does not give.)",
+   "refused": {},
+   "refused_order": [],
    "respelled": {},
    "respelled_order": [],
-   "texts": [
-    "count=11 is not a number the request writes (12)"
-   ]
+   "texts": []
   },
   "extra:need-empty-list": {
    "argument_gaps": {
@@ -13495,34 +13019,33 @@
   "extra:o-copied-not-written": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
+    "invalid": [
+     [
+      "copied",
+      "is not written in the request"
+     ]
+    ],
     "missing": [],
-    "names": [],
+    "names": [
+     "copied"
+    ],
     "reason": "",
-    "values": {
-     "copied": ""
-    }
+    "values": {}
    },
    "check_arguments": {
-    "notes": [
-     "copied='blue box' is not in the request: default"
-    ],
-    "ok": {
-     "copied": "",
-     "items": [],
-     "named": "",
-     "qty": 0
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "copied='blue box' is not written in the request",
+     "type": "PlanningCommandInputError"
     }
    },
    "checked_arguments": {
-    "notes": [
-     "copied='blue box' is not in the request: default"
-    ],
-    "ok": {
-     "copied": "",
-     "items": [],
-     "named": "",
-     "qty": 0
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "copied='blue box' is not written in the request",
+     "type": "PlanningCommandInputError"
     }
    }
   },
@@ -13989,30 +13512,36 @@
   "extra:qty-no-number": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
+    "invalid": [
+     [
+      "qty",
+      "is not a number the request writes"
+     ]
+    ],
     "missing": [],
-    "names": [],
+    "names": [
+     "qty"
+    ],
     "reason": "",
     "values": {
      "amount": 1.0,
-     "qty": 5,
      "size": "large"
     }
    },
    "check_arguments": {
-    "notes": [],
-    "ok": {
-     "amount": 1.0,
-     "qty": 5,
-     "size": "large"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "qty=5 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    },
    "checked_arguments": {
-    "notes": [],
-    "ok": {
-     "amount": 1.0,
-     "qty": 5,
-     "size": "large"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "qty=5 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    }
   },
@@ -14091,27 +13620,35 @@
   "extra:qty-number-in-str": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [],
+    "invalid": [
+     [
+      "count",
+      "is not a number the request writes"
+     ]
+    ],
     "missing": [],
-    "names": [],
+    "names": [
+     "count"
+    ],
     "reason": "",
     "values": {
-     "count": 1,
      "title": "Doyle and Sons 1"
     }
    },
    "check_arguments": {
-    "notes": [],
-    "ok": {
-     "count": 1,
-     "title": "Doyle and Sons 1"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "count=1 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    },
    "checked_arguments": {
-    "notes": [],
-    "ok": {
-     "count": 1,
-     "title": "Doyle and Sons 1"
+    "error": {
+     "fields": [],
+     "gaps": null,
+     "message": "count=1 is not a number the request writes",
+     "type": "PlanningCommandInputError"
     }
    }
   },
@@ -14742,31 +14279,40 @@
    "argument_gaps": {
     "earlier": [],
     "invalid": [],
-    "missing": [
-     "req"
-    ],
-    "names": [
-     "req"
-    ],
+    "missing": [],
+    "names": [],
     "reason": "",
     "values": {
-     "label": "Red Box"
+     "label": "Red Box",
+     "req": "John Doe"
     }
    },
    "check_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "req='John Doe' is a placeholder, not a value",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "colour": "",
+     "flag": false,
+     "flag_on": true,
+     "label": "Red Box",
+     "limit": 10,
+     "note": "",
+     "ratio": 1.5,
+     "req": "John Doe",
+     "size": "small"
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "req='John Doe' is a placeholder, not a value",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "colour": "",
+     "flag": false,
+     "flag_on": true,
+     "label": "Red Box",
+     "limit": 10,
+     "note": "",
+     "ratio": 1.5,
+     "req": "John Doe",
+     "size": "small"
     }
    }
   },
@@ -14846,35 +14392,41 @@
   "extra:req-plain-any": {
    "argument_gaps": {
     "earlier": [],
-    "invalid": [
-     [
-      "req",
-      "is not written in the request"
-     ]
-    ],
+    "invalid": [],
     "missing": [],
-    "names": [
-     "req"
-    ],
+    "names": [],
     "reason": "",
     "values": {
-     "label": "Red Box"
+     "label": "Red Box",
+     "req": "whatever"
     }
    },
    "check_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "req='whatever' is not written in the request",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "colour": "",
+     "flag": false,
+     "flag_on": true,
+     "label": "Red Box",
+     "limit": 10,
+     "note": "",
+     "ratio": 1.5,
+     "req": "whatever",
+     "size": "small"
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "req='whatever' is not written in the request",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "colour": "",
+     "flag": false,
+     "flag_on": true,
+     "label": "Red Box",
+     "limit": 10,
+     "note": "",
+     "ratio": 1.5,
+     "req": "whatever",
+     "size": "small"
     }
    }
   },
@@ -14882,31 +14434,40 @@
    "argument_gaps": {
     "earlier": [],
     "invalid": [],
-    "missing": [
-     "req"
-    ],
-    "names": [
-     "req"
-    ],
+    "missing": [],
+    "names": [],
     "reason": "",
     "values": {
-     "label": "Red Box"
+     "label": "Red Box",
+     "req": "unspecified_value"
     }
    },
    "check_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "req='unspecified_value' is a placeholder, not a value",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "colour": "",
+     "flag": false,
+     "flag_on": true,
+     "label": "Red Box",
+     "limit": 10,
+     "note": "",
+     "ratio": 1.5,
+     "req": "unspecified_value",
+     "size": "small"
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "req='unspecified_value' is a placeholder, not a value",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "colour": "",
+     "flag": false,
+     "flag_on": true,
+     "label": "Red Box",
+     "limit": 10,
+     "note": "",
+     "ratio": 1.5,
+     "req": "unspecified_value",
+     "size": "small"
     }
    }
   },
@@ -14988,29 +14549,25 @@
     "values": {
      "branch": "Main",
      "member": "Ann Lee",
-     "note": ""
+     "note": "Main"
     }
    },
    "check_arguments": {
-    "notes": [
-     "note='Main' repeats another argument: default"
-    ],
+    "notes": [],
     "ok": {
      "branch": "Main",
      "entity_type": "identity",
      "member": "Ann Lee",
-     "note": ""
+     "note": "Main"
     }
    },
    "checked_arguments": {
-    "notes": [
-     "note='Main' repeats another argument: default"
-    ],
+    "notes": [],
     "ok": {
      "branch": "Main",
      "entity_type": "identity",
      "member": "Ann Lee",
-     "note": ""
+     "note": "Main"
     }
    }
   },
@@ -15036,11 +14593,12 @@
     }
    },
    "checked_arguments": {
-    "error": {
-     "fields": [],
-     "gaps": null,
-     "message": "member='Ann Lee' is also the value of branch",
-     "type": "PlanningCommandInputError"
+    "notes": [],
+    "ok": {
+     "branch": "Ann Lee",
+     "entity_type": "identity",
+     "member": "Ann Lee",
+     "note": ""
     }
    }
   },
@@ -15277,13 +14835,12 @@
     "names": [],
     "reason": "",
     "values": {
-     "other": "",
      "who": "Ann Lee"
     }
    },
    "check_arguments": {
     "notes": [
-     "other='Ann Lee' repeats another argument: default"
+     "other left empty: 'Ann Lee' is written once in your request and is the who."
     ],
     "ok": {
      "other": "",
@@ -15293,7 +14850,7 @@
    },
    "checked_arguments": {
     "notes": [
-     "other='Ann Lee' repeats another argument: default"
+     "other left empty: 'Ann Lee' is written once in your request and is the who."
     ],
     "ok": {
      "other": "",
@@ -15344,27 +14901,23 @@
     "names": [],
     "reason": "",
     "values": {
-     "text": "",
+     "text": "whatever words",
      "who": "Ann Lee"
     }
    },
    "check_arguments": {
-    "notes": [
-     "text='whatever words' is not in the request: default"
-    ],
+    "notes": [],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "whatever words",
      "who": "Ann Lee"
     }
    },
    "checked_arguments": {
-    "notes": [
-     "text='whatever words' is not in the request: default"
-    ],
+    "notes": [],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "whatever words",
      "who": "Ann Lee"
     }
    }
@@ -15410,31 +14963,27 @@
     "names": [],
     "reason": "",
     "values": {
-     "text": "",
+     "text": "Ann Lee",
      "who": "Ann Lee"
     }
    },
    "check_arguments": {
     "notes": [
-     "text='it' -> 'Ann Lee' (the request's one subject)",
-     "text='it' -> 'Ann Lee'",
-     "text='Ann Lee' repeats another argument: default"
+     "text='it' -> 'Ann Lee' (the request's one subject)"
     ],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "Ann Lee",
      "who": "Ann Lee"
     }
    },
    "checked_arguments": {
     "notes": [
-     "text='it' -> 'Ann Lee' (the request's one subject)",
-     "text='it' -> 'Ann Lee'",
-     "text='Ann Lee' repeats another argument: default"
+     "text='it' -> 'Ann Lee' (the request's one subject)"
     ],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "Ann Lee",
      "who": "Ann Lee"
     }
    }
@@ -15480,27 +15029,23 @@
     "names": [],
     "reason": "",
     "values": {
-     "text": "",
+     "text": "Ann Lee",
      "who": "Ann Lee"
     }
    },
    "check_arguments": {
-    "notes": [
-     "text='Ann Lee' repeats another argument: default"
-    ],
+    "notes": [],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "Ann Lee",
      "who": "Ann Lee"
     }
    },
    "checked_arguments": {
-    "notes": [
-     "text='Ann Lee' repeats another argument: default"
-    ],
+    "notes": [],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "Ann Lee",
      "who": "Ann Lee"
     }
    }
@@ -15513,29 +15058,23 @@
     "names": [],
     "reason": "",
     "values": {
-     "text": "",
+     "text": "ann lee",
      "who": "Ann Lee"
     }
    },
    "check_arguments": {
-    "notes": [
-     "text='ann lee' -> 'Ann Lee'",
-     "text='Ann Lee' repeats another argument: default"
-    ],
+    "notes": [],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "ann lee",
      "who": "Ann Lee"
     }
    },
    "checked_arguments": {
-    "notes": [
-     "text='ann lee' -> 'Ann Lee'",
-     "text='Ann Lee' repeats another argument: default"
-    ],
+    "notes": [],
     "ok": {
      "other": "",
-     "text": "",
+     "text": "ann lee",
      "who": "Ann Lee"
     }
    }
@@ -15764,9 +15303,7 @@
     ],
     "reason": "",
     "values": {
-     "tags": [
-      "x"
-     ]
+     "tags": []
     }
    },
    "check_arguments": {

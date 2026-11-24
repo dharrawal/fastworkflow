@@ -642,3 +642,38 @@ def test_non_string_or_mixed_choice_sets_are_never_checked():
     assert _string_choices(str) == []
     assert _string_choices(Literal["b", "a"]) == ["a", "b"]
     assert _string_choices(Optional[Color]) == ["blue", "red"]
+
+
+# ---------------------------------------------------------------- an edit's field written as a path names one input
+
+def _read_edits(proposal, *edits):
+    from fastworkflow.review_proposals import workflow_scope
+
+    with workflow_scope(_TUTORIAL):
+        return _proposed_edits_to_engine(proposal, [ProposedEdit(**each) for each in edits], reply_text="")
+
+
+def test_a_field_written_as_a_path_replaces_that_input(tutorial_workflow):
+    plan = SubTaskProposal(items=[_find_record_plan().items[0]])
+    edits = _read_edits(plan, {"op": "change", "index": 1, "field": "sub_tasks[1].inputs.kind", "value": "member"})
+    applied = apply_edits(plan, edits)
+    assert _inputs(applied, 1) == {"name": "Emma", "kind": "member"}
+    assert all(each.name for each in applied.items[0].inputs)
+
+
+def test_a_path_that_names_another_step_or_a_field_that_names_no_input_is_asked_again(tutorial_workflow):
+    from fastworkflow.review_engine import EditParseError
+
+    with pytest.raises(EditParseError, match="names another step"):
+        _read_edits(_find_record_plan(), {"op": "change", "index": 1, "field": "sub_tasks[2].inputs.kind",
+                                          "value": "member"})
+    with pytest.raises(EditParseError) as asked:
+        _read_edits(_find_record_plan(), {"op": "change", "index": 1, "field": "frobnicate", "value": "x"})
+    assert "kind" in str(asked.value) and "name" in str(asked.value)
+
+
+def test_an_input_the_command_declares_but_the_step_does_not_hold_is_accepted(tutorial_workflow):
+    plan = SubTaskProposal(items=[SubTask(goal="Look for Emma", inputs=[SubTaskInput(name="name", value="Emma")],
+                                          means=Means(kind="planning", name="find_record"))])
+    applied = apply_edits(plan, _read_edits(plan, {"op": "change", "index": 1, "field": "kind", "value": "member"}))
+    assert _inputs(applied, 1) == {"name": "Emma", "kind": "member"}

@@ -20,7 +20,7 @@ from fastworkflow.command_context_model import (
 from fastworkflow.command_preview import load_problems
 from fastworkflow.context_identity import declared_instance_label
 from fastworkflow.serialization_hooks import reset_warnings
-from fastworkflow.workflow import Workflow
+from fastworkflow.workflow import Workflow, running_command
 from fastworkflow.command_routing import RoutingRegistry
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -67,17 +67,20 @@ def test_record_is_the_invoked_record_after_a_get_parent_lookup(workflow, manage
     """A command found on an enclosing record: the record it acts on stays put while the position moves."""
     child = manager.create_todo_list("chores")
     workflow.root = manager
-    # The framework binds the record a command was invoked on before the command runs.
+    # The framework binds the record a command was invoked on before the command runs, and runs the command.
     workflow._command_context_for_response_generation = child
 
-    parent = workflow.get_parent(workflow.record)
-    assert parent is manager
-    assert workflow.record is child
+    with running_command():
+        parent = workflow.get_parent(workflow.record)
+        assert parent is manager
+        assert workflow.record is child
 
-    workflow.record = parent
-    assert workflow._current_command_context is manager
-    # The getter keeps the invoked record until the command returns.
-    assert workflow.record is child
+        workflow.record = parent
+        assert workflow._current_command_context is manager
+        # The getter keeps the invoked record until the command returns.
+        assert workflow.record is child
+    # Outside a command it is the current position.
+    assert workflow.record is manager
 
 
 def test_assigning_record_moves_the_workflow(workflow, manager):
@@ -225,7 +228,8 @@ def test_the_workflow_does_not_load_with_the_instance_label_classmethod(tmp_path
     # workflow does not load; load_problems lists the error (it does not raise), naming the property form.
     problems = load_problems(str(folder))
     assert len(problems) == 1, problems
-    assert problems[0].startswith("the workflow's commands do not load: CommandContextModelError: ")
+    # a workflow-global mistake: one line that names the context class file (bd fix-ftdl.2)
+    assert problems[0].startswith("_commands/TodoItem/_TodoItem.py: CommandContextModelError: ")
     assert "instance_label is removed" in problems[0]
     assert 'make the label a property on the record object' in problems[0]
     assert 'instance_label_attr = "<property name>"' in problems[0]

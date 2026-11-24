@@ -1,3 +1,4 @@
+import json
 from typing import List
 
 import fastworkflow
@@ -13,10 +14,10 @@ class Signature:
     """Get order details"""
     class Input(BaseModel):
         order_id: str = Field(
+            json_schema_extra={"from_command_output": "get_user_details.order_ids"},
             description=(
                 "The order ID to get details for"
             ),
-            json_schema_extra={"from_command_output": "get_user_details"},
             pattern=r"^(#?[\w\d]+)$",
             examples=["#W0000000"],
         )
@@ -38,15 +39,22 @@ class Signature:
                 "fulfillments with details including tracking id and item ids, "
                 "order status, and"
                 "payment history with details including transaction type, amount and payment method id"
-            ),
-            json_schema_extra={
-                "used_by": [
-                    "exchange_delivered_order_items",
-                    "get_product_details",
-                    "modify_pending_order_items",
-                    "return_delivered_order_items",
-                ]
-            },
+            )
+        )
+        item_ids: List[str] = Field(
+            default_factory=list,
+            json_schema_extra={"ui": {"hidden": True}},
+            description="The ids of the items in the order; empty when the order is not found.",
+        )
+        product_ids: List[str] = Field(
+            default_factory=list,
+            json_schema_extra={"ui": {"hidden": True}},
+            description="The ids of the products the order's items belong to; empty when the order is not found.",
+        )
+        payment_method_ids: List[str] = Field(
+            default_factory=list,
+            json_schema_extra={"ui": {"hidden": True}},
+            description="The ids of the payment methods the order was paid with; empty when the order is not found.",
         )
 
     plain_utterances: List[str] = [
@@ -74,11 +82,30 @@ class ResponseGenerator:
         workflow: Workflow,
         command: str,
         command_parameters: Signature.Input,
-    ) -> Signature.Output:
+    ) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow, command_parameters)
-        return output
+        # the response text is the order_details field's JSON alone, as it was before the id lists were added
+        return fastworkflow.CommandResponse(
+            response=output.model_dump_json(include={"order_details"}), output=output)
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
         order_details = GetOrderDetails.invoke(data=data, order_id=input.order_id)
-        return Signature.Output(order_details=order_details) 
+        order = _json_object(order_details)
+        items = [item for item in order.get("items") or [] if isinstance(item, dict)]
+        payments = [p for p in order.get("payment_history") or [] if isinstance(p, dict)]
+        return Signature.Output(
+            order_details=order_details,
+            item_ids=[str(item["item_id"]) for item in items if "item_id" in item],
+            product_ids=list(dict.fromkeys(str(item["product_id"]) for item in items if "product_id" in item)),
+            payment_method_ids=list(dict.fromkeys(
+                str(p["payment_method_id"]) for p in payments if "payment_method_id" in p)),
+        )
+
+def _json_object(text: str) -> dict:
+    """The tool's JSON text as a dict; empty for its error text."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}

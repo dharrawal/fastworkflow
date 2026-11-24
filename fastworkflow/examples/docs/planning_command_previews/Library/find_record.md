@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `name` | str | required | `<name>` |  | yes | the name to look for |
+| `name` | str | required | `Emma` |  | yes | the name to look for |
 | `kind` | one of book, member | `book` | `book` |  |  | whether to look for a book or a member |
 
 - `name` must be written in the command text (`copied_from_command_text`).
@@ -67,7 +67,7 @@ For the sample inputs, once for each different plan the inputs that change them 
 
 Reads no earlier facts. Output: one of the outputs listed under Facts.
 
-1. `find_book query=<name>`
+1. `find_book query=Emma`
 
 Pages: step 1 reads page 1 only.
 
@@ -77,14 +77,14 @@ Pages: step 1 reads page 1 only.
 
 Reads no earlier facts. Output: one of the outputs listed under Facts.
 
-1. `find_member query=<name>`
+1. `find_member query=Emma`
 
 ## Answer
 
 ### Answer when kind = book
 
-Written by `__result__`: \<name> matches \<find.total> book (\<find.titles[0]>).
+Written by `__result__`: Emma matches \<find.total> book (\<find.titles[0]>).
 
 ### Answer when kind = member
 
-Written by `__result__`: \<name> matches \<find.total> member (\<find.names[0]>).
+Written by `__result__`: Emma matches \<find.total> member (\<find.names[0]>).

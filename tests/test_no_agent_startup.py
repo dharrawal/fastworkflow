@@ -10,7 +10,7 @@ import pytest
 import fastworkflow
 from fastworkflow import no_agent_mode
 from tests.test_manager_shutdown_matrix import (  # noqa: F401 - the server fixtures
-    app_module, env_files, hello_world_workflow_path, isolated_env_file)
+    app_module, hello_world_workflow_path, isolated_env_file)
 
 
 @pytest.fixture

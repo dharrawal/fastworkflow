@@ -7,8 +7,8 @@ is ONE function (``plan_choice_question``). Both are code only: no model is call
 same way and a client that is itself an agent can rely on the forms the question names.
 
 What the CME used to match for itself is options of this reader: a reply whose first word names a candidate returns the
-pick AND the rest of the reply (``Reading.rest``; the CME uses it as that command's parameter text, the plan path does
-not read it), the plain utterances of ``abort``, ``you_misunderstood`` and ``what_can_i_do`` are *aliases* (abort, none
+pick (the rest of the reply is kept in ``Reading.rest`` and read by neither path: a reply answers its question and
+nothing else, so the command's parameter text is the request that was asked about, ``intent_loop.answer``), the plain utterances of ``abort``, ``you_misunderstood`` and ``what_can_i_do`` are *aliases* (abort, none
 of these, list the commands), a number picks, and a fuzzy tie is unclear (never the first of the tied).
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping, Optional
 
 from fastworkflow import no_agent_mode
-from fastworkflow.utils.fuzzy_match import find_best_matches
+from fastworkflow.utils.fuzzy_match import normalize_text, normalized_levenshtein_distance
 
 from typing import NamedTuple
 
@@ -31,9 +31,6 @@ LIST = "list"
 #: typed command name (``intent_detection._FUZZY_PREMATCH_MAX_DISTANCE``; a test holds the two equal). It is repeated
 #: here because importing the CME module loads the model stack, which a reader of plain text must not need.
 FUZZY_MAX_DISTANCE = 0.3
-#: A reply shorter than this is never matched as a misspelt name. The matcher scores a candidate on its leading
-#: characters only, so one or two letters match every name that begins with them at distance 0.
-FUZZY_MIN_LENGTH = 3
 
 #: The reply the question names for "none of these fits".
 NONE_REPLY = "none"
@@ -71,6 +68,25 @@ def _only(names: Iterable[str]) -> Optional[str]:
     return unique[0] if len(unique) == 1 else None
 
 
+def misspelt(text: str, keys: Iterable[str]) -> tuple[list[str], Optional[float]]:
+    """The *keys* (command names, leaves) that *text* is a misspelling of: the WHOLE text against each WHOLE key, without
+    regard to case, spaces, underscores or ``@`` (``fuzzy_match.normalize_text``), by normalised edit distance within
+    ``FUZZY_MAX_DISTANCE``. Returns every key at the smallest distance and that distance, or ``([], None)``.
+
+    THE test of "this is a misspelt command name", for a request (``intent_loop._by_name``) and for a reply to the
+    which-command question (``read``). A prefix is not a misspelling: ``a`` or ``add`` is not ``add_note``, and nor is a
+    sentence that begins with a name. Several keys at the smallest distance are for the caller to read as a tie."""
+    typed = normalize_text(text)
+    if not typed:
+        return [], None
+    scored = [(normalized_levenshtein_distance(typed, normalize_text(key), max_normalized=FUZZY_MAX_DISTANCE), key)
+              for key in dict.fromkeys(str(key) for key in keys)]
+    best = min((distance for distance, _ in scored), default=None)
+    if best is None or best > FUZZY_MAX_DISTANCE:
+        return [], None
+    return [key for distance, key in scored if abs(distance - best) <= 1e-12], best
+
+
 def read(reply: str, candidates: Iterable[str], *, numbered: Optional[int] = None,
          aliases: Optional[Mapping[str, str]] = None) -> Reading:
     """How a reply to "which of *candidates* is meant?" reads. *candidates* are the names in the order the question
@@ -82,19 +98,20 @@ def read(reply: str, candidates: Iterable[str], *, numbered: Optional[int] = Non
       ``/`` and surrounding quotes or backticks;
     - the humanised name (``book by title`` for ``Library/book_by_title``);
     - an *alias*: *aliases* maps a phrase (lower case) to ``abort``, ``none`` or ``list`` (the CME gives the plain
-      utterances of ``abort``, ``you_misunderstood`` and ``what_can_i_do``); a candidate's name wins over an alias;
+      utterances of ``abort``, ``you_misunderstood`` and ``what_can_i_do``); a candidate's name wins over an alias. An
+      alias is a fixed phrase: it matches the WHOLE reply (case and trailing ``.`` or ``!`` ignored), never a reply that
+      only begins like it or a misspelling of it;
     - a 1-based number of a listed option (*numbered*: how many of the candidates the question numbered; all of them
       when not given). A number outside the list is unclear;
     - cancel and its synonyms (``no_agent_mode.declines``): abort;
-    - ``yes`` when the question offered exactly one candidate (it is then a confirmation): that candidate;
+    - a yes (``no_agent_mode.is_yes``) when the question offered exactly one candidate (it is then a confirmation):
+      that candidate;
     - ``none``, ``no``, ``neither``, ``something else`` and the like: none of these;
     - a first word that is a candidate's name, the rest of the reply kept in ``Reading.rest`` (``find_book 5``);
-    - a misspelt name or alias, by the matcher and bound the CME uses for a typed command name. Two that match
-      equally well are unclear: the reader never guesses between them.
+    - a misspelt name (``misspelt``: the whole reply against each whole name and leaf, the test the intent loop uses
+      for a typed command name). Two that match equally well are unclear: the reader never guesses between them.
 
     A leaf that two candidates share (the same command name in two contexts) picks neither; the full name does.
-    The words for cancel and none are read before the fuzzy match because that match scores a candidate on its leading
-    characters, so ``no`` would otherwise pick a name that begins with "no".
     """
     names = [str(name) for name in candidates if str(name)]
     text = str(reply or "").strip().strip("`'\"").strip()
@@ -112,7 +129,7 @@ def read(reply: str, candidates: Iterable[str], *, numbered: Optional[int] = Non
     if humanised:
         picked = _only(humanised)
         return Reading(PICK, picked) if picked is not None else Reading(UNCLEAR)
-    aliases = {str(key).lower(): value for key, value in (aliases or {}).items()}
+    aliases = {no_agent_mode._bare(key): value for key, value in (aliases or {}).items()}
     if word in aliases:
         return Reading(aliases[word])
 
@@ -123,7 +140,7 @@ def read(reply: str, candidates: Iterable[str], *, numbered: Optional[int] = Non
 
     if no_agent_mode.declines(text):
         return Reading(ABORT)
-    if len(names) == 1 and no_agent_mode.read_yes_no(text) is True:
+    if len(names) == 1 and no_agent_mode.is_yes(text):
         return Reading(PICK, names[0])
     if word in _NONE_WORDS and names:
         # "none of these" answers a question that listed candidates: with no candidates (the CME's check of a reply to a
@@ -138,21 +155,14 @@ def read(reply: str, candidates: Iterable[str], *, numbered: Optional[int] = Non
         if by_first is not None:
             return Reading(PICK, by_first, parts[1].strip())
 
-    if len(word.replace(" ", "")) < FUZZY_MIN_LENGTH or not (names or aliases):
-        return Reading(UNCLEAR)
-    # The leaf and the full name are both offered to the matcher, as a person may type either. Aliases join them: the
-    # closest of all wins, and two that tie are unclear.
-    by_key: dict[str, list[tuple[str, Optional[str]]]] = {}
+    # The leaf and the full name are both offered, as a person may type either; two names that tie are unclear.
+    by_key: dict[str, list[str]] = {}
     for name in names:
         for key in (name, _leaf(name)):
-            by_key.setdefault(key, []).append((PICK, name))
-    for phrase, kind in aliases.items():
-        by_key.setdefault(phrase, []).append((kind, None))
-    matched, _ = find_best_matches(word.replace(" ", "_"), list(by_key), threshold=FUZZY_MAX_DISTANCE)
-    targets = list(dict.fromkeys(target for key in matched for target in by_key[key]))
-    if len(targets) == 1:
-        return Reading(targets[0][0], targets[0][1])
-    return Reading(UNCLEAR)
+            by_key.setdefault(key, []).append(name)
+    matched, _ = misspelt(word, by_key)
+    picked = _only(name for key in matched for name in by_key[key])
+    return Reading(PICK, picked) if picked is not None else Reading(UNCLEAR)
 
 
 # ---- the which-command question, one text for every path ------------------------------------------------------------

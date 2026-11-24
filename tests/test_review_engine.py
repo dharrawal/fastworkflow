@@ -465,10 +465,11 @@ def test_a_proposal_reply_on_a_real_session_that_is_refused_says_why_and_keeps_t
 
 def test_the_action_policy_reads_exactly_the_approval_words():
     policy = reply_policy(KIND_ACTION)
-    assert policy.classify("yes") is Verdict.CONFIRM
+    for text in ("yes", " yes", "yes ", "Yes", "accept", "ok", "go."):          # the one yes reader (no_agent_mode.is_yes)
+        assert policy.classify(text) is Verdict.CONFIRM, text
     assert policy.classify("no") is Verdict.DECLINE
     assert policy.classify("always") is Verdict.ALWAYS
-    for text in (" yes", "yes ", "Yes", "/yes", "sure", "yes but", "accept"):
+    for text in ("/yes", "sure", "yes but", "y", "run it"):
         assert policy.classify(text) is Verdict.REPROMPT, text
 
 

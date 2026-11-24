@@ -4,15 +4,17 @@ A command states a fact about itself with a decorator, not a class attribute::
 
     @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)   # or REQUIRED_UNTIL_DELEGATED
     @writes                                                      # execution commands only
-    @descends_to("Account", when_parameter="account_uid")        # when_parameter is optional
+    @descends_to("Account")                                      # an unconditional move
     class ResponseGenerator:
         ...
 
 Each decorator stores its value on a private attribute (``__fw_approval__``, ``__fw_writes__``,
-``__fw_descends_to__``) together with a mark that only the decorator sets. The loader
-(:func:`check_command_spellings`) fails the load for three things: the retired public attributes
-(``approval``, ``writes``, ``descends_to``, ``descend_parameter``), each naming its decorator, and a
-private attribute written by hand without its decorator's mark.
+``__fw_descends_to__``) together with a mark that only the decorator sets. :func:`declaration_problems` lists what
+fails the load of the command (and of that command only, ``planning_commands.resolve_field_sources``): the retired
+public attributes (``approval``, ``writes``, ``descends_to``, ``descend_parameter``), each naming its decorator, the
+removed ``when_parameter`` option of ``@descends_to``, a private attribute written by hand without its decorator's
+mark, ``@writes`` on a ``PlanGenerator``, a ``@descends_to`` target that is no context of the workflow, and an
+``approval_template`` that cannot be filled.
 
 This module imports nothing from the rest of fastworkflow, so the package and the planning module can
 both re-export it.
@@ -20,11 +22,7 @@ both re-export it.
 from __future__ import annotations
 
 import enum
-import logging
-import os
 from typing import Any, Callable, Optional, TypeVar
-
-logger = logging.getLogger(__name__)
 
 _C = TypeVar("_C", bound=type)
 
@@ -32,9 +30,11 @@ _C = TypeVar("_C", bound=type)
 class UserApproval(enum.Enum):
     """How a command needs the user's say before it runs (approval_annotations).
 
-    ``REQUIRED_ALWAYS``: the user is asked every time. ``REQUIRED_UNTIL_DELEGATED``: the user is asked
-    until they delegate the decision. A command with no ``@user_approval_for_execution`` is left to the
-    agent, with no gate.
+    ``REQUIRED_ALWAYS``: a person confirms every run, even a command they typed themselves; a standing
+    ``always`` approval is neither offered nor honoured, so it can never be delegated.
+    ``REQUIRED_UNTIL_DELEGATED``: the agent needs the user's say, and the user's own typed command or a
+    standing ``always`` approval counts as that say. A command with no ``@user_approval_for_execution``
+    is left to the agent, with no gate.
     """
 
     REQUIRED_ALWAYS = "required_always"
@@ -62,8 +62,14 @@ _MARKS = {
 _DECORATOR_FOR = {
     APPROVAL_ATTRIBUTE: "@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)",
     WRITES_ATTRIBUTE: "@writes",
-    DESCENDS_TO_ATTRIBUTE: '@descends_to("<Context>", when_parameter=...)',
+    DESCENDS_TO_ATTRIBUTE: '@descends_to("<Context>")',
 }
+
+#: Set by ``@descends_to`` when it is given the removed ``when_parameter`` option, so the load can name it.
+RETIRED_WHEN_PARAMETER_ATTRIBUTE = "__fw_descends_to_when_parameter__"
+
+_UNCONDITIONAL_MOVE = ("@descends_to always declares an unconditional move; declare it without the option "
+                       "(a command that moves only sometimes still assigns workflow.record only when it moves)")
 
 #: The public class attributes the decorators replace. Declaring one is a load error.
 RETIRED_ATTRIBUTES = ("approval", "writes", "descends_to", "descend_parameter")
@@ -72,10 +78,6 @@ _APPROVAL_BY_RETIRED_VALUE = {
     "mandatory": "REQUIRED_ALWAYS",
     "delegatable": "REQUIRED_UNTIL_DELEGATED",
 }
-
-
-class CommandDeclarationError(ValueError):
-    """A command class spells a declaration the retired way, or writes a private attribute by hand."""
 
 
 def _mark(command_class: _C, attribute: str, value: Any) -> _C:
@@ -105,23 +107,28 @@ def writes(command_class: _C) -> _C:
     """Declare that running an execution command's ``ResponseGenerator`` changes the application's data.
 
     A ``PlanGenerator`` cannot carry it: a planning command writes when a step of it runs a command that
-    does. That is a load error, raised by :func:`fastworkflow.command_writes.check_write_declarations`.
+    does. That is a load error of the planning command (:func:`declaration_problems`).
     """
     return _mark(command_class, WRITES_ATTRIBUTE, True)
 
 
-def descends_to(context: str, *, when_parameter: Optional[str] = None) -> Callable[[_C], _C]:
-    """Declare the context a command enters. ``when_parameter`` names the input whose presence makes the
-    command descend (the navigation edge is then conditional). Both arguments are checked when the module
-    is imported."""
+_NOT_GIVEN: Any = object()
+
+
+def descends_to(context: str, *, when_parameter: Any = _NOT_GIVEN) -> Callable[[_C], _C]:
+    """Declare the context a command enters, whenever it runs. That the name is a non-empty string is checked when
+    the module is imported; a name that is no context of the workflow fails the load of the command
+    (:func:`declaration_problems`). ``when_parameter`` is removed: passing it is accepted here only so the load can
+    fail naming it."""
     if not isinstance(context, str) or not context.strip():
         raise TypeError(f"@descends_to takes the name of a context, not {context!r}")
-    if when_parameter is not None and (not isinstance(when_parameter, str) or not when_parameter.strip()):
-        raise TypeError(f"@descends_to(when_parameter=...) takes an input field name, not {when_parameter!r}")
-    target = (context.strip(), when_parameter.strip() if when_parameter is not None else None)
+    target = context.strip()
 
     def decorate(command_class: _C) -> _C:
-        return _mark(command_class, DESCENDS_TO_ATTRIBUTE, target)
+        marked = _mark(command_class, DESCENDS_TO_ATTRIBUTE, target)
+        if when_parameter is not _NOT_GIVEN:
+            setattr(marked, RETIRED_WHEN_PARAMETER_ATTRIBUTE, when_parameter)
+        return marked
 
     return decorate
 
@@ -141,30 +148,23 @@ def declares_writes(command_class: Any) -> bool:
     return command_class is not None and getattr(command_class, WRITES_ATTRIBUTE, False) is True
 
 
-def declared_descend(command_class: Any) -> Optional[tuple[str, Optional[str]]]:
-    """``(context, when_parameter)`` from ``@descends_to``, or None."""
+def declared_descend(command_class: Any) -> Optional[str]:
+    """The context named by ``@descends_to``, or None."""
     if command_class is None:
         return None
     value = getattr(command_class, DESCENDS_TO_ATTRIBUTE, None)
-    return value if isinstance(value, tuple) else None
+    return value if isinstance(value, str) else None
 
 
 # ---------------------------------------------------------------------------
-# The load check: retired spellings and hand-written private attributes
+# The load check: retired spellings, hand-written private attributes, targets and templates
 # ---------------------------------------------------------------------------
-
-def _source_label(metadata, workflow_folderpath: str) -> str:
-    path = metadata.response_generation_module_path or ""
-    if not path:
-        return workflow_folderpath
-    return os.path.relpath(os.path.abspath(path), os.path.abspath(workflow_folderpath))
-
 
 def _q(text: Any) -> str:
     return f'"{text}"'
 
 
-def _retired_problems(command_name: str, command_class: type) -> list[str]:
+def _retired_problems(command_class: type) -> list[str]:
     own = vars(command_class)
     problems: list[str] = []
     if "approval" in own:
@@ -180,54 +180,75 @@ def _retired_problems(command_name: str, command_class: type) -> list[str]:
     if "writes" in own:
         problems.append(f"writes = {own['writes']} is removed: write @writes on the ResponseGenerator "
                         "(execution commands only)")
-    if "descends_to" in own or "descend_parameter" in own:
-        target = own.get("descends_to")
-        gate = own.get("descend_parameter")
-        if isinstance(target, str):
-            head = f"descends_to = {_q(target)} is removed"
-        else:
-            head = f"descend_parameter = {_q(gate)} is removed"
-        args = [_q(target) if isinstance(target, str) else '"<Context>"']
-        if isinstance(gate, str):
-            args.append(f"when_parameter={_q(gate)}")
-        problems.append(f"{head}: write @descends_to({', '.join(args)}) on the ResponseGenerator")
-    return [f"{command_name}: {text}" for text in problems]
+    if "descends_to" in own:
+        target = own["descends_to"]
+        shown = _q(target) if isinstance(target, str) else '"<Context>"'
+        problems.append(f"descends_to = {shown} is removed: write @descends_to({shown}) on the ResponseGenerator")
+    if "descend_parameter" in own:
+        problems.append(f"descend_parameter = {_q(own['descend_parameter'])} is removed: {_UNCONDITIONAL_MOVE}")
+    if RETIRED_WHEN_PARAMETER_ATTRIBUTE in own:
+        problems.append(f"when_parameter is removed from @descends_to (it was given "
+                        f"{own[RETIRED_WHEN_PARAMETER_ATTRIBUTE]!r}): {_UNCONDITIONAL_MOVE}")
+    return problems
 
 
-def _hand_written_problems(command_name: str, command_class: type) -> list[str]:
+def _hand_written_problems(command_class: type) -> list[str]:
     own = vars(command_class)
     problems = []
     for attribute, mark in _MARKS.items():
         if attribute in own and own.get(mark) is not _DECORATED:
-            problems.append(f"{command_name}: {attribute} is written by hand; declare it with "
+            problems.append(f"{attribute} is written by hand; declare it with "
                             f"{_DECORATOR_FOR[attribute]} instead")
     return problems
 
 
-def check_command_spellings(workflow_folderpath: str, routing) -> None:
-    """Fail the load for a retired spelling or a hand-written private attribute on any command class.
+def _descends_to_problems(command_class: type, contexts: frozenset[str]) -> list[str]:
+    target = declared_descend(command_class)
+    if target is None or target in contexts:
+        return []
+    import difflib
 
-    Raises :class:`CommandDeclarationError` naming the file, the command and the decorator to write.
-    Core commands are skipped; a command whose class cannot be read is left to its own load path.
-    """
-    import fastworkflow
+    close = difflib.get_close_matches(target, sorted(contexts), n=1)
+    hint = f"did you mean {_q(close[0])}?" if close else f"the workflow's contexts are {', '.join(sorted(contexts))}"
+    return [f"@descends_to({_q(target)}) names no context of the workflow; {hint}"]
 
-    problems: list[str] = []
-    core = set(routing.command_directory.core_command_names)
-    for command_name, metadata in routing.command_directory.map_command_2_metadata.items():
-        if command_name in core:
-            continue
-        try:
-            command_class = routing.get_command_class(
-                command_name, fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
-        except Exception:  # noqa: BLE001 - an unreadable class is reported by its own load path
-            logger.debug("declarations unread for %r", command_name, exc_info=True)
-            continue
-        if command_class is None:
-            continue
-        where = _source_label(metadata, workflow_folderpath)
-        for text in (*_retired_problems(command_name, command_class),
-                     *_hand_written_problems(command_name, command_class)):
-            problems.append(f"{where}: {text}")
-    if problems:
-        raise CommandDeclarationError("\n".join(problems))
+
+def _approval_template_problems(command_class: type, input_fields: frozenset[str]) -> list[str]:
+    import string
+
+    if "approval_template" not in dir(command_class):
+        return []
+    template = getattr(command_class, "approval_template")
+    if not isinstance(template, str):
+        return [f"approval_template must be a str (a str.format text over the Input fields); got {template!r}"]
+    if declared_approval(command_class) is None:
+        return ["approval_template is read only for a command that asks for approval: add "
+                "@user_approval_for_execution(...), or remove approval_template"]
+    try:
+        names = [name for _, name, _, _ in string.Formatter().parse(template) if name is not None]
+    except ValueError as error:
+        return [f"approval_template {template!r} is not a str.format text: {error}"]
+    fields = ", ".join(sorted(input_fields)) or "none"
+    return [f"approval_template {template!r} names {{{name}}}, which is not a field of Input; write a field "
+            f"name in braces (its fields: {fields})"
+            for name in names if name not in input_fields]
+
+
+def declaration_problems(command_class: Any, *, is_planning: bool, contexts: frozenset[str],
+                         input_fields: frozenset[str]) -> list[str]:
+    """Why the declarations on a command's ``ResponseGenerator`` or ``PlanGenerator`` fail its load, one message
+    per mistake, each saying what to write instead; empty when they are fine. *contexts* are the workflow's
+    context names (a ``@descends_to`` target must be one), *input_fields* the names of the command's
+    ``Signature.Input`` fields (an ``approval_template`` fills from them)."""
+    if not isinstance(command_class, type):
+        return []
+    problems = [*_retired_problems(command_class), *_hand_written_problems(command_class)]
+    if is_planning and WRITES_ATTRIBUTE in vars(command_class):
+        problems.append("a planning command cannot carry @writes. It writes when its steps run a command that "
+                        "carries @writes: put the decorator on that execution command")
+    if is_planning and APPROVAL_ATTRIBUTE in vars(command_class):   # one rule for both marks (bd fix-ftdl.7.6)
+        problems.append("a planning command cannot carry @user_approval_for_execution. Its steps are asked about "
+                        "when they run a command that carries it: put the decorator on that execution command")
+    problems += _descends_to_problems(command_class, contexts)
+    problems += _approval_template_problems(command_class, input_fields)
+    return problems

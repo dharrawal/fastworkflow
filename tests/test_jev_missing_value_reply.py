@@ -187,6 +187,28 @@ def test_agent_mode_makes_no_call(monkeypatch, jev_on):
     assert predictor.calls == []
 
 
+def test_a_persons_slash_reply_in_an_agent_session_is_read(monkeypatch, jev_on):
+    """The replier decides, not the session: a person's "/" message in an agent session is assistant mode, and Jev reads
+    their reply (the agent's own tool call, above, is not read)."""
+    predictor = _Predict("wait", 0.99)
+    _classifier(monkeypatch, predictor)
+    workflow = _pending(app_workflow=_app_workflow(run_as_agent=True))
+    workflow.context[waiting.ASSISTANT_KEY] = True      # the round began with a "/" message
+    assert waiting.port_of(workflow.context).assistant
+    intent, _ = parameter_reply._missing_value_reply_intent(
+        workflow, workflow.context["app_workflow"], PENDING_COMMAND, "hmm")
+    assert intent == "wait"
+    assert len(predictor.calls) == 1
+
+
+def test_the_audience_is_the_replier_not_the_session():
+    from fastworkflow.parameters import ask
+    agent_session = {"run_as_agent": True}
+    assert ask.audience_of(agent_session) == ask.AGENT
+    assert ask.audience_of(agent_session, assistant=True) == ask.HUMAN
+    assert ask.audience_of({"run_as_agent": False}) == ask.HUMAN
+
+
 def test_the_off_switch_makes_no_call(monkeypatch, jev_on):
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_MISSING_VALUE_REPLY", "false")
     predictor = _Predict("wait", 0.99)
@@ -244,7 +266,9 @@ def test_wait_keeps_the_pending_round(monkeypatch, jev_on):
     output = _reply(monkeypatch, workflow, "hold on, checking")
 
     assert output.handled is False and output.routed is False
-    assert output.response.startswith("OK, take your time.\nMissing parameter values: ")
+    # The question comes back as it was, under one line, as on the plan path (bd fix-ftdl.7.8, D9).
+    question = parameter_clarification.ParameterLoop.from_state(stored.payload["loop"]).question
+    assert question and output.response == f"OK, take your time.\n\n{question}"
     assert "user_name" in output.response
     assert intent_loop.waiting_for(workflow.context) == intent_loop.WAITING_PARAMETERS
     # The round is untouched; the record only notes the first wait in a row (fix-b3w2: ``waited``).
@@ -324,18 +348,43 @@ class _IntentStage(_CommandNamePrediction):
         raise _ReachedIntentDetection(command)
 
 
-def test_different_command_leaves_the_pending_round_and_reads_the_reply_as_a_request(monkeypatch, jev_on):
+def test_a_different_request_is_not_run_and_is_asked_once_more(monkeypatch, jev_on):
+    """Decision B (bd fix-ftdl.8.10): the question says only the answer is read, so a reply read as a different request
+    is not run. It counts as a reply with no progress: the question comes back once, saying the reply was not run."""
     _classifier(monkeypatch, _Predict("different_command", 0.9))
-    monkeypatch.setattr(wildcard, "CommandNamePrediction", _IntentStage)
-    # The fresh request is read from its start: the intent model is the first thing asked.
+    # The intent model is never asked: the reply does not reach intent detection.
+    monkeypatch.setattr(wildcard, "CommandNamePrediction", _CommandNamePrediction)
+    recorded: list = []
+    _executor(monkeypatch, recorded)
+    workflow = _pending()
+    stored = waiting.port_of(workflow.context).get()
+    question = parameter_clarification.ParameterLoop.from_state(stored.payload["loop"]).question
+
+    output = _reply(monkeypatch, workflow, "show me the users")
+
+    assert output.handled is False and output.routed is False and output.reply_intent == "different_command"
+    assert "read as a new request" in output.response and "not run" in output.response
+    assert "cancel" in output.response and output.response.endswith(question)
+    assert intent_loop.waiting_for(workflow.context) == intent_loop.WAITING_PARAMETERS
+    held = parameter_clarification.pending(workflow.context)
+    assert held.stalled == 1 and held.question == question
+    assert workflow.context["command_name"] == PENDING_COMMAND
+    assert recorded == []
+
+
+def test_a_second_different_request_in_a_row_ends_the_command_naming_what_is_missing(monkeypatch, jev_on):
+    _classifier(monkeypatch, _Predict("different_command", 0.9))
+    monkeypatch.setattr(wildcard, "CommandNamePrediction", _CommandNamePrediction)
     recorded: list = []
     _executor(monkeypatch, recorded)
     workflow = _pending()
 
-    with pytest.raises(_ReachedIntentDetection) as reached:
-        _reply(monkeypatch, workflow, "show me the users")
+    _reply(monkeypatch, workflow, "show me the users")
+    output = _reply(monkeypatch, workflow, "list the rooms")
 
-    assert str(reached.value.args[0]) == "show me the users"
+    assert output.handled is True and output.routed is False and output.reply_intent == "different_command"
+    assert "was not run" in output.response and "user_name" in output.response
+    assert "read as a new request" in output.response and "own message" in output.response
     assert parameter_clarification.pending(workflow.context) is None
     assert intent_loop.waiting_for(workflow.context) is None
     assert recorded == []
@@ -446,10 +495,11 @@ def test_e2e_an_abort_leaves_the_pending_round(_assistant_session, monkeypatch):
     assert stored is None
 
 
-def test_e2e_a_different_request_runs_as_a_fresh_request(_assistant_session, monkeypatch):
+def test_e2e_a_different_request_is_not_run_and_the_question_stays(_assistant_session, monkeypatch):
     _jev_says(monkeypatch, "different_command")
     out = _assistant_session.process_turn("what can i do?")
+    text = str(out.model_dump())
+    assert "read as a new request" in text and "second_num" in text, text
     stage, stored = _cme_state(_assistant_session)
-    assert stored is None
-    assert stage is None
-    assert "PARAMETER EXTRACTION ERROR" not in str(out.model_dump())
+    assert stage == intent_loop.WAITING_PARAMETERS
+    assert stored is not None and stored.values["first_num"] == 5.0 and stored.stalled == 1

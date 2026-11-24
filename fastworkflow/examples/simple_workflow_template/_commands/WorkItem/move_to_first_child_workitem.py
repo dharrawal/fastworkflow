@@ -47,6 +47,7 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
+@fastworkflow.descends_to("WorkItem")
 class ResponseGenerator:
     """Handle command execution and craft the textual response."""
 

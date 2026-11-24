@@ -80,8 +80,11 @@ def test_the_questions_come_in_order_before_the_review_and_nothing_runs_until_it
     assert which.answer.startswith(f"More than one command fits part 2: {JOKE!r}.")
     assert _lookups(env) == []
 
-    # 2. the picked plain command takes no values question; part 3's missing values are asked next.
-    values = _reply(env, "find_book")
+    # 2. the picked plain command is asked for its required value (no agent model); part 3's missing values follow.
+    query = _reply(env, "find_book")
+    assert _kind(query) == "planning_parameter" and _request(query)["command"] == FIND_BOOK
+    assert _request(query)["missing"] == ["query"] and _lookups(env) == []
+    values = _reply(env, "Emma")
     assert _kind(values) == "planning_parameter" and _request(values)["command"] == NOTE_PLAN
     assert _request(values)["missing"] == ["member", "text"] and _lookups(env) == []
 
@@ -161,7 +164,10 @@ def test_a_part_the_review_accepted_is_recorded_confirmed_and_a_part_the_user_pi
     env.parts = [ABOUT_EMMA, JOKE]
 
     _artifacts(env.ctx.process_turn(f"{ABOUT_EMMA}; {JOKE}", approval_surface=HOST))
-    review = _reply(env, "find_book")
+    query = _reply(env, "find_book")
+    assert _kind(query) == "planning_parameter" and _request(query)["command"] == FIND_BOOK
+    assert _request(query)["missing"] == ["query"]
+    review = _reply(env, "Emma")
     assert _kind(review) == "review"
     assert _learned(env) == []                       # nothing is settled until the plan is run
     assert _reply(env, "yes").status is TurnStatus.COMPLETED
@@ -184,7 +190,10 @@ def test_a_one_candidate_part_the_review_accepted_teaches_and_an_unreviewed_name
 
     # A command named exactly is the fast path: recorded as a name match, which never teaches.
     no_agent.parts = ["find_book"]
-    no_agent.ctx.process_turn("find_book", approval_surface=HOST)
+    query = no_agent.ctx.process_turn("find_book", approval_surface=HOST)
+    assert _kind(query) == "planning_parameter" and _request(query)["command"] == FIND_BOOK
+    assert _request(query)["missing"] == ["query"]
+    _reply(no_agent, "Emma")
     named = [each for each in _learned(no_agent) if each["how"] == "name"]
     assert named and named[0]["command"] == FIND_BOOK and named[0]["confirmed"] == 0
 
@@ -282,7 +291,12 @@ def test_the_pending_resolution_is_one_json_record_that_round_trips_through_a_sa
     assert ctx._plan_resolution.to_state() == state and ctx.waiting.question == asked.answer
 
     # The reply after the restore carries on exactly where the resolution stood: the next question, then the review.
-    values = _reply(env, "find_book")
+    query = _reply(env, "find_book")
+    assert _kind(query) == "planning_parameter" and _request(query)["command"] == FIND_BOOK
+    assert _request(query)["missing"] == ["query"] and _loop(ctx).origin == 1
+    blob = json.loads(json.dumps(ctx.serialize_state(channel_id="resolution")))
+    _as_a_new_process(ctx, blob)
+    values = _reply(env, "Emma")
     assert _kind(values) == "planning_parameter" and _loop(ctx).origin == 2
     blob = json.loads(json.dumps(ctx.serialize_state(channel_id="resolution")))
     assert blob["waiting"]["kind"] == "parameters" and blob["plan_resolution"]["index"] == 2
@@ -355,6 +369,43 @@ def test_with_an_agent_model_cancelling_the_question_drops_the_part_and_the_revi
     assert record is not None and [item["goal"] for item in record.binding["items"]] == [emma, emma + " again"]
 
 
+def _on_the_command_line(ctx):
+    """The context as ``fastworkflow run`` holds it: the core of a real ``ChatSession``, with that session's message,
+    output and trace queues (the CLI transport, where the agent's own ``ask_user`` blocks on the message queue)."""
+    from fastworkflow.chat_session import ChatSession
+
+    session = ChatSession(run_as_agent=True)
+    session._core = ctx
+    ctx.set_transport_queues(user_message_queue=session.user_message_queue,
+                             command_output_queue=session.command_output_queue,
+                             command_trace_queue=session.command_trace_queue)
+    return session
+
+
+def test_on_the_command_line_the_gate_asks_which_command_and_cancel_drops_the_part_as_on_the_chat_page(
+        gated, monkeypatch):
+    """bd fix-ftdl.7.7: the terminal's session has a message queue, and the gate's questions were not put when one was
+    set, so an ambiguous part was planned by the agent there while the chat page asked about it. The gate's questions
+    suspend the turn like the review does, and the next message is the reply on both."""
+    monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "off")
+    emma = "who wrote Emma and how many copies do we have"
+    script_matcher(monkeypatch, lambda text: (
+        {FIND_BOOK: 0.45, AUTHOR: 0.3, BY_TITLE: 0.25, "none": 0.0} if text == JOKE else {BY_TITLE: 0.9, "none": 0.0}))
+    _split_into(monkeypatch, [JOKE, emma])
+    session = _on_the_command_line(gated.ctx)
+
+    asked = gated.ctx.process_turn(f"{JOKE}; {emma}")
+
+    assert asked.status is TurnStatus.AWAITING_USER and _kind(asked) == "plan_choice", asked.answer
+    assert gated.store.active() is None                    # no review yet
+    # //cancel at the terminal answers the question with its kind's cancel reply, through the message queue.
+    assert session.cancel_pending_prompt() == "clarification"
+    review = gated.ctx.process_turn(session.user_message_queue.get_nowait())
+    assert review.status is TurnStatus.AWAITING_USER
+    record = gated.store.active()
+    assert record is not None and [item["goal"] for item in record.binding["items"]] == [emma]
+
+
 def _note_part_plan():
     means = review_proposals.Means(kind=review_proposals.MEANS_PLANNING, name=NOTE_PLAN)
     item = review_proposals.SubTask(goal=f"{A_NOTE}: {NOTE}", means=means,
@@ -369,6 +420,7 @@ def loops_retry() -> str:
     return RETRY
 
 
+@pytest.mark.usefixtures("no_planner_key")      # the reply reader's remote read is not this test's subject (bd fix-xny2)
 def test_with_an_agent_model_a_missing_value_is_asked_before_the_review_when_the_inputs_were_drafted_until_the_rule_stops_it(gated):
     plan = _note_part_plan()
     turn = resolution.Turn(workflow=gated.wf, no_agent=False, can_ask=True, port=waiting.Holder())

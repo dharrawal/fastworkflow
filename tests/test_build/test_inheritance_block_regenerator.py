@@ -278,3 +278,44 @@ def test_idempotence(existing_model, context_dirs):
         file_content = json.load(f)
     
     assert file_content == second_result 
+
+# ------------------------------------------------------------------ bd fix-ftdl.9.4 item 3: merge, never reset, say it
+
+def _regenerator_on(tmp_path, existing: dict, folders=("Book", "Member", "Record")):
+    commands_dir = tmp_path / "_commands"
+    for folder in folders:
+        (commands_dir / folder).mkdir(parents=True, exist_ok=True)
+    model_path = commands_dir / "context_inheritance_model.json"
+    create_test_context_model(model_path, existing)
+    return InheritanceBlockRegenerator(commands_root=commands_dir, model_path=model_path), model_path
+
+
+def test_a_hand_written_base_is_kept_and_a_discovered_one_added(tmp_path, capsys):
+    """Book's Python class has no Record base, but the author wrote one: build keeps it and adds the base it found."""
+    regenerator, model_path = _regenerator_on(tmp_path, {"Book": {"base": ["Record"]}})
+    classes = {"Book": ClassInfo("Book", "book.py", bases=["Item"]), "Item": ClassInfo("Item", "item.py")}
+    model = regenerator.regenerate_inheritance(classes)
+    assert model["Book"] == {"base": ["Record", "Item"]}
+    assert json.loads(model_path.read_text())["Book"] == {"base": ["Record", "Item"]}
+    out = capsys.readouterr().out
+    assert "context_inheritance_model.json: Book: bases ['Record'] -> ['Record', 'Item']" in out
+
+
+def test_with_no_classes_no_folder_loses_its_bases(tmp_path, capsys):
+    """With no classes analysed, every existing entry stays as written; only a folder with no entry gets one."""
+    regenerator, model_path = _regenerator_on(
+        tmp_path, {"Book": {"base": ["Record"]}, "Member": {"base": ["Record"]}})
+    model = regenerator.regenerate_inheritance()
+    assert model["Book"] == {"base": ["Record"]} and model["Member"] == {"base": ["Record"]}
+    assert model["Record"] == {"base": []}
+    out = capsys.readouterr().out
+    assert "context_inheritance_model.json: Record: added with bases []" in out
+    assert "Book" not in out and "Member" not in out
+
+
+def test_an_unchanged_model_prints_nothing(tmp_path, capsys):
+    regenerator, _ = _regenerator_on(
+        tmp_path, {"Book": {"base": ["Record"]}, "Member": {"base": []}, "Record": {"base": []}})
+    regenerator.regenerate_inheritance({"Book": ClassInfo("Book", "book.py", bases=["Record"]),
+                                        "Record": ClassInfo("Record", "record.py")})
+    assert capsys.readouterr().out == ""

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field options · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-words">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-words">
+      <div class="prose">
+        <p class="num">05</p>
+        <h3>Field options</h3>
+        <p>A <em>field option</em> is a key you put in a field's <code>json_schema_extra</code> dict to turn on one extra behaviour, such as "strip the word 'the'" or "let a classifier decide this yes/no value". Two declarations change no behaviour at all: they are training data (see <a href="#e-words-training">training data only</a>). Reach for one only when a field's value is not simply a word or number the user typed. Most fields need no option at all.</p>
+        <p>A few terms first. An <em>input</em> is a field of your command's <code>Signature.Input</code> pydantic model (see <a href="e-input.html">an input</a>). An <em>execution command</em> runs your Python code; a <em>planning command</em> runs a plan of other commands (see <a href="p-plan.html">a plan in place of a body</a>). The <em>command text</em> is what the user typed for the command, plus their replies to its questions. The options work the same on both kinds of command unless the table says otherwise.</p>
+        <p><strong>Why most fields need nothing.</strong> By default the value the model fills for a <code>str</code> or <code>int</code> is used as it is: it is not compared with the command text, because the model may convert it (a date from "tomorrow"). A few checks that need no option still run on every field: a value that is entirely a template token (<code>{name}</code>, <code>&lt;name&gt;</code>; an id such as <code>SKU_42</code> and a JSON string such as <code>{"a": 1}</code> are values), pronouns and workflow vocabulary words, and, on a field you did not mark, the remote "was this value given" check, which skips any value the request writes at word boundaries (the paragraph "Checks that always run" on <a href="e-input.html">an input</a> lists them). <code>copied_from_command_text</code> is the explicit strict check that makes the value be one the user wrote (taught on <a href="e-input.html">an input</a>). The other options add behaviours the default does not have.</p>
+
+        <h4 id="s-field">Every option at a glance</h4>
+        <p>Most keys take <code>True</code> or a small dict of their own options; <code>from_command_output</code> takes a text or a list of texts, and <code>examples_by</code> a dict of dicts of lists (below). Leave the key out to turn it off: <code>False</code> fails the load. "Load" means the moment <code>fastworkflow run</code>, <code>fastworkflow train</code> or the server reads your command files; a command that fails to load is reported there and does not run.</p>
+        <table class="ref">
+          <thead><tr><th>You write</th><th>On</th><th>What it does</th><th>A mistake is caught</th></tr></thead>
+          <tbody>
+            <tr><td><code>description=</code>, <code>examples=</code>, <code>default=</code>, <code>pattern=</code></td><td>both; any</td><td>Plain <code>Field(...)</code> arguments: see <a href="e-input.html">an input</a>.</td><td></td></tr>
+            <tr><td><code>"copied_from_command_text": {"ignore": [...]}</code></td><td>both; <code>str</code></td><td>Strips the listed words from either end before the strict check.</td><td>at load</td></tr>
+            <tr><td><code>"copied_from_command_text": True</code></td><td>both; <code>str</code>, <code>int</code>, <code>list[str]</code></td><td>The strict check. On a <code>list[str]</code>, drops each item the command text does not write. On a <code>str</code>, the value must be written in the command text as whole words and takes its spelling; on an <code>int</code>, it must be a number the command text writes, even when the text writes no number. Required or optional, a value given and not written is refused. Either adds one sentence for the model (below).</td><td>at load</td></tr>
+            <tr><td><code>"record_named_in_command_text": True</code> (or <code>{"ignore": [...]}</code>)</td><td>both; <code>str</code></td><td>As the copy check, and the value must name a record the command text names.</td><td>at load</td></tr>
+            <tr><td><code>"classifier_confirms": True</code></td><td>both; <code>bool</code>, <code>Literal</code>, or a <code>str</code> with <code>record_named_in_command_text</code></td><td>A classifier decides the value again; a sure answer replaces the model's. Needs <code>JEV_API_KEY</code>.</td><td>at load</td></tr>
+            <tr><td><code>"classifier_confirms": {"meanings": {...}}</code></td><td>both; <code>Literal</code></td><td>The same, with each value's meaning shown to the classifier.</td><td>at load</td></tr>
+            <tr><td><code>"classifier_confirms": {"words": {...}}</code></td><td>both; <code>Literal</code></td><td>Training data only: the words users write for each value. It also turns on the classifier check, as <code>True</code> does.</td><td>at load</td></tr>
+            <tr><td><code>"examples_by": {...}</code></td><td>both; any</td><td>Training data only: example values of this field for each value of a choice field.</td><td>at load</td></tr>
+            <tr><td><code>"classifier_decides": True</code></td><td>both; <code>bool</code></td><td>Only the classifier sets it; otherwise it keeps its default.</td><td>at load</td></tr>
+            <tr><td><code>"from_command_output": "cmd.field"</code> (or a list)</td><td>both; any</td><td>Names the command whose Output hands out this value: see <a href="e-from.html">a handle's producer</a>.</td><td>at load: its shape, and that the command and the field exist and fit; a command with a bad one does not load (a bare command name with no field is one)</td></tr>
+            <tr><td><code>"command_text_after_command_name": True</code></td><td>execution only; <code>str</code>; one field</td><td>In agent mode, the text after the command name becomes this value, with no model call: see <a href="e-input.html">an input</a>.</td><td>at load</td></tr>
+            <tr><td><code>"ui": {"widget": "textarea"}</code> or <code>{"widget": "radio"}</code></td><td>both; <code>str</code> for textarea, <code>Literal</code> for radio</td><td>A hint to a client, such as the chat page, for drawing the input in a question form (a multi-line box, or radio buttons whatever the number of values): see <a href="e-input.html">an input</a>. No check or extraction reads it.</td><td>at load: the command does not load</td></tr>
+            <tr><td><code>"enum"</code>, <code>"used_by"</code> or <code>"pattern"</code></td><td>neither (removed)</td><td>The allowed values of a field are its <code>Literal</code> type, a pattern is <code>Field(pattern=...)</code>, and nothing read <code>used_by</code>; words such as "One of: a, b" in a description are prose, not a list of allowed values, and they exempt no word from the vocabulary screen. See <a href="removed.html">removed spellings</a>.</td><td>load error on an Input or an Output field of either kind of command</td></tr>
+            <tr><td><code>"ui": {...}</code> on an <strong>Output</strong> field</td><td>both</td><td>Presentation hints for a client: the keys <code>table</code>, <code>hidden</code>, <code>hero</code>, <code>format</code> (one of <code>currency</code>, <code>percent</code>, <code>code</code>, <code>badge</code>), <code>tones</code> and <code>currency</code>. See <a href="e-return.html#ui">how a result is shown</a>. They change nothing the command returns.</td><td>at load: the command does not load</td></tr>
+          </tbody>
+        </table>
+        <p>Two keys that clash also fail the load: <code>copied_from_command_text</code> with <code>record_named_in_command_text</code>, and the two classifier keys together. Every key that is not an option fails the load, on either kind of command, and the message names the key, the closest option when one is close (<code>"copied_from_command_txt"</code> gives "did you mean 'copied_from_command_text'?") and the valid keys. A planning command's Input field holds its options only. An execution command's Input field also takes the JSON Schema annotations (<code>examples</code>, <code>description</code> and the like), because its parameter-example generator reads <code>description</code> and <code>examples</code> there; write them as <code>Field(examples=...)</code> all the same, where both kinds read them. An Output field of either kind takes only <code>ui</code> and the JSON Schema annotations (<code>examples</code> and the like). Never write <code>available_from</code> (the framework writes it from <code>from_command_output</code>) or a retired spelling such as <code>in_request</code> or <code>verify</code>; a retired spelling fails the load with a message naming the key that replaced it (see <a href="removed.html">removed</a>). A planning command's Input also limits its field types, because its values arrive as text: <code>str</code>, <code>bool</code>, <code>int</code>, <code>float</code>, <code>list[str]</code> or a <code>Literal</code> of text, <code>Optional</code> only as <code>Optional[str] = None</code>, and <code>default_factory</code> only <code>list</code> on a <code>list[str]</code>; any other type fails the load and the command is skipped. An <code>Optional[int]</code> fails with a message that says an argument the request leaves out is empty text, which a number cannot be; write <code>start: int = 0</code> or <code>Optional[str] = None</code>. The same field-type rule is applied to an execution field that carries a check option, with one difference: a marked <code>Optional[int] = None</code> (or <code>int | None</code>) is accepted on an execution command, where an absent value is simply not checked. Five names are reserved on a planning command's Input for the framework's own planner inputs and fail the load: <code>user_query</code>, <code>available_commands</code>, <code>steps_before</code>, <code>steps_after</code> and <code>reasoning</code>.</p>
+
+        <h4 id="e-words-text">The request's own words</h4>
+        <p>Two options say the value must come from the command text.</p>
+        <ul>
+          <li><code>copied_from_command_text</code> with <code>ignore</code>: the listed words are removed from either end before the check, so "the Riverside branch" gives <code>Riverside</code> (the first figure). Its <code>list[str]</code> form checks each item; without it, list items are not checked.</li>
+          <li><code>record_named_in_command_text</code>: the value must also be the name of a record (a person, a group, a code) that the command text names, not a stray word such as "I". It takes the same <code>ignore</code> list.</li>
+        </ul>
+        <p><code>"copied_from_command_text": True</code> on a <code>str</code> or <code>int</code> is the strict check, and what it does is exactly this. A <code>str</code> must be written in the command text as whole words (its first and last characters do not continue into a letter or digit of the text, so "Ann" is not written in "Joanna"; case is ignored and any kind of dash counts as a plain dash) and takes the command text's spelling; an <code>int</code> must be a number the command text writes, and is refused when the text writes none. This holds for a required and an optional field alike (a marked value the model did not give is not checked), and it is one check, the same function on both kinds of command. Two marked fields may hold one value only when the user's request writes it as often ("New York, New York"); otherwise a field gives the value up (the first whose name, as words with an optional plural s, is not among the four words before the value in the request, an optional one first): an optional one is left empty with a line that says so (on the review, on any question, and on the trace), and when both are required one is refused and asked again. A field with no option is not compared with the command text, nor with another field, and a pydantic <code>pattern</code> neither adds the check nor removes it: it only validates (and the model is told the format). The model reads sentences after your description, from your declarations only and the same on both kinds of command: "Copy it exactly as the request writes it." on a marked <code>str</code>, "A number the request writes." on a marked <code>int</code>, a sentence for a marked <code>list[str]</code> or <code>record_named_in_command_text</code> field, "True only when the request asks for it." on every <code>bool</code> ("False only when the request asks against it." when it defaults to true), and the pattern of a field that declares one. An unmarked <code>str</code> is told nothing about copying, on either kind. And when the workflow declares id formats, a part of an id the model copied is widened to the whole id, on a marked field only (see <a href="c-identifiers.html">identifier formats</a>). So write the description for a person, and leave instructions to the model out of it.</p>
+        <p>These checks only ask "is this written?". For any other rule about the user's words, write a validator: it reads the same command text as <code>info.context["command_text"]</code> (see <a href="e-hook.html">correct or refuse</a>).</p>
+
+        <h4 id="p-verify">A value a classifier decides</h4>
+        <p>Some values are not words you can copy. "Show me Dune, and who has it" asks for loans, but no word in it is <code>True</code>. A yes/no input, or a choice between a few fixed values, is easy for the filling model to get wrong. The classifier options ask a second, separate model (a <em>classifier</em>) to decide the value from the request alone (the second figure).</p>
+        <ul>
+          <li><code>classifier_confirms</code>: the model fills the field as usual, then the classifier decides it again. When the classifier is sure (a probability of at least 0.65), its answer replaces the model's; otherwise the model's value stands. The <code>{"meanings": {value: text}}</code> form, on a <code>Literal</code>, shows the classifier each value with its meaning, and the chat page's question form labels each choice with it ("value — meaning"); every key must be one of the <code>Literal</code>'s values. On a <code>str</code> with <code>record_named_in_command_text</code>, the classifier picks which of the records the request names is meant, or "none".</li>
+          <li><code>classifier_decides</code>, on a <code>bool</code>: the model never fills it, and any value given for it is ignored. A sure classifier answer sets it; otherwise it keeps its default.</li>
+        </ul>
+        <p>The classifier reads the request and the field's <code>description</code> (and the meanings). So write the description as the condition for the value, such as "the request asks who has the book on loan".</p>
+        <p><strong>The classifier is the remote decision model, Jev, and needs <code>JEV_API_KEY</code>.</strong> Without the key no check runs: a <code>classifier_confirms</code> field keeps the model's value and a <code>classifier_decides</code> field always keeps its default. Nothing fails; the startup log has one INFO line naming the fields whose checks are inactive. When the classifier disagrees, the user sees nothing: no question, no message. The command runs with the classifier's value, and the turn's trace records a note such as <code>loans=False -&gt; True (check 0.90)</code>.</p>
+
+        <h4 id="e-words-training">Training data only</h4>
+        <p>Two declarations tell the synthetic utterance generator how users talk about a value. No check, extraction, planner or client reads them, and in this tree no generator reads them yet either (the generator is planned work, not shipped). They are still checked at load, so a mistake fails the load and names the field and the rule. Like any edit of a command file, editing them retrains that command.</p>
+        <ul>
+          <li><code>"classifier_confirms": {"words": {value: [word, ...]}}</code>, on a <code>Literal</code>: the words or short phrases users write for each value, such as <code>{"group": ["team"]}</code>. Every key is one of the <code>Literal</code>'s values, every list is non-empty, a word is listed once per value (case ignored) and under one value only; a value may have no words. It sits inside <code>classifier_confirms</code>, so it turns the classifier check on: <code>{"words": ...}</code> with no <code>meanings</code> is the same check as <code>True</code>.</li>
+          <li><code>"examples_by": {choice field: {choice value: [example, ...]}}</code>, on the field whose example values depend on a choice: it names exactly one other field of the same Input whose type is a <code>Literal</code> (or <code>Optional</code> of one), each inner key is one of its values, and each list is non-empty and holds values valid for this field (its type, <code>pattern</code> and bounds, checked strictly, so <code>"5"</code> is not an <code>int</code>; <code>None</code> is never an example). A choice value may have no entry.</li>
+        </ul>
+
+        <h4>Beginner mistakes</h4>
+        <ul>
+          <li>Marking <code>copied_from_command_text</code> on a value the model has to compute, such as a date. Every correct answer is refused as "is not written in the request", and the user is asked for a value they already gave. Leave a computed value unmarked.</li>
+          <li>Leaving a name, a title or an id the user must write unmarked. The model's value is then used even when the user never wrote it. The <code>argument_check_not_in_request</code> attribute on the extraction span names such fields.</li>
+          <li>Relying on <code>classifier_decides</code> on a machine without <code>JEV_API_KEY</code>. The field is then always its default, whatever the user asks, with no error. Use <code>classifier_confirms</code> if the model's guess is better than the default.</li>
+          <li>An option on a type it does not fit, such as <code>copied_from_command_text</code> on a <code>bool</code> or <code>meanings</code> on a <code>bool</code>. The command fails to load, and the error names the option, the field and its type.</li>
+        </ul>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/overdue_summary.py</figcaption>
+        <pre><code>class Input(BaseModel):
+    branch: str = Field(
+        default="",
+        description="the branch asked about, if named (such as Central "
+                    "or Riverside); empty for all",
+        <span class="c"># "the Riverside branch" is checked, and kept, as "Riverside"</span>
+        json_schema_extra={"copied_from_command_text": {"ignore": ["the", "branch"]}})</code></pre>
+      </figure>
+      <figure>
+        <figcaption>tests/test_verify_alone.py (ReportInput), with a Literal field added (no shipped example uses the classifier options)</figcaption>
+        <pre><code>class ReportInput(BaseModel):
+    <span class="c"># no option: the model's value is used as it is</span>
+    title: str = Field(description="the book's title")
+    <span class="c"># the model fills it; a sure classifier answer replaces it</span>
+    loans: bool = Field(default=False, description="the request asks who has the book on loan",
+                        json_schema_extra={"classifier_confirms": True})
+    <span class="c"># only the classifier sets it; without JEV_API_KEY it stays False</span>
+    leave_out_author: bool = Field(
+        default=False,
+        description="the request says to leave out the book's author, or asks only for other parts",
+        json_schema_extra={"classifier_decides": True})
+    <span class="c"># the classifier chooses between the two meanings</span>
+    kind: Literal["book", "member"] = Field(
+        default="book",
+        description="whether the request is about a book or a member",
+        json_schema_extra={"classifier_confirms": {"meanings": {
+            "book": "a book in the catalogue",
+            "member": "a person who borrows books"}}})</code></pre>
+      </figure>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-input.html"><span>Previous</span>An input</a>
+    <a class="next" href="e-from.html"><span>Next</span>A handle's producer</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

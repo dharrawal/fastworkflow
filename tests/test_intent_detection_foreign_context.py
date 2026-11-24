@@ -216,6 +216,13 @@ def _copy_of_the_todo_workflow(tmp_path, *, declare_entering_command: bool = Fal
         workflow_path,
         ignore=shutil.ignore_patterns("___command_info", "___workflow_contexts", "___convo_info", "__pycache__"),
     )
+    # The shipped workflow declares every move it makes (load-check sweep, batch 2); these tests are about one declared
+    # entering command, so the copy starts with none and declares only that one.
+    for path in (workflow_path / "_commands").rglob("*.py"):
+        source = path.read_text()
+        if "@fastworkflow.descends_to(" in source:
+            path.write_text("".join(line for line in source.splitlines(keepends=True)
+                                    if not line.startswith("@fastworkflow.descends_to(")))
     if declare_entering_command:
         _declare_descends_to(workflow_path, "TodoListManager/get_todo_list.py", "TodoList")
     return workflow_path

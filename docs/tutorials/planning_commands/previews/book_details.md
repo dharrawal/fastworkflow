@@ -13,7 +13,9 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `title` | str | required | `<title>` |  |  | the book's title |
+| `title` | str | required | `<title>` |  | yes | the book's title |
+
+- `title` must be written in the command text (`copied_from_command_text`).
 
 ## Example requests
 
@@ -63,7 +65,7 @@ Reads: `find`. Output: `Book`. Settings: `when=find.book_uids`.
 
 _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 
-1. `show_book book_uid=<find.book_uids[0]>`
+1. `show_book with the uid of the <title> match`
 
 ## Answer
 

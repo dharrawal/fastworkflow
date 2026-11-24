@@ -18,27 +18,31 @@ A planning command sits in ``_commands`` as an execution command does: a root pl
 names its commands); the file stem is a Python identifier (snake_case: ``show_record.py``).
 A ``.py`` file or subfolder whose name starts with ``_`` or ``.`` is skipped (``_kinds.py``
 is a helper the planning command files import with ``from ._kinds import FIND``, not a planning command).
-``_commands/_split.py`` is not a planning command either: it configures the split stage (the
-splitter's instructions, the identifier patterns of the split merge, the referent step's subject
-hints; see ``workflow_agent.split_settings``). No other file is read.
+``_commands/_workflow.py`` is not a planning command either: it holds the workflow's own settings, as the class
+attributes of its ``class Context`` (the whole workflow is a context with this one settings file): the splitter's
+examples, the identifier patterns of the split merge, the referent step's subject hints; see
+``workflow_agent.split_settings``. No other file is read.
 
-The split settings file, every attribute optional::
+The workflow settings file, every attribute optional::
 
     import re
 
 
-    class Signature:
-        """Split the user's request into the separate requests it bundles together. ..."""
+    class Context:
+        # This workflow's own splitting examples: they replace the built-in splitter's generic ones.
+        split_examples = [
+            ("Close acct_4421 and acct_4422.", ["Close acct_4421.", "Close acct_4422."]),
+        ]
 
+        # Account numbers, as the commands take them: acct_4421
+        identifier_patterns = [re.compile(r"\bacct_[0-9]+")]
 
-    # Account numbers, as the commands take them: acct_4421
-    identifier_patterns = [re.compile(r"\bacct_[0-9]+")]
+        subject_hints = """Records in this workflow are accounts and their owners."""
 
-    subject_hints = """Records in this workflow are accounts and their owners."""
-
-The ``Signature`` docstring replaces the built-in splitter's instructions (``Signature.Input`` /
-``Signature.Output`` may describe the splitter fields ``job_types``, ``user_query`` and
-``subtasks``); a pattern that does not compile, or a file that does not import, fails the load.
+``split_examples`` are given to the splitter as demos, with the built-in rules (a malformed list fails the load).
+Any other public member of ``Context`` fails the load (a context hook too: the workflow has no parent), and so does
+a pattern that does not compile, a file that does not import, a file with no ``class Context``, and a
+``_commands/_split.py`` (the removed spelling of these settings).
 
 A planning command file::
 
@@ -87,12 +91,13 @@ A planning command file::
 
 - ``Signature`` (required) with a docstring (required; its whitespace is collapsed to one
   line). ``Input`` (a pydantic ``BaseModel``) declares the parameters in order; a planning command
-  without parameters leaves it out or empty. A field's type is ``str``, ``bool``, ``int``
-  or ``Literal[...]`` of text values (an enum). ``Field(default=...)`` makes it optional (no
-  default: required; a ``bool`` always defaults to false, a ``default=True`` fails the
-  load: the model sets it true only when the request asks for that part). A ``str``
-  default is the value ``steps()`` gets when the request gives none, so ``"NOT_FOUND"``
-  would be written into the steps: an argument the request may leave out defaults to
+  without parameters leaves it out or empty. A field's type is ``str``, ``bool``, ``int``,
+  ``float``, ``list[str]`` or ``Literal[...]`` of text values (an enum), or ``Optional[str] = None``
+  (``Optional[int]`` fails the load: an argument the request leaves out is empty text, which a number cannot be).
+  ``Field(default=...)`` makes it optional (no default: required; a ``bool`` normally defaults to false, because
+  the model sets it true only when the request asks for that part, but a ``default=True`` loads). A ``str``
+  default is the value ``steps()`` gets when the request gives none (``default="NOT_FOUND"``, the
+  framework's not-given marker, is a load error, ``not_given_default_problems``): an argument the request may leave out defaults to
   ``""``, or is ``Optional[str] = None`` (the ``PlanGenerator``, the hook and the
   validators then get None for it; to the planner it is a str that defaults to empty).
   ``description``
@@ -121,17 +126,20 @@ A planning command file::
     or ``NO_SUBJECT`` ("none": the default, or a failed call for a required parameter); a
     request naming no subject is not checked.
   - ``copied_from_command_text: True`` (a ``str``, an ``int`` or a ``list[str]``): a ``str`` must appear in the request
-    exactly as the request writes it (a verbatim substring); an ``int`` must be a number
+    exactly as the request writes it, at word boundaries ("dun" is not written in "dune"); an ``int`` must be a number
     the request writes (digits or the words zero to twenty outside the text of the other
-    arguments); otherwise it takes the only one written, or its default when that is
-    written, and with several others the call fails ("the first two" never runs as 3); a
-    ``list[str]`` keeps each item the request writes and drops the others.
+    arguments); a number the request does not write is refused, never replaced by one it does write ("the first
+    two" never runs as 3), and an absent value is not checked; a
+    ``list[str]`` keeps each item the request writes and drops the others. A marked value given and not written is
+    refused, required or optional. Two marked str fields may hold one value only when the request writes it as often.
   - ``copied_from_command_text: {"ignore": [words]}`` (a ``str``; ``record_named_in_command_text`` takes the
     same ``ignore``): words removed from either end of the value before the check (the cleanup the retired
     ``strip`` option did). A field with no check takes its cleanup in code: ``strip_words(text, words)`` in
     a ``field_validator``.
   - No check is implied by a field's type (design 2.46): a field without an option is not
-    checked against the request, on either kind of command. A check option on a field of a
+    compared with the request, on either kind of command, and its value stands (a value that is entirely one
+    template token, only a pronoun, only a word of the workflow's vocabulary or only punctuation is still refused
+    on every ``str``, whatever the options). A check option on a field of a
     type it does not apply to fails the load, naming the option and the type.
 
 - ``PlanGenerator`` (required): its public methods are the planning command's phases, in order, each
@@ -191,9 +199,10 @@ is malformed (a ``PlanningCommandFormatError`` naming the file), fails its load:
 an error and skipped, the workflow's other planning commands still load, and ``fastworkflow command
 preview`` fails naming it.
 
-Any ``str`` argument that lies inside a match of one of the workflow's identifier patterns
-(``identifier_patterns`` in ``_commands/_split.py``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
-whole match ("4421" of "acct_4421"); inside several, it is refused.
+A ``str`` argument marked ``copied_from_command_text`` or ``record_named_in_command_text`` that lies inside a match of
+one of the workflow's identifier patterns (``identifier_patterns`` in ``_commands/_workflow.py``, e.g.
+``\bacct_[0-9]+``) without being all of it becomes the whole match ("4421" of "acct_4421"); inside several, it is
+refused. An unmarked argument is never widened.
 
 The model's ``steps_before`` / ``steps_after`` lose any ``<...>`` placeholder (and the
 ``key=`` that holds one); a step holding a uid-shaped token the request does not write is
@@ -203,11 +212,12 @@ asks for, by a word of the command's name, catalog description or plain_utteranc
 
 A planning command call's ``str`` and ``int`` arguments first go through the screen a command's
 parameters go through (``utils.signatures.screen_parameter_values``: quotes and brackets
-removed, placeholders and out-of-range numbers refused), and a str argument is looked up in
+removed, bracketed placeholders and out-of-range numbers refused), and a marked str argument is looked up in
 the request with Unicode dashes folded to "-" (see ``check_arguments``).
 '''
 from __future__ import annotations
 
+import decimal
 import difflib
 import enum
 import functools
@@ -228,17 +238,17 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union, g
 from pydantic import BaseModel
 
 from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint
+from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint, raised_in_helper
 from fastworkflow.field_options import (
-    CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, CONVERTED_FROM_COMMAND_TEXT, COMMAND_TEXT_AFTER_COMMAND_NAME,
-    COPIED_FROM_COMMAND_TEXT, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT, UI)
+    CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, COMMAND_TEXT_AFTER_COMMAND_NAME,
+    COPIED_FROM_COMMAND_TEXT, EXAMPLES_BY, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT, UI)
 from fastworkflow.parameter_clarification import Extraction
 from fastworkflow.planning_command_json_schema_internal import (
     HAND_WRITTEN_AVAILABLE_FROM_KEY as _HAND_WRITTEN_AVAILABLE_FROM_KEY,
     PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS as _PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS,
 )
 from fastworkflow.utils.workflow_vocabulary import (
-    WorkflowVocabulary, description_kind_options, load_workflow_vocabulary)
+    WorkflowVocabulary, load_workflow_vocabulary)
 from fastworkflow.observation_offloading.finish_check import (
     KIND_COMMAND,
     KIND_CONDITIONAL,
@@ -281,7 +291,7 @@ VERIFY_THRESHOLD = 0.65
 NO_SUBJECT = "none"
 #: A ``classifier_confirms`` check of a record-naming parameter chooses among at most this many of the request's subjects.
 MAX_SUBJECT_OPTIONS = 8
-#: Names a parameter may not take (they are fields of the planner's typed call).
+#: Names a parameter may not take (they are the splitter's own prompt fields).
 RESERVED_NAMES = frozenset({"user_query", "available_commands", "steps_before", "steps_after",
                             "reasoning"})
 
@@ -306,7 +316,7 @@ class PlanningCommandCallError(ValueError):
 class PlanningCommandInputError(PlanningCommandCallError):
     """The arguments are refused: a field of the planning command's ``Input`` breaks its type or a field
     validator, a model validator of the ``Input`` raised ``fastworkflow.Refused``
-    (``validate_extracted_parameters: <message>``), or a guard of
+    (its message), or a guard of
     ``check_arguments`` refused one of the planner's arguments (missing, not a valid value, not
     written in the request). The message says what to fix; ``typed_planning_call`` gives it to the
     planner for one more typed call. ``fields`` names the arguments a ``Refused(field=...)`` named:
@@ -365,15 +375,6 @@ def _vocabulary_for(command: "PlanningCommandCommand") -> WorkflowVocabulary | N
         return None
 
 
-def _kind_selector_options(p: Param, vocabulary: WorkflowVocabulary | None) -> frozenset[str]:
-    """The kind words a kind-selector argument lists in its description (the same rule the
-    command parameter screen applies, ``description_kind_options``). A planning command has no labeled
-    examples of its own, so only its description can make it one."""
-    if vocabulary is None:
-        return frozenset()
-    return description_kind_options(p.desc, vocabulary.kind_words)
-
-
 def missing_argument_question(command: PlanningCommandCommand, name: str) -> str:
     """The question put to the user for a required argument the request does not give.
 
@@ -400,23 +401,47 @@ def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verd
     again with each gap's parameter left out, until they pass or refuse something that names no argument. The values
     of the other arguments, as the guards checked them, are kept in ``values`` (the ones the request gave, not defaults).
     No model call."""
+    return _gaps_and_checked(command, raw, request, verdicts)[0]
+
+
+def checked_around_gaps(command: PlanningCommandCommand, raw: dict, request: str,
+                        verdicts: dict | None = None) -> tuple[dict, list[str]]:
+    """``(args, notes)`` of the guards run with every gap's parameter left out (``argument_gaps``' last run): what the
+    guards correct in the arguments they do not refuse (a sure verdict, a widened id, the request's spelling, a
+    member's declared spelling), so a refusal of one argument does not drop the corrections of the others. Empty
+    when a refusal names no argument. No model call."""
+    checked = _gaps_and_checked(command, raw, request, verdicts)[1]
+    return (dict(checked.values), list(checked.notes)) if checked is not None else ({}, [])
+
+
+def _gaps_and_checked(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None):
+    """``(Extraction, Checked)``: the gaps of ``argument_gaps``, and the guards' result once they pass with the gaps
+    left out (None when they stop at a refusal that names no argument)."""
     missing: list[str] = []
     invalid: list[tuple[str, str]] = []
+    screened: list[tuple[str, str]] = []
     work = command
     args: dict = {}
+    passed = None
     while True:
         checked = one_guard.check_plan(work, raw, request, verdicts)
         stop = checked.stop
         if stop is None:
             args = checked.values
+            passed = checked
             break
         if stop.call:     # the check finds no such argument in the request at all: it names no argument to ask for
             break
         (missing.append(stop.name) if stop.state == one_guard.MISSING else invalid.append((stop.name, stop.why)))
+        if stop.screened:
+            screened.append((stop.name, stop.screened))
         work = replace(work, params=tuple(p for p in work.params if p.name != stop.name))
+    # the duplicate rule's notes: a field it left not given is not a value the checks stand behind
+    left_empty = ask.left_empty_lines(checked.notes)
     kept = {name: value for name, value in args.items() if not _empty(raw.get(name)) and name not in missing
-            and name not in {n for n, _ in invalid}}
-    return Extraction(missing=tuple(missing), invalid=tuple(invalid), values=kept)
+            and name not in {n for n, _ in invalid} and name not in left_empty}
+    return (Extraction(missing=tuple(missing), invalid=tuple(invalid), values=kept, screened=tuple(screened),
+                       left_empty=tuple(left_empty.values())), passed)
 
 
 def refusal_gaps(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> Extraction:
@@ -430,7 +455,9 @@ def refusal_gaps(command: PlanningCommandCommand, refusal: PlanningCommandInputE
     gap = refusal.gap
     if gap is None or gap.name not in {p.name for p in command.params}:
         return Extraction()
-    return Extraction(missing=(gap.name,)) if gap.state == one_guard.MISSING else Extraction(invalid=((gap.name, gap.why),))
+    if gap.state == one_guard.MISSING:
+        return Extraction(missing=(gap.name,), screened=((gap.name, gap.screened),) if gap.screened else ())
+    return Extraction(invalid=((gap.name, gap.why),))
 
 
 def gaps_question(command: PlanningCommandCommand, gaps: Extraction) -> str:
@@ -562,6 +589,10 @@ PLANNING_COMMAND_FIELD_KEYS = frozenset(OPTION_KEYS) | {"available_from"}
 #: The retired spellings (spec 2.0): using one is a load error that names the option replacing it.
 RETIRED_OPTIONS = ("in_request", "verify", "positional", "from", "subject", "means", "strip")
 
+#: Keys of ``json_schema_extra`` removed from every ``Input`` and ``Output`` field of either kind of command (bd fix-qjne.3):
+#: the allowed values are the type (``Literal``), nothing read ``used_by``, and a pattern is ``Field(pattern=...)``.
+REMOVED_FIELD_KEYS = ("enum", "used_by", "pattern")
+
 #: The options a ``Param`` carries (the check options of spec 2.1 to 2.4), read by ``option_params``.
 CHECK_OPTIONS = (CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, COPIED_FROM_COMMAND_TEXT, RECORD_NAMED_IN_COMMAND_TEXT)
 
@@ -590,8 +621,7 @@ def _retired_replacement(key: str, value) -> str:
             return _option_text(name, {"ignore": value["ignore"]} if "ignore" in value else True)
         if value is True:
             return _option_text(COPIED_FROM_COMMAND_TEXT, True)
-        return ('leave the key out, or on an execution command\'s Input write '
-                f'{_option_text(CONVERTED_FROM_COMMAND_TEXT, True)}')
+        return "leave the key out"
     if key == "verify":
         if value == "alone":
             return _option_text(CLASSIFIER_DECIDES, True)
@@ -611,13 +641,37 @@ def _retired_replacement(key: str, value) -> str:
     return _option_text(COPIED_FROM_COMMAND_TEXT, {"ignore": value})   # strip
 
 
+def _removed_key_advice(key: str, value) -> str:
+    """What to write instead of a removed field key of ``REMOVED_FIELD_KEYS``."""
+    if key == "used_by":
+        return "delete it (nothing reads it)"
+    if key == "pattern":
+        return f"write Field(pattern={_shown(value)})"
+    if isinstance(value, (list, tuple)) and value and all(isinstance(v, str) for v in value):
+        return f"write the field's type as Literal[{', '.join(_shown(v) for v in value)}]"
+    return "write the field's type as Literal[...]"
+
+
+def check_removed_field_keys(where: str, name: str, extra) -> None:
+    """The load error of a key of ``REMOVED_FIELD_KEYS`` among a field's ``json_schema_extra`` *extra*."""
+    for key in REMOVED_FIELD_KEYS:
+        if key in extra:
+            raise _field_error(where, name, f"{key}: {_shown(extra[key])} is removed: {_removed_key_advice(key, extra[key])}")
+
+
 def _retired_option_error(where: str, name: str, extra) -> None:
     """The load error of a retired spelling among a field's ``json_schema_extra`` *extra*, naming its replacement."""
+    check_removed_field_keys(where, name, extra)
+    if "db_lookup" in extra:
+        from fastworkflow.utils.signatures import _RETIRED_DB_LOOKUP
+
+        raise _field_error(where, name, _RETIRED_DB_LOOKUP)
     for key in RETIRED_OPTIONS:
         if key in extra:
             value = extra[key]
-            raise PlanningCommandFormatError(f"{where}: field {name!r}: {key}: {_shown(value)} is removed: write "
-                                             f"{_retired_replacement(key, value)}")
+            replacement = _retired_replacement(key, value)
+            advice = replacement if replacement == "leave the key out" else f"write {replacement}"
+            raise PlanningCommandFormatError(f"{where}: field {name!r}: {key}: {_shown(value)} is removed: {advice}")
 
 
 def _field_error(where: str, name: str, message: str) -> PlanningCommandFormatError:
@@ -630,28 +684,102 @@ def _closest(word: str, options) -> str | None:
     return matches[0] if matches else None
 
 
-def check_field_keys(name: str, extra, where: str, *, planning: bool) -> None:
-    """The keys of one field's ``json_schema_extra`` (spec 2.0): a retired spelling and an unknown key fail the load.
+#: JSON Schema annotation keywords an execution command's ``Input`` field, any ``Output`` field and a facts field may
+#: carry in ``json_schema_extra`` (a planning command's ``Input`` takes the option keys only: ``check_field_keys``).
+#: Never read as the misspelling of an option key (``examples`` resembles ``examples_by``).
+_SCHEMA_ANNOTATION_KEYS = frozenset({"title", "description", "default", "examples", "deprecated", "readOnly",
+                                     "writeOnly", "format"})
 
-    A planning command's ``Input`` takes only the option keys. An execution command's ``Input`` also carries
-    other keys of its own (``enum``, ``examples``, ``used_by``, ...), so there an unknown key fails only when it
-    is the misspelling of an option key."""
+#: The option key an ``Output`` field of either kind of command may set (display hints for a client). The resolver's
+#: own keys (``from_command_output``, ``available_from``) have their own load errors there (``resolve_signature_field_sources``).
+OUTPUT_FIELD_OPTION_KEYS = (UI,)
+
+
+def _valid_keys_text(options, *, annotations: bool) -> str:
+    text = ", ".join(options)
+    return f"{text}, and the JSON Schema annotations {', '.join(sorted(_SCHEMA_ANNOTATION_KEYS))}" if annotations else text
+
+
+def check_field_keys(name: str, extra, where: str, *, planning: bool) -> None:
+    """The keys of one ``Input`` field's ``json_schema_extra`` (spec 2.0), one rule stated here (bd fix-ftdl.8.22,
+    fix-ftdl.9.4): a retired spelling and an unknown key fail the load on either kind of command. Besides the option
+    keys, an execution command's ``Input`` takes the JSON Schema annotation keywords (``_SCHEMA_ANNOTATION_KEYS``),
+    because its parameter-example generator reads ``description`` and ``examples`` there
+    (``utils/generate_param_examples.py``, a fallback to ``Field(examples=...)``); nothing reads them on a planning
+    command's ``Input``, which takes the option keys only. The message names the key, the closest option when one is
+    close, and the valid keys."""
     _retired_option_error(where, name, extra)
     for key in extra:
         if key in PLANNING_COMMAND_FIELD_KEYS or key in _CHECK_KEYS_INTERNAL:
             continue
+        if not planning and key in _SCHEMA_ANNOTATION_KEYS:
+            continue
         close = _closest(key, OPTION_KEYS)
-        if planning or close:
-            hint = f"did you mean {close!r}?" if close else f"its options are {', '.join(OPTION_KEYS)}"
-            raise _field_error(where, name, f"unknown option {key!r}; {hint}")
+        valid = f"its options are {_valid_keys_text(OPTION_KEYS, annotations=not planning)}"
+        hint = f"did you mean {close!r}? ({valid})" if close else valid
+        raise _field_error(where, name, f"unknown option {key!r}; {hint}")
+
+
+def _not_a_dict(where: str, name: str) -> PlanningCommandFormatError:
+    """The load error of a field whose ``json_schema_extra`` is not a dict (a function is never read by the checks)."""
+    return _field_error(where, name, "json_schema_extra must be a dict of the field's options; a function or another "
+                                     "value is not read, so none of its keys would be checked")
+
+
+def _facts_field_key_problem(model: type, name: str, extra, *, typed: bool) -> Optional[str]:
+    """Why one facts model field's ``json_schema_extra`` fails the load, or None. A facts field is typed with a
+    command's Output and takes no option: an Input or Output option, and any other key but a JSON Schema annotation,
+    is refused. ``from_command_output`` has its own message; so does the retired copy key ``"from"`` (what the removed
+    ``fact_from`` wrote) on a field that is not *typed* (``typed_phase_facts``, whose message says copies are not
+    read), and on a *typed* field it is refused here."""
+    from fastworkflow.typed_phase_facts import COPIES_NOT_READ
+
+    where = f"{model.__name__}"
+    if extra is None:
+        return None
+    if not isinstance(extra, Mapping):
+        return str(_not_a_dict(where, name))
+    for key in extra:
+        if key == "from" and typed:
+            return str(_field_error(where, name, f"from is removed: {COPIES_NOT_READ}; the field's type, a command's "
+                                                 "Output, says what it holds: leave the key out"))
+        if key in _SCHEMA_ANNOTATION_KEYS or key in (FROM_COMMAND_OUTPUT, "from"):
+            continue
+        if key in OPTION_KEYS or key in OUTPUT_FIELD_OPTION_KEYS:
+            return str(_field_error(where, name, f"{key} is an option of a command's Input or Output field; a facts "
+                                                 "field takes none (its type, a command's Output, says what it holds)"))
+        return str(_field_error(where, name, f"unknown key {key!r}; a facts field takes no option (only the JSON "
+                                             f"Schema annotations {', '.join(sorted(_SCHEMA_ANNOTATION_KEYS))})"))
+    return None
+
+
+def check_output_field_keys(name: str, extra, where: str) -> None:
+    """The keys of one ``Output`` field's ``json_schema_extra``, on either kind of command (bd fix-ftdl.8.22): a removed
+    or retired spelling names its replacement, an ``Input`` option says it is one, and any other key that is not ``ui``
+    or a JSON Schema annotation fails the load. ``from_command_output`` and ``available_from`` are left to their own
+    messages (``resolve_signature_field_sources``)."""
+    _retired_option_error(where, name, extra)
+    for key in extra:
+        if key in (*OUTPUT_FIELD_OPTION_KEYS, FROM_COMMAND_OUTPUT, "available_from") or key in _SCHEMA_ANNOTATION_KEYS:
+            continue
+        valid = f"an Output field takes {_valid_keys_text(OUTPUT_FIELD_OPTION_KEYS, annotations=True)}"
+        if key in OPTION_KEYS:
+            raise _field_error(where, name, f"{key} is an option of an Input field; {valid}")
+        close = _closest(key, OUTPUT_FIELD_OPTION_KEYS)
+        hint = f"did you mean {close!r}? ({valid})" if close else valid
+        raise _field_error(where, name, f"unknown option {key!r}; {hint}")
 
 
 def _parse_param(name: str, spec, where: str) -> Param:
-    if not re.fullmatch(_NAME, name) or name in RESERVED_NAMES:
+    if name in RESERVED_NAMES:
+        raise PlanningCommandFormatError(
+            f"{where}: field {name!r} is reserved for the framework's own planner inputs "
+            f"({', '.join(sorted(RESERVED_NAMES))}); rename the field")
+    if not re.fullmatch(_NAME, name):
         raise PlanningCommandFormatError(f"{where}: bad parameter name {name!r}")
     if not isinstance(spec, dict):
         raise PlanningCommandFormatError(f"{where}: parameter {name!r} must be a block with a type")
-    _check_keys(spec, {"type", "default", "desc", "verify", "in_request", "ignore"},
+    _check_keys(spec, {"type", "default", "desc", "verify", "in_request", "ignore", "optional"},
                 f"parameter {name!r}", where)
     type_text = spec.get("type")
     if not isinstance(type_text, str):
@@ -674,7 +802,7 @@ def _parse_param(name: str, spec, where: str) -> Param:
     raw_default = spec.get("default")
     if isinstance(raw_default, dict):
         raise PlanningCommandFormatError(f"{where}: parameter {name!r} default must be a value")
-    required = raw_default is None and kind != "bool"
+    required = raw_default is None and kind != "bool" and spec.get("optional") is not True
     default: object = None
     if kind == "bool":
         if raw_default not in (None, "true", "false"):
@@ -786,7 +914,7 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
 
 def _option_kind(annotation) -> str:
     """The coarse type of a field's annotation for an option check: str, int, bool, float, list[str], enum or other."""
-    if get_origin(annotation) in (Union, UnionType) and type(None) in get_args(annotation):
+    if rules.is_union(annotation) and type(None) in get_args(annotation):
         inner = [a for a in get_args(annotation) if a is not type(None)]
         annotation = inner[0] if len(inner) == 1 else annotation
     if annotation in (str, int, bool, float):
@@ -804,12 +932,22 @@ def _spec_from_field(name: str, info, where: str, *, planning: bool = False) -> 
     from pydantic_core import PydanticUndefined
 
     annotation = info.annotation
-    optional = get_origin(annotation) in (Union, UnionType) and type(None) in get_args(annotation)
+    optional = rules.is_union(annotation) and type(None) in get_args(annotation)
+    optional_number = False
     if optional:
-        if annotation != Optional[str] or info.default is not None:
+        inner = [a for a in get_args(annotation) if a is not type(None)]
+        if len(inner) != 1 or info.default is not None or inner[0] not in (str, int):
             raise PlanningCommandFormatError(f"{where}: field {name!r}: Optional is for an argument the command text "
-                                   "may leave out, Optional[str] = None; give another type a default")
-        annotation = str
+                                   "may leave out, Optional[str] = None (or Optional[int] = None on an execution "
+                                   "command); give another type a default")
+        if inner[0] is int:
+            if planning:
+                raise PlanningCommandFormatError(
+                    f"{where}: field {name!r}: a planning command's arguments reach it as text, and an argument the "
+                    "request leaves out is empty text, which a number cannot be; give the int a default, or make it "
+                    "Optional[str] = None (an execution command may declare Optional[int] = None)")
+            optional_number = True
+        annotation = inner[0]
     if annotation in (str, bool, int, float):
         type_text = annotation.__name__
     elif annotation == list[str]:
@@ -832,7 +970,9 @@ def _spec_from_field(name: str, info, where: str, *, planning: bool = False) -> 
         default = []
     elif info.default is not PydanticUndefined:
         default = info.default
-    if optional:
+    if optional_number:
+        spec["optional"] = True
+    elif optional:
         spec["default"] = ""
     elif default is not PydanticUndefined:
         if default is None or isinstance(default, dict) or (isinstance(default, (list, tuple)) and type_text != "list[str]"):
@@ -853,7 +993,8 @@ def _spec_from_field(name: str, info, where: str, *, planning: bool = False) -> 
         raise PlanningCommandFormatError(f"{where}: field {name!r}: requires is not a planning command option; reset the "
                                "argument (or refuse the call) in a model validator on Input")
     check_field_keys(name, extra, where, planning=planning)
-    spec.update(check_option_spec(name, extra, where, kind=_option_kind(annotation), planning=planning))
+    spec.update(check_option_spec(name, extra, where, kind=_option_kind(annotation), planning=planning,
+                                  annotation=annotation))
     return spec
 
 
@@ -989,7 +1130,10 @@ def _ui_value_annotation(annotation):
 
 
 def check_ui_value_options(output_cls, where: str = "Signature.Output") -> list[str]:
-    """The load problems of ``ui.tones`` and ``ui.currency`` against the field types of one ``Signature.Output``.
+    """The load problems of the ``ui`` hints against the field types of one ``Signature.Output``: ``hero`` is for a
+    scalar (never a list), ``format`` ``"percent"`` and ``"currency"`` for a number (``"code"`` draws any scalar and
+    ``"badge"`` text or a number), and ``tones`` and ``currency`` as below. A field whose hint fails its own syntax check
+    (``check_ui_option``) is reported for that alone.
 
     ``tones`` is for a ``str``, a ``Literal`` or an ``Enum`` (or a list of one; a ``bool`` is drawn as yes/no, never a
     badge), and on a ``Literal`` or ``Enum`` every key must be one of the declared values (compared as text,
@@ -1001,6 +1145,10 @@ def check_ui_value_options(output_cls, where: str = "Signature.Output") -> list[
         hint = extra.get(UI)
         if not isinstance(hint, dict):
             continue
+        try:
+            check_ui_option(field_name, extra, where, on_output=True)
+        except PlanningCommandFormatError:
+            continue    # the hint's own syntax is the field's one problem
         inner = _ui_value_annotation(info.annotation)
         shown = python_utils.type_text(info.annotation)
         tones = hint.get("tones")
@@ -1024,10 +1172,26 @@ def check_ui_value_options(output_cls, where: str = "Signature.Output") -> list[
                             where, field_name, f"{UI}.tones key {text!r} is not one of the declared values "
                             f"{', '.join(repr(str(v)) for v in declared)}")))
         code = hint.get("currency")
-        if code is not None and hint.get("format") == "currency" and inner not in (int, float):
+        number = inner in (int, float, decimal.Decimal)
+        if code is not None and hint.get("format") == "currency" and not number:
             problems.append(str(_field_error(where, field_name, f"{UI}.currency is for an int or float value (or a list "
                                              f"of one); {shown} is not one")))
+        elif hint.get("format") in ("currency", "percent") and not number:
+            problems.append(str(_field_error(where, field_name, f"{UI}.format \"{hint['format']}\" is for an int or "
+                                             f"float value (or a list of one); {shown} is not one")))
+        if hint.get("hero") is True and _ui_value_annotation(info.annotation) is not _without_optional(info.annotation):
+            problems.append(str(_field_error(where, field_name, f"{UI}.hero marks the one scalar to show first; "
+                                             f"{shown} is a list: leave the key out, or draw it with {UI}.table")))
     return problems
+
+
+def _without_optional(annotation):
+    """*annotation* without ``Optional`` (the one-list-level step of ``_ui_value_annotation`` left out)."""
+    if get_origin(annotation) in (Union, UnionType):
+        inner = [a for a in get_args(annotation) if a is not type(None)]
+        if len(inner) == 1:
+            return inner[0]
+    return annotation
 
 
 def check_ui_option(name: str, extra, where: str, *, kind: str = "other", on_output: bool = False) -> None:
@@ -1111,28 +1275,73 @@ def check_ui_option(name: str, extra, where: str, *, kind: str = "other", on_out
         raise option_error(where, f'{UI}.widget "radio"', name, kind, "a Literal of text values")
 
 
+def _literal_values(annotation) -> tuple:
+    """The declared values of a ``Literal`` annotation (or ``Optional`` of one), else ()."""
+    if rules.is_union(annotation) and type(None) in get_args(annotation):
+        inner = [a for a in get_args(annotation) if a is not type(None)]
+        annotation = inner[0] if len(inner) == 1 else annotation
+    return get_args(annotation) if get_origin(annotation) is Literal else ()
+
+
+def check_confirms_words(name: str, words, where: str, values: tuple) -> None:
+    """The load check of ``classifier_confirms`` ``words`` (``field_options.ConfirmsOptions.words``; training data
+    only, read by the synthetic utterance generator): a non-empty dict from a declared value (*values*) to a non-empty
+    list of non-empty words, a word once per value (ignoring case) and under one value only."""
+    what = f"{CLASSIFIER_CONFIRMS} words"
+    if not isinstance(words, dict) or not words:
+        raise _field_error(where, name, f"{what} must be a dict from a value to the words users write for it, such "
+                           f"as {{\"<value>\": [\"<word>\", ...]}}; got {_shown(words)}")
+    owner: dict[str, tuple[str, str]] = {}
+    for key, listed in words.items():
+        if key not in values:
+            raise _field_error(where, name, f"{what}: {key!r} is not a value of it")
+        if isinstance(listed, str) or not isinstance(listed, (list, tuple)) or not listed:
+            raise _field_error(where, name, f"{what} for {key!r} must be a non-empty list of words; "
+                               f"got {_shown(listed)}")
+        seen: dict[str, str] = {}
+        for word in listed:
+            if not isinstance(word, str) or not word.strip():
+                raise _field_error(where, name, f"{what} for {key!r}: {_shown(word)} is not a word (non-empty text)")
+            folded = word.strip().casefold()
+            if folded in seen:
+                raise _field_error(where, name, f"{what} for {key!r} list {seen[folded]!r} and {word!r}, the same "
+                                   "word (compared ignoring case); write it once")
+            seen[folded] = word
+            if folded in owner and owner[folded][0] != key:
+                raise _field_error(where, name, f"{what}: {word!r} is listed for both {owner[folded][0]!r} and "
+                                   f"{key!r}; a word stands for one value only")
+            owner[folded] = (key, word)
+
+
 def check_option_spec(name: str, options: dict, where: str, *, kind: str = "other",
-                      planning: bool = False) -> dict:
+                      planning: bool = False, annotation=None) -> dict:
     """The ``_parse_param`` spec of a field's option keys (spec 2.1 to 2.6), read from its ``json_schema_extra``.
 
     The author's keys (``field_options``) translate to the spec's internal options: ``copied_from_command_text``
     is the internal ``in_request`` true (with its ``ignore`` words), ``record_named_in_command_text`` is
     ``in_request`` "subject", ``classifier_confirms`` is ``verify`` (true, or the meanings dict) and
     ``classifier_decides`` is ``verify`` "alone" (the internal names; authors never write them). The keys of the same field must fit together, and the types they apply to are checked
-    here (*kind*: the coarse type from ``_option_kind``). ``from_command_output``, ``converted_from_command_text``
-    and ``command_text_after_command_name`` are read where they are used; their shape is checked here."""
+    here (*kind*: the coarse type from ``_option_kind``). ``from_command_output``
+    and ``command_text_after_command_name`` are read where they are used; their shape is checked here.
+
+    ``classifier_confirms`` ``words`` is training data only: checked here against the ``Literal`` values of
+    *annotation*, and never written into the spec, so a dict with ``words`` and no ``meanings`` is the check
+    ``True`` gives. ``examples_by`` is checked on the whole ``Input`` (``check_examples_by``)."""
     spec: dict = {}
     check_ui_option(name, options, where, kind=kind)
     copied = _option_value(name, where, options, COPIED_FROM_COMMAND_TEXT, ("ignore",))
     record = _option_value(name, where, options, RECORD_NAMED_IN_COMMAND_TEXT, ("ignore",))
-    confirms = _option_value(name, where, options, CLASSIFIER_CONFIRMS, ("meanings",))
+    confirms = _option_value(name, where, options, CLASSIFIER_CONFIRMS, ("meanings", "words"))
+    if isinstance(confirms, dict) and "words" in confirms:
+        if kind != "enum":
+            raise option_error(where, f"{CLASSIFIER_CONFIRMS} words", name, kind, "a Literal")
+        check_confirms_words(name, confirms["words"], where, _literal_values(annotation))
     decides = _option_value(name, where, options, CLASSIFIER_DECIDES)
-    converted = _option_value(name, where, options, CONVERTED_FROM_COMMAND_TEXT)
     positional = _option_value(name, where, options, COMMAND_TEXT_AFTER_COMMAND_NAME)
     if FROM_COMMAND_OUTPUT in options:
         source = options[FROM_COMMAND_OUTPUT]
         if not (isinstance(source, str) or (isinstance(source, (list, tuple)) and all(isinstance(s, str) for s in source))):
-            raise _field_error(where, name, f"{FROM_COMMAND_OUTPUT} must be \"[Context/]command[.field]\" text or a list of it; "
+            raise _field_error(where, name, f"{FROM_COMMAND_OUTPUT} must be \"[Context/]command.field\" text or a list of it; "
                                f"got {_shown(source)}")
     if copied and record:
         raise _field_error(where, name, f"{COPIED_FROM_COMMAND_TEXT} and {RECORD_NAMED_IN_COMMAND_TEXT} cannot both be "
@@ -1140,15 +1349,10 @@ def check_option_spec(name: str, options: dict, where: str, *, kind: str = "othe
     if confirms and decides:
         raise _field_error(where, name, f"{CLASSIFIER_CONFIRMS} and {CLASSIFIER_DECIDES} cannot both be on a field: "
                            "the classifier confirms a value the extractor fills, or decides a bool alone")
-    if converted and (copied or record):
-        raise _field_error(where, name, f"{CONVERTED_FROM_COMMAND_TEXT} takes the field out of the copy check, so it "
-                           "cannot be with copied_from_command_text or record_named_in_command_text")
     if positional and planning:
         raise _field_error(where, name, f"{COMMAND_TEXT_AFTER_COMMAND_NAME} is for an execution command's Input")
     if positional and kind != "str":
         raise option_error(where, COMMAND_TEXT_AFTER_COMMAND_NAME, name, kind, "a str")
-    if converted and kind not in ("str", "int"):
-        raise option_error(where, CONVERTED_FROM_COMMAND_TEXT, name, kind, "a str or an int")
     if record:
         spec["in_request"] = "subject"
         if isinstance(record, dict) and "ignore" in record:
@@ -1158,7 +1362,7 @@ def check_option_spec(name: str, options: dict, where: str, *, kind: str = "othe
         if isinstance(copied, dict) and "ignore" in copied:
             spec["ignore"] = _ignore_words(name, where, COPIED_FROM_COMMAND_TEXT, copied["ignore"])
     if confirms:
-        if isinstance(confirms, dict):
+        if isinstance(confirms, dict) and "meanings" in confirms:
             meanings = confirms["meanings"]
             if not isinstance(meanings, dict) or not meanings:
                 raise _field_error(where, name, f"{CLASSIFIER_CONFIRMS} meanings must be a dict of each value's meaning")
@@ -1678,11 +1882,17 @@ def placeholder_template(command: PlanningCommandCommand) -> list[str]:
         try:
             lines = _call_steps(command.steps_fn, input_instance(command, env), command.path)
         except TemplateError as exc:
+            if hint := _public_base_helper_hint(command, exc):
+                raise _StepsFailOnPlaceholders(f"{command.path}: {exc}{hint}") from None
             raise PlanningCommandFormatError(f"{command.path}: {exc}") from None
         except Exception as exc:  # noqa: BLE001 - a set steps() refuses is left out of the template
             if not grid and not runs:
-                raise PlanningCommandFormatError(f"{command.path}: steps() fails on placeholder inputs "
-                                       f"({type(exc).__name__}: {exc}); declare Signature.template") from None
+                text = f"{command.path}: steps() fails on placeholder inputs ({type(exc).__name__}: {exc})"
+                if hint := _public_base_helper_hint(command, exc):
+                    raise _StepsFailOnPlaceholders(text + hint) from None
+                if isinstance(exc, PhaseError):     # the shape of a phase is wrong: no template excuses it
+                    raise _StepsFailOnPlaceholders(text) from None
+                raise PlanningCommandFormatError(f"{text}; declare Signature.template") from None
             continue
         grid.append(env)
         runs.append(lines)
@@ -1724,10 +1934,12 @@ def _is_template_line(text: str) -> bool:
 
 
 def _plan_generator_inherits_foreign(plan_cls: type, path: str) -> None:
-    """Load error when *plan_cls* subclasses another command's ``PlanGenerator`` (3.4, 2.36)."""
+    """Load error when *plan_cls* subclasses another command's ``PlanGenerator`` (3.4, 2.36), directly or through
+    any class between them (a shared base in a ``_`` module, or a class of the command file itself): every class of
+    its MRO is checked."""
     module = sys.modules.get(plan_cls.__module__)
     own = getattr(module, "PlanGenerator", None) if module is not None else None
-    for base in plan_cls.__bases__:
+    for base in plan_cls.__mro__[1:]:
         if not inspect.isclass(base) or base.__name__ != "PlanGenerator":
             continue
         if base is own:
@@ -1794,7 +2006,37 @@ def _check_result_method(plan_cls: type, path: str, command: "PlanningCommandCom
             where = "__result__" if owner is plan_cls else f"{owner.__qualname__}.__result__"
             raise PlanningCommandFormatError(
                 f"{path}: {where} takes {parameter.name!r}, which is not a phase of this command")
+    _check_result_annotation(result_fn, owner, plan_cls, path, command)
     return True
+
+
+def _check_result_annotation(result_fn, owner: type, plan_cls: type, path: str,
+                             command: "PlanningCommandCommand") -> None:
+    """A return annotation of ``__result__`` that contradicts the declared ``Signature.Output`` does not load:
+    ``-> str`` or another model, where the one result rule (``command_executor.command_response_of``) would refuse
+    the value at run time. Only a class annotation is read (``Output``, ``CommandResponse`` or no annotation are
+    fine); ``Optional[...]``, an unresolvable name or any other form is left to the run-time rule."""
+    if command.output_model is None:
+        return
+    import typing
+
+    try:
+        annotation = typing.get_type_hints(result_fn).get("return")   # a string annotation is resolved
+    except Exception:  # noqa: BLE001 - a name that does not resolve here is the run-time rule's to judge
+        return
+    if not inspect.isclass(annotation):
+        return
+    import fastworkflow
+    from pydantic import BaseModel
+
+    if annotation is command.output_model or issubclass(annotation, fastworkflow.CommandResponse):
+        return
+    if annotation is str or issubclass(annotation, BaseModel):
+        where = "__result__" if owner is plan_cls else f"{owner.__qualname__}.__result__"
+        raise PlanningCommandFormatError(
+            f"{path}: {where} is annotated -> {annotation.__qualname__}, but the command declares "
+            f"Signature.Output ({command.output_model.__qualname__}): return that Output, or "
+            "CommandResponse(response=..., output=<Output>)")
 
 
 def command_from_module(name: str, module, path: str) -> PlanningCommandFile:
@@ -1858,18 +2100,22 @@ def planning_command_from_parts(name: str, signature, path: str, *, steps_fn: Ca
     guard_input_validators(input_model, path)
     output_model = getattr(signature, "Output", None)
     declared_output = (inspect.isclass(output_model) and issubclass(output_model, BaseModel))
-    # Signature.Output ``from_command_output`` is checked at field-source resolution (3.3), not here, so a
-    # planning command with that error still loads under the unified load policy.
+    # Signature.Output ``from_command_output`` is checked at field-source resolution (3.3), where it is this
+    # command's load error like every other problem of its file.
     utterances = getattr(signature, "plain_utterances", ())
     if isinstance(utterances, str) or not all(isinstance(u, str) for u in utterances):
         raise PlanningCommandFormatError(f"{path}: plain_utterances must be a list of str")
     from fastworkflow.utils.signatures import reject_retired_db_lookup, removed_validate_hook_message
-    reject_retired_db_lookup(signature, input_model, path)
+    try:
+        reject_retired_db_lookup(signature, input_model, path)
+    except ValueError as error:     # one command's mistake: it does not load, the rest does
+        raise PlanningCommandFormatError(str(error)) from None
     if message := removed_validate_hook_message(signature, path):
         raise PlanningCommandFormatError(message)
 
     params = {n: _parse_param(n, _spec_from_field(n, info, path, planning=True), path)
               for n, info in input_model.model_fields.items()}
+    check_examples_by(input_model, path)
     if not params and plan_fn is None:
         try:
             lines = _call_steps(steps_fn, input_model(), path)
@@ -1909,12 +2155,40 @@ def planning_command_from_parts(name: str, signature, path: str, *, steps_fn: Ca
         if isinstance(declared, str) or not all(isinstance(t, str) for t in declared):
             raise PlanningCommandFormatError(f"{path}: Signature.template must be a list of str")
         template = list(declared)   # as written: it is text for the planner
+        try:   # the build still checks the steps (a declared template does not excuse a broken phase)
+            placeholder_template(command)
+        except _StepsFailOnPlaceholders:
+            raise
+        except PlanningCommandFormatError:
+            pass    # the validators refuse every placeholder input: what a declared template is for
     else:
         template = placeholder_template(command)
     if not template:
         raise PlanningCommandFormatError(f"{path}: a planning command needs steps")
     return PlanningCommandFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)),
                      plain_utterances=tuple(utterances), path=path)
+
+
+class _StepsFailOnPlaceholders(PlanningCommandFormatError):
+    """A phase of the command is malformed (its steps are not a list of str, or it is a public helper of a base): a
+    mistake a declared ``Signature.template`` does not excuse (``placeholder_template``). Steps that only fail on the
+    placeholder VALUES (a division by a default of 0) are what a declared template is for."""
+
+
+def _public_base_helper_hint(command: PlanningCommandCommand, error: Exception) -> str:
+    """The fix for a phase that fails while the template is built when the phase is a public method a BASE of the
+    PlanGenerator defines (a helper someone forgot to name with ``_``), else ""."""
+    match = re.search(r"phase '(\w+)'", str(error))
+    plan_cls = command.plan_cls
+    if match is None or plan_cls is None:
+        return ""
+    name = match.group(1)
+    owner = next((klass for klass in plan_cls.__mro__ if name in vars(klass)), None)
+    if owner is None or owner is plan_cls:
+        return ""
+    where = os.path.basename(inspect.getsourcefile(owner) or "") or owner.__module__
+    return (f"; every public method of a PlanGenerator and of its bases is a phase, and {name} is defined on "
+            f"the base {owner.__qualname__} ({where}): if {name} is a helper, name it _{name}")
 
 
 def _concatenated_steps_fn(plan_fn: Callable) -> Callable:
@@ -2026,11 +2300,13 @@ def _spelled_from_text(spelled: Any) -> str:
 
 @dataclass(frozen=True)
 class FieldSourceProblem:
-    """One problem or info line reported by :func:`resolve_field_sources`."""
+    """One problem reported by :func:`resolve_field_sources`."""
 
     file: str
     message: str
-    severity: Literal["error", "info"] = "error"
+    severity: Literal["error"] = "error"
+    #: The command whose file has the problem: the problem is that command's load error, so it does not load
+    #: (``FieldSourceResolution.errors_for``). Empty for a problem of a file the workflow shares.
     command: str = ""
 
     def format(self) -> str:
@@ -2046,9 +2322,7 @@ class FieldSourceResolution:
 
     workflow_folderpath: str
     problems: tuple[FieldSourceProblem, ...]
-    #: Command names (execution or planning) that have a ``from_command_output`` / ``available_from``
-    #: resolution error. They still load and stay routable or matchable; preview
-    #: ``--check`` fails on the reported problems. Not "skipped" at load time.
+    #: Command names (execution or planning) that have a load error (``errors_for``): none of them loads.
     skipped_commands: frozenset[str]
     model_to_command: Mapping[type, str]
     signatures: Mapping[str, Any]
@@ -2065,13 +2339,11 @@ class FieldSourceResolution:
     def errors(self) -> tuple[FieldSourceProblem, ...]:
         return tuple(p for p in self.problems if p.severity == "error")
 
-    @property
-    def infos(self) -> tuple[FieldSourceProblem, ...]:
-        return tuple(p for p in self.problems if p.severity == "info")
-
     def errors_for(self, command_name: str) -> list[str]:
-        return [p.format() for p in self.problems
-                if p.severity == "error" and p.command == command_name]
+        """Why *command_name* does not load: every problem found in its file, one rule for every kind of problem
+        and both kinds of command. Empty when it loads."""
+        return list(dict.fromkeys(p.format() for p in self.problems
+                                  if p.severity == "error" and p.command == command_name))
 
 
 def _annotation_text(annotation: Any) -> str:
@@ -2226,7 +2498,17 @@ def resolve_signature_field_sources(
                     severity="error",
                     command=command_name,
                 ))
+            if "available_from" in extra:
+                problems.append(FieldSourceProblem(
+                    file=file_path,
+                    message=(f"Signature.Output.{field_name}: available_from is written by the framework from an "
+                             f"Input field's {FROM_COMMAND_OUTPUT}, and an Output field declares neither; remove it"),
+                    command=command_name,
+                ))
             try:
+                if info.json_schema_extra is not None and not isinstance(info.json_schema_extra, Mapping):
+                    raise _not_a_dict("Signature.Output", field_name)
+                check_output_field_keys(field_name, extra, "Signature.Output")
                 check_ui_option(field_name, extra, "Signature.Output", on_output=True)
             except PlanningCommandFormatError as error:
                 problems.append(FieldSourceProblem(file=file_path, message=str(error), severity="error",
@@ -2235,11 +2517,19 @@ def resolve_signature_field_sources(
                         for message in (*check_table_groups(output_cls), *check_ui_value_options(output_cls)))
 
     # 2. Check facts models in phase_outputs for from_command_output (distinct from fact_from)
+    from fastworkflow.typed_phase_facts import _strip_optional as _typed_facts_strip
+
     for model in phase_outputs:
         if not (inspect.isclass(model) and issubclass(model, BaseModel)):
             continue
         for field_name, info in model.model_fields.items():
             extra = info.json_schema_extra if isinstance(info.json_schema_extra, Mapping) else {}
+            if model not in resolution.model_to_command and (   # a command's own Output has its own checks
+                    key_problem := _facts_field_key_problem(
+                        model, field_name, info.json_schema_extra,
+                        typed=_typed_facts_strip(info.annotation) in resolution.model_to_command)) is not None:
+                problems.append(FieldSourceProblem(file=file_path, message=key_problem, severity="error",
+                                                   command=command_name))
             if FROM_COMMAND_OUTPUT in extra:
                 problems.append(FieldSourceProblem(
                     file=file_path,
@@ -2270,10 +2560,12 @@ def resolve_signature_field_sources(
                 else af_val if isinstance(af_val, str) and af_val
                 else "<command>"
             )
+            if "." not in first_cmd:
+                first_cmd += ".<field>"
             problems.append(FieldSourceProblem(
                 file=file_path,
                 message=(f"Input.{field_name}: available_from is written by {FROM_COMMAND_OUTPUT}; "
-                         f'write "{FROM_COMMAND_OUTPUT}": "{first_cmd}" or "{FROM_COMMAND_OUTPUT}": "{first_cmd}.<field>"'),
+                         f'write "{FROM_COMMAND_OUTPUT}": "{first_cmd}"'),
                 severity="error",
                 command=command_name,
             ))
@@ -2300,7 +2592,7 @@ def resolve_signature_field_sources(
         if not sources or not all(isinstance(s, str) and s.strip() for s in sources):
             problems.append(FieldSourceProblem(
                 file=file_path,
-                message=(f"Input.{field_name}: {FROM_COMMAND_OUTPUT} must be '[<Context>/]<command>[.<field>]' "
+                message=(f"Input.{field_name}: {FROM_COMMAND_OUTPUT} must be '[<Context>/]<command>.<field>' "
                          f"or a non-empty list of them, got {raw_source!r}"),
                 severity="error",
                 command=command_name,
@@ -2316,7 +2608,7 @@ def resolve_signature_field_sources(
                 problems.append(FieldSourceProblem(
                     file=file_path,
                     message=(f"Input.{field_name} (from {entry!r}): malformed reference; "
-                             "expected '[<Context>/]<command>[.<field>]'"),
+                             "expected '[<Context>/]<command>.<field>'"),
                     severity="error",
                     command=command_name,
                 ))
@@ -2357,7 +2649,11 @@ def resolve_signature_field_sources(
                     problems.append(FieldSourceProblem(
                         file=file_path,
                         message=(f"Input.{field_name} (from {entry!r}): no command {ref_cmd} "
-                                 f"{scope_label}; qualify it ({', '.join(candidates)})"),
+                                 f"{scope_label}; {', '.join(candidates)} "
+                                 f"{'is' if len(candidates) == 1 else 'are'} in another context. Write "
+                                 f"the qualified name only when a user can be in that context before running "
+                                 f"this command; a qualified name is not checked for that, so otherwise name a "
+                                 f"producer on this command's own path, or leave the declaration out"),
                         severity="error",
                         command=command_name,
                     ))
@@ -2412,16 +2708,18 @@ def resolve_signature_field_sources(
             )
 
             if ref_field is None:
-                resolved_entries.append(target_qname)
-                suggestion = (
-                    f"{entry}.<field> (e.g. {', '.join(f'{entry}.{f}' for f in list(out_fields)[:3])})"
-                    if out_fields else f"{entry}.<field>"
-                )
+                field_ok = False
+                fitting = [f"{entry}.{name}" for name, finfo in out_fields.items()
+                           if _producer_types_match(info.annotation, finfo.annotation)]
+                advice = (f"an Output field of {entry} that fits {_annotation_text(info.annotation)}: "
+                          f"{', '.join(fitting)}" if fitting else
+                          f"{entry} has no Output field of a type that fits "
+                          f"{_annotation_text(info.annotation)}; give it one")
                 problems.append(FieldSourceProblem(
                     file=file_path,
-                    message=(f"Input.{field_name} (from {entry!r}): command-only producer "
-                             f"reference; consider naming an Output field ({suggestion})"),
-                    severity="info",
+                    message=(f"Input.{field_name} (from {entry!r}): a bare command name is not accepted; "
+                             f'write "<command>.<field>", {advice}'),
+                    severity="error",
                     command=command_name,
                 ))
                 continue
@@ -2537,6 +2835,169 @@ def _typed_phase_output_problems(
     return problems
 
 
+def _workflow_contexts(folder: str, files: Mapping[str, Any]) -> frozenset[str]:
+    """The workflow's context names: each context folder that holds a command, and each context
+    ``context_inheritance_model.json`` declares (a base included). What a ``@descends_to`` target must name."""
+    contexts = {name.split("/", 1)[0] for name in files if "/" in name}
+    try:
+        declared = CommandContextModel.declared_bases(folder)
+    except Exception:  # noqa: BLE001 - the file's own error is reported where it is read
+        declared = {}
+    for context, bases in declared.items():
+        contexts.add(context)
+        contexts.update(bases)
+    return frozenset(contexts - {"*", ""})
+
+
+def input_validator_mode_problems(input_model: Any) -> list[str]:
+    """An Input's model validators that are not ``mode="after"``, one problem each. ``validate_input`` checks the
+    fields one by one and then runs the model validators on the built Input, so a ``before`` or ``wrap`` validator
+    would switch the whole Input to one pydantic call with other refusal wording."""
+    decorators = getattr(input_model, "__pydantic_decorators__", None) if inspect.isclass(input_model) else None
+    if decorators is None:
+        return []
+    return [f"Signature.Input: model validator {name!r} is mode=\"{decorator.info.mode}\"; an Input's model "
+            "validators must be mode=\"after\" (def check(self) -> Self, reading the built Input)"
+            for name, decorator in decorators.model_validators.items() if decorator.info.mode != "after"]
+
+
+def not_given_default_problems(input_model: Any) -> list[str]:
+    """An Input field whose declared default is the framework's not-given marker (``NOT_FOUND`` for a str,
+    ``INVALID_INT_VALUE`` / ``INVALID_FLOAT_VALUE`` for a number), one problem each, on both kinds of command. The
+    marker is how the framework holds a value nobody gave, so such a default could never be told from a missing
+    value: it was required at one check and optional at others (and written into a planning command's steps)."""
+    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
+
+    fields = getattr(input_model, "model_fields", None) if inspect.isclass(input_model) else None
+    problems = []
+    for name, info in (fields or {}).items():
+        default = info.default
+        if isinstance(default, str):
+            marker = default == NOT_FOUND
+        elif isinstance(default, (int, float)) and not isinstance(default, bool):
+            marker = default in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
+        else:
+            marker = False
+        if marker:
+            kind = getattr(info.annotation, "__name__", None) or str(info.annotation)
+            problems.append(f"Signature.Input.{name}: default {default!r} is the framework's not-given marker, so a "
+                            "value could never be told from a missing one. Declare a required field with no default "
+                            f"(`{name}: {kind} = Field(description=...)`, asked for when missing), or "
+                            f"`{name}: {kind} | None = None` for an optional one")
+    return problems
+
+
+def _closed_contexts(cmd_dir: Any) -> frozenset[str]:
+    """The contexts whose callback class declares ``occupiable = False`` (a base other contexts inherit commands
+    from, never a place the workflow stands on). Read from the classes directly; a class that does not load is
+    reported where it is read (``command_preview._context_load_problems``)."""
+    closed = set()
+    for name, metadata in cmd_dir.map_context_2_metadata.items():
+        try:
+            module = python_utils.get_module(metadata.context_module_path, metadata.workflow_folderpath)
+        except Exception:  # noqa: BLE001 - its own load problem
+            continue
+        if getattr(getattr(module, metadata.context_class, None), "occupiable", None) is False:
+            closed.add(name)
+    return frozenset(closed)
+
+
+#: The members a command's ``Signature`` may have, read through its class hierarchy: the only names the framework reads
+#: from it. ``template`` is read on a planning command only, ``SlotInput`` in the framework's own workflows only (the
+#: plan review's slot question). Any other public member fails that command's load; a helper's name starts with ``_``.
+SIGNATURE_MEMBERS = ("Input", "Output", "plain_utterances", "generate_utterances", "template_utterances")
+PLANNING_SIGNATURE_MEMBERS = ("template",)
+FRAMEWORK_SIGNATURE_MEMBERS = ("SlotInput",)
+#: Members with a message of their own, reported where the Signature is read (``utils.signatures``).
+_SIGNATURE_MEMBERS_REPORTED_ELSEWHERE = ("validate_extracted_parameters", "db_lookup")
+#: The declaration decorators of a generator class, by the attribute each sets.
+_DECLARATION_DECORATORS = {"__fw_writes__": "@writes", "__fw_approval__": "@user_approval_for_execution",
+                           "__fw_descends_to__": "@descends_to"}
+
+
+def is_framework_command_folder(workflow_folderpath: str) -> bool:
+    """Whether *workflow_folderpath* is one of the framework's own workflows (command metadata extraction, plan
+    metadata extraction), compared by resolved path. The light form of
+    ``train.intent_model_layout.is_framework_workflow``, which imports the training stack."""
+    import fastworkflow
+
+    real = os.path.realpath(workflow_folderpath)
+    return any(real == os.path.realpath(fastworkflow.get_internal_workflow_path(name))
+               for name in ("command_metadata_extraction", "plan_metadata_extraction"))
+
+
+def signature_member_problems(signature: Any, *, is_planning: bool, framework: bool) -> list[str]:
+    """The load errors of a command's ``Signature`` members, read through its class hierarchy (``object`` left
+    out): a public member not in ``SIGNATURE_MEMBERS`` (``template`` on a planning command, ``SlotInput`` in a
+    framework workflow), and a declaration decorator put on ``Signature`` instead of the generator class."""
+    if not inspect.isclass(signature):
+        return []
+    names = {name for klass in signature.__mro__ if klass is not object for name in vars(klass)}
+    problems = []
+    if misplaced := [decorator for attribute, decorator in _DECLARATION_DECORATORS.items() if attribute in names]:
+        problems.append(f"{', '.join(misplaced)} {'is' if len(misplaced) == 1 else 'are'} on Signature: a declaration "
+                        "goes on the ResponseGenerator or PlanGenerator class")
+    allowed = (SIGNATURE_MEMBERS + (PLANNING_SIGNATURE_MEMBERS if is_planning else ())
+               + (FRAMEWORK_SIGNATURE_MEMBERS if framework else ()))
+    for name in sorted(names):
+        if name.startswith("_") or name in allowed or name in _SIGNATURE_MEMBERS_REPORTED_ELSEWHERE:
+            continue
+        if name in PLANNING_SIGNATURE_MEMBERS:
+            problems.append(f"Signature.{name} is read only on a planning command: an execution command has no "
+                            f"template; remove it")
+            continue
+        close = difflib.get_close_matches(name, allowed, n=1)
+        problems.append(
+            f"Signature.{name} is not a Signature member{f'; did you mean {close[0]!r}?' if close else '.'} The "
+            f"members are {', '.join(SIGNATURE_MEMBERS)} (and {', '.join(PLANNING_SIGNATURE_MEMBERS)} on a planning "
+            "command); a helper's name starts with an underscore")
+    return problems
+
+
+def _command_class_problems(module: Any, fpath: str, signature: Any, is_planning: bool,
+                            contexts: frozenset[str], closed: frozenset[str] = frozenset(),
+                            framework: bool = False) -> list[str]:
+    """The load errors of a command file's classes, beside its Signature's: a Signature with no generator class
+    (``command_directory.missing_generator_problem``), a ``ResponseGenerator.__call__`` that does not take three
+    arguments (``command_routing.response_call_arity_problem``) and the declarations on the generator
+    (``command_declarations.declaration_problems``), and the Signature's members (``signature_member_problems``). One
+    list, read as every other problem of the file."""
+    from fastworkflow.command_declarations import declaration_problems, declared_descend
+    from fastworkflow.command_directory import missing_generator_problem
+    from fastworkflow.command_routing import response_call_arity_problem
+
+    problems = []
+    if problem := missing_generator_problem(fpath):
+        problems.append(problem[len(fpath):].lstrip(": ") if problem.startswith(fpath) else problem)
+    problems += signature_member_problems(signature, is_planning=is_planning, framework=framework)
+    problems += input_validator_mode_problems(getattr(signature, "Input", None))
+    problems += not_given_default_problems(getattr(signature, "Input", None))
+    generator = getattr(module, "PlanGenerator" if is_planning else "ResponseGenerator", None)
+    if not inspect.isclass(generator):
+        return problems
+    if not is_planning and (problem := response_call_arity_problem(generator)):
+        problems.append(problem)
+    input_model = getattr(signature, "Input", None)
+    fields = frozenset(getattr(input_model, "model_fields", {}) or {}) if inspect.isclass(input_model) else frozenset()
+    if not is_planning and fields:
+        # an execution command's Input field keys, one rule with a planning command's (a planning command's are
+        # checked where its file is parsed, ``option_params``)
+        for name, info in input_model.model_fields.items():
+            if info.json_schema_extra is not None and not isinstance(info.json_schema_extra, dict):
+                problems.append(str(_not_a_dict("Signature.Input", name)))
+            elif isinstance(info.json_schema_extra, dict):
+                try:
+                    check_field_keys(name, info.json_schema_extra, "Signature.Input", planning=False)
+                except PlanningCommandFormatError as error:
+                    problems.append(str(error))
+    problems += declaration_problems(generator, is_planning=is_planning, contexts=contexts, input_fields=fields)
+    if (target := declared_descend(generator)) in closed:
+        problems.append(f"@descends_to(\"{target}\") names a context declared occupiable = False: a base other "
+                        "contexts inherit commands from, never a place the workflow stands on. Name the context the "
+                        "command enters")
+    return problems
+
+
 def resolve_field_sources(workflow_folderpath: str) -> FieldSourceResolution:
     """Resolve every ``from_command_output`` declaration across the commands and planning commands of *workflow_folderpath*.
 
@@ -2585,18 +3046,23 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
     model_to_command: dict[type, str] = {}
     planning_command_phase_outputs: dict[str, tuple[type, ...]] = {}
     planning_commands: dict[str, PlanningCommandCommand] = {}
+    contexts = _workflow_contexts(folder, all_files)
+    closed = _closed_contexts(cmd_dir)
 
     for qname in sorted(all_files):
         fpath, owner, is_planning = all_files[qname]
         try:
             module = python_utils.get_module(fpath, owner)
         except Exception as exc:  # noqa: BLE001
-            import_errors[qname] = f"{type(exc).__name__}: {exc}"
+            import_errors[qname] = f"{type(exc).__name__}: {exc}{raised_in_helper(exc, fpath, owner)}"
             continue
         if module is None:
             import_errors[qname] = f"could not import {fpath}"
             continue
         sig = getattr(module, "Signature", None)
+        problems.extend(FieldSourceProblem(file=fpath, message=message, command=qname)
+                        for message in _command_class_problems(module, fpath, sig, is_planning, contexts, closed,
+                                                               framework=is_framework_command_folder(owner)))
         if not inspect.isclass(sig):
             continue
         signatures[qname] = sig
@@ -2610,8 +3076,8 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
                 planning_commands[qname] = parsed.command
                 if parsed.command.phase_outputs:
                     planning_command_phase_outputs[qname] = parsed.command.phase_outputs
-            except PlanningCommandFormatError as exc:
-                msg = str(exc)
+            except Exception as exc:  # noqa: BLE001 - any mistake in the file fails that command's load, not the workflow's
+                msg = str(exc) if isinstance(exc, PlanningCommandFormatError) else f"{type(exc).__name__}: {exc}"
                 prefix = f"{fpath}: "
                 if msg.startswith(prefix):
                     msg = msg[len(prefix):]
@@ -2793,7 +3259,8 @@ def _command_steps(command: PlanningCommandCommand, signatures: dict) -> tuple[d
     return fields, list(seen)
 
 
-def check_step_commands(command: PlanningCommandCommand, signatures: dict) -> list[str]:
+def check_step_commands(command: PlanningCommandCommand, signatures: dict,
+                        not_loading: frozenset[str] = frozenset()) -> list[str]:
     """Problems with the commands a planning command's steps name: each command step of its template
     (every placeholder combination; ``step_commands``) and each ``pick`` must name a
     command of the workflow (*signatures*: ``facts.workflow_signatures``), and each
@@ -2804,12 +3271,20 @@ def check_step_commands(command: PlanningCommandCommand, signatures: dict) -> li
     problems = []
     for name, args in seen:
         if name not in fields:
-            problem = (f"{command.path}: a step runs {name!r}, which is not a command of the "
-                       "workflow")
+            verb = "names" if planning_api._DO_NOT_RUN in args else "runs"
+            problem = (f"{command.path}: a step {verb} {name!r}, which does not load: see its own problem"
+                       if name in not_loading else
+                       f"{command.path}: a step {verb} {name!r}, which is not a command of the workflow")
+        elif planning_api._DO_NOT_RUN in args:
+            continue
+        elif more := next((a for a in args if a.startswith(planning_api._NAMED_TAKES_MORE + ": ")), None):
+            problem = (f"{command.path}: a step opens a row of {name!r} by named=, but {name!r} also requires "
+                       f"{more.split(': ', 1)[1]}, which such a step cannot pass, so code could never run it "
+                       "(pass the row's id and every required input)")
         elif planning_api._NAMED_UNRESOLVED in args:
             problem = (f"{command.path}: a step opens a row of {name!r} by named=, but {name!r} declares no "
-                       "row id input (a field from_command_output, or its one required str field): pass the "
-                       "id input explicitly")
+                       "row id input the runtime can find (declare the producer of its id field with "
+                       "from_command_output, or pass the id input explicitly)")
         else:
             unknown = [a for a in args if not any(a in f for f in fields[name])]
             if not unknown:
@@ -2826,23 +3301,30 @@ def _callee_graph(planning_commands: Mapping[str, PlanningCommandCommand],
     """``callees[name]`` for each planning command (3.7): the qualified names its steps call.
 
     The steps are read by ``_command_steps``, the parse ``check_step_commands`` checks, fixed
-    steps included. A step's name resolves from the command's own context as a producer's does
-    (``_resolve_producer_target``). A name off that path that exactly one command of the
-    workflow has resolves to it: a step runs in the context an earlier callee left open
-    (``book_loans`` runs ``list_loans`` on the book ``book_by_title`` opened). An ambiguous or
-    unknown name is no edge; the cycle guard at run time refuses a cycle the graph cannot see.
+    steps included. A step's name resolves on the command's own static lookup path nearest scope
+    first, as the runtime resolves it (``_resolve_producer_target`` lists the path's matches in
+    that order), so a command that shadows a base's or the global command of its name and runs
+    that name calls itself. A name off that path that exactly one command of the workflow has
+    resolves to it: a step runs in the context an earlier callee left open (``book_loans`` runs
+    ``list_loans`` on the book ``book_by_title`` opened). A name that several contexts off the
+    path have is no edge; the cycle guard at run time refuses a cycle the graph cannot see.
     """
     known = set(resolution.signatures)
     graph: dict[str, frozenset[str]] = {}
     for qname, command in sorted(planning_commands.items()):
         _, seen = _command_steps(command, resolution.signatures)
         targets: set[str] = set()
-        for name, _ in seen:
+        for name, args in seen:
+            if planning_api._DO_NOT_RUN in args:
+                continue        # a do_not_run step calls nothing
             ref_context, _, ref_cmd = name.rpartition("/")
+            context = qname.rpartition("/")[0]
             target, candidates = _resolve_producer_target(
-                ref_context or None, ref_cmd, qname.rpartition("/")[0], known, resolution.base_contexts)
-            if target is None and len(candidates) == 1:
-                target = candidates[0]
+                ref_context or None, ref_cmd, context, known, resolution.base_contexts)
+            if target is None and candidates and (
+                    len(candidates) == 1
+                    or candidates[0].rpartition("/")[0] in _static_lookup_scopes(context, resolution.base_contexts)):
+                target = candidates[0]      # unique off the path, or the nearest scope's on it
             if target is not None:
                 targets.add(target)
         graph[qname] = frozenset(targets)
@@ -3056,17 +3538,14 @@ def number(steps: list[str]) -> str:
 
 def _validate_arguments(command: PlanningCommandCommand, args: dict, request: str, workflow=None,
                         notes: list[str] | None = None) -> dict:
-    """The validation steps after the options' checks, in their order (spec 3.5), for a typed planning
-    call, which has no ``Signature`` to run them on: the ``Input``'s model validators, with the request,
-    workflow and command as context (``check_input``, which writes their changes back), then the roles of
-    two inputs given one value (``_check_roles``). Raises PlanningCommandInputError when a validator or a
-    rule refuses the call, PlanningCommandCallError when a validator raises."""
+    """The validation step after the options' checks (spec 3.5), for a typed planning call, which has no
+    ``Signature`` to run it on: the ``Input``'s field checks and model validators, with the request, workflow and
+    command as context (``check_input``, which writes their changes back). Raises PlanningCommandInputError when a
+    validator or a rule refuses the call, PlanningCommandCallError when a validator raises."""
     written = check_input(command, args, request, workflow)
     if written and notes is not None:
-        notes += [f"{n}={args[n]!r} -> {v!r} (validate_extracted_parameters)" for n, v in written.items()]
-    checked = {**args, **written}
-    _check_roles(command, checked, request)
-    return checked
+        notes += [f"{n}={args[n]!r} -> {v!r} (validator)" for n, v in written.items()]
+    return {**args, **written}
 
 
 def check_input(command: PlanningCommandCommand, args: dict, request: str, workflow=None) -> dict:
@@ -3075,10 +3554,10 @@ def check_input(command: PlanningCommandCommand, args: dict, request: str, workf
     (``parameters.validate.validate``, the one driver; this function words its outcome for a typed planning call).
 
     Raises PlanningCommandInputError, whose message says which field breaks which rule (a field's type or
-    field validator). A ``fastworkflow.Refused`` a model validator raised is the refusal, in the hook's words:
-    ``validate_extracted_parameters: <message>``, with its ``fields`` (``refusal`` holds the bare message). A plain
-    ``ValueError`` or ``AssertionError`` is the same refusal with no field. Any other exception a model validator raises is a PlanningCommandCallError
-    ``validate_extracted_parameters raised <Type>: <text>`` (``raised`` names its type, ``detail`` its text).
+    field validator). A ``fastworkflow.Refused`` a model validator raised is the refusal: its message, with its
+    ``fields`` (``refusal`` holds the same message). A plain ``ValueError`` or ``AssertionError`` is exactly a
+    ``Refused`` that names no field. Any other exception a model validator raises is a PlanningCommandCallError
+    ``a validator raised <Type>: <text>`` (``raised`` names its type, ``detail`` its text).
     A refusal carries no writes: what a validator rewrote before it stopped is dropped (one rule, both kinds).
 
     Returns the fields the validators changed, ``{name: value}``, which the caller writes back onto the
@@ -3100,39 +3579,13 @@ def check_input(command: PlanningCommandCommand, args: dict, request: str, workf
         error.refusal = refusal.detail or refusal.message
         raise error from None
     if refusal.kind == one_driver.REFUSED:
-        error = PlanningCommandInputError(f"validate_extracted_parameters: {refusal.message}", fields=refusal.fields)
+        error = PlanningCommandInputError(refusal.message, fields=refusal.fields)
         error.refusal = refusal.message
         raise error from None
-    if refusal.kind == one_driver.PLAIN:
-        # A plain ValueError (or AssertionError) stays a refusal with no field (spec 3.3): the extractor is asked
-        # once more, as the pydantic validators' ValueError was at HEAD. Its text is the hook's prefixed message.
-        error = PlanningCommandInputError(f"validate_extracted_parameters: {refusal.message}")
-        error.refusal = refusal.message
-        raise error from None
-    failure = PlanningCommandCallError(f"validate_extracted_parameters raised {refusal.raised}: {refusal.message}")
+    failure = PlanningCommandCallError(f"a validator raised {refusal.raised}: {refusal.message}")
     failure.raised = refusal.raised
     failure.detail = refusal.message
     raise failure from None
-
-
-def _check_roles(command: PlanningCommandCommand, args: dict, request: str) -> None:
-    """The same value for two required free-text inputs: the one whose role the request does not
-    write just before the value is refused (``_role_fits``); when both fit or neither does, the
-    first is refused. Raises PlanningCommandInputError. One rule on both paths: the typed planning
-    call (``_validate_arguments``) and the turn frame (``signatures.validate_parameters``)."""
-    required = [p for p in command.params if p.type == "str" and p.required and not p.values]
-    for i, p in enumerate(required):
-        for q in required[i + 1:]:
-            value = str(args[p.name])
-            if not value or value.lower() != str(args[q.name]).lower():
-                continue
-            fits_p, fits_q = _role_fits(request, value, p), _role_fits(request, value, q)
-            loser, other = (q, p) if fits_p and not fits_q else (p, q)
-            why = f"is also the value of {other.name}"
-            raise PlanningCommandInputError(
-                f"{loser.name}={args[loser.name]!r} {why}",
-                gap=one_guard.Gap(loser.name, one_guard.INVALID, "role", why, args[loser.name],
-                                  f"{loser.name}={args[loser.name]!r} {why}"))
 
 
 # ---------------------------------------------------------------- arguments and guards
@@ -3202,15 +3655,6 @@ def _confident(verdicts: dict | None, name: str):
     """The ``(value, probability)`` check of ``name`` when it is sure enough, else None."""
     verdict = (verdicts or {}).get(name)
     return verdict if verdict is not None and verdict[1] >= VERIFY_THRESHOLD else None
-
-
-def _allowed_values(command: PlanningCommandCommand, p: Param) -> tuple[str, ...]:
-    """The values a ``str`` argument allows when its type does not say (``argument_checks.allowed_values``,
-    the execution checker's reader: on a planning command, a ``One of: a, b`` list in its description)."""
-    from fastworkflow.parameters.rules import allowed_values
-
-    info = command.input_model.model_fields.get(p.name) if command.input_model is not None else None
-    return allowed_values(info) if info is not None else ()
 
 
 def _request_numbers(request: str, args: dict, command: PlanningCommandCommand) -> set[int]:
@@ -3419,31 +3863,100 @@ def _screen(command: PlanningCommandCommand, raw: dict, request: str) -> tuple[d
     return {n: getattr(values, n) for n in names}, refused
 
 
-# The rule sentences of design 3.4 (Descriptions), one per option the check below enforces. The
-# CME parameter extractor reads each after the description of a field that carries the option, and
-# nothing else reads them: not the preview, nor the listings (``fastworkflow.utils.signatures``
-# appends them through ``extraction_sentences_for``).
-IN_REQUEST_STR_SENTENCE = "Copy it exactly as the request writes it."   # in_request on a str
-IN_REQUEST_INT_SENTENCE = "A number the request writes."                # in_request on an int
-IN_REQUEST_LIST_SENTENCE = "Copy each item exactly as the request writes it."  # in_request on a list[str]
-SUBJECT_SENTENCE = "Copy it exactly as the request writes it. It must name a record the request names."  # subject
-VERIFY_BOOL_SENTENCE = "True only when the request asks for it."       # verify on a bool
-VERIFY_BOOL_TRUE_SENTENCE = "False only when the request asks against it."  # verify on a bool that defaults true
+# The sentences the extraction model reads about a field after its description (bd fix-ftdl.6.5): each comes from
+# one of the field's own declarations, and they are the same for a planning command and an execution command
+# (``option_sentences``, the one builder; the parameter extractor and the planner's typed fill both read it).
+IN_REQUEST_STR_SENTENCE = "Copy it exactly as the request writes it."   # copied_from_command_text on a str
+IN_REQUEST_INT_SENTENCE = "A number the request writes."                # copied_from_command_text on an int
+IN_REQUEST_LIST_SENTENCE = "Copy each item exactly as the request writes it."  # copied_from_command_text on a list[str]
+SUBJECT_SENTENCE = "Copy it exactly as the request writes it. It must name a record the request names."  # record_named
+BOOL_SENTENCE = "True only when the request asks for it."              # the bool type (default false)
+BOOL_TRUE_SENTENCE = "False only when the request asks against it."    # the bool type, default true
 
 
 def extraction_sentences(p: Param) -> tuple[str, ...]:
-    """The rule sentences of the options *p* carries, as ``check_arguments`` enforces them
-    (3.4, Descriptions). A subject field's sentence already says what ``in_request`` says, so it
-    stands alone: the extractor reads each rule once."""
-    sentences: list[str] = []
+    """The sentences of the marks *p* carries, as ``check_arguments`` enforces them. A subject field's sentence already
+    says what ``in_request`` says, so it stands alone: the extractor reads each rule once."""
     if p.subject:
-        sentences.append(SUBJECT_SENTENCE)
-    elif p.in_request:
-        sentences.append({"str": IN_REQUEST_STR_SENTENCE, "int": IN_REQUEST_INT_SENTENCE}.get(
-            p.type, IN_REQUEST_LIST_SENTENCE))
-    if p.verify and p.type == "bool":
-        sentences.append(VERIFY_BOOL_SENTENCE if p.default is not True else VERIFY_BOOL_TRUE_SENTENCE)
+        return (SUBJECT_SENTENCE,)
+    if p.in_request:
+        return ({"str": IN_REQUEST_STR_SENTENCE, "int": IN_REQUEST_INT_SENTENCE}.get(p.type, IN_REQUEST_LIST_SENTENCE),)
+    return ()
+
+
+def type_sentences(info) -> tuple[str, ...]:
+    """The sentences of a field's type and format: a ``bool`` (``Optional[bool]`` too) is true only when the request asks
+    for it (false only when the request asks against it, for a bool that defaults to true), a rule of the type on both
+    kinds of command; a declared ``Field(pattern=...)`` is its format (``rules.pattern_sentence``)."""
+    members = [a for a in get_args(info.annotation) if a is not type(None)] if rules.is_union(info.annotation) \
+        else [info.annotation]
+    sentences = []
+    if members == [bool]:
+        sentences.append(BOOL_TRUE_SENTENCE if info.default is True else BOOL_SENTENCE)
+    if pattern := rules.pattern_sentence(info):
+        sentences.append(pattern)
     return tuple(sentences)
+
+
+def check_examples_by(input_model, where: str) -> None:
+    """The load check of every ``examples_by`` of *input_model* (``field_options.ExamplesBy``; training data only, read
+    by the synthetic utterance generator, never by a check, the extractor, a planner or a client). A
+    PlanningCommandFormatError naming the field and the rule broken; cached per ``Input`` and *where*."""
+    if (problem := _examples_by_problem(input_model, where)) is not None:
+        raise PlanningCommandFormatError(problem)
+
+
+@functools.lru_cache(maxsize=None)
+def _examples_by_problem(input_model, where: str) -> str | None:
+    from pydantic import TypeAdapter, ValidationError
+    from typing import Annotated
+
+    fields = input_model.model_fields
+    for name, info in fields.items():
+        extra = info.json_schema_extra
+        if not isinstance(extra, dict) or EXAMPLES_BY not in extra:
+            continue
+
+        def problem(message: str) -> str:
+            return str(_field_error(where, name, f"{EXAMPLES_BY} {message}"))
+
+        value = extra[EXAMPLES_BY]
+        if not isinstance(value, dict) or not value:
+            return problem("must be a dict from the name of a choice (Literal) field of this Input to "
+                           "{\"<value>\": [<example>, ...]}, such as {\"kind\": {\"group\": [\"Payroll Approvers\"]}}; "
+                           f"got {_shown(value)}")
+        if len(value) > 1:
+            return problem(f"names {len(value)} choice fields ({', '.join(map(repr, value))}); name one: examples "
+                           "that depend on several choices are not supported")
+        [(choice, by_value)] = value.items()
+        if choice == name:
+            return problem(f"names this field itself ({choice!r}); name the choice field its examples depend on")
+        if choice not in fields:
+            return problem(f"names {choice!r}, which is not a field of this Input; its fields are "
+                           f"{', '.join(map(repr, fields))}")
+        values = _literal_values(fields[choice].annotation)
+        if not values:
+            return problem(f"names {choice!r}, which is not a choice field (its type is "
+                           f"{python_utils.type_text(fields[choice].annotation)}, not a Literal)")
+        if not isinstance(by_value, dict) or not by_value:
+            return problem(f"for {choice!r} must be a non-empty dict from a value of {choice!r} to a list of "
+                           f"examples; got {_shown(by_value)}")
+        adapter = TypeAdapter(Annotated[(info.annotation, *info.metadata)] if info.metadata else info.annotation)
+        for key, examples in by_value.items():
+            if key not in values:
+                return problem(f"{choice}: {key!r} is not a value of {choice!r}")
+            if isinstance(examples, (str, bytes)) or not isinstance(examples, (list, tuple)) or not examples:
+                return problem(f"{choice}: the examples for {key!r} must be a non-empty list; got {_shown(examples)}")
+            for example in examples:
+                if example is None:
+                    return problem(f"{choice}: an example for {key!r} is None; an example is a value of this field")
+                try:
+                    adapter.validate_python(example, strict=True)
+                except ValidationError as error:
+                    reason = error.errors()[0].get("msg", str(error)) if error.errors() else str(error)
+                    return problem(f"{choice}: the example {example!r} for {key!r} is not a valid value of this "
+                                   f"field ({python_utils.type_text(info.annotation)}): {reason}")
+    return None
 
 
 def option_params(input_model, where: str, *, planning: bool = False) -> tuple[Param, ...]:
@@ -3463,7 +3976,8 @@ def option_params(input_model, where: str, *, planning: bool = False) -> tuple[P
         check_field_keys(name, extra, where, planning=planning)
         if any(key in extra for key in OPTION_KEYS):
             # the shape, the combinations and the type of every option the field carries (2.0)
-            check_option_spec(name, extra, where, kind=_option_kind(info.annotation), planning=planning)
+            check_option_spec(name, extra, where, kind=_option_kind(info.annotation), planning=planning,
+                              annotation=info.annotation)
         if extra.get(COMMAND_TEXT_AFTER_COMMAND_NAME) is True:
             positional.append(name)
         if not any(key in extra for key in CHECK_OPTIONS):
@@ -3474,6 +3988,7 @@ def option_params(input_model, where: str, *, planning: bool = False) -> tuple[P
     if len(positional) > 1:
         raise PlanningCommandFormatError(f"{where}: {COMMAND_TEXT_AFTER_COMMAND_NAME} is on {' and '.join(positional)}; "
                                          "one field per Input takes the command text after the command name")
+    check_examples_by(input_model, where)
     return tuple(out)
 
 
@@ -3483,6 +3998,35 @@ def option_command(input_model, name: str, identifiers: tuple = ()) -> PlanningC
     that carry an option, so ``check_arguments`` and ``check_verdicts`` run on them unchanged (2.46)."""
     return PlanningCommandCommand(name=name, description="", params=option_params(input_model, name),
                                   identifiers=identifiers, input_model=input_model)
+
+
+def execution_command(workflow_folderpath: str, qualified_name: str) -> PlanningCommandCommand | None:
+    """An execution command's ``Input`` as a ``PlanningCommandCommand`` with a ``Param`` for EVERY field the planning
+    grammar can state (str, bool, int, float, list[str], a text ``Literal``), so the one parameter clarification loop
+    (``parameter_clarification``) asks for its values as it asks for a planning command's. A field of another type is
+    left out (the loop does not ask for it: the command's own extraction stage does, as before). None when the command
+    has no ``Input`` or none of its fields can be stated."""
+    from fastworkflow import ModuleType, RoutingRegistry
+
+    try:
+        model = RoutingRegistry.get_definition(workflow_folderpath).get_command_class(
+            qualified_name, ModuleType.COMMAND_PARAMETERS_CLASS)
+    except Exception:  # noqa: BLE001 - a command with no readable Input has no values to ask for
+        return None
+    return _execution_command(model, qualified_name) if model is not None else None
+
+
+@functools.lru_cache(maxsize=None)
+def _execution_command(input_model, name: str) -> PlanningCommandCommand | None:
+    params = []
+    for field_name, info in input_model.model_fields.items():
+        try:
+            params.append(_parse_param(field_name, _spec_from_field(field_name, info, name), name))
+        except PlanningCommandFormatError:
+            continue
+    if not params:
+        return None
+    return PlanningCommandCommand(name=name, description="", params=tuple(params), input_model=input_model)
 
 
 def classifier_alone_fields(input_model) -> frozenset[str]:
@@ -3495,25 +4039,28 @@ def classifier_alone_fields(input_model) -> frozenset[str]:
 
 
 def option_sentences(input_model) -> dict[str, tuple[str, ...]]:
-    """``{field: sentences}`` the CME parameter extractor appends to the descriptions of an ``Input``'s fields
-    (3.4, Descriptions), for each field whose options have a sentence. Empty for a field without options,
-    whichever kind of command the ``Input`` belongs to."""
+    """THE prompt builder of a field (bd fix-ftdl.6.5): ``{field: sentences}`` the extraction model reads after the
+    description of each field of an ``Input`` that has any, from the field's own declarations only: its marks
+    (``extraction_sentences``), then its type and format (``type_sentences``). The same for both kinds of command; the
+    parameter extractor (``InputForParamExtraction.create_signature_from_pydantic_model``) and the planner's typed fill
+    (``typed_signature``) read it."""
     if input_model is None:
         return {}
-    return {p.name: sentences for p in option_params(input_model, getattr(input_model, "__name__", "Input"))
-            if (sentences := extraction_sentences(p))}
+    marks = {p.name: extraction_sentences(p)
+             for p in option_params(input_model, getattr(input_model, "__name__", "Input"))}
+    out = {}
+    for name, info in input_model.model_fields.items():
+        if sentences := (*marks.get(name, ()), *type_sentences(info)):
+            out[name] = sentences
+    return out
 
 
 def extraction_sentences_for(workflow_folderpath: str | None, qualified_name: str | None) -> dict[str, tuple[str, ...]]:
-    """``{field: sentences}`` the CME parameter extractor appends to the descriptions of planning
-    command *qualified_name*'s fields, for the fields whose options have a sentence. Empty without a
-    workflow (3.4, Descriptions)."""
+    """``option_sentences`` of planning command *qualified_name*'s ``Input``. Empty without a workflow."""
     if not workflow_folderpath or not qualified_name:
         return {}
     command = planning_command(workflow_folderpath, qualified_name)
-    if command is None:
-        return {}
-    return {p.name: sentences for p in command.params if (sentences := extraction_sentences(p))}
+    return {} if command is None else option_sentences(command.input_model)
 
 
 def verify_field_names(workflow_folderpath: str) -> tuple[str, ...]:
@@ -3551,35 +4098,30 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
       text) stands for its element;
     - a ``str`` or ``int`` argument first goes through the command parameter screen
       (``utils.signatures.screen_parameter_values``, as a command's parameters do): quotes
-      or angle brackets around the whole value are removed, a placeholder (``<name>``,
-      ``desired-name`` the request does not write) or an out-of-range number (a negative
-      ``count``, a declared ``ge``/``le`` bound) is refused (an optional argument takes its
-      default, a required one fails the call), and the extractor's "not given" number or a
+      or angle brackets around the whole value are removed, a bracketed placeholder (``<name>``) or an
+      out-of-range number (a negative ``count``, a declared ``ge``/``le`` bound) is refused (an optional
+      argument takes its default, a required one fails the call), and the extractor's "not given" number or a
       made-up extreme counts as missing;
     - a missing or empty argument takes its default; a required one fails the call;
     - an enum must be one of its values, an int an integer, a float a number (the extractor's
       "not given" marker counts as missing), a bool true/false; a list[str] is its elements
-      (cleaned; no check that the request writes them: design 2.22), a list written as JSON text
-      or comma-separated text;
-    - a str argument loses surrounding quotes, and must then be a
-      verbatim (case-insensitive; any Unicode dash matches "-") substring of ``request``;
-      it takes the request's own spelling. One that is not: an optional argument takes its default, a required one
-      fails the call (the planner fills it once more, then falls back to the template path);
-    - a str argument whose description lists its values (``One of: a, b``) must be one of them, ignoring
-      case, and takes the declared spelling (``argument_checks.allowed_member``, the execution checker's rule);
-      one that is not is reset or fails the call as above;
-    - a str argument inside an identifier match of the request (``command.identifiers``)
-      becomes the whole match; a ``subject`` one must name a record of the request
-      (``_as_subject``); one that does not is reset or fails the call as above;
-    - a ``copied_from_command_text`` ``str`` must be a verbatim substring of ``request`` (after the
-      usual ``str`` normalisation); a ``copied_from_command_text`` ``int`` must be a number the request
-      writes, when it writes any (see the module doc);
+      (cleaned), a list written as JSON text or comma-separated text;
+    - a str argument loses surrounding quotes; a value that is entirely one template token, only punctuation, only a
+      pronoun or only a word of the workflow's vocabulary is refused (a pronoun the request ties to one subject
+      becomes that subject); otherwise the value stands as the extractor gave it;
+    - a MARKED argument (``copied_from_command_text`` or ``record_named_in_command_text``, ``Param.in_request``) is the
+      one strict check: a ``str`` must be written in ``request`` at word boundaries (case-insensitive; any Unicode
+      dash matches "-") and takes the request's own spelling; one the model cut short inside an identifier match of the
+      request (``command.identifiers``) becomes the whole match; a ``record_named`` one must name a record of the
+      request (``_as_subject``); an ``int`` must be a number the request writes; a list[str] keeps the items the
+      request writes. A marked value given and not written fails the call, required or optional; a marked value not
+      given is not checked. Two marked str arguments may hold one value only when the user writes it as often (an
+      optional one beyond that count takes its default with a note, ``ask.left_empty_line``; a required one fails);
     - ``verdicts`` (``{param: (value, probability)}``, from ``check_verdicts``): a sure
       verdict on a ``classifier_confirms`` parameter replaces its argument, and stands in for a missing
       or invalid enum (for a subject, ``NO_SUBJECT`` resets it, or fails a required one);
       a ``classifier_decides`` bool ignores any argument given for it: a sure verdict decides it,
-      and it keeps its default otherwise;
-    - an optional str argument equal to another str argument takes its default.
+      and it keeps its default otherwise.
 
     An argument that only applies when others take some value is reset afterwards, by the
     planning command's model validators (``_validate_arguments``).
@@ -3807,14 +4349,10 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], planni
 
 # ---------------------------------------------------------------- the planner call
 
-def _field_desc(p: Param) -> str:
-    desc = p.desc or p.name
-    if p.type == "bool":
-        if p.default is True:
-            return f"{desc}. false only when the request explicitly asks against this; otherwise true"
-        return f"{desc}. true only when the request explicitly asks for this; otherwise false"
-    if p.type == "str":
-        desc += ". Copied verbatim from the request"
+def _field_desc(p: Param, sentences: tuple[str, ...] = ()) -> str:
+    """A field of the planner's typed fill: its description, the sentences of its declarations (``option_sentences``,
+    the extractor's own) and whether it is required."""
+    desc = ". ".join([(p.desc or p.name).rstrip(". "), *(s.rstrip(".") for s in sentences)])
     return desc + (" (required)" if p.required else f" (default {json.dumps(_json_value(p))})")
 
 
@@ -3829,13 +4367,14 @@ def typed_signature(command: PlanningCommandCommand):
     import dspy
 
     fields: dict = {"user_query": (str, dspy.InputField())}
+    sentences = option_sentences(command.input_model)
     for p in command.params:
         if p.alone:   # verify "alone": the classifier decides it, the planner is not asked
             continue
         kind = {"str": str, "bool": bool, "int": int, "float": float, "list[str]": list[str]}.get(p.type)
         if p.type == "enum":
             kind = Literal[p.values]
-        fields[p.name] = (kind, dspy.OutputField(desc=_field_desc(p)))
+        fields[p.name] = (kind, dspy.OutputField(desc=_field_desc(p, sentences.get(p.name, ()))))
     fields["steps_before"] = (list[str], dspy.OutputField(
         desc="plain command steps to run before the skill, only for parts of the request it does not cover; "
              "only values the request writes, never a <placeholder> or an id; usually []"))
@@ -3844,10 +4383,8 @@ def typed_signature(command: PlanningCommandCommand):
              "only values the request writes, never a <placeholder> or an id; usually []"))
     instructions = (
         "Plan the user_query by calling one skill command and, only if needed, plain command steps.\n"
-        "Fill the skill's parameters from the request: names and values exactly as the request writes them "
-        "(never add a word the request does not attach to the name); a boolean is true only when the request "
-        "explicitly asks for that part, otherwise false; an enum is what the request is about; leave a "
-        "parameter empty to take its default.\n"
+        "Fill the skill's parameters from the request, as each parameter's description says; an enum is what the "
+        "request is about; leave a parameter empty to take its default.\n"
         "Code expands the skill into its command steps. steps_before / steps_after are only for parts of the "
         "request the expansion does not cover, each a short sentence naming one available command; never "
         "repeat a command the expansion already runs; usually both are empty.\n\n"
@@ -3965,6 +4502,9 @@ class PlanningCommandCallPlan:
     #: The verify verdicts the call read (``check_verdicts``), kept so a call planned again on a failed first phase
     #: (``reextracted_arguments``) checks its arguments the same way. None when there were none.
     verdicts: dict | None = None
+    #: The advisory (``parameters.check.not_written_fields``): the unmarked ``str`` and ``int`` arguments whose value the
+    #: request does not write, as field names. Recorded on the planner span; it changes nothing.
+    not_in_request: list[str] = field(default_factory=list)
 
 
 def no_argument_call(command: PlanningCommandCommand) -> PlanningCommandCallPlan:
@@ -4078,13 +4618,18 @@ def _typed_fallback(command: PlanningCommandCommand, request: str, available_com
 
 
 def checked_arguments(command: PlanningCommandCommand, raw: dict, request: str, workflow=None,
-                      verdicts: dict | None = None) -> tuple[dict, list[str]]:
+                      verdicts: dict | None = None, *, user_text: str | None = None) -> tuple[dict, list[str]]:
     """``(args, notes)``: *raw* through every check a typed planning call runs on its arguments, in order:
     ``check_arguments`` (the guards, with ``verdicts`` when the call has them), then ``_validate_arguments``
     (the ``Input``'s model validators, the roles).
+
+    *request* is what the guards read. *user_text* is the validators' ``command_text`` when the two differ: a caller
+    whose *request* also holds text the framework wrote (the answers of the turn's earlier parts, so that a value an
+    earlier part found counts as written) passes the user's own words here, because a validator reads its
+    ``command_text`` as what the user said (bd fix-ftdl.10). Not given, the validators read *request*.
     Raises PlanningCommandInputError when a check refuses them."""
     args, notes = check_arguments(command, raw, request, verdicts)
-    return _validate_arguments(command, args, request, workflow, notes), notes
+    return _validate_arguments(command, args, request if user_text is None else user_text, workflow, notes), notes
 
 
 def typed_fallback_arguments(command: PlanningCommandCommand, request: str, available_commands: str, raw: dict,
@@ -4137,7 +4682,9 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
             kind = _input_error_kind(refused, command, raw, request, seen["verdicts"])
             if kind == pipeline.KIND_MISSING and attempt == 1 and seen["reset"]:
                 kind = pipeline.KIND_REFUSED   # a value the extractor gave, a check then reset to not given
-            return pipeline.Verdict(kind, str(refused), refused)
+            return pipeline.Verdict(kind, str(refused), refused,
+                                    open=_open_arguments(command, refused, raw, request, seen["verdicts"],
+                                                         seen["reset"] if attempt == 1 else {}))
 
     with ThreadPoolExecutor(1) as pool:
         checks = pool.submit(contextvars.copy_context().run, check_verdicts, check_lm, command, request)
@@ -4152,7 +4699,9 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
         # the extractor reads the request once more with the refusal after it; the guards still read the request alone
         extracted = pipeline.extract(
             fill_text, validate=validate, unparsed=lambda: bool(seen["unparsed"]),
-            retry_note=REFUSED_EXTRACTION_NOTE)
+            retry_note=REFUSED_EXTRACTION_NOTE,
+            unparsed_refusal=pipeline.unparsed_refusal(command.input_model) if command.input_model is not None
+            else pipeline.UNPARSED_REFUSAL)
     verdicts, raw = seen["verdicts"], extracted.params
     if extracted.final.ok:
         args, notes = extracted.final.detail
@@ -4179,7 +4728,17 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
     notes += verdict_notes(verdicts)   # the verdicts read, whether or not they changed an argument
     phases = call_phases(command, args)
     return PlanningCommandCallPlan(plan=number(before + steps + after), args=args, notes=notes, prediction=prediction,
-                         phases=phases, steps_before=list(before), steps_after=list(after), verdicts=verdicts)
+                         phases=phases, steps_before=list(before), steps_after=list(after), verdicts=verdicts,
+                         not_in_request=_not_in_request(command, args, request))
+
+
+def _not_in_request(command: PlanningCommandCommand, args: dict, request: str) -> list[str]:
+    """The advisory of a typed call (``parameters.check.not_written_fields`` on its checked arguments); never fails a call."""
+    try:
+        return one_guard.not_written_fields(command.input_model, args, request) if command.input_model is not None else []
+    except Exception as exc:  # noqa: BLE001 - recording only
+        logger.warning(f"planning command {command.name}: the not-in-request advisory failed: {exc!r}")
+        return []
 
 
 def reextracted_arguments(command: PlanningCommandCommand, request: str, observation: str, args: dict,
@@ -4209,6 +4768,16 @@ def reextracted_arguments(command: PlanningCommandCommand, request: str, observa
         return None
     new_args, _notes = extracted.final.detail
     return None if new_args == args else new_args
+
+
+def _open_arguments(command: PlanningCommandCommand, refused: "PlanningCommandInputError", raw: dict, request: str,
+                    verdicts: dict | None, reset: dict) -> tuple[str, ...] | None:
+    """The arguments a refused call leaves open (every gap ``argument_gaps`` finds, the ones the refusal names, the ones
+    the not-given check reset): the only ones the one second fill may change. None when the refusal names no input."""
+    if not refusal_names_an_input(command, refused):
+        return None
+    names = [*refusal_gaps(command, refused).names, *argument_gaps(command, raw, request, verdicts).names, *reset]
+    return tuple(dict.fromkeys(names)) or None
 
 
 def _input_error_kind(refused: "PlanningCommandInputError", command: PlanningCommandCommand | None = None,

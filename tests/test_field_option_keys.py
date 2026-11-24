@@ -85,7 +85,7 @@ def test_fieldoptions_names_the_option_keys_and_the_option_typeddicts_are_export
     ``UiOptions`` included, is exported identically on ``fastworkflow`` and ``fastworkflow.planning``."""
     assert set(FieldOptions.__annotations__) == set(OPTION_KEYS)
     assert {"ignore"} == set(CopiedOptions.__annotations__) == set(RecordNamedOptions.__annotations__)
-    assert set(ConfirmsOptions.__annotations__) == {"meanings"}
+    assert set(ConfirmsOptions.__annotations__) == {"meanings", "words"}
     assert set(UiOptions.__annotations__) == {"hidden", "hero", "format", "widget", "table", "tones", "currency"}
     for name in ("FieldOptions", "CopiedOptions", "RecordNamedOptions", "ConfirmsOptions", "UiOptions"):
         assert getattr(fastworkflow, name) is getattr(fastworkflow.planning, name)
@@ -118,15 +118,15 @@ def test_two_command_text_after_command_name_fields_in_one_input_fail_the_load()
         pc.option_params(Input, "app/show")
 
 
-def test_converted_from_command_text_takes_a_field_out_of_the_copy_check_and_is_read_by_argument_checks():
+def test_only_a_marked_field_is_the_strict_check_and_an_execution_input_reads_it_through_argument_checks():
     class Input(BaseModel):
-        due: str = Field(default="", description="the due date", json_schema_extra={"converted_from_command_text": True})
+        due: str = Field(default="", description="the due date")
         name: str = Field(default="", description="a name", json_schema_extra={"copied_from_command_text": True})
 
-    assert one_guard.is_grounding_exempt(Input.model_fields["due"])
-    assert not one_guard.is_grounding_exempt(Input.model_fields["name"])
-    # an execution command's Input: a converted field is not a planning option, so no param
-    assert "due" not in _params(Input)
+    assert not one_guard.is_marked(Input.model_fields["due"])
+    assert one_guard.is_marked(Input.model_fields["name"])
+    # an execution command's Input: an unmarked field carries no check option, so it is no param
+    assert "due" not in _params(Input) and "name" in _params(Input)
 
 
 def _resolve(consumer_input_cls, producer_output_cls, *, consumer="Library/open_book"):
@@ -278,11 +278,30 @@ def test_an_unknown_key_on_a_planning_command_fails_even_without_a_close_match()
         pc.option_params(Input, "app/show", planning=True)
 
 
-def test_an_execution_command_may_carry_its_own_keys_but_not_a_misspelled_option():
+@pytest.mark.parametrize("extra", [{"in_request": False}, {"verify": False}])
+def test_a_retired_key_with_no_replacement_says_leave_it_out(extra):
     class Input(BaseModel):
-        kind: str = Field(default="", json_schema_extra={"enum": ["book", "member"], "examples": ["book"]})
+        name: str = Field(default="", json_schema_extra=extra)
+
+    with pytest.raises(pc.PlanningCommandFormatError, match=r"is removed: leave the key out$"):
+        pc.option_params(Input, "app/show", planning=True)
+
+
+def test_an_execution_command_may_carry_a_json_schema_annotation_but_no_unknown_key():
+    # One rule (bd fix-ftdl.8.22, stated in check_field_keys): an unknown key fails an Input field of either kind; an
+    # execution command's Input also takes the JSON Schema annotations (its parameter-example generator reads
+    # description and examples there), a planning command's takes its options only.
+    class Input(BaseModel):
+        kind: str = Field(default="", json_schema_extra={"examples": ["book"], "title": "Kind"})
 
     assert pc.option_params(Input, "app/show") == ()
+    with pytest.raises(pc.PlanningCommandFormatError, match="unknown option 'examples'"):
+        pc.option_params(Input, "app/show", planning=True)
+    class Own(BaseModel):
+        kind: str = Field(default="", json_schema_extra={"examples": ["book"], "x_note": "an author's own key"})
+
+    with pytest.raises(pc.PlanningCommandFormatError, match="unknown option 'x_note'; its options are .*examples"):
+        pc.option_params(Own, "app/show")
     class Bad(BaseModel):
         kind: str = Field(default="", json_schema_extra={"copied_from_command_txt": True})
 
@@ -300,7 +319,7 @@ def test_an_execution_command_may_carry_its_own_keys_but_not_a_misspelled_option
     ({"copied_from_command_text": {"ignore": "the"}}, "copied_from_command_text ignore must be a list of words"),
     ({"classifier_confirms": {"meanings": {}}}, "classifier_confirms meanings must be a dict"),
     ({"classifier_decides": {"x": 1}}, "classifier_decides must be True"),
-    ({"from_command_output": 3}, 'from_command_output must be "[Context/]command[.field]" text or a list of it'),
+    ({"from_command_output": 3}, 'from_command_output must be "[Context/]command.field" text or a list of it'),
 ])
 def test_a_false_or_bad_value_is_rejected(extra, message):
     model = _field(bool if "classifier_decides" in extra else str, extra)
@@ -313,8 +332,6 @@ def test_a_false_or_bad_value_is_rejected(extra, message):
      "copied_from_command_text and record_named_in_command_text cannot both be on a field"),
     (bool, {"classifier_confirms": True, "classifier_decides": True},
      "classifier_confirms and classifier_decides cannot both be on a field"),
-    (str, {"converted_from_command_text": True, "copied_from_command_text": True},
-     "converted_from_command_text takes the field out of the copy check"),
     (str, {"classifier_confirms": True}, "option classifier_confirms does not apply to field 'value' of type str"),
 ])
 def test_conflicting_or_incomplete_pairs_fail_the_load(annotation, extra, message):
@@ -468,6 +485,20 @@ def test_an_output_ui_false_is_a_field_source_problem():
         total: float = Field(default=0.0, json_schema_extra={"ui": False})
 
     assert "leave the key out to turn it off" in _output_problems(Output)[0].message
+
+
+@pytest.mark.parametrize("extra, needle", [
+    ({"colour": "red"}, "unknown option 'colour'; an Output field takes ui"),
+    ({"uii": {"format": "code"}}, "unknown option 'uii'; did you mean 'ui'?"),
+    ({"verify": True}, "verify: True is removed: write"),
+    ({"classifier_confirms": True}, "classifier_confirms is an option of an Input field"),
+])
+def test_an_output_field_takes_only_ui_and_json_schema_annotations(extra, needle):
+    class Output(BaseModel):
+        total: float = Field(default=0.0, json_schema_extra=extra)
+
+    problems = _output_problems(Output)
+    assert len(problems) == 1 and needle in problems[0].message, problems
 
 
 def test_a_field_without_a_ui_key_is_unchanged_by_the_ui_check():

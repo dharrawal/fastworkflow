@@ -433,7 +433,7 @@ def test_i_a_guard_refusal_is_the_invalid_value_response_and_pushes_no_frame(
         assert [(o.success, o.command_response.response) for o in refused] == [(
             False,
             f"PARAMETER EXTRACTION ERROR FOR COMMAND '{BOOK_BY_TITLE}'\n"
-            "I can't run book by title yet: title='Foundation' is not written in the request. "
+            "I can't run book by title yet: the title 'Foundation' is not in your request. "   # ask.refused_clause
             "Which title should I use?",
         )]
         # The guard came before the hook and the Input: neither ran, and no frame was pushed.
@@ -511,8 +511,8 @@ def test_l_an_input_validator_reading_the_request_refuses_on_the_nested_path(
         assert outputs[0].success is False
         assert outputs[0].command_response.response == (
             f"PARAMETER EXTRACTION ERROR FOR COMMAND '{BOOK_BY_TITLE}'\n"
-            f"the arguments break a rule of {BOOK_BY_TITLE}: "
-            "title: the library does not look up withdrawn books")
+            "I can't run book by title yet: the library does not look up withdrawn books. "
+            "Which title should I use?")
         assert outputs[1].success is True
         # Only the accepted step entered the planning path.
         assert entered == [(BOOK_BY_TITLE, "book_by_title title=Dune")]
@@ -1132,8 +1132,10 @@ def test_ae_a_fan_out_item_whose_sub_plan_calls_a_planning_command_is_bound_to_i
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
 
-        @phase(over="find.book_uids", output=item_opened)
-        def opened(self, uid):
+        Opened = item_opened  # the return annotation below is read in the class's namespace
+
+        @phase(over="find.book_uids")
+        def opened(self, uid) -> Opened:
             return [run("open_by_uid", book_uid=uid)]
 
         def __result__(self, input, find, opened):
@@ -1220,8 +1222,10 @@ def test_ak_two_fan_out_items_each_open_their_record_in_place(open_by_uid_env, m
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
 
-        @phase(over="find.book_uids", output=item_opened)
-        def opened(self, uid):
+        Opened = item_opened  # the return annotation below is read in the class's namespace
+
+        @phase(over="find.book_uids")
+        def opened(self, uid) -> Opened:
             return [run("open_by_uid", book_uid=uid)]
 
         def __result__(self, input, find, opened):

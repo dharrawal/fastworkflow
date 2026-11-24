@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `member` | str | required | `<member>` |  | yes | the member's name |
+| `member` | str | required | `Raj Patel` |  | yes | the member's name |
 | `loans` | bool | false | false |  |  | whether to name the books the member has on loan |
 | `notes` | bool | false | false |  |  | whether to show the notes on the member's record |
 
@@ -84,7 +84,7 @@ For the sample inputs, once for each different plan the inputs that change them 
 
 Reads no earlier facts. Output: `Output`.
 
-1. `find_member query=<member>`
+1. `find_member query="Raj Patel"`
 
 #### Phase 2: `member`
 
@@ -92,7 +92,7 @@ Reads: `find`. Output: `Output`. Settings: `when=find.member_uids`.
 
 _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 
-1. `open_member with the uid of the <member> match`
+1. `open_member with the uid of the "Raj Patel" match`
 
 ### Plan when loans = false, notes = true
 

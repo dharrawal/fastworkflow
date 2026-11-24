@@ -15,7 +15,7 @@ import heapq
 import logging
 from dataclasses import dataclass
 
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import fastworkflow
 from fastworkflow.command_context_model import CommandContextModel
@@ -43,7 +43,6 @@ class DescendEdge:
     command: str
     target: str
     needs: tuple[str, ...] = ()
-    required_to_enter: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,7 +52,6 @@ class NavStep:
     command: str
     enters: str
     needs: tuple[str, ...] = ()
-    required_to_enter: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,48 +59,44 @@ class _Move:
     command: str
     target: str
     needs: tuple[str, ...]
-    required_to_enter: tuple[str, ...]
     kind: str
 
 
+_CURRENT = object()
+
+
+def live_chain(workflow, record: object = _CURRENT) -> Iterator[tuple[object, str]]:
+    """THE climb (bd fix-ftdl.3): ``(record, context name)`` for *record* (default: the current position) and each
+    record that encloses it, nearest first, up to and including the root. Every lookup path reads it.
+
+    Lazy: ``workflow.get_parent`` is asked for the next record only when the reader needs it. The root and a repeat are
+    both found by identity: the chain ends at the root record (``is workflow.root``), and a parent already on the chain
+    ends it, so a nested record of the same class as an enclosing one keeps the rest of the chain. A parent of None
+    ends it early: the lookup goes straight to the global commands. In a workflow with a root, a record that is not the
+    root whose context has no ``get_parent`` raises ``MissingGetParentError`` from ``Workflow.get_parent``, naming the
+    context, the file and the method; no reader catches it. A record of None is the global scope and has no chain.
+    """
+    if record is _CURRENT:
+        record = workflow._current_command_context
+    root = workflow.root
+    seen: set[int] = set()
+    while record is not None and id(record) not in seen:
+        seen.add(id(record))
+        yield record, fastworkflow.Workflow.get_command_context_name(record)
+        if record is root:
+            return
+        record = workflow.get_parent(record)
+
+
 def live_context_chain(workflow) -> tuple[str, ...]:
-    """The contexts ``go_up`` will actually visit, current first, global last.
+    """The contexts ``go_up`` will actually visit, current first, global last: the names of ``live_chain``, each once.
 
     The hierarchy file lists every parent a context *may* have. ``go_up`` follows
     the object in hand, which has one parent. A path that climbed a parent the
     live object does not have would send the caller the wrong way.
     """
-    current = getattr(workflow, "_current_command_context_name", "*")
-    if current == "*":
-        return ("*",)
-    names = [current]
-    seen = {current}
-    obj = getattr(workflow, "_current_command_context", None)
-    root = getattr(workflow, "root", None)
-    while obj is not None and obj is not root:
-        try:
-            parent = workflow.get_parent(obj)
-        except Exception:
-            logger.debug("parent walk stopped at %r", names[-1], exc_info=True)
-            break
-        if parent is None or parent is obj:
-            break
-        if parent is root:
-            # The root object is a context of its own (library: Library), and go_up reaches it.
-            # Named as the exact-name path names it (exact_name_scopes), before the global scope.
-            root_name = fastworkflow.Workflow.get_command_context_name(root)
-            if root_name not in seen:
-                names.append(root_name)
-            break
-        parent_name = type(parent).__name__
-        if parent_name in seen:
-            break
-        seen.add(parent_name)
-        names.append(parent_name)
-        obj = parent
-    if names[-1] != "*":
-        names.append("*")
-    return tuple(names)
+    names = tuple(dict.fromkeys(name for _, name in live_chain(workflow)))
+    return (*names, "*") if names[-1:] != ("*",) else names
 
 
 def lookup_scopes(workflow_folderpath: str, context_names: Iterable[str]) -> tuple[str, ...]:
@@ -158,30 +152,12 @@ def exact_name_scopes(workflow) -> tuple[LookupScope, ...]:
     The current object's context, then its bases (``CommandContextModel.ordered_base_contexts``,
     transitively), then each record on the LIVE chain (``workflow.get_parent``) with its bases, up to
     and including the root object, then the global scope ``*``. A scope already on the path is
-    skipped, and ``*`` listed as a base is the global scope at the end. The root edge is settled as
-    ``planning_scopes`` settles it: a parent of None, or a parent already on the path, ends the chain.
+    skipped, and ``*`` listed as a base is the global scope at the end. The records are ``live_chain``'s.
     With no current object there is only the global scope.
     """
     folder = getattr(workflow, "folderpath", None)
-    root = getattr(workflow, "root", None)
-    obj = getattr(workflow, "_current_command_context", None)
-    records: list[tuple[str, object]] = []
-    if obj is not None:
-        records.append((fastworkflow.Workflow.get_command_context_name(obj), obj))
-        visited: set[int] = {id(obj)}
-        while obj is not root:
-            try:
-                parent = workflow.get_parent(obj)
-            except Exception:  # noqa: BLE001 - never fail a lookup on the parent walk
-                logger.debug("exact-name lookup parent walk stopped at %r", obj, exc_info=True)
-                break
-            if parent is None or id(parent) in visited:
-                break
-            visited.add(id(parent))
-            records.append((fastworkflow.Workflow.get_command_context_name(parent), parent))
-            if parent is root:
-                break
-            obj = parent
+    root = workflow.root
+    records = [(name, record) for record, name in live_chain(workflow)]
 
     model = None
     if folder and records:
@@ -208,10 +184,13 @@ def exact_name_scopes(workflow) -> tuple[LookupScope, ...]:
 
 
 def scope_command_names(workflow_folderpath: str, context_name: str) -> tuple[str, ...]:
-    """The qualified command names a scope offers: its commands, inherited ones and planning commands."""
+    """The qualified command names a scope offers to a name a user or an agent writes: its commands, inherited ones
+    and planning commands. A command with no ``Signature`` (a startup command) runs only as an action, so no name
+    reaches it (``CommandDirectory.runs_only_as_action``)."""
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
-    return tuple(sorted({*crd.get_command_names(context_name),
-                         *crd.get_planning_command_names(context_name)}))
+    return tuple(sorted(name for name in {*crd.get_command_names(context_name),
+                                          *crd.get_planning_command_names(context_name)}
+                        if not crd.command_directory.runs_only_as_action(name)))
 
 
 def token_names_command(token: str, name: str) -> bool:
@@ -258,7 +237,7 @@ def plan_navigation(
         graph.setdefault(source, []).append(move)
 
     for here, parent in zip(live_chain, live_chain[1:]):
-        add(here, _Move("go_up", parent, (), (), "ascend"))
+        add(here, _Move("go_up", parent, (), "ascend"))
 
     nodes = set(live_chain)
     for edge in edges:
@@ -266,15 +245,14 @@ def plan_navigation(
         nodes.add(edge.target)
         if edge.source == edge.target:
             continue
-        add(edge.source, _Move(
-            edge.command, edge.target, edge.needs, edge.required_to_enter, "descend"))
+        add(edge.source, _Move(edge.command, edge.target, edge.needs, "descend"))
     for node in nodes:
         if node != "*":
-            add(node, _Move("reset_context", "*", (), (), "reset"))
+            add(node, _Move("reset_context", "*", (), "reset"))
 
     for source in graph:
         graph[source].sort(key=lambda move: (
-            len(move.needs) + len(move.required_to_enter),
+            len(move.needs),
             _KIND_ORDER[move.kind],
             move.command,
         ))
@@ -289,7 +267,7 @@ def plan_navigation(
         for move in graph.get(node, ()):
             cand = (
                 steps + 1,
-                caveats + len(move.needs) + len(move.required_to_enter),
+                caveats + len(move.needs),
                 resets + (1 if move.kind == "reset" else 0),
             )
             if move.target not in best or cand < best[move.target]:
@@ -306,8 +284,7 @@ def plan_navigation(
         node = target
         while prev[node] is not None:
             source, move = prev[node]
-            steps_rev.append(NavStep(
-                move.command, move.target, move.needs, move.required_to_enter))
+            steps_rev.append(NavStep(move.command, move.target, move.needs))
             node = source
         steps_rev.reverse()
         planned[target] = tuple(steps_rev)
@@ -401,8 +378,7 @@ def _in_context_entries(
             (edge for edge in edges
              if edge.source == current and edge.target == target
              and _command_tail(edge.command) != wanted),
-            key=lambda edge: (
-                len(edge.needs) + len(edge.required_to_enter), edge.command),
+            key=lambda edge: (len(edge.needs), edge.command),
         )
         if not local:
             continue
@@ -412,19 +388,13 @@ def _in_context_entries(
             f"To open {label!r} from here, run {runs} instead of {token!r}; "
             f"that is how you enter {label!r} from {current_label!r}."
         )
-        gated = local[0].required_to_enter if len(local) == 1 else ()
-        if gated:
-            sentence += (
-                f" Without {', '.join(gated)} it does not enter {label!r}."
-            )
         sentences.append(sentence)
     return sentences
 
 
 def _format_entry(edge: DescendEdge) -> str:
-    """``command name=<name> ...`` with every value the edge needs to enter."""
-    holes = _union(edge.needs, edge.required_to_enter)
-    return edge.command + "".join(f" {name}=<{name}>" for name in holes)
+    """``command name=<name> ...`` with every value the edge needs."""
+    return edge.command + "".join(f" {name}=<{name}>" for name in edge.needs)
 
 
 def unavailable_command_message(
@@ -476,7 +446,7 @@ def code_path(workflow, command: str) -> list[str] | None:
         return None
     found = [path for path in paths.values() if path]
     shortest = [path for path in found if len(path) == min(map(len, found))] if found else []
-    if len(shortest) != 1 or any(step.needs or step.required_to_enter for step in shortest[0]):
+    if len(shortest) != 1 or any(step.needs for step in shortest[0]):
         return None
     return [step.command.split("/")[-1] for step in shortest[0]]
 
@@ -525,9 +495,9 @@ def render_already_in_context(token: str, current: str, workflow) -> str:
 def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
     """The navigation edges, declared by ``@descends_to`` on each command and nothing else.
 
-    ``when_parameter`` on ``@descends_to`` makes the edge conditional: the parameter is then required to
-    enter (``required_to_enter``). The parameters the command needs to run come from its required
-    ``Input`` fields (``needs``), as ``_required_parameters`` reads them (design 3.15). A context
+    Every edge is unconditional: a ``@descends_to`` command enters its context whenever it runs. The
+    parameters the command needs to run come from its required ``Input`` fields (``needs``), as
+    ``_required_parameters`` reads them (design 3.15). A context
     class's ``enter_command`` is no longer read; it is a load error (``entry_declarations``).
     """
     try:
@@ -542,7 +512,6 @@ def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
 
     for command_key, effect in effects.items():
         sources = _contexts_for_command_key(command_key, contexts)
-        gate = effect.when_parameter_present
         for target in effect.declared_targets():
             if not _enterable(target, occupiable):
                 continue
@@ -550,16 +519,16 @@ def collect_descend_edges(workflow_folderpath: str) -> tuple[DescendEdge, ...]:
                 if source == target:
                     continue
                 shown = _shown_command(source, command_key, contexts)
-                _put(raw, _RawEdge(source, shown, command_key, target, gate))
+                _put(raw, _RawEdge(source, shown, command_key, target))
 
     schema: dict[str, tuple[str, ...] | None] = {}
     edges: dict[tuple[str, str, str], DescendEdge] = {}
     for record in raw.values():
         if record.routing_name not in schema:
             schema[record.routing_name] = _required_parameters(routing, record.routing_name)
-        needs, required = _classify(schema[record.routing_name], record.gate)
         key = (record.source, record.command, record.target)
-        edges[key] = DescendEdge(record.source, record.command, record.target, needs, required)
+        edges[key] = DescendEdge(
+            record.source, record.command, record.target, tuple(schema[record.routing_name] or ()))
     return tuple(edges.values())
 
 
@@ -575,7 +544,7 @@ def entering_commands(workflow_folderpath: str, context_name: str) -> list[str]:
         logger.debug("entering commands unread for %r", context_name, exc_info=True)
         return []
     shown = {
-        " ".join([edge.command, *(f"<{name}>" for name in _union(edge.needs, edge.required_to_enter))])
+        " ".join([edge.command, *(f"<{name}>" for name in edge.needs)])
         for edge in edges
         if edge.target == context_name
     }
@@ -583,23 +552,22 @@ def entering_commands(workflow_folderpath: str, context_name: str) -> list[str]:
 
 
 def context_entry_commands(workflow_folderpath: str) -> frozenset[str]:
-    """The commands that only enter a context: each declares ``@descends_to`` with no ``when_parameter`` (it always
-    enters) and takes no required input (``_required_parameters`` read the signature and found none). Such a command
-    does nothing about what a request asks except move the workflow, so a request is never routed to one by meaning
-    (``resolution.part_intent`` leaves them out of the remote decision model's options). A command whose signature
-    cannot be read is not counted. The framework's own navigation commands are core commands, left out elsewhere."""
+    """The commands that only enter a context: each declares ``@descends_to`` a context other than the ones it runs in
+    (the command of a descend edge, ``collect_descend_edges``) and takes no required input (``_required_parameters``
+    read the signature and found none). Such a command does nothing about what a request asks except move the workflow,
+    so a request is never routed to one by meaning (``resolution.part_intent`` leaves them out of the remote decision
+    model's options). A command that moves within its own context (to another record of the same class) enters no
+    context and is not one. A command whose signature cannot be read is not counted. The framework's own navigation
+    commands are core commands, left out elsewhere."""
     effects, _ = _navigation_effects(workflow_folderpath)
     if not effects:
         return frozenset()
     routing = RoutingRegistry.get_definition(workflow_folderpath)
+    contexts: dict[str, list[str]] = dict(routing.contexts)
     return frozenset(name for name, effect in effects.items()
-                     if effect.when_parameter_present is None and _required_parameters(routing, name) == ())
-
-
-def declared_descends_to(routing, command_name: str) -> str | None:
-    """The context a command declares it enters with ``@descends_to``, or None."""
-    descend = _declared_descend(routing, command_name)
-    return descend.target if descend is not None else None
+                     if _required_parameters(routing, name) == ()
+                     and any(target not in _contexts_for_command_key(name, contexts)
+                             for target in effect.declared_targets()))
 
 
 @dataclass(frozen=True)
@@ -608,7 +576,6 @@ class _RawEdge:
     command: str
     routing_name: str
     target: str
-    gate: str | None
 
 
 def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
@@ -622,7 +589,6 @@ def _put(raw: dict[tuple[str, str, str], _RawEdge], record: _RawEdge) -> None:
         record.command,
         existing.routing_name or record.routing_name,
         record.target,
-        existing.gate or record.gate,
     )
 
 
@@ -631,7 +597,6 @@ class _DeclaredDescend:
     """A command's ``@descends_to`` declaration."""
 
     target: str
-    when_parameter_present: str | None = None
 
     def declared_targets(self) -> tuple[str, ...]:
         return (self.target,)
@@ -641,8 +606,7 @@ def _declared_descend(routing, command_name: str) -> _DeclaredDescend | None:
     """The ``@descends_to`` a command declares on its response-generator class, or None.
 
     The class is read through the same routing lookup as the other command
-    facts. ``when_parameter`` is the parameter whose presence makes the command
-    descend; without it the command always descends.
+    facts. The command always descends.
     """
     try:
         module = routing.get_command_class(
@@ -653,8 +617,7 @@ def _declared_descend(routing, command_name: str) -> _DeclaredDescend | None:
     declared = declared_descend(module)
     if declared is None:
         return None
-    target, gate = declared
-    return _DeclaredDescend(target, gate)
+    return _DeclaredDescend(declared)
 
 
 def _navigation_effects(workflow_folderpath: str):
@@ -734,43 +697,9 @@ def _required_parameters(routing, command_name: str) -> tuple[str, ...] | None:
     return tuple(required)
 
 
-def _classify(
-    schema_required: tuple[str, ...] | None,
-    gate: str | None,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split parameters into 'must pass to run' and 'must pass to enter'.
-
-    A required input is ``needs``. ``when_parameter`` on an optional field is the
-    second kind: the command runs without it and stays put.
-    """
-    needs = tuple(schema_required or ())
-    required: tuple[str, ...] = ()
-    if gate and gate not in needs:
-        required = (gate,)
-    return needs, required
-
-
-def _union(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
-    seen: set[str] = set()
-    merged: list[str] = []
-    for name in (*left, *right):
-        if name not in seen:
-            seen.add(name)
-            merged.append(name)
-    return tuple(merged)
-
-
 def _format_step(step: NavStep) -> str:
-    holes = list(step.needs)
-    holes.extend(name for name in step.required_to_enter if name not in step.needs)
     text = step.command
-    if holes:
-        text += "".join(f" <{name}>" for name in holes)
-    notes = [f"needs {name}" for name in step.needs]
-    if step.required_to_enter:
-        target = display_context_name(step.enters)
-        joined = ", ".join(step.required_to_enter)
-        notes.append(f"{joined} required to enter {target}")
-    if notes:
-        text += " (" + "; ".join(notes) + ")"
+    if step.needs:
+        text += "".join(f" <{name}>" for name in step.needs)
+        text += " (" + "; ".join(f"needs {name}" for name in step.needs) + ")"
     return text

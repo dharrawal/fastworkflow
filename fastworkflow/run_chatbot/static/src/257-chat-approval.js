@@ -1,8 +1,9 @@
 /* -- chat approval card [fix-weih.12] ------------------------------------- */
 /* An execution approval (question_kind "approval") as a card with the bound
    parameters and three buttons, with no model call. ActionReplyPolicy accepts
-   only the exact words yes, always and no ("Yes" or "yes please" costs a
-   round), so the buttons send exactly those words, kept in one place below.
+   a yes (yes, true, ok, agreed, accept or go), always or no, each as the
+   whole reply with case and a trailing . or ! ignored ("yes please" costs a
+   round), so the buttons send the words yes, always and no, kept below.
    The turn waits when out.status is "awaiting_user" (the agent asked) or when
    the last output says artifacts.awaiting_user === true (a "/" command the
    user typed: its turn status is "completed"). Registered after the built-in
@@ -107,9 +108,6 @@ function tmRenderApprovalCard(bubbleMsg, out) {
     if (Object.keys(shown).length) {
       root.appendChild(tmRenderKeyValues(shown, Object.keys(shown),
         schema && tmIsPlainObject(schema.input) ? schema.input : null));
-    }
-    if (approval.irreversible === true) {
-      root.appendChild(el("div", "approvalIrreversible", "This cannot be undone."));
     }
   } else {
     root.setAttribute("aria-label", "Approval needed");

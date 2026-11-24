@@ -340,10 +340,12 @@ def test_the_global_scope_is_one_line_on_a_shortlist_that_does_not_name_it(copy_
     assert not [line for line in named.split("\n") if line.startswith("Global commands (")]
 
 
-def test_the_threshold_is_7000_and_the_three_example_listings_are_under_it(copy_of):
-    """FULL_LISTING_MAX_CHARS is 7000 (10.15, from the 10.7 measurement): the todo, library and tutorial full listings
-    are each at most it, so production gives each whole. (The real app's listing, 82,055 characters, is above it.)"""
-    assert FULL_LISTING_MAX_CHARS == 7000
+def test_the_threshold_is_8000_and_the_three_example_listings_are_under_it(copy_of):
+    """FULL_LISTING_MAX_CHARS is 8000 (10.15, from the 10.7 measurement, 7000; raised to 8000 by fix-xj0x because the
+    library example with declared input examples is about 7,700 characters, output examples no longer rendered): the
+    todo, library and tutorial full listings are each at most it, so production gives each whole. (The real app's
+    listing, 82,055 characters, is above it.)"""
+    assert FULL_LISTING_MAX_CHARS == 8000
     todo, library = copy_of(TODO, "todo_size"), _library_in(copy_of, name="library_size")
     tutorial = copy_of(TUTORIAL, "tutorial_size")
     for app in (todo, library, tutorial):
@@ -373,7 +375,7 @@ def test_a_large_workflow_is_cut_to_the_shortlist_above_the_threshold(copy_of, m
     full = workflow_agent.planner_commands_text(library)
     command = run_listing_text(library, "run list_member_loans for the member", arm=COMMAND_SHORTLIST)
     assert len(command) < len(full)
-    # THRESHOLD, lowered threshold (the library is 6,516 characters, under the real 7,000): the shortlist
+    # THRESHOLD, lowered threshold (the library is about 7,700 characters, under the real 8,000): the shortlist
     monkeypatch.setattr(run_listing, "FULL_LISTING_MAX_CHARS", 3000)
     with listing_arm(THRESHOLD):
         assert run_listing_text(library, "run list_member_loans for the member") == command

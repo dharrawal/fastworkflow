@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Correct or refuse · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-hook">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-hook">
+      <div class="prose">
+        <p class="num">07</p>
+        <h3>Correct or refuse</h3>
+        <p>Sometimes a value is the right type but still not usable: a name typed in the wrong case, an end date before its start date, a request about "everyone" for a command that handles one person. Reach for this shape when your command must fix such a value, or turn it down with a clear message, before its code runs.</p>
+        <p>The shape is one method on the command's <code>Input</code> class (the pydantic model that lists the command's parameters, see <a href="e-input.html">an input</a>), decorated with <code>@model_validator(mode="after")</code>. The framework calls it after it has read the values out of the user's request. In the method you do one of three things:</p>
+        <ul>
+          <li><b>Accept.</b> Return <code>self</code>.</li>
+          <li><b>Correct.</b> Assign a better value to <code>self.&lt;field&gt;</code>, then return <code>self</code>. Your command's code reads the corrected value.</li>
+          <li><b>Refuse.</b> Raise <code>fastworkflow.Refused(message, field=...)</code>. The message is what the user reads, so say what is wrong and what a good value looks like.</li>
+        </ul>
+        <p><b>What the user sees.</b> A refusal that names a field (<code>field="user_name"</code>, or a list of names) means "this value is wrong, but an answer can fix it". The framework clears that field, keeps the others, and asks for it again, showing your message (it asks the user, or in agent mode the agent that made the call). Their reply is checked again, your validator included. A refusal with no <code>field</code> means "no answer can fix this call". Nobody is asked: the command ends and the user sees your message as a failed result. When the values came from the model that reads the request, a refusal that names a field first makes that model read the request once more, with your message after it, so the message helps it pick a better value for that field (only the fields you named are taken from its second answer). A refusal with no <code>field</code> is not read again: the model is never asked to rewrite values nobody asked about. A <code>@field_validator</code> on one field that raises <code>ValueError</code> or <code>AssertionError</code> is a refusal of that field, exactly as <code>Refused(message, field=&lt;that field&gt;)</code>; so is one that raises <code>Refused(message)</code> with no <code>field</code>: the field is the one the validator is on, and it is asked again. A <code>field</code> that names no field of the <code>Input</code> is a bug: on an execution command the call fails with an error naming the field and the <code>Input</code>'s fields.</p>
+        <p><b>A correction is kept only when the validator passes.</b> If you assign a value and then raise <code>Refused</code>, the assignment is thrown away and the values stay as they were before your method ran. A value a validator corrected is noted "(validator)" in the call's notes on a planning command; on an execution command the extraction span records it as <code>validation_hook.changed_fields</code>.</p>
+        <p><b>The same method works for a planning command.</b> A planning command (a command that writes the steps of a job, see <a href="p-plan.html">a plan in place of a body</a>) has the same <code>Signature.Input</code>, and its validators run on its arguments the same way. The difference is what a refusal with no field leads to: the call is handed to the planner or the agent instead of ending with your message (with no agent model set, that part of the request is not run).</p>
+        <p><b>What the method can read.</b> Take a second argument, <code>info</code>, when you need it. <code>info.context["workflow"]</code> is the running workflow, and <code>.record</code> is the object the command acts on (while the framework renders a planning command's plan without running it, the workflow itself is <code>None</code>; <code>fastworkflow command run-code</code> runs the plan and passes the session's workflow, as the runtime does). <code>info.context["command_text"]</code> is the user's request, with their replies to earlier questions after it. <code>info.context["command"]</code> is the command's full name. Without <code>info</code>, write <code>def rule(self)</code>. Write <code>mode="after"</code>: a model validator in <code>mode="before"</code> or <code>"wrap"</code> makes pydantic validate the whole <code>Input</code> in one call instead, and a <code>ValueError</code> it raises then reaches the user as "the arguments break a rule of &lt;command&gt;: ..." rather than as your bare message, so the command does not load: "Signature.Input: model validator 'tidy' is mode="before"; an Input's model validators must be mode="after"".</p>
+        <p><b>What already ran.</b> Your method runs after every other check, the marked fields' check that two of them do not hold the same value included, and nothing checks a value it rewrote again. Every required field is present and of its declared type, and the field's own options and pattern have passed. So check only what the field declaration cannot say: a rule across two fields, a fact about the current record, a cleanup of the text.</p>
+        <p><b>Beginner mistakes.</b></p>
+        <ul>
+          <li>Forgetting <code>return self</code>. Returning anything else (including <code>None</code>) is a bug in the command, and the call fails with an error that says the validator must return <code>self</code>.</li>
+          <li>Raising a plain <code>ValueError</code> or <code>AssertionError</code>. It is read exactly as <code>fastworkflow.Refused(message)</code> with no field, and the user reads the bare message, so it works, but raise <code>Refused</code> so the intent is plain and so you can name a field. Any other exception is a failure of the validator: it is reported as "a validator raised KeyError: ..." on a planning command and as "Exception in X's validators: ..." on an execution command, with no field to ask about.</li>
+          <li>Reading <code>info.context["workflow"].record</code> in a planning command without checking it. The workflow itself is <code>None</code> while the framework renders the command's plan without running it, so reading <code>.record</code> raises there: <code>fastworkflow command preview</code> then renders that plan with your validator skipped and a note that says so, and the plan template the planner reads leaves that combination out. Return <code>self</code> early when <code>info.context["workflow"]</code> is <code>None</code>.</li>
+          <li>Raising <code>Refused(message, field=...)</code> from the command's own code (<code>ResponseGenerator.__call__</code>, or a planning command's <code>__result__</code>) to have a value asked again. There the command has already run, so nobody is asked: the refusal is the call's failed answer, and the fields you named are reported on it as its artifact <code>refused_fields</code>. Refuse a value in a validator to have it asked again.</li>
+          <li>Writing the old <code>validate_extracted_parameters</code> method on <code>Signature</code>. It is removed: a command that still has it does not load, and the load error names this shape (see <a href="removed.html">removed spellings</a>).</li>
+        </ul>
+        <p>The shipped <code>messaging_app_4</code> example's <code>set_current_user</code> does what the first figure shows, with a fuzzy name match. The <code>library</code> example's <code>member_report</code> is the planning command in the second.</p>
+        <p class="see">See also <a href="e-input.html">an input</a> for the field declaration, and <a href="e-words.html">field options</a> for checks you declare on a field instead of writing.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/ChatRoom/set_current_user.py (adapted from messaging_app_4; the shipped file uses the framework's fuzzy matcher, and accepts the value when nothing matches)</figcaption>
+        <pre><code>import fastworkflow
+from pydantic import BaseModel, Field, model_validator
+
+
+class Signature:
+    class Input(BaseModel):
+        user_name: str = Field(description="the name of a person in this chat room",
+                               examples=["Jane Doe"])
+
+        @model_validator(mode="after")
+        def user_name_is_in_the_room(self, info):
+            room = info.context["workflow"].record
+            names = room.list_users()
+            if not names:
+                <span class="c"># no field: no answer can fix this, so the command ends with this message</span>
+                raise fastworkflow.Refused(
+                    "This chat room has no users yet, so there is no one to pick.")
+            by_folded = {name.casefold(): name for name in names}
+            if self.user_name.casefold() in by_folded:
+                <span class="c"># correct: "jane doe" becomes "Jane Doe"</span>
+                self.user_name = by_folded[self.user_name.casefold()]
+                return self
+            <span class="c"># field named: the user is asked for user_name again, with this message</span>
+            raise fastworkflow.Refused(
+                f"No user named {self.user_name!r} is in this chat room. "
+                f"Pick one of: {', '.join(names)}.",
+                field="user_name")</code></pre>
+      </figure>
+      <figure>
+        <figcaption>_commands/Library/member_report.py (a planning command; excerpt)</figcaption>
+        <pre><code>class Signature:
+    class Input(BaseModel):
+        member: str = Field(description="the member's name",
+                            json_schema_extra={"copied_from_command_text": True})
+
+        @model_validator(mode="after")
+        def refuse_everyone(self, info):
+            if self.member.casefold() in EVERYONE:
+                raise fastworkflow.Refused(
+                    f"member is {self.member!r}, which names no one member; this "
+                    "command reports on one member: give that member's name",
+                    field="member")
+            return self
+
+
+<span class="c"># module level, below the classes</span>
+EVERYONE = {"everyone", "everybody", "all", "all members", "every member"}</code></pre>
+      </figure>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-from.html"><span>Previous</span>A handle's producer</a>
+    <a class="next" href="e-return.html"><span>Next</span>What it returns</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

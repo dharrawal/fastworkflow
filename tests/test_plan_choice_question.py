@@ -275,6 +275,10 @@ def test_a_pick_goes_to_the_parameter_question_then_one_review_and_the_turn_keep
     ("none", NO_FIT),
     ("something else", NO_FIT),
     ("cancel", "it was declined when asked which planning command should run it"),
+    # The phrases of the CME's ``you_misunderstood`` ("none of these") and ``abort`` (cancel) read as they do on "/"
+    # (``intent_loop.core_aliases``, one source).
+    ("you misunderstood", NO_FIT),
+    ("abort", "it was declined when asked which planning command should run it"),
 ])
 def test_none_or_cancel_ends_the_part_as_the_not_run_entry(no_agent, reply, reason):
     asked = _asked_about_the_joke(no_agent)
@@ -429,3 +433,11 @@ def test_with_an_agent_model_no_plan_choice_is_asked(todo, monkeypatch):  # noqa
     # The decision is never reached with an agent model, and no record of a question exists.
     assert asked == [] and ctx._plan_resolution is None
     assert all(NOT_RUN_ARTIFACT not in output.command_response.artifacts for output in done.command_outputs)
+
+
+def test_the_listing_phrase_of_the_cme_is_not_read_by_the_plan_question(no_agent):
+    """``what_can_i_do`` is the CME's alone: on the plan path the phrase is an unreadable reply, asked once more."""
+    _asked_about_the_joke(no_agent)
+    again = _reply(no_agent, "what can I do")
+    assert again.status is TurnStatus.AWAITING_USER
+    assert again.answer.startswith(choice.RETRY)

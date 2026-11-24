@@ -38,6 +38,7 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
+                           examples=["Dune", "Dune Messiah", "Persuasion"],
                            json_schema_extra={"copied_from_command_text": True})
 
 

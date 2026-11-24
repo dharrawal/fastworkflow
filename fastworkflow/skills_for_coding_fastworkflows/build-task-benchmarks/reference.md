@@ -1,12 +1,12 @@
 # Harness reference
 
 A working skeleton for the two-tier benchmark described in `SKILL.md`. Adapt names to the
-workflow; the structure is what matters. Nothing here is workflow-specific.
+workflow; the structure is what matters. The examples use the shipped `library` example's commands.
 
 ## Placeholders and turns
 
 A turn's parameters are resolved at run time, because most of them are not known when the task is
-written — they come from seeding, or from an earlier turn's output.
+written: they come from seeding, or from an earlier turn's output.
 
 ```python
 class Ref:
@@ -61,49 +61,81 @@ class Task(Conversation):
 
 ## Executing one turn
 
-A command path is `Context/command_name`, or a bare `command_name` for the global context.
+A command path is the routing name: `Context/command_name`, or a bare `command_name` for the
+global context. An inherited command keeps the name of the context that defines it (a `Book`
+runs `Record/add_note`).
+
+Open a real session once, then send every turn through `CommandExecutor.perform_action`, the
+runtime's direct-action path. It runs the command on the record the workflow stands on, runs the
+`Input`'s field checks and model validators first, and wraps what the command returns in a
+`CommandOutput`.
 
 ```python
-def module_for(command_path):
-    context_name, command_name = (command_path.split("/", 1) if "/" in command_path
-                                  else ("*", command_path))
-    module_name = (f"{WORKFLOW_PACKAGE}._commands.{command_name}" if context_name == "*"
-                   else f"{WORKFLOW_PACKAGE}._commands.{context_name}.{command_name}")
-    return importlib.import_module(module_name), command_name
+import json, os, uuid
+
+import fastworkflow
+from fastworkflow import Action, ModuleType
+from fastworkflow.command_executor import CommandExecutor, call_response_generator
 
 
-def context_name_of(context):
-    return "*" if context is None else type(context).__name__
+def open_session(workflow_folder):
+    """A real Workflow, started as `fastworkflow run` starts it (its startup action, if any)."""
+    if fastworkflow.RoutingRegistry is None:
+        fastworkflow.init({})
+    workflow = fastworkflow.Workflow.create(workflow_folder,
+                                            workflow_id_str=f"bench-{uuid.uuid4().hex}")
+    startup = os.path.join(workflow_folder, "startup_action.json")
+    if os.path.isfile(startup):
+        with open(startup, encoding="utf-8") as fh:
+            CommandExecutor.perform_action(workflow, Action(**json.load(fh)))
+    return workflow
 
 
-def execute(workflow, command_path, context, params):
-    """Invoke one command the way the runtime does, and report where it left us."""
-    module, command_name = module_for(command_path)
-    generator = module.ResponseGenerator()
-    workflow.record = context
-    if not hasattr(module.Signature, "Input"):
-        return generator(workflow, command_name, None), workflow.record
+def context_now(workflow):
+    """Where the workflow stands after a turn: what `what_is_current_context` reports."""
+    return workflow._current_command_context_name
 
-    # The Input's model validators run here, with the validation context the runtime gives them
-    # (command_text, workflow, command). A Refused they raise is a soft outcome, not an exception.
+
+def execute(workflow, turn, params):
+    """Run one turn the way the runtime does. The framework navigation commands are below."""
+    if turn.command.startswith(CORE):
+        return execute_core(workflow, turn)
     try:
-        parameters = module.Signature.Input.model_validate(
-            params, context={"command_text": "", "workflow": workflow, "command": command_name})
-    except ValidationError as error:
-        refusal = next((e["ctx"]["error"] for e in error.errors()
-                        if isinstance(e.get("ctx", {}).get("error"), fastworkflow.Refused)), None)
-        if refusal is None:
-            raise
-        # The runtime turns the refusal into the call's answer and hands the message back to the
-        # caller to correct, so a bad call stays a conversation.
-        return refusal.as_output(), context
-    return generator(workflow, command_name, parameters), workflow.record
+        return CommandExecutor.perform_action(
+            workflow, Action(command_name=turn.command, command=turn.say, parameters=params))
+    except ValueError as refused:
+        # A missing or refused value: the message is what the user would be asked.
+        return fastworkflow.Refused(str(refused)).as_output()
 ```
+
+An `unsafe` turn is checked and never sent: run only the `Input`'s checks, with the validation
+context the runtime gives them.
+
+```python
+from fastworkflow.parameters.validate import validate
+
+
+def validate_only(workflow, turn, params):
+    """The refusal the runtime would give this call, or None when it would be accepted."""
+    routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    input_model = routing.get_command_class(turn.command, ModuleType.COMMAND_PARAMETERS_CLASS)
+    if input_model is None:
+        return None
+    return validate(input_model, params, command_text=turn.say, workflow=workflow,
+                    command_name=turn.command).refusal
+```
+
+The workflow is never reset between turns: `context_now` after one turn is where the next runs.
+`perform_action` does not climb: a step whose command lives on an enclosing record needs a go-up
+turn first, as a planned step. A planning command is refused on this path (it runs only in an
+agent turn), so keep planning-command steps for runs through real turns.
 
 ## Reading handles the way an agent does
 
-Listings normally render a summary line, a header naming the columns, then one row per line. Parse
-the handle out of the text, never out of internal state.
+Parse the handle out of the response text, never out of internal state. A command with a
+`Signature.Output` responds with that Output as JSON, so read its handle field with `json.loads`.
+A text listing that renders a summary line, a header naming the columns, then one row per line
+reads like this:
 
 ```python
 def handles_from(response):
@@ -134,13 +166,13 @@ excludes a write or unsafe turn, `BLOCKED` when an earlier turn already failed.
 ## Framework navigation commands
 
 These live in the framework's metadata-extraction workflow, not the workflow's own command folder,
-and they mutate `workflow.context["app_workflow"]`. Run the real bodies through a shim so the
-parent chain being walked is the framework's, not a reimplementation. Do not overwrite the app
-workflow's own context dict — it already holds live session state.
+and they read and move `workflow.context["app_workflow"]`, so `perform_action` on the app workflow
+cannot run them. Run the real bodies through a shim so the parent chain being walked is the
+framework's, not a reimplementation. Do not overwrite the app workflow's own context dict: it
+already holds live session state.
 
 ```python
-CME_COMMANDS_DIR = os.path.join(os.path.dirname(fastworkflow.__file__),
-                                "_workflows", "command_metadata_extraction", "_commands")
+CORE = "IntentDetection/"
 RESET = "IntentDetection/reset_context"
 GO_UP = "IntentDetection/go_up"
 WHAT_CAN_I_DO = "IntentDetection/what_can_i_do"
@@ -150,42 +182,32 @@ WHERE_AM_I = "IntentDetection/what_is_current_context"
 class _CmeShim:
     def __init__(self, app_workflow):
         self.context = {"app_workflow": app_workflow}
-        self.folderpath = os.path.dirname(CME_COMMANDS_DIR)
+        self.folderpath = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
 
 
-def core_module(command_path):
-    context_name, command_name = command_path.split("/", 1)
-    path = os.path.join(CME_COMMANDS_DIR, context_name, f"{command_name}.py")
-    spec = importlib.util.spec_from_file_location(f"cme_{command_name}", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def execute_any(workflow, command_path, context, params):
-    """`execute` for workflow commands, the real core command for the rest."""
-    if not command_path.startswith("IntentDetection/"):
-        return execute(workflow, command_path, context, params)
-    workflow.record = context
-    output = core_module(command_path).ResponseGenerator()(
-        _CmeShim(workflow), command_path)
-    return output, workflow.record
+def execute_core(workflow, turn):
+    routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    generator = routing.get_command_class(turn.command, ModuleType.RESPONSE_GENERATION_INFERENCE)()
+    return call_response_generator(generator, _CmeShim(workflow), turn.say, None,
+                                   command_name=turn.command)
 ```
 
 ## Static context planning
 
 Navigation is declared, so the context each step runs in is knowable without a backend. Needed for
-offline routing; doubles as an assertion in live mode.
+offline routing; doubles as an assertion in live mode. `root` is the root record's context (what
+`context_now` says right after `open_session`): a reset lands there, which is `*` only when the
+workflow's root is the global context.
 
 ```python
-def plan(task):
-    current, stack, planned = "*", [], []
+def plan(task, root):
+    current, stack, planned = root, [], []
     for turn in task.turns:
         runs_in = current
         if turn.command == RESET:
-            current, stack = "*", []
+            current, stack = root, []
         elif turn.command == GO_UP:
-            current = stack.pop() if stack else "*"
+            current = stack.pop() if stack else root
         elif turn.expect_context:
             stack.append(current)
             current = turn.expect_context
@@ -199,51 +221,83 @@ asserts its destination is planned as a pop rather than a push.
 
 ## Routing scorer
 
-Loads one classifier per context and reuses it. Never touches the backend.
+Asks each context's trained local model (`CommandRouter`, cached per folder) and walks the scopes
+as the runtime does (see `SKILL.md`). Never touches the backend or a remote model.
 
 ```python
-class Router:
-    def __init__(self, artifacts_dir):
-        self.artifacts_dir, self._cache = artifacts_dir, {}
+from fastworkflow.intent_detector import handed_on
+from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 
-    def labels_for(self, context, utterance):
-        from fastworkflow.model_pipeline_training import CommandRouter
+
+class Router:
+    def __init__(self, workflow_folder):
+        if fastworkflow.RoutingRegistry is None:
+            fastworkflow.init({})
+        self.folder = workflow_folder
+        self.routing = fastworkflow.RoutingRegistry.get_definition(workflow_folder)
+
+    def commands(self, context):
+        known = context in self.routing.contexts
+        return set(self.routing.get_command_names(context)) if known else set()
+
+    def labels(self, context, utterance, reachable):
+        """One label when the model is confident, else its candidates plus up to two commands
+        of other reachable scopes it ranked ahead of its own (as the runtime adds them)."""
         folder = "global" if context == "*" else context
-        if folder not in self._cache:
-            path = os.path.join(self.artifacts_dir, folder)
-            self._cache[folder] = CommandRouter(path) if os.path.isdir(path) else None
-        router = self._cache[folder]
-        return None if router is None else [str(x) for x in router.predict(utterance)]
+        path = os.path.join(self.folder, "___command_info", folder)
+        if not os.path.isdir(path):
+            return None
+        labels, details = CommandRouter(path).predict_with_details(utterance)
+        labels = [str(label) for label in labels]
+        if len(labels) > 1:
+            labels, _ = handed_on(labels, details, reachable)
+        return labels
+
+
+def _one_command(labels):
+    return (labels is not None and len(labels) == 1
+            and labels[0] not in (WILDCARD_LABEL, PARAMETER_VALUE_LABEL))
 
 
 def route_turn(router, entry):
-    turn, context = entry["turn"], entry["runs_in"]
-    labels = router.labels_for(context, turn.say)
-    if labels is None:
-        return {"outcome": "no-model", "labels": []}
-    want = turn.command
+    turn, here = entry["turn"], entry["runs_in"]
+    want, walk = turn.command, [here, *entry["ancestors"]]
+    reachable = set().union(*(router.commands(c) for c in [*walk, "*"]))
 
-    if labels == [want]:
-        return {"outcome": "direct", "labels": labels}
-    if want in labels:
-        return {"outcome": "ambiguous", "labels": labels}
+    def outcome(labels, at, climbed=False):
+        if _one_command(labels):
+            hit = "escalated" if climbed else "direct"
+            return {"outcome": hit if labels == [want] else "misrouted", "at": at, "labels": labels}
+        if labels and len(labels) > 1 and want in labels:
+            return {"outcome": "ambiguous", "at": at, "labels": labels}
+        return {"outcome": "lost", "at": at, "labels": labels or []}
 
-    # Only a lone escalation label escalates. Beside real candidates it takes the
-    # ambiguity branch at runtime and never walks up.
-    if labels == ["wildcard"]:
-        for ancestor in entry["ancestors"] + ["*"]:
-            up = router.labels_for(ancestor, turn.say)
-            if up is None:
-                continue
-            if up == [want]:
-                return {"outcome": "escalated", "resolved_at": ancestor, "labels": labels}
-            if want in up:
-                return {"outcome": "ambiguous", "resolved_at": ancestor, "labels": up}
-            if up != ["wildcard"]:
-                break
-        return {"outcome": "lost", "labels": labels}
-    return {"outcome": "misrouted", "labels": labels}
+    # The global scope first: only a confident application command decides there.
+    if "*" not in walk:
+        first = router.labels("*", turn.say, reachable)
+        if _one_command(first) and not first[0].startswith(CORE):
+            return outcome(first, "*", climbed=True)
+    last, at = None, here
+    for index, context in enumerate(walk):
+        labels = router.labels(context, turn.say, reachable)
+        if labels is None:
+            continue  # no model for this scope: it declines
+        last, at = labels, context
+        if len(labels) == 1 and labels != [WILDCARD_LABEL]:
+            return outcome(labels, at, climbed=index > 0)  # a command, or a bare value
+        if index == 0 and len(labels) > 1:
+            return outcome(labels, at)  # the own scope is unsure: the runtime asks
+    # Everything said "not here": the global scope, asked last.
+    if (last is None or last == [WILDCARD_LABEL]) and "*" not in walk:
+        final = router.labels("*", turn.say, reachable)
+        if final is not None:
+            return outcome(final, "*", climbed=True)
+    return outcome(last, at, climbed=True)
 ```
+
+A confident answer that names a planning command is asked at runtime when no remote model
+confirms it; score it `ambiguous` if your tasks include planning commands.
 
 ## Held-out phrasing check
 
@@ -267,10 +321,10 @@ Fields let one pool serve every variant of a parameterised question.
 
 ```python
 PHRASINGS = {
-    "Container/list_members": [
-        "who sits inside this {kind}",
-        "enumerate the membership here",
-        "name everyone in this {kind}",
+    "Book/list_loans": [
+        "who has this {kind} out right now",
+        "list the current borrowers here",
+        "which members are holding this {kind}",
     ],
 }
 
@@ -290,29 +344,29 @@ Tier-1 errands become the tier-2 vocabulary. Keep them small and parameterise th
 so the same block reads differently in different tasks.
 
 ```python
-def entity_overview(v=0):
+def book_overview(v=0):
     return [
-        step("Resource/show_properties", v),
-        step("Resource/show_risk_score", v),
-        step("Resource/list_controls_hit", v),
+        step("Book/show_book", v),
+        step("Book/list_loans", v),
+        step("Record/show_notes", v),
     ]
 
 
-def tag_cycle(tag, v=0):
-    """Apply a working label, prove it landed, take it off again."""
+def note_cycle(text, v=0):
+    """Add a working note and prove it landed. The library has no command that removes a note,
+    so the write is `unsafe` (validated, never sent). With an undo command, mark both turns
+    `write=True` and add the undo as a `restore=True` turn."""
     return [
-        step("Resource/show_metadata", v),
-        step("Resource/add_tag", v, {"tag": tag}, params={"tag": tag}, write=True),
-        step("Resource/show_metadata", v + 1, write=True),
-        step("Resource/remove_tag", v, {"tag": tag}, params={"tag": tag},
-             write=True, restore=True),
+        step("Record/add_note", v, {"text": text}, params={"text": text}, unsafe=True),
+        step("Record/show_notes", v + 1, unsafe=True),
     ]
 
 
-task = Task("periodic-review", "...", ["entity-360", "stewardship"],
-            [step("open_item_explorer", 0, expect_context="ItemExplorer"),
-             *entity_overview(0),
-             *tag_cycle(WORKING_TAG, 0)])
+task = Task("book-review", "...", ["book-360", "notes"],
+            [step("Library/open_book", 0, params={"book_uid": Seed("book")},
+                  expect_context="Book"),
+             *book_overview(0),
+             *note_cycle(WORKING_NOTE, 0)])
 ```
 
 ## CLI shape

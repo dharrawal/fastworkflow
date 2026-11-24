@@ -100,8 +100,8 @@ A phase repeated for several cases is one method each, calling one shared module
 
 **Options** (`@phase`, the one decorator): `over="find.uids"` runs the phase once per item
 (its one parameter that is neither `input` nor a phase gets the item), with `max_items=`,
-`until=`, `noun=`; `optional=True`: the job goes on when it fails; `output=` a facts model
-that depends on the input. An option written `lambda input: ...` is decided per call.
+`until=`, `noun=`; `optional=True`: the job goes on when it fails; `output=` a function of the input
+that picks the facts model (a fixed facts type is the return annotation). An option written `lambda input: ...` is decided per call.
 
 **What the planner sees.** Each phase written once per input with every fact unknown:
 `<find.total>`, `<find.uids[0]>`, `<find.labels[*]>`; a helper called on facts reads as its
@@ -223,8 +223,8 @@ completion.
   `fastworkflow.planning_commands`, called in the field's `field_validator`.
 - `command_text_after_command_name: True` (a `str`, at most one per `Input`; execution commands only): takes the text
   after the command name. `from_command_output: "<command>.<field>"` (or a list) names the command that supplies the
-  value (see `declare-parameter-producers`). `converted_from_command_text: True` (execution commands) marks a value
-  converted from the command text, such as a date written "next Monday".
+  value (see `declare-parameter-producers`). A field with no copy option keeps the
+  model's value (it is not compared with the command text); `copied_from_command_text` is the strict check.
 
 An `Input` validator's returned value is written back to the arguments: a validator that cleans a
 value changes the argument, and a refusing one still refuses. The option checks run first, then the
@@ -258,9 +258,11 @@ that property. The `instance_label` classmethod is removed: a context that still
 
 ## Approval annotation (`@user_approval_for_execution`)
 
-A command may carry `@user_approval_for_execution(...)` on its class: `ResponseGenerator` for an execution command,
-`PlanGenerator` for a planning command. It takes one of two values from `UserApproval`, and nothing else, and is
-imported from `fastworkflow` (or `fastworkflow.planning`):
+An execution command may carry `@user_approval_for_execution(...)` on its `ResponseGenerator`. It takes one of two
+values from `UserApproval`, and nothing else, and is imported from `fastworkflow` (or `fastworkflow.planning`). A
+planning command cannot carry it (a load error naming the command and its file): it needs the strongest approval among
+the commands its steps reach, directly or through planning commands it calls, and each of those calls is asked about
+when it runs.
 
 ```python
 @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)   # the action cannot be undone, e.g. sending a critical email
@@ -268,8 +270,8 @@ class ResponseGenerator:
     ...
 ```
 
-- `UserApproval.REQUIRED_ALWAYS`: the framework asks before every run, and the run waits for the reply.
-- `UserApproval.REQUIRED_UNTIL_DELEGATED`: the framework asks until a standing approval for the user exists.
+- `UserApproval.REQUIRED_ALWAYS`: the framework asks before every run, including a run the user typed, and the run waits for the reply. No standing approval applies to it and `always` is not offered.
+- `UserApproval.REQUIRED_UNTIL_DELEGATED`: the framework asks the agent's calls until a standing approval for the user exists; the user's own typed command runs unasked.
 - Absent: the agent decides, with no gate. Most commands are like this.
 
 The annotation is not read/write gating. An easy-to-undo write needs no annotation, and only the two
@@ -286,7 +288,8 @@ annotation gets no marker.
 An execution command that changes the application's data carries `@writes` on its
 `ResponseGenerator`. A planning command does not declare it: it writes when one of its steps (directly,
 or through a planning command it calls) runs a command that declares it, and it is read-only otherwise.
-`@writes` on a `PlanGenerator` is a load error naming the command and its file (`fastworkflow.command_writes`);
+`@writes` on a `PlanGenerator` is a load error naming the command and its file
+(`command_declarations.declaration_problems`);
 the old `writes = True` attribute fails the load and names the decorator.
 
 Inside a planning command's phase, a command that writes runs only when a step of that phase names it.

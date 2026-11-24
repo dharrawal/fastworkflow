@@ -199,14 +199,25 @@ class ClassifierEngine:
     name = ENGINE_CLASSIFIER
 
     def __init__(self, router: Any, *, fallback: bool = False,
-                 reachable: Optional[Iterable[str] | Callable[[], Iterable[str]]] = None):
+                 reachable: Optional[Iterable[str] | Callable[[], Iterable[str]]] = None,
+                 workflow_folderpath: Optional[str] = None):
         self.router = router
         self.fallback = fallback
         self.reachable = reachable
+        self.workflow_folderpath = workflow_folderpath
 
     def decide(self, utterance: str) -> ScopeAnswer:
         labels, details = self.router.predict_with_details(utterance)
         labels = list(labels)
+        several = len(labels) > 1
+        if self.workflow_folderpath is not None:
+            # A head trained before a command stopped loading may still answer it: that label is "not here" (the
+            # command is in no scope's command set, ``RoutingDefinition.not_loading``).
+            not_loading = fastworkflow.RoutingRegistry.get_definition(self.workflow_folderpath).not_loading()
+            if kept := [label for label in labels if label not in not_loading]:
+                labels = kept
+            elif labels:
+                labels, details, several = [WILDCARD_LABEL], {**details, "confident": False}, False
         # `.get` throughout: the details dict belongs to the router, and a router that reports
         # nothing (the test doubles that inject labels return an empty dict on purpose) still answers.
         scores = {
@@ -219,8 +230,9 @@ class ClassifierEngine:
             if added:
                 scores.update(added)
                 details = {**details, "handed_on": list(added)}
-        if len(labels) != 1:
-            # No label at all is treated as the callers treat it today: not one command, so an ambiguity.
+        if len(labels) != 1 or several:
+            # No label at all is treated as the callers treat it today: not one command, so an ambiguity. Several
+            # labels with one left (the others did not load) are still not one sure answer.
             kind = AMBIGUOUS
         elif is_escalation(labels[0]):
             kind = NOT_MINE
@@ -258,6 +270,8 @@ def candidates(workflow_folderpath: str, context_name: str) -> list[Candidate]:
     core = workflow_agent.core_command_names()
     offered: list[Candidate] = []
     for name in crd.get_command_names(context_name):
+        if crd.command_directory.runs_only_as_action(name):
+            continue        # a command with no Signature (a startup command) is never a request's answer
         offered.append(Candidate(
             name=name,
             kind="core" if name in core else "execution",
@@ -484,14 +498,16 @@ def engine_for(
         path = tuple(dict.fromkeys(scope_path)) if scope_path else None
         return ClassifierEngine(
             (router_factory or _command_router)(folder),
-            reachable=None if path is None else (lambda: reachable_labels(workflow_folderpath, path)))
+            reachable=None if path is None else (lambda: reachable_labels(workflow_folderpath, path)),
+            workflow_folderpath=workflow_folderpath)
     choice = engine_choice(workflow_folderpath, context_name, command_info_root=command_info_root)
     path = tuple(dict.fromkeys(scope_path or (context_name,)))
 
     def classifier() -> ClassifierEngine:
         return ClassifierEngine(
             (router_factory or _command_router)(folder),
-            reachable=lambda: reachable_labels(workflow_folderpath, path))
+            reachable=lambda: reachable_labels(workflow_folderpath, path),
+            workflow_folderpath=workflow_folderpath)
 
     if choice == ENGINE_CLASSIFIER:
         return classifier()
@@ -970,14 +986,17 @@ def _untrained_report(
 # ---------------------------------------------------------------- the walk
 
 def enclosing_scopes(workflow, record: Optional[object]) -> Iterator[Scope]:
-    """The scopes above *record*, nearest first, up to and including the root record.
+    """The scopes above *record*, nearest first, up to and including the root record: ``live_chain`` after its first.
 
     Lazy on purpose: ``workflow.get_parent`` is asked for the next record only when the walk needs
     it. A record of None is the global scope and has nothing above it.
     """
-    while record is not None and not (record == workflow.root):
-        record = workflow.get_parent(record)
-        yield Scope(fastworkflow.Workflow.get_command_context_name(record), record)
+    from fastworkflow.context_navigation import live_chain
+
+    chain = live_chain(workflow, record)
+    next(chain, None)
+    for enclosing, context_name in chain:
+        yield Scope(context_name, enclosing)
 
 
 def scopes_for(workflow) -> list[Scope]:
@@ -1103,19 +1122,12 @@ class ScopeWalk:
         return answer, scope, routing_hint
 
     def _enclosing(self, record: Optional[object]) -> Iterator[Scope]:
-        """The scopes above *record*, nearest first, each bound as the workflow's record when the walk binds.
-
-        A binding walk asks the workflow where it stands at every step (``record``, ``is_record_root``)
-        and moves its bound record one parent up, so the workflow's own idea of its root decides
-        where the climb ends. A reading walk follows the same chain without touching the workflow.
-        """
-        if not self.bind:
-            yield from enclosing_scopes(self.workflow, record)
-            return
-        workflow = self.workflow
-        while workflow.record is not None and not workflow.is_record_root:
-            workflow._command_context_for_response_generation = workflow.get_parent(workflow.record)
-            yield Scope(fastworkflow.Workflow.get_command_context_name(workflow.record), workflow.record)
+        """The scopes above *record*, nearest first (``enclosing_scopes``), each bound as the workflow's record when the
+        walk binds. A reading walk follows the same chain without touching the workflow."""
+        for scope in enclosing_scopes(self.workflow, record):
+            if self.bind:
+                self.workflow._command_context_for_response_generation = scope.record
+            yield scope
 
 
 @dataclass(frozen=True)

@@ -12,14 +12,17 @@ class Signature:
 
     class Input(BaseModel):
         query: str = Field(description="words of the title or the author's name",
-                           examples=["Middlemarch", "George Eliot"])
-        start: Optional[int] = Field(default=None, description="the first row of the page")
+                           examples=["Middlemarch", "George Eliot"],
+                           json_schema_extra={"copied_from_command_text": True})
+        start: Optional[int] = Field(default=None, ge=0, description="the first row of the page")
 
     class Output(BaseModel):
-        book_uids: list[str] = Field(description="the uid of each book found, in row order; "
-                                                 "open_book takes one",
+        book_uids: list[str] = Field(description="the uid of each book found, in row order, such as "
+                                                 "b1, b2; open_book takes one",
+                                     examples=[["b1", "b2"], ["b3"]],
                                      json_schema_extra={"ui": {"table": "books"}})
         titles: list[str] = Field(description="the title of each book found, in row order",
+                                  examples=[["Dune", "Dune Messiah"], ["Emma"]],
                                   json_schema_extra={"ui": {"table": "books"}})
         total: int = Field(description="how many books match, on every page")
 

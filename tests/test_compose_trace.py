@@ -15,7 +15,7 @@ from fastworkflow import tracing
 from fastworkflow.observability.store import get_observability_sink
 from fastworkflow.run_chatbot import composer as gui
 from tests.test_compose_endpoints import (  # noqa: F401  (fixtures)
-    _card_body, _form_body, app_module, client, composer, env_files, headers,
+    _card_body, _form_body, app_module, client, composer, headers,
 )
 
 _CARD = [{"lead": "Your order is delivered.", "sections": [{"heading": "Order", "blocks": [

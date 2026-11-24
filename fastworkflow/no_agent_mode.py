@@ -288,22 +288,44 @@ def _fact_text(value: Any) -> str:
     return str(value)
 
 
-#: Most characters of one step's own result text a code-written statement shows (the data, ``fw_not_run``, has it all).
-RESULT_TEXT_CAP = 300
+#: Most characters of one step's own result text a code-written statement shows. The statement is the only answer a
+#: stopped plan gives with no agent model, so what a step read is shown, not a glimpse of it: every step result of the
+#: stopped plans of an attended benchmark round (330 step results, the longest 1,809 characters; the longest one a
+#: 300-character limit cut held about 3,250) fits with room to spare. A longer one (a list of thousands of rows) is cut
+#: at a line, saying how much was not shown; the data, ``fw_not_run`` ``results``, has it all.
+RESULT_TEXT_CAP = 4_000
+
+#: Most characters of result text one statement shows over all its steps together, so the answer stays bounded (the
+#: chat page's composer reads an answer whole up to 20,000 characters). A step reached after it is spent shows only
+#: how much it read.
+RESULTS_TOTAL_CAP = 16_000
 
 
-def _result_text(text: str) -> str:
-    """*text* cut to its first lines within ``RESULT_TEXT_CAP`` characters, saying how much was cut."""
+_QUOTE = "  > "
+
+
+def _result_lines(text: str, limit: int) -> list[str]:
+    """*text* as quoted lines, its first whole lines within *limit* characters as shown (the quote marks counted),
+    the last saying how much was not shown and where it is when any was cut."""
     text = str(text).strip()
-    if len(text) <= RESULT_TEXT_CAP:
-        return text
-    kept = ""
+    lines, used, kept = [], 0, 0
     for line in text.splitlines():
-        if len(kept) + len(line) + 1 > RESULT_TEXT_CAP:
+        if used + len(_QUOTE) + len(line) + 1 > limit:
             break
-        kept += line + "\n"
-    kept = kept.rstrip() or text[:RESULT_TEXT_CAP]
-    return f"{kept} [... {len(text) - len(kept)} more characters not shown]"
+        lines.append(_QUOTE + line)
+        used += len(_QUOTE) + len(line) + 1
+        kept += len(line) + 1
+    if len(lines) == len(text.splitlines()):
+        return lines
+    if not lines and limit > len(_QUOTE):
+        lines, kept = [_QUOTE + text[:limit - len(_QUOTE)]], limit - len(_QUOTE) + 1
+    note = (f"[... {len(text) - max(kept - 1, 0)} more characters not shown; the full text is in the turn's results "
+            "(fw_not_run results)]")
+    if lines:
+        lines[-1] += " " + note
+    else:
+        lines = [_QUOTE + note]
+    return lines
 
 
 def ran_statement(entry: dict[str, Any]) -> str:
@@ -312,10 +334,13 @@ def ran_statement(entry: dict[str, Any]) -> str:
     of the rows read so far."""
     results = entry.get("results") or {}
     lines = ["**What ran**"]
+    budget = RESULTS_TOTAL_CAP
     for line in entry.get("done") or []:
         lines.append(f"- {line}")
         if results.get(line):
-            lines += [f"  > {part}" for part in _result_text(results[line]).splitlines()]
+            shown = _result_lines(results[line], min(RESULT_TEXT_CAP, budget))
+            budget = max(0, budget - sum(len(part) + 1 for part in shown))
+            lines += shown
     facts = entry.get("facts") or {}
     if facts:
         lines += ["", "**Facts recorded**"]
@@ -354,7 +379,10 @@ def step_limit_note(command: str, read: dict[str, Any]) -> str:
 
 # ---- decision steps: the question a paused planning command asks and how its reply is read ------------------------
 
-_YES = frozenset({"yes", "y", "true"})
+#: THE words that say yes (owner decision 2026-11-23), read as the whole reply by ``is_yes``: the one reader of every yes
+#: that consents or confirms (the approval question, the turn's review, a pinned plan's parameter question, "Did you
+#: mean the command 'X'?", a conditional decision step).
+YES_WORDS = frozenset({"yes", "true", "ok", "agreed", "accept", "go"})
 _NO = frozenset({"no", "n", "false"})
 _DECLINE = frozenset({"cancel", "abort", "stop", "decline", "never mind", "nevermind"})
 
@@ -364,11 +392,17 @@ def _bare(reply: str) -> str:
     return " ".join(str(reply or "").lower().split()).strip(" .!")
 
 
+def is_yes(reply: str) -> bool:
+    """Whether *reply* is a yes: the WHOLE reply, case and a trailing ``.`` or ``!`` ignored, is one of ``YES_WORDS``
+    (yes, true, ok, agreed, accept, go). The one reader of a yes that consents or confirms; strict on purpose, so
+    ``yes please``, ``go ahead`` or ``y`` is no yes."""
+    return _bare(reply) in YES_WORDS
+
+
 def read_yes_no(reply: str) -> Optional[bool]:
-    """True for yes / y / true, False for no / n / false, None for anything else. Strict on purpose: the review
-    engine's cues also read ``no changes`` and ``go`` as an accept, which answer a different question."""
-    word = _bare(reply)
-    return True if word in _YES else False if word in _NO else None
+    """True for a yes (``is_yes``), False for no / n / false, None for anything else. Strict on purpose: the review
+    engine's cues also read ``no changes`` and ``go ahead`` as an accept, which answer a different question."""
+    return True if is_yes(reply) else False if _bare(reply) in _NO else None
 
 
 def declines(reply: str) -> bool:

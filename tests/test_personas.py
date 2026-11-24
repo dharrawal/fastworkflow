@@ -396,14 +396,19 @@ def test_a_thin_domain_pool_is_topped_up_and_reported(tmp_path, retail_persona_c
     assert any("topped up" in note for note in source.notes())
 
 
-def test_explicit_personas_win_over_domain_keywords(tmp_path):
-    """Supplying personas is the stronger statement; keywords must not dilute the set."""
+def test_a_persona_file_with_both_personas_and_domain_keywords_is_refused(tmp_path):
+    """One of the two keys would silently win, so the file is an error naming itself."""
     _write_persona_file(
         tmp_path,
         {"personas": ["The only curated user."], "domain_keywords": ["order"]},
     )
-    source = persona_source_for_workflow(str(tmp_path))
-    assert isinstance(source, AppPersonaSource)
+    path = persona_config_path(str(tmp_path))
+    with pytest.raises(PersonaConfigError) as raised:
+        load_persona_config(path)
+    assert path in str(raised.value)
+    assert "Keep one of the two keys" in str(raised.value)
+    with pytest.raises(PersonaConfigError):
+        persona_source_for_workflow(str(tmp_path))
 
 
 # ---------------------------------------------------------------------------

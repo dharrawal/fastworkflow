@@ -29,27 +29,30 @@ pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
 
 class _Find(BaseModel):
-    query: str = Field(description="what to look for, for example Ann")
+    query: str = Field(description="what to look for, for example Ann",
+                       json_schema_extra={"copied_from_command_text": True})
     kind: Optional[str] = None
     start: Optional[int] = None
 
 
-def _guard_verdict(value: str, text: str, command_name: str = "find_application"):
-    """The extractor's grounding guard (``_llm_guard``), as ``ParameterExtraction._extract_impl`` builds it: it reads the
-    command text with a leading own-command word stripped (``fill.without_own_command_word``)."""
-    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import _llm_guard
-    from fastworkflow.parameters import fill
+def _validated(value: str, text: str, command_name: str = "find_application"):
+    """The execution command's validation step on the agent's text (``InputForParamExtraction.validate_parameters``):
+    since bd fix-qoyz the written-in-the-request check is made only on a field marked ``copied_from_command_text``, by
+    the one guard (``planning_commands.option_command`` -> ``check_plan``), which reads the text with a leading
+    own-command word stripped (``fill.without_own_command_word``). ``(is_valid, message, refused field names)``."""
+    from fastworkflow.utils.signatures import InputForParamExtraction
 
-    diagnostics: dict = {}
-    check, _settle = _llm_guard(fill.without_own_command_word(text, command_name), diagnostics)
-    return check(_Find(query=value), 1), diagnostics
+    step = InputForParamExtraction(command=text, input_for_param_extraction_class=None)
+    is_valid, message, _suggestions, fields = step.validate_parameters(None, command_name, _Find(query=value))
+    return is_valid, message, fields
 
 
 def test_a_value_only_the_command_name_spells_is_not_grounded_in_the_agents_text():
-    """fix-2juj: 'Application' is spelled only inside the command word 'find_application' the agent's text begins with."""
-    verdict, diagnostics = _guard_verdict("Application", "find_application SCOM")
-    assert verdict.kind == "refused" and diagnostics["argument_check_retry"] is True
-    assert verdict.detail.refused and "query" in " ".join(verdict.detail.refusal_texts())
+    """fix-2juj: 'Application' is spelled only inside the command word 'find_application' the agent's text begins with,
+    so it is not written in the request: a marked field holding it is refused and asked for, on the real path."""
+    is_valid, message, fields = _validated("Application", "find_application SCOM")
+    assert not is_valid and fields == ["query"]
+    assert "the query 'Application' is not in your request" in message
 
 
 @pytest.mark.parametrize("value, text, command_name", [
@@ -59,8 +62,8 @@ def test_a_value_only_the_command_name_spells_is_not_grounded_in_the_agents_text
     ("Application", "find application Application", "find_application"),     # the user's own words are not the command token
 ])
 def test_a_value_the_request_writes_still_passes_the_grounding_guard(value, text, command_name):
-    verdict, _ = _guard_verdict(value, text, command_name)
-    assert verdict.kind != "refused"
+    is_valid, message, fields = _validated(value, text, command_name)
+    assert is_valid and fields == [], message
 
 
 def test_cancel_pending_ends_a_question_the_deterministic_path_holds(session):  # noqa: F811

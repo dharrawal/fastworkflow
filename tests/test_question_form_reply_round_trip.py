@@ -114,9 +114,9 @@ def test_path_a_the_extractor_reads_the_whole_message_and_the_guards_accept_the_
 
 
 def test_path_a_nothing_in_code_strips_a_label_a_careless_extractor_copies(todo, monkeypatch):
-    """The guards require a str argument to be a verbatim substring of the request, and the label line is part of
-    the request, so an extractor that copies the whole line is accepted too: the code does not protect the value
-    from its label. This is why the finding is a risk of the extractor, not a parse the form can rely on."""
+    """The strict check of a marked str argument requires it to be written in the request at word boundaries (an
+    unmarked one is not compared with the request at all), and the label line is part of the request, so an extractor
+    that copies the whole line is accepted too: the code does not protect the value from its label. This is why the finding is a risk of the extractor, not a parse the form can rely on."""
     command = _command()
     message = f"{REQUEST}\n{REPLY}"
     args, _notes = pc.check_arguments(command, {"title": REPLY}, message)

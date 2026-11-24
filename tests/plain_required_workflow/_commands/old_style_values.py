@@ -1,4 +1,6 @@
-"""old_style_values: the deprecated spelling, a required str declared with default="NOT_FOUND"."""
+"""old_style_values: once the deprecated spelling (a required str declared with default="NOT_FOUND", now a load
+error), migrated to a plain required field. ``tests/test_plain_required_fields.py`` writes the old spelling back on
+a temp copy to show the load error."""
 
 from typing import List
 
@@ -8,10 +10,10 @@ from pydantic import BaseModel, Field
 
 
 class Signature:
-    """Record one value, declared the deprecated way."""
+    """Record one value."""
 
     class Input(BaseModel):
-        name: str = Field(default="NOT_FOUND", description="a name")
+        name: str = Field(description="a name")
 
     class Output(BaseModel):
         summary: str = Field(description="the recorded value")

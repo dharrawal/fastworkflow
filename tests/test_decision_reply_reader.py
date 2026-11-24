@@ -55,7 +55,7 @@ def _said(word: str, calls: list):
     return remote
 
 
-@pytest.mark.parametrize("reply, answer", [("yes", "yes"), ("Y", "yes"), ("no", "no"), ("false.", "no")])
+@pytest.mark.parametrize("reply, answer", [("yes", "yes"), ("OK", "yes"), ("no", "no"), ("false.", "no")])   # "Y" is no yes (one yes reader)
 def test_a_conditional_steps_yes_or_no_is_its_answer_and_the_remote_model_is_not_asked(reply, answer):
     calls: list = []
     reading = replies.read_decision(CONDITIONAL, reply, phrases=replies.phrase_of, remote=_said("wait", calls))
@@ -201,7 +201,7 @@ def test_missing_value_a_plain_value_is_asked_of_the_remote_model_once_and_kept(
     remote = _Remote(monkeypatch, "answer")
     done = library_env.ctx.process_turn("the cover is torn")
     assert done.status is TurnStatus.COMPLETED and len(remote.calls) == 1
-    assert "add_note text=the cover is torn" in _sent(library_env)
+    assert 'add_note text="the cover is torn"' in _sent(library_env)
 
 
 def test_missing_value_a_named_line_is_the_value_and_the_remote_model_is_not_asked(library_env, monkeypatch):
@@ -209,7 +209,7 @@ def test_missing_value_a_named_line_is_the_value_and_the_remote_model_is_not_ask
     remote = _Remote(monkeypatch, "wait")
     done = library_env.ctx.process_turn("text: the cover is torn")
     assert done.status is TurnStatus.COMPLETED and remote.calls == []
-    assert "add_note text=the cover is torn" in _sent(library_env)
+    assert 'add_note text="the cover is torn"' in _sent(library_env)
 
 
 def test_missing_value_the_asking_rule_is_unchanged_asked_once_more_then_the_stop(library_env, monkeypatch):

@@ -3,10 +3,11 @@
 Two checkers read an argument against the request:
 
 - **planning**: ``planning_commands.checked_arguments`` (``check_arguments``, then ``_validate_arguments``:
-  the hook, ``check_input``, ``_check_roles``), on the values ``extracted_arguments`` hands the typed call
+  the hook, ``check_input``), on the values ``extracted_arguments`` hands the typed call
   (the extractor's "not given" text read as no value, ``_given_or_none``);
 - **execution**: ``argument_checks.check_extracted_values`` and ``ExtractionCheck.apply``, on the
-  ``model_construct`` instance the LLM extractor gives an execution command (``ParameterExtraction._llm_extract``).
+  ``model_construct`` instance the LLM extractor gives an execution command (``ParameterExtraction._llm_extract``),
+  then, for a marked field, the one guard of the validation stage (``check_plan`` through ``option_command``).
 
 Every case of one table goes through both, on the same pydantic ``Input`` (a real planning command of
 ``tests/planning_tutorial_workflow``, or one of the small commands below, written into the temporary copy
@@ -107,7 +108,7 @@ class PlanGenerator:
     def steps(self, input):
         return [f"find the member {input.name}", f"label the shelf {input.code}"]
 ''',
-    # a value converted on purpose (in_request False), with an example
+    # a value converted on purpose (no option: the extractor's value stands), with an example
     "drift_converted": '''
 from pydantic import BaseModel, Field
 
@@ -117,8 +118,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(default="", description="a person's name", json_schema_extra={"copied_from_command_text": True})
-        due: str = Field(default="", description="the due date, YYYY-MM-DD", examples=["2024-05-20"],
-                         json_schema_extra={"converted_from_command_text": True})
+        due: str = Field(default="", description="the due date, YYYY-MM-DD", examples=["2024-05-20"])
 
 
 class PlanGenerator:
@@ -155,7 +155,6 @@ class Signature:
 
     class Input(BaseModel):
         kind: Literal["book", "member", "branch"] = Field(default="book", description="the kind of record")
-        kind_prose: str = Field(default="book", description="the kind of record. One of: book, member, branch")
 
 
 class PlanGenerator:
@@ -204,12 +203,10 @@ class PlanGenerator:
 
 
 class ChoiceText(BaseModel):
-    """The execution twin of ``drift_choice.kind``: the same choice declared as an execution command's ``str``
-    allowed values (``json_schema_extra`` enum, which a planning command's loader refuses: its choice is a
-    ``Literal``)."""
+    """The execution twin of ``drift_choice.kind``: the same ``Literal`` choice, on an execution command's ``Input``
+    (the one spelling of allowed values)."""
 
-    kind_text: str = Field(default="book", description="the kind of record",
-                           json_schema_extra={"enum": ["book", "member", "branch"]})
+    kind_text: Literal["book", "member", "branch"] = Field(default="book", description="the kind of record")
 
 
 # ---------------------------------------------------------------- verdicts
@@ -250,11 +247,11 @@ def _replaced(verdict) -> bool:
 #: an explicit decision, with the measurement for the path whose behaviour changes (fix-48np.2's notes, step 4).
 DIFFERENCES: dict[str, Difference] = {
     "planning-only": Difference(
-        what="Planning-only concepts, not imposed on execution commands: subjects (the in_request \"subject\" "
-             "option, and a pronoun read as the request's one subject or refused), identifier expansion (a "
-             "fragment of an identifier the request writes becomes the whole identifier, or is refused), kind "
-             "selectors and the vocabulary word screens (a kind, field or command word of the workflow), verify "
-             "verdicts, and roles (two inputs given one value; an optional str repeating another).",
+        what="Planning-only concepts on an UNMARKED field, not imposed on execution commands by this checker: the "
+             "vocabulary word screens of check_plan (a kind, field or command word of the workflow; on an execution "
+             "command they run in validate_parameters) and verify verdicts. A MARKED field of either kind has one "
+             "guard, check_plan (subjects, identifier expansion, the duplicate rule), so its verdicts agree "
+             "(bd fix-ftdl.6.3).",
         why="They read the workflow (its vocabulary, identifiers, subjects) or a classifier and decide what a "
             "planning call means; on an execution command they stay opt-in per field (the option fields "
             "validate_parameters checks with check_arguments itself), not checks of every extracted value.",
@@ -288,29 +285,29 @@ CORPUS_FIELDS: dict[str, tuple[str, str | None]] = {
     "title-case": ("title", None),
     "person": ("author", None),
     "two-roles": ("member", None),
-    "pronoun-one-subject": ("author", "planning-only"),        # "it" is the request's one subject
+    "pronoun-one-subject": ("author", None),                   # "it" is the request's one subject (a marked field)
     "enum": ("kind", None),
     "bools": ("title", None),
-    "whole-identifier": ("title", "planning-only"),           # 4421 -> acct_4421
+    "whole-identifier": ("title", None),                      # 4421 -> acct_4421, by the one guard of a marked field
     "optional-placeholder": ("note", None),
     "braces": ("author", None),
     "angle": ("author", None),
     "name-number": ("author", None),
     "unspecified": ("author", None),
     "invented-example": ("author", None),
-    "that-one": ("author", "planning-only"),                  # a pronoun, no single subject
-    "it": ("author", "planning-only"),
-    "own-name": ("author", "planning-only"),                  # vocabulary words
-    "field-name": ("query", "planning-only"),
+    "that-one": ("author", None),                             # a pronoun, no single subject (a marked field)
+    "it": ("author", None),
+    "own-name": ("author", None),                             # vocabulary words (a marked field)
+    "field-name": ("query", None),
     "command-word": ("member", "planning-only"),
     "declared-choice": ("branch", "planning-only"),
     "kind-word": ("query", "planning-only"),
     "invented-subject": ("author", None),
     "not-in-request": ("title", None),
     "deictic": ("title", None),
-    "identifier-fragment": ("title", "planning-only"),
-    "role-conflict": ("branch", "planning-only"),             # branch is the input refused
-    "role-conflict-unwritten": ("member", "planning-only"),
+    "identifier-fragment": ("title", None),
+    "role-conflict": ("branch", None),                        # unmarked fields: no duplicate rule on either kind
+    "role-conflict-unwritten": ("member", None),
     "not-an-enum-value": ("kind", None),
     "not-given-text": ("title", None),
     "unknown-marker": ("title", None),
@@ -360,10 +357,6 @@ EXECUTION_CASES = [
     Case("number-word-not-written", _EXEC, "drift_rows", "show eight rows", {"count": 9}, "count"),
     Case("digits-inside-a-str", _EXEC, "drift_rows", "find Doyle and Sons 1",
          {"title": "Doyle and Sons 1", "count": 7}, "count"),
-    # "One of:" in a description: one allowed-values rule on both paths (argument_checks.allowed_member, fix-48np.3)
-    Case("one-of-outside", _EXEC, "drift_choice", "find the magazine Ann", {"kind_prose": "magazine"}, "kind_prose"),
-    Case("one-of-spelling", _EXEC, "drift_choice", "find the member Ann", {"kind_prose": "Member"}, "kind_prose"),
-    Case("one-of-member", _EXEC, "drift_choice", "find a branch near Ann", {"kind_prose": "branch"}, "kind_prose"),
 ]
 
 _DIFF = "deliberate difference"
@@ -391,15 +384,14 @@ DIFFERENCE_CASES = [
     Case("int-equal-to-default", _DIFF, "drift_page", "show 2 or 3 loans", {"size": 5}, "size"),
     Case("int-equal-to-default-one-number", _DIFF, "drift_page", "show loans of 3 books", {"size": 5}, "size"),
     # planning-only
-    Case("subject-cut-short", _DIFF, "drift_subject", "Show the books of Ann Lee", {"name": "Ann"}, "name",
-         difference="planning-only"),
+    Case("subject-cut-short", _DIFF, "drift_subject", "Show the books of Ann Lee", {"name": "Ann"}, "name"),
     Case("subject-agree", _DIFF, "drift_subject", "Show the books of Ann Lee", {"name": "Ann Lee"}, "name"),
     Case("verify-verdict", _DIFF, "drift_verify", "is there a book named Lee", {"name": "Lee", "kind": "book"},
          "kind", verdicts={"kind": ("member", 0.9)}, difference="planning-only"),
     Case("verify-unsure-agree", _DIFF, "drift_verify", "is there a book named Lee", {"name": "Lee", "kind": "book"},
          "kind", verdicts={"kind": ("member", 0.3)}),
     Case("optional-repeats-another", _DIFF, "drift_code", "label the shelf of Ann Lee",
-         {"name": "Ann Lee", "code": "Ann Lee"}, "code", difference="planning-only"),
+         {"name": "Ann Lee", "code": "Ann Lee"}, "code"),   # the one duplicate rule of marked fields, both kinds
     Case("identifier-whole-agree", _DIFF, "book_by_title", "who has acct_4421", {"title": "acct_4421"}, "title"),
 ]
 
@@ -471,8 +463,10 @@ def _literal_verdict(annotation, value):
 
 
 def execution_verdict(command: pc.PlanningCommandCommand, case: Case):
-    """The execution checker on the same ``Input``, as ``ParameterExtraction._llm_extract`` runs it: on the
-    extractor's ``model_construct`` instance, against the command text; ``apply`` writes the outcome."""
+    """The execution checker on the same ``Input``, as an execution command's extraction runs it: the check stage
+    (``argument_checks.check_extracted_values``, ``ParameterExtraction._llm_extract``) on the extractor's
+    ``model_construct`` instance, against the command text, ``apply`` writing its outcome; then, for a MARKED field, the
+    one guard the validation stage runs (``check_plan`` through ``option_command``, bd fix-ftdl.6.3)."""
     model = case.execution_model or command.input_model
     name = case.execution_field or case.field
     values = dict(case.values)
@@ -487,6 +481,14 @@ def execution_verdict(command: pc.PlanningCommandCommand, case: Case):
         return REFUSED
     if not one_guard.is_given(info, given):
         return NOT_GIVEN
+    option = pc.option_command(model, command.name, ACCOUNTS)
+    if any(p.name == name for p in option.params):
+        raw = {p.name: pc._given_or_none(getattr(params, p.name)) for p in option.params}
+        try:
+            args, _ = pc.check_arguments(option, raw, case.request)
+        except pc.PlanningCommandCallError as refusal:
+            return REFUSED if str(refusal).startswith(f"{name}=") else f"refused for another reason: {refusal}"
+        return ACCEPTED if args[name] == given else _as(args[name])
     if get_origin(info.annotation) is Literal:
         return _literal_verdict(info.annotation, given)
     value = getattr(params, name)

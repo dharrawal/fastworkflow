@@ -2,9 +2,7 @@
 
 ``go_up`` follows the live parent, not every parent the hierarchy file allows.
 ``reset_context`` is used when it is shorter than climbing. A descend step says
-``needs <field>`` when the command cannot run without it, and ``<field> required
-to enter <context>`` when the command runs either way and only navigates when
-the field is present.
+``needs <field>`` when the command cannot run without it.
 """
 from __future__ import annotations
 
@@ -39,7 +37,6 @@ def test_global_reaches_a_workspace_by_its_descend_command():
     path = plan_navigation("*", ["ItemExplorer"], ("*",), edges)["ItemExplorer"]
     assert _steps(path) == ["open_item_explorer"]
     assert path[0].needs == ()
-    assert path[0].required_to_enter == ()
 
 
 def test_go_up_follows_the_live_parent_not_every_declared_one():
@@ -67,7 +64,7 @@ def test_reset_is_used_when_it_is_shorter_than_climbing():
 
 def test_equal_length_prefers_the_step_that_needs_nothing():
     edges = (
-        DescendEdge("ItemExplorer", "list_accounts", "Account", required_to_enter=("account_uid",)),
+        DescendEdge("ItemExplorer", "list_accounts", "Account", needs=("account_uid",)),
         DescendEdge("ItemExplorer", "open_account_free", "Account"),
     )
     path = plan_navigation(
@@ -75,15 +72,15 @@ def test_equal_length_prefers_the_step_that_needs_nothing():
     assert _steps(path) == ["open_account_free"]
 
 
-def test_a_shorter_conditional_step_is_kept_and_names_its_parameter():
+def test_a_shorter_step_is_kept_and_names_its_parameter():
     edges = (
-        DescendEdge("Identity", "list_accounts", "Account", required_to_enter=("account_uid",)),
+        DescendEdge("Identity", "list_accounts", "Account", needs=("account_uid",)),
         DescendEdge("ItemExplorer", "open_account_by_uid", "Account", needs=("account_uid",)),
     )
     chain = ("Identity", "ItemExplorer", "*")
     path = plan_navigation("Identity", ["Account"], chain, edges)["Account"]
     assert _steps(path) == ["list_accounts"]
-    assert path[0].required_to_enter == ("account_uid",)
+    assert path[0].needs == ("account_uid",)
 
 
 def test_no_declared_descend_has_no_path():
@@ -103,13 +100,13 @@ def test_the_message_for_find_person_says_open_item_explorer():
     assert "go_up or reset_context" not in text
 
 
-def test_the_message_lists_both_kinds_of_caveat():
+def test_the_message_names_what_each_step_needs():
     edges = (
         DescendEdge("*", "open_item_explorer", "ItemExplorer"),
         DescendEdge(
             "ItemExplorer", "open_account_by_uid", "Account", needs=("account_uid",)),
         DescendEdge(
-            "Identity", "list_accounts", "Account", required_to_enter=("account_uid",)),
+            "Identity", "list_accounts", "Account", needs=("account_uid",)),
     )
     opened = plan_navigation("*", ["Account"], ("*",), edges)
     from_global = render_unavailable_command("list_permissions", "*", ["Account"], opened)
@@ -122,7 +119,7 @@ def test_the_message_lists_both_kinds_of_caveat():
     listed = plan_navigation("Identity", ["Account"], chain, edges)
     from_identity = render_unavailable_command("list_permissions", "Identity", ["Account"], listed)
     assert (
-        "list_accounts <account_uid> (account_uid required to enter Account)"
+        "list_accounts <account_uid> (needs account_uid)"
         in from_identity
     )
 
@@ -139,12 +136,12 @@ def test_each_home_context_gets_its_own_path():
 
 
 def test_live_chain_stops_at_global_when_the_parent_is_none():
-    class Explorer:
+    class ItemExplorer:
         pass
 
     class Workflow:
         _current_command_context_name = "ItemExplorer"
-        _current_command_context = Explorer()
+        _current_command_context = ItemExplorer()
         root = None
 
         def get_parent(self, obj):
@@ -173,6 +170,13 @@ class _App:
 
     def get_planning_command_names(self, context):
         return []
+
+    # read with the names (context_navigation.scope_command_names): a command with no Signature runs only as an
+    # action and is in no scope's names
+    class command_directory:
+        @staticmethod
+        def runs_only_as_action(name):
+            return False
 
 
 class _Cme:
@@ -240,7 +244,7 @@ _SHELF_EDGES = (
     DescendEdge("*", "open_library", "Library"),
     DescendEdge("Library", "open_book_by_uid", "Book", needs=("book_uid",)),
     DescendEdge("Library", "open_shelf", "Shelf", needs=("shelf_uid",)),
-    DescendEdge("Shelf", "list_books", "Book", required_to_enter=("book_uid",)),
+    DescendEdge("Shelf", "list_books", "Book", needs=("book_uid",)),
 )
 
 
@@ -254,7 +258,6 @@ def test_the_refusal_names_the_in_context_command_that_enters_the_same_context()
         "It is available in: 'Library'. "
         "To open 'Book' from here, run list_books book_uid=<book_uid> instead of "
         "'open_book_by_uid'; that is how you enter 'Book' from 'Shelf'. "
-        "Without book_uid it does not enter 'Book'. "
         "Otherwise, from here to 'Library': go_up. Then retry 'open_book_by_uid'."
     )
     assert text.index("list_books") < text.index("go_up")

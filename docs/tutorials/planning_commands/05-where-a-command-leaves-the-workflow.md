@@ -22,14 +22,17 @@ class Signature:
     class Input(BaseModel):
         book_uid: str = Field(
             description="the uid of the book to open",
+            examples=["b1", "b3", "b2"],
             json_schema_extra={"from_command_output": "find_book.book_uids"},
             pattern=r"^b[0-9]+$",
         )
 
     class Output(BaseModel):
-        book_uid: str = Field(description="the uid of the book now open")
-        title: str = Field(description="the book's title")
-        author: str = Field(description="the book's author")
+        book_uid: str = Field(description="the uid of the book now open, such as b1",
+                              examples=["b1", "b3"])
+        title: str = Field(description="the book's title", examples=["Dune", "Emma"])
+        author: str = Field(description="the book's author",
+                            examples=["Frank Herbert", "Jane Austen"])
         copies: int = Field(description="how many copies the library owns")
 
     plain_utterances = [
@@ -66,9 +69,9 @@ class ResponseGenerator:
   the agent is shown the way into a context it is not in, the list it plans from (page 14)
   uses these declarations to reach the commands of contexts a plan has not entered yet, and
   code checks each plan against them, so a step planned in a context the plan never enters
-  gets a note. A command that moves the workflow into a context it does not declare gets a
-  warning the first time it does it, naming the command and the context, so a missing
-  `@descends_to` shows up in the first run.
+  gets a note. A command may move the workflow only onto a context it declares (or one that
+  inherits from it): a move onto any other context fails the command, naming the decorator to
+  write, and the workflow stays where it was, so a missing `@descends_to` shows up in the first run.
 - **`json_schema_extra={"from_command_output": "find_book.book_uids"}`** points this field at
   another command's `Output` field: the place its value comes from. On an `Input` field,
   `from_command_output` is a **producer** hint: "call `find_book` first; one of its `book_uids` is this value". The
@@ -142,12 +145,15 @@ class Signature:
     """List the loans of the open book: each borrower and the due date."""
 
     class Input(BaseModel):
-        start: Optional[int] = Field(default=None, description="the first row of the page")
+        start: Optional[int] = Field(default=None, ge=0, description="the first row of the page")
 
     class Output(BaseModel):
         borrowers: list[str] = Field(description="each borrower's name, in row order",
+                                     examples=[["Ann Lee", "Raj Patel"], ["Mia Chen"]],
                                      json_schema_extra={"ui": {"table": "loans"}})
-        due_dates: list[str] = Field(description="each loan's due date, in row order",
+        due_dates: list[str] = Field(description="each loan's due date as an ISO date "
+                                                 "(YYYY-MM-DD), in row order",
+                                     examples=[["2026-11-02", "2026-10-20"], ["2026-10-18"]],
                                      json_schema_extra={"ui": {"table": "loans"}})
         total: int = Field(description="how many loans the book has, on every page")
 

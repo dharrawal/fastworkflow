@@ -107,7 +107,8 @@ def test_a_book_or_member_as_the_anchor_round_trips(initialized_fastworkflow, ki
     assert getattr(node.library, kind)[uid] is node
 
 
-def test_record_is_declared_ephemeral_so_no_context_of_the_library_needs_a_hook():
+def test_no_context_of_the_library_needs_a_state_hook():
+    """Record is declared occupiable = False, which is enough for the startup check; no EPHEMERAL get_state is needed."""
     from fastworkflow.run_fastapi_mcp import checkpoint
     assert checkpoint.contexts_without_state_hook(str(LIBRARY)) == []
 
@@ -191,7 +192,11 @@ def library_app(tmp_path, env_files):
     env_file, passwords_file = env_files
     folder = tmp_path / "library"
     shutil.copytree(LIBRARY, folder, ignore=shutil.ignore_patterns(
-        "___command_info", "___workflow_contexts", "___convo_info", "__pycache__"), symlinks=True)
+        "___command_info", "___workflow_contexts", "___convo_info", "__pycache__",
+        "startup_action.json"), symlinks=True)
+    # The test builds the channel's root itself (a library with a note on one book), so the copy carries no
+    # startup_action.json: a server given a workflow folder with one runs it as every session's first turn
+    # (bd fix-qjne.10), and the root would be set twice.
     sys.argv = ["pytest", "--workflow_path", str(folder), "--env_file_path", env_file,
                 "--passwords_file_path", passwords_file]
     import fastworkflow.run_fastapi_mcp.__main__ as main

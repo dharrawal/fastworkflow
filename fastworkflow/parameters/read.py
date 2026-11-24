@@ -5,8 +5,9 @@ execution command. ``read`` is the only reader; ``parameter_clarification.read_r
 decision step) and ``ParameterExtraction._extract_and_merge_missing_parameters`` (an execution command's reply) call it
 the same way. The rule:
 
-a. ``cancel`` and its synonyms decline. ``yes`` and its synonyms accept only when the question was a confirmation (it
-   showed drafted values and asked to confirm, ``confirm``); otherwise they are read by c.
+a. ``cancel`` and its synonyms decline. A yes (``no_agent_mode.is_yes``: yes, true, ok, agreed, accept, go) accepts
+   only when the question was a confirmation (it showed drafted values and asked to confirm, ``confirm``); otherwise
+   it is read by c.
 b. ``name: value`` (or ``name=value``) lines set the named fields, for any field the question listed: the open ones
    (``open_names``) and the ones it showed with a value (``names``). A one-line reply whose comma-separated parts are
    ALL such lines (``title: Dune, author: Herbert``) is read as those lines.
@@ -47,7 +48,6 @@ ACCEPT = "accept"
 VALUES = "values"
 FREE = "free"
 
-ACCEPT_WORDS = frozenset({"yes", "y", "ok", "okay", "run", "run it", "go", "confirm", "true"})
 #: The bare replies that say "no value": a value for a yes/no field or an allowed value, else the field is left empty
 #: (optional) or the reply is unclear (required).
 NO_WORDS = frozenset({"no", "none", "neither", "n", "nope"})
@@ -164,7 +164,7 @@ def read(reply: str, names: Iterable[str], open_names: Iterable[str], *, confirm
     word = no_agent_mode._bare(text)
     if word in no_agent_mode._DECLINE:
         return Read(DECLINE)
-    if confirm and word in ACCEPT_WORDS:
+    if confirm and no_agent_mode.is_yes(text):
         return Read(ACCEPT)
     listed = list(dict.fromkeys([*names, *open_names]))
     if "\n" not in text.strip() and "," in text:
@@ -216,7 +216,8 @@ def fits_constrained(reply: str, open_names: Iterable[str], slots: Optional[Mapp
         part and _fit(part, slots[name]) is not None for name, part in zip(names, parts))
 
 
-_YES_NO = frozenset({"yes", "y", "true", "no", "n", "false", "nope", "none", "neither"})
+#: The words a yes/no FIELD takes as its value (a value, not consent: a yes that consents is ``no_agent_mode.is_yes``).
+YES_NO_VALUES = frozenset({"yes", "y", "true", "no", "n", "false", "nope", "none", "neither"})
 _NUMBER = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 
 
@@ -224,7 +225,7 @@ def _fit(part: str, slot: Slot) -> Optional[str]:
     """*part* as the value of the field *slot* describes, or None when it cannot be one (rule e, iii)."""
     word = no_agent_mode._bare(part)
     if slot.boolean:
-        return part if word in _YES_NO else None
+        return part if word in YES_NO_VALUES else None
     if slot.options:
         return next((option for option in slot.options if word == option.lower()), None)
     if slot.number:

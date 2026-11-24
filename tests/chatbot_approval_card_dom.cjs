@@ -74,11 +74,11 @@ const SCHEMAS = {
       pw: {type: 'string', format: 'password', title: 'Pw'}}, required: ['user']}},
 };
 const PROMPT = 'The agent wants to run Orders/cancel_pending_order with order_id=#W1, reason=dup. ' +
-  'This cannot be undone. Reply yes to approve, no to decline, or always to approve this command from now on.';
+  'Reply yes to approve, no to decline, or always to approve this command from now on.';
 
 function approval(over) {
   return Object.assign({command: 'Orders/cancel_pending_order',
-    parameters: {order_id: '#W1', reason: 'dup'}, origin: 'agent', irreversible: true, can_always: true}, over || {});
+    parameters: {order_id: '#W1', reason: 'dup'}, origin: 'agent', can_always: true}, over || {});
 }
 function waitingTurn(artifacts, response, status) {
   return {turn_key: 'k' + Math.random().toString(16).slice(2), status: status || 'awaiting_user',
@@ -120,7 +120,6 @@ async function main() {
     assert.equal(card.getAttribute('aria-labelledby'), card.querySelector('.approvalTitle').id);
     assert.deepEqual(Array.from(card.querySelectorAll('dl.rKv dt')).map(text), ['Order ID', 'Reason']);
     assert.deepEqual(Array.from(card.querySelectorAll('dl.rKv dd')).map(text), ['#W1', 'dup']);
-    assert.equal(text(card.querySelector('.approvalIrreversible')), 'This cannot be undone.');
     assert.deepEqual(labels(msg), ['Approve', 'Always allow cancel_pending_order', 'Decline']);
     const details = msg.querySelector('details.approvalDetails, details.paramDetails');
     assert.ok(details && !details.open, 'closed Details');
@@ -164,12 +163,11 @@ async function main() {
     ['Approve', 'Always allow cancel_pending_order', 'Decline'], 'a missing can_always still offers it');
 
   /* ---- case 4: fallbacks ------------------------------------------------------------------------------- */
-  /* no parameters, not irreversible */
-  const bare = paint(waitingTurn({question_kind: 'approval', approval: approval({parameters: {}, irreversible: false})}));
+  /* no parameters */
+  const bare = paint(waitingTurn({question_kind: 'approval', approval: approval({parameters: {}})}));
   assert.equal(bare.querySelectorAll('dl.rKv').length, 0);
-  assert.equal(bare.querySelectorAll('.approvalIrreversible').length, 0);
   assert.deepEqual(labels(bare), ['Approve', 'Always allow cancel_pending_order', 'Decline']);
-  const noParams = approval({irreversible: false});
+  const noParams = approval();
   delete noParams.parameters;
   assert.equal(paint(waitingTurn({question_kind: 'approval', approval: noParams})).querySelectorAll('dl.rKv').length, 0);
   /* missing approval payload: verbatim text stays visible, three buttons beneath it */
@@ -239,9 +237,6 @@ async function main() {
   assert.deepEqual(Array.from(secretCard.querySelectorAll('dl.rKv dd')).map(text), ['ann', '••••', '••••']);
   assert.equal(secretCard.textContent.indexOf('S3CR3T-tok'), -1, 'no secret in the card');
   assert.equal(secretCard.textContent.indexOf('hunter2'), -1);
-  /* the irreversible callout is words, not colour alone */
-  assert.ok(text(paint(waitingTurn({question_kind: 'approval', approval: approval()})).querySelector('.approvalIrreversible'))
-    .indexOf('cannot be undone') !== -1);
   /* markup stays text */
   const evil = '<img src=x onerror=alert(1)>';
   const markup = paint(waitingTurn({question_kind: 'approval', approval: approval({

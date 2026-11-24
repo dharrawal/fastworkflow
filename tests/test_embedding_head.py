@@ -443,6 +443,10 @@ def test_the_detector_contract_and_the_gates_read_the_layout_without_change(publ
     assert not intent_detector.has_head(str(vdir / layout.WORKFLOW_MODEL_DIRNAME))
     engine = intent_detector.engine_for(workflow, "Book", allow_matcher=False)
     assert isinstance(engine, intent_detector.ClassifierEngine)
+    # The folder holds only the published head (no _commands/), so the engine's filter of the commands that do not
+    # load (RoutingDefinition.not_loading, which reads the workflow's routing) cannot run here: the head's answers are
+    # read through the same engine with no workflow to filter against.
+    engine = intent_detector.ClassifierEngine(engine.router)
 
     match = engine.decide("list the loans of this book")
     assert match.kind == intent_detector.MATCH and match.confident and match.labels == ["Book/list_loans"]

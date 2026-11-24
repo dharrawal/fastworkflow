@@ -138,11 +138,16 @@ def run_main(args):
         "[bold green]Tips:[/bold green] Prefix natural language commands with a single '/' to execute them in deterministic (non-agentic) mode. "
         "Type '//cancel' to cancel a pending question, review or approval. Ctrl-C stops waiting for a running turn.")
 
-    # Command files that do not load are skipped; say so before the first prompt (not only in the log).
+    # Command files that do not load are skipped; say so before the first prompt (not only in the log). A workflow-wide
+    # problem (a shared file such as startup_action.json or _workflow.py) stops the run, naming the file.
     from fastworkflow.command_preview import load_problems
 
-    for problem in load_problems(args.workflow_path):
+    problems = load_problems(args.workflow_path)
+    for problem in problems:
         console.print(f"[bold red]Load problem:[/bold red] {problem}")
+    if any(problem.workflow_wide for problem in problems):
+        console.print("[bold red]Error:[/bold red] the workflow does not load: fix the shared file named above.")
+        exit(1)
 
     # ------------------------------------------------------------------
     # Startup progress bar ------------------------------------------------
@@ -194,9 +199,17 @@ def run_main(args):
         console.print(f"[bold red]Error:[/bold red] {problem}")
         exit(1)
 
-    startup_action: Optional[fastworkflow.Action] = None
-    if args.startup_action:
-        startup_action = fastworkflow.load_startup_action(args.startup_action)
+    # --startup_action / --startup_command win; with neither, the workflow folder's startup_action.json runs.
+    startup_action = fastworkflow.resolve_startup_action(
+        args.workflow_path, args.startup_command, args.startup_action)
+    if startup_action is None and not args.startup_command:
+        # A command with no Signature runs only as the startup action: with none, nothing would run it.
+        from fastworkflow.command_preview import missing_startup_action_problem
+
+        if problem := missing_startup_action_problem(args.workflow_path):
+            StartupProgress.end()
+            console.print(f"[bold red]Startup problem:[/bold red] {problem}")
+            exit(1)
 
     context_dict = None
     if args.context_file_path:
@@ -268,7 +281,7 @@ def run_main(args):
    
     with contextlib.suppress(queue.Empty):
         timeout: float = 0.000001
-        if args.startup_command or args.startup_action:
+        if args.startup_command or startup_action is not None:
             timeout=180.0
         if command_output := fastworkflow.chat_session.command_output_queue.get(
             timeout=timeout

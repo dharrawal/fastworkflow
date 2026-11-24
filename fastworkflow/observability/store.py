@@ -896,7 +896,9 @@ _SECRET_PATTERNS = [
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}"),
 ]
 
-_REDACTED = "[REDACTED]"
+#: The text the store writes in place of a credential it scrubbed (``Redactor``).
+REDACTED = "[REDACTED]"
+_REDACTED = REDACTED
 
 
 class Redactor:
@@ -2881,7 +2883,7 @@ class ObservabilityStore:
             return [dict(r) for r in rows]
 
     def spans_for_turns(
-        self, turn_keys: Iterable[str]
+        self, turn_keys: Iterable[str], *, name: Optional[str] = None
     ) -> dict[str, list[dict[str, Any]]]:
         """`get_spans` for many turns at once: ``{turn_key: [span row, ...]}``.
 
@@ -2897,23 +2899,43 @@ class ObservabilityStore:
         caller never has to distinguish "absent" from "no spans"; duplicate
         keys are collapsed and blank ones dropped. Keys are bound in chunks
         well under SQLite's variable limit, so an arbitrarily long list is
-        safe.
+        safe. With *name*, only the spans of that name are read (bd
+        fix-0iuo.23); every requested key is still present.
         """
         keys = list(dict.fromkeys(key for key in turn_keys if key))
         spans_by_turn: dict[str, list[dict[str, Any]]] = {key: [] for key in keys}
         if not keys:
             return spans_by_turn
+        name_clause, name_params = ("", []) if name is None else (" AND name=?", [name])
         with self._connect() as conn:
             for chunk in _chunked(keys):
                 placeholders = ",".join("?" * len(chunk))
                 rows = conn.execute(
-                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders}) "
-                    "ORDER BY trace_id, start_ns",
-                    chunk,
+                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders})"
+                    f"{name_clause} ORDER BY trace_id, start_ns",
+                    [*chunk, *name_params],
                 ).fetchall()
                 for row in rows:
                     spans_by_turn[row["trace_id"]].append(dict(row))
         return spans_by_turn
+
+    def count_spans_without_turn(self, *, name: Optional[str] = None) -> int:
+        """How many spans belong to no turn: their ``trace_id`` names no row of ``turns``.
+
+        Such spans are never answered by `get_spans` or `spans_for_turns` for a
+        listed turn, so a reader that walks turns can report how many it could
+        not reach (bd fix-0iuo.23). With *name*, only the spans of that name
+        are counted.
+        """
+        name_clause, name_params = ("", []) if name is None else (" AND s.name=?", [name])
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM spans s WHERE NOT EXISTS "
+                "(SELECT 1 FROM turns t WHERE t.turn_key = s.trace_id)"
+                f"{name_clause}",
+                name_params,
+            ).fetchone()
+        return int(row[0])
 
     def iter_spans_for_turn_batches(
         self,

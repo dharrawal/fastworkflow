@@ -119,6 +119,12 @@ class Eligibility:
     reason: str
     projection: Optional[serialization_hooks.ContextProjection] = None
 
+    @property
+    def declared(self) -> bool:
+        """Pinned because the author declared it (``get_state`` returned ``fastworkflow.EPHEMERAL``)."""
+        return (self.projection is not None
+                and self.projection.outcome is serialization_hooks.ProjectionOutcome.DECLARED_EPHEMERAL)
+
 
 def assess(
     runtime: "ChannelRuntime",
@@ -335,15 +341,18 @@ def restore(
     return runtime_section
 
 
-def warn_pinned_once(channel_id: str, workflow_path: str, reason: str) -> None:
-    """One line per (workflow, reason). Pinned is a steady state, not an event."""
-    key = (workflow_path, reason)
+def warn_pinned_once(channel_id: str, workflow_path: str, eligibility: Eligibility) -> None:
+    """One line per (workflow, reason). Pinned is a steady state, not an event. A session the author declared
+    ephemeral is not warned about: a declared choice is not a problem (bd fix-ftdl.7.17)."""
+    if eligibility.declared:
+        return
+    key = (workflow_path, eligibility.reason)
     if key in _pin_warned:
         return
     _pin_warned.add(key)
     logger.warning(
         f"Channel {channel_id} cannot be checkpointed and will not be evicted: "
-        f"{reason}"
+        f"{eligibility.reason}"
     )
 
 
@@ -352,8 +361,10 @@ def contexts_without_state_hook(workflow_path: str) -> list[str]:
 
     A session whose current or root context is one of these is pinned: never evicted, so never bounded.
     Whether a given session holds one is only known at run time, so this lists every context the workflow
-    declares; a context that declares ``get_state`` (returning a dict or ``fastworkflow.EPHEMERAL``) is not
-    listed. Returns [] when the workflow's contexts cannot be read (the startup warning is advisory).
+    declares that an object can be; a context that declares ``get_state`` (returning a dict or
+    ``fastworkflow.EPHEMERAL``) is not listed, nor one declared ``occupiable = False`` (no object is ever of it, so
+    it is never the saved object; bd fix-ftdl.7.17). Returns [] when the workflow's contexts cannot be read (the
+    startup warning is advisory).
     """
     try:
         context_model = fastworkflow.CommandContextModel.load(workflow_path)
@@ -364,6 +375,8 @@ def contexts_without_state_hook(workflow_path: str) -> list[str]:
         missing = []
         for name in names:
             hooks = context_model.get_context_class(name, fastworkflow.ModuleType.CONTEXT_CLASS)
+            if hooks is not None and getattr(hooks, "occupiable", None) is False:
+                continue
             if hooks is None or not hasattr(hooks, "get_state"):
                 missing.append(name)
         return missing

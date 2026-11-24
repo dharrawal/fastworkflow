@@ -1,7 +1,6 @@
 """``occupiable`` and ``@descends_to`` are read from the workflow's own classes.
 
-``occupiable`` is declared on a context's callback class, and ``@descends_to`` (with its
-``when_parameter``) on a command's response-generator class. With neither
+``occupiable`` is declared on a context's callback class, and ``@descends_to`` on a command's response-generator class. With neither
 declared, the context is listed and the command has no navigation effect.
 """
 from __future__ import annotations
@@ -82,18 +81,7 @@ def test_unreadable_context_is_not_declared(monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_descends_to_with_gate_is_declared_on_command_module():
-    @fastworkflow.descends_to("Permission", when_parameter="permission_uid")
-    class ResponseGenerator:
-        pass
-
-    routing = _FakeRouting({}, modules={"Account/list_permissions": ResponseGenerator})
-    effect = context_navigation._declared_descend(routing, "Account/list_permissions")
-    assert effect.declared_targets() == ("Permission",)
-    assert effect.when_parameter_present == "permission_uid"
-
-
-def test_descends_to_without_gate_always_descends():
+def test_descends_to_is_declared_on_command_module():
     @fastworkflow.descends_to("Group")
     class ResponseGenerator:
         pass
@@ -101,7 +89,6 @@ def test_descends_to_without_gate_always_descends():
     routing = _FakeRouting({}, modules={"Application/open_group": ResponseGenerator})
     effect = context_navigation._declared_descend(routing, "Application/open_group")
     assert effect.declared_targets() == ("Group",)
-    assert effect.when_parameter_present is None
 
 
 def test_command_without_descends_to_is_not_declared():
@@ -134,7 +121,7 @@ def _patch_navigation(monkeypatch, routing, declared_occupiable):
 
 
 def test_descends_to_is_the_navigation_effect(monkeypatch):
-    @fastworkflow.descends_to("Permission", when_parameter="permission_uid")
+    @fastworkflow.descends_to("Permission")
     class ResponseGenerator:
         pass
 
@@ -145,7 +132,6 @@ def test_descends_to_is_the_navigation_effect(monkeypatch):
     effects, _ = context_navigation._navigation_effects("wf")
     effect = effects["Account/list_permissions"]
     assert effect.declared_targets() == ("Permission",)
-    assert effect.when_parameter_present == "permission_uid"
 
 
 def test_command_without_descends_to_has_no_navigation_effect(monkeypatch):

@@ -12,7 +12,7 @@ import pytest
 from fastworkflow import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow.parameters.validate import (
-    PLAIN, RAISED, REFUSED, RULE, Refusal, Validated, ValidatorReturnError, validate)
+    RAISED, REFUSED, Refusal, Validated, ValidatorReturnError, validate)
 from fastworkflow.utils.signatures import InputForParamExtraction
 from tests.test_input_model_validators import PLANNING
 from tests.test_planning_command_files import _write
@@ -25,6 +25,14 @@ BODIES = {
         def no_digits(cls, v):
             if any(c.isdigit() for c in v):
                 raise ValueError("no digits in a name")
+            return v
+''',
+    "field_refused_bare": '''
+        @field_validator("name")
+        @classmethod
+        def no_digits(cls, v):
+            if any(c.isdigit() for c in v):
+                raise fastworkflow.Refused("no digits in a name")
             return v
 ''',
     "refused_fields": '''
@@ -84,7 +92,7 @@ BODIES = {
             return self
 ''',
 }
-VALUES = {"field_rule": "x1", "refused_fields": "attic"}
+VALUES = {"field_rule": "x1", "field_refused_bare": "x1", "refused_fields": "attic"}
 
 
 def _command(tmp_path, case):
@@ -129,11 +137,18 @@ def test_a_clean_pass_returns_the_values_and_no_write_or_refusal(tmp_path):
     assert out == Validated(values={"name": "ann", "note": ""}, written={}, refusal=None)
 
 
-def test_a_field_validator_refusal_is_a_rule_refusal_with_the_whole_sentence(tmp_path):
+def test_a_field_validator_refusal_is_a_refusal_of_that_field_with_its_own_message(tmp_path):
+    # pydantic locates the failing field validator's error on its field: the refusal names it (bd fix-ftdl.7.10)
     out = _run(_command(tmp_path, "field_rule"), "field_rule")
     assert out.values == {} and out.written == {}
-    assert out.refusal == Refusal("the arguments break a rule of field_rule: name: no digits in a name", (), None, RULE,
-                                  "name: no digits in a name")
+    assert out.refusal == Refusal("no digits in a name", ("name",), None, REFUSED)
+
+
+def test_a_bare_refused_in_a_field_validator_names_that_field_as_a_value_error_there_does(tmp_path):
+    # the field comes from pydantic's error location, so the command asks again for it (fix-ftdl.8.20)
+    out = _run(_command(tmp_path, "field_refused_bare"), "field_refused_bare")
+    assert out.values == {} and out.written == {}
+    assert out.refusal == Refusal("no digits in a name", ("name",), None, REFUSED)
 
 
 def test_a_model_validator_refused_with_fields_keeps_its_fields(tmp_path):
@@ -148,12 +163,12 @@ def test_a_refused_with_no_field_names_none(tmp_path):
 
 def test_a_plain_value_error_is_a_bare_plain_refusal(tmp_path):
     out = _run(_command(tmp_path, "plain"), "plain")
-    assert out.refusal == Refusal("name and note are one record", (), None, PLAIN)
+    assert out.refusal == Refusal("name and note are one record", (), None, REFUSED)
 
 
 def test_an_assertion_error_is_a_plain_refusal_and_drops_what_the_validator_wrote(tmp_path):
     out = _run(_command(tmp_path, "rewrite_then_plain"), "rewrite_then_plain")
-    assert out.refusal == Refusal("assertion after rewriting", (), None, PLAIN)
+    assert out.refusal == Refusal("assertion after rewriting", (), None, REFUSED)
     assert out.written == {}
 
 
@@ -189,22 +204,23 @@ def test_a_validator_that_does_not_return_the_input_is_a_programming_error(tmp_p
 # ------------------------------------------------------------------ both drivers, unchanged (captured before the change)
 
 PLAN_BEFORE = {
-    "field_rule": ["PlanningCommandInputError", "the arguments break a rule of field_rule: name: no digits in a name",
-                   [], "name: no digits in a name", "ABSENT", "ABSENT", "ABSENT"],
-    "refused_fields": ["PlanningCommandInputError", "validate_extracted_parameters: the attic is closed",
+    # changed on purpose (bd fix-ftdl.7.10): a failing field validator refuses its field, as Refused(field=) does
+    "field_rule": ["PlanningCommandInputError", "no digits in a name",
+                   ["name"], "no digits in a name", "ABSENT", "ABSENT", "ABSENT"],
+    "refused_fields": ["PlanningCommandInputError", "the attic is closed",
                        ["name"], "the attic is closed", "ABSENT", "ABSENT", "ABSENT"],
     "refused_nofield": ["PlanningCommandInputError",
-                        "validate_extracted_parameters: this command does not fit the request",
+                        "this command does not fit the request",
                         [], "this command does not fit the request", "ABSENT", "ABSENT", "ABSENT"],
-    "plain": ["PlanningCommandInputError", "validate_extracted_parameters: name and note are one record",
+    "plain": ["PlanningCommandInputError", "name and note are one record",
               [], "name and note are one record", "ABSENT", "ABSENT", "ABSENT"],
-    "unexpected": ["PlanningCommandCallError", "validate_extracted_parameters raised KeyError: 'nope'",
+    "unexpected": ["PlanningCommandCallError", "a validator raised KeyError: 'nope'",
                    None, "ABSENT", "ABSENT", "KeyError", "'nope'"],
     "rewrite": ["ok", {"name": "ANN"}],
-    "rewrite_then_refuse": ["PlanningCommandInputError", "validate_extracted_parameters: stopped after rewriting",
+    "rewrite_then_refuse": ["PlanningCommandInputError", "stopped after rewriting",
                             ["note"], "stopped after rewriting", "ABSENT", "ABSENT", "ABSENT"],
     "rewrite_then_plain": ["PlanningCommandInputError",
-                           "validate_extracted_parameters: assertion after rewriting",
+                           "assertion after rewriting",
                            [], "assertion after rewriting",
                            "ABSENT", "ABSENT", "ABSENT"],
     "wrong_return": ["PlanningCommandCallError",
@@ -227,27 +243,29 @@ def _hook(is_valid, message, changed=(), refused=(), raised=None, **more):
 
 OK = [True, "All required parameters are valid.", {}, []]
 EXEC_BEFORE = {
-    "field_rule": [[False, "the arguments break a rule of Library/field_rule: name: no digits in a name", {}, []],
-                   _hook(False, "the arguments break a rule of Library/field_rule: name: no digits in a name"),
+    # changed on purpose (bd fix-ftdl.7.10): asked again for the field, as a Refused naming it is
+    "field_rule": [[False, _QUESTION.format(command="field rule", field="name", message="no digits in a name"), {},
+                    ["name"]],
+                   _hook(False, "no digits in a name", refused=["name"], invalid_fields=["name"], missing_fields=[]),
                    {"name": "x1", "note": ""}],
     "refused_fields": [[False, _QUESTION.format(command="refused fields", field="name", message="the attic is closed"), {}, ["name"]],
                        _hook(False, "the attic is closed", refused=["name"], invalid_fields=["name"], missing_fields=[]),
                        {"name": "attic", "note": ""}],
     "refused_nofield": [[False, "this command does not fit the request", {}, []],
                         _hook(False, "this command does not fit the request"), {"name": "ann", "note": ""}],
-    "plain": [[False, "validate_extracted_parameters: name and note are one record", {}, []],
-              _hook(False, "validate_extracted_parameters: name and note are one record"),
+    "plain": [[False, "name and note are one record", {}, []],
+              _hook(False, "name and note are one record"),
               {"name": "ann", "note": ""}],
-    "unexpected": [[False, "Exception in Library/unexpected's validate_extracted_parameters function: 'nope'", {}, []],
-                   _hook(False, "Exception in Library/unexpected's validate_extracted_parameters function: 'nope'",
+    "unexpected": [[False, "Exception in Library/unexpected's validators: 'nope'", {}, []],
+                   _hook(False, "Exception in Library/unexpected's validators: 'nope'",
                          raised="KeyError"), {"name": "ann", "note": ""}],
     "rewrite": [OK, _hook(True, None, changed=["name"]), {"name": "ANN", "note": ""}],
     "rewrite_then_refuse": [[False, _QUESTION.format(command="rewrite then refuse", field="note", message="stopped after rewriting"), {}, ["note"]],
                             _hook(False, "stopped after rewriting", refused=["note"],
                                   invalid_fields=["note"], missing_fields=[]),
                             {"name": "ann", "note": ""}],
-    "rewrite_then_plain": [[False, "validate_extracted_parameters: assertion after rewriting", {}, []],
-                           _hook(False, "validate_extracted_parameters: assertion after rewriting"),
+    "rewrite_then_plain": [[False, "assertion after rewriting", {}, []],
+                           _hook(False, "assertion after rewriting"),
                            {"name": "ann", "note": ""}],
     "wrong_return": [[False, "Library/wrong_return: a validator on Input must return self (the corrected Input) "
                              "or raise; it returned NoneType", {}, []],

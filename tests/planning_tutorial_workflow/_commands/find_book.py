@@ -11,7 +11,7 @@ class Signature:
     """Find books by title or author."""
 
     class Input(BaseModel):
-        query: str = Field(description="words of the title or the author's name")
+        query: str = Field(description="words of the title or the author's name", json_schema_extra={"copied_from_command_text": True})
         start: Optional[int] = Field(default=None, description="the first row of the page")
 
     class Output(BaseModel):

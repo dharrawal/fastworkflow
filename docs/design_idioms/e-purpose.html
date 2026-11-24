@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How a request finds your command · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-purpose">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-purpose">
+      <div class="prose">
+        <p class="num">03</p>
+        <h3>How a request finds your command</h3>
+        <p>A user types a sentence, and the framework has to decide which of your commands it means. This step is called intent detection. You help it with two things you write on the <code>Signature</code> class of every command file: its docstring, one sentence saying what the command does, and its seed utterances, a list of example requests named <code>plain_utterances</code>. Write both for every command a user can ask for in words.</p>
+        <p>A command here is one Python file under <code>_commands/</code>: an execution command runs your code once, a planning command (see <a href="p-plan.html">a plan in place of a body</a>) runs several steps. Both read the docstring and the seeds the same way, with one difference at load: a planning command with no docstring does not load (<code>Signature needs a docstring (the planning command's description)</code>), while an execution command without one loads and is described by its name in words in training and to the remote model, and by its bare qualified name, with no description, in the which-command question. A command file that fails to load fails that command only: <code>fastworkflow run</code>, <code>fastworkflow train</code> and the server list it before they start, <code>train</code> stops, and <code>command preview --check</code> fails (see <a href="removed.html#load-rule">what a mistake stops</a>). How a confident match is acted on also differs; see "Who reads them" below.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/open_book.py</figcaption>
+        <pre><code>class Signature:
+    &quot;&quot;&quot;Open one book by its uid, so that the book&#x27;s own commands act on it.&quot;&quot;&quot;
+
+    class Input(BaseModel):
+        book_uid: str = Field(description=&quot;the uid of the book to open&quot;, ...)
+
+    <span class="c"># Output omitted here; see the file.</span>
+
+    plain_utterances = [
+        &quot;open book b1&quot;,
+        &quot;go to the book Dune&quot;,
+        &quot;open the book with uid b3&quot;,
+        &quot;make b2 the current book&quot;,
+        &quot;select b2 so I can act on it&quot;,
+        &quot;I want to act on b3 now&quot;,
+        &quot;make the Dune Messiah book the open one&quot;,
+        &quot;load uid b4 as the current book&quot;,
+    ]</code></pre>
+      </figure>
+      <div class="prose">
+        <h4>The purpose sentence</h4>
+        <p>A good docstring:</p>
+        <ul>
+          <li>starts with the verb a user would use (<em>Show</em>, <em>Count</em>, <em>Open</em>, <em>Say who</em>) and names what it acts on and what comes back;</li>
+          <li>tells this command apart from its neighbours, because the which-command question below puts them side by side;</li>
+          <li>keeps a condition or a limit for a second sentence (<em>One member per call.</em>), so the first sentence, the one training uses, is only the purpose;</li>
+          <li>fits on one line.</li>
+        </ul>
+        <p>Training reads only the <em>first sentence</em>, which ends at the first <code>.</code>, <code>!</code> or <code>?</code> followed by a space (and only in the default <code>embedding</code> layout: the two fine-tuned layouts read no docstring). Every other reader is shown the whole docstring, joined onto one line. A <code>Context</code> docstring is cut at its first line instead, which is a different rule. So the first sentence has to stand on its own, and anything after it is read too.</p>
+        <h4 id="e-seeds">Seed utterances</h4>
+        <p>Aim for about eight seeds, and vary the kind of sentence: an order, a question, a short casual line, one with a value in it and one without. Use the values a real user would type, such as a uid or a title. Put the most typical requests first, because the remote model (below) sees only the first nine; <code>fastworkflow command preview --check</code> prints a notice for a command with more. The rest still train the local model. A command needs no <code>Input</code> to be trained: the library's <code>show_book</code> has none.</p>
+        <h4>Who reads them</h4>
+        <ul>
+          <li><b>The command's name.</b> Before any model, a request whose first word is a command's exact name runs that command. A request that is, as a whole, a misspelling of one name (<code>add_notte</code> for <code>add_note</code>; case, spaces and underscores ignored) is taken as that command, but it is not the user naming it: a command that changes data or carries an approval mark found that way is confirmed first. A request that only begins like a name (<code>a</code>, <code>show me</code>) is not a misspelling; it goes to the models below.</li>
+          <li><b>Training.</b> <code>fastworkflow train</code> first has a language model (the one named by <code>LLM_SYNDATA_GEN</code>) write new requests in the style of your seeds, as a few different kinds of people would ask them; they are cached and written again when the seed list changes, and also when the command's name, the persona or utterance counts, the generating model or the prompt-building code change. The training rows for the command are then its name in words (<code>open book</code>), your seeds, the generated requests, and the first sentence of the docstring. Each seed counts three times as much as a generated request, because you wrote it. The local intent model, a small classifier stored in the workflow folder, is fitted on those rows in seconds. At run time the local model matches a message that reads like your seeds to the command, with no model call. That match runs at once only for an execution command that does not change data: a confident match to a planning command is confirmed by the remote model, or asked about when <code>JEV_API_KEY</code> is not set, and a match to a command that changes data or carries an approval mark waits for the user's yes (see <a href="e-writes.html">a command that changes data</a>).</li>
+          <li><b>The remote intent model.</b> When the local model is not sure and <code>JEV_API_KEY</code> is set, a remote model is asked. It sees each candidate as <code>- name: docstring</code> followed by its first nine seeds. A command that only enters another context (it declares <code>@descends_to</code> and takes no required input) is never among the candidates: its exact name and the local model still reach it.</li>
+          <li><b>The which-command question.</b> When more than one command still fits, the user (or the agent) gets a numbered list, one line per command: its name and its docstring. When exactly one fits, the "/" path asks "Did you mean the command 'X'?" instead, and the plan path takes it and lets the turn's review confirm it.</li>
+          <li><b>The planner and the agent.</b> Their listing of the commands they may call puts the docstring on the line under each name, always.</li>
+          <li><b>"what can I do".</b> The built-in <code>what_can_i_do</code> command prints the docstring. In agent mode, in a workflow with planning commands, a message that only asks what the assistant can do is answered in code instead: each planning command in plain words with its shortest seed as the example, then the other commands by name, with no docstring.</li>
+          <li><b>Planning commands only.</b> The request splitter, which cuts a message that asks for several things into parts, is shown one line per planning command, its name and its docstring, as the kinds of job a message may hold (see <a href="r-turn.html#p-split">splitting a request</a>). <code>fastworkflow command preview</code> opens each preview with the docstring, and the chat page shows it on its plan buttons.</li>
+        </ul>
+        <h4>What <code>train</code> checks</h4>
+        <ul>
+          <li>These three checks cover execution commands only; a planning command is trained like one but is skipped by all three, so a planning command with two seeds gets no guidance and a planning command's seed that is a benchmark request does not stop the run. For an execution command with fewer than eight seeds there is a yellow &quot;Seed guidance&quot; line. It is advice; training goes on.</li>
+          <li>Two execution commands whose seeds look alike are printed as a pair. Make the seeds tell them apart, merge the commands, or record the pair as intended in <code>accepted_duplicates.json</code> in the workflow folder.</li>
+          <li>If the workflow has an <code>intent_benchmark.json</code> (the requests used to score routing), a seed that is also a benchmark request, ignoring case and end punctuation, stops the run with an error. A score on requests the model trained on only measures memory.</li>
+        </ul>
+        <h4>Beginner mistakes</h4>
+        <ul>
+          <li>Writing the description in the module docstring (the one at the top of the file), or the seeds at the top of the file or on <code>ResponseGenerator</code>, instead of on <code>class Signature</code>. Intent detection and every listing read both only from <code>Signature</code> (only the README that <code>fastworkflow build</code> writes shows a module docstring): what is written elsewhere is ignored, so a command with neither trains on its name alone, and a planning command with no docstring there fails to load.</li>
+          <li>An abbreviation such as <code>e.g.</code> or <code>i.e.</code> in the first sentence: the sentence is cut there, so training learns half of it.</li>
+          <li>Pasting a benchmark request the model got wrong into the seeds: <code>train</code> stops, as above. Write a new sentence with the same meaning instead.</li>
+        </ul>
+        <p>Older command files, such as those in <code>hello_world</code> and <code>retail_workflow</code>, also define <code>template_utterances = []</code> and a <code>generate_utterances</code> method. The framework does what that method does when it is absent, which is to train on the command's name and the seeds; a body that differs (14 of the 15 retail files) is still honoured, and in the two fine-tuned layouts can leave the name-in-words row out (the default <code>embedding</code> layout adds that row anyway). <code>template_utterances</code> trains nothing, though the duplicate scan and the seed hash read it. A new command writes only <code>plain_utterances</code>.</p>
+        <p class="see">See also <a href="r-shapes.html">the shapes the framework reads</a>, for the other docstrings it reads (on <code>class Context</code>, on <code>Input</code> and <code>Output</code> models) and the ones it ignores.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/member_report.py (a planning command)</figcaption>
+        <pre><code>class Signature:
+    """Show a member's loans, and the notes on their record when asked. One member per call."""
+    <span class="c"># training learns from: "Show a member's loans, and the notes on their record when asked."</span>
+    <span class="c"># every other reader sees both sentences</span></code></pre>
+      </figure>
+      <figure>
+        <figcaption>the which-command question, built from two library docstrings</figcaption>
+        <pre><code>More than one command fits this request: 'who has Dune'. Which one is meant?
+1. Library/book_loans: Say who has a book on loan, given its title.
+2. Library/book_by_title: Show who wrote a book, and how many copies the library owns, given its title.
+Reply with a name or number, 'none' if none of these fits, or cancel. Only your answer is read; anything else in the reply is ignored.</code></pre>
+      </figure>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-object.html"><span>Previous</span>The record it acts on</a>
+    <a class="next" href="e-input.html"><span>Next</span>An input</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>
